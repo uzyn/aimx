@@ -347,6 +347,19 @@ mod tests {
     }
 
     #[test]
+    fn references_provided_uses_explicit_value() {
+        let mut args = test_args();
+        args.reply_to = Some("<reply@example.com>".to_string());
+        args.references = Some("<first@example.com> <second@example.com>".to_string());
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("In-Reply-To: <reply@example.com>\r\n"));
+        assert!(text.contains("References: <first@example.com> <second@example.com>\r\n"));
+    }
+
+    #[test]
     fn reply_to_normalizes_bare_message_id() {
         let mut args = test_args();
         args.reply_to = Some("original123@example.com".to_string());

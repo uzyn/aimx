@@ -152,20 +152,31 @@ pub fn ingest_email(
     Ok(())
 }
 
+fn create_resolver() -> Option<mail_auth::Resolver> {
+    mail_auth::Resolver::new_system_conf()
+        .or_else(|_| mail_auth::Resolver::new_cloudflare())
+        .ok()
+}
+
 fn verify_auth(raw: &[u8], rcpt: &str) -> (String, String) {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(_) => return ("none".to_string(), "none".to_string()),
     };
 
+    let resolver = match create_resolver() {
+        Some(r) => r,
+        None => return ("none".to_string(), "none".to_string()),
+    };
+
     rt.block_on(async {
-        let dkim_result = verify_dkim_async(raw).await;
-        let spf_result = verify_spf_async(raw, rcpt).await;
+        let dkim_result = verify_dkim_async(raw, &resolver).await;
+        let spf_result = verify_spf_async(raw, rcpt, &resolver).await;
         (dkim_result, spf_result)
     })
 }
 
-async fn verify_dkim_async(raw: &[u8]) -> String {
+async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::Resolver) -> String {
     let auth_msg = match mail_auth::AuthenticatedMessage::parse(raw) {
         Some(msg) => msg,
         None => return "none".to_string(),
@@ -174,14 +185,6 @@ async fn verify_dkim_async(raw: &[u8]) -> String {
     if auth_msg.dkim_headers.is_empty() {
         return "none".to_string();
     }
-
-    let resolver = match mail_auth::Resolver::new_system_conf() {
-        Ok(r) => r,
-        Err(_) => match mail_auth::Resolver::new_cloudflare() {
-            Ok(r) => r,
-            Err(_) => return "none".to_string(),
-        },
-    };
 
     let results = resolver.verify_dkim(&auth_msg).await;
 
@@ -198,27 +201,24 @@ async fn verify_dkim_async(raw: &[u8]) -> String {
     "fail".to_string()
 }
 
-async fn verify_spf_async(raw: &[u8], rcpt: &str) -> String {
+async fn verify_spf_async(raw: &[u8], rcpt: &str, resolver: &mail_auth::Resolver) -> String {
     let ip = match extract_received_ip(raw) {
         Some(ip) => ip,
         None => return "none".to_string(),
     };
 
-    let sender_domain = rcpt.split('@').nth(1).unwrap_or("");
     let mail_from = extract_mail_from(raw).unwrap_or_default();
-    let helo_domain = mail_from.split('@').nth(1).unwrap_or(sender_domain);
+    let from_domain = mail_from.split('@').nth(1).unwrap_or("");
+
+    let helo_domain = if !from_domain.is_empty() {
+        from_domain
+    } else {
+        rcpt.split('@').nth(1).unwrap_or("")
+    };
 
     if helo_domain.is_empty() {
         return "none".to_string();
     }
-
-    let resolver = match mail_auth::Resolver::new_system_conf() {
-        Ok(r) => r,
-        Err(_) => match mail_auth::Resolver::new_cloudflare() {
-            Ok(r) => r,
-            Err(_) => return "none".to_string(),
-        },
-    };
 
     let spf_output = resolver
         .verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)
@@ -419,7 +419,7 @@ fn generate_file_id(mailbox_dir: &Path) -> String {
 }
 
 fn format_markdown(meta: &EmailMetadata, body: &str) -> String {
-    let yaml = serde_yaml::to_string(meta).unwrap_or_default();
+    let yaml = serde_yaml::to_string(meta).expect("EmailMetadata must serialize to YAML");
     let mut result = String::new();
     result.push_str("---\n");
     result.push_str(&yaml);
@@ -978,5 +978,81 @@ mod tests {
         let input = "Received: from mail.example.com\n\t([192.168.1.1])";
         let result = unfold_headers(input);
         assert!(result.contains("Received: from mail.example.com ([192.168.1.1])"));
+    }
+
+    #[test]
+    fn gmail_dkim_fixture_parses_correctly() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
+
+        ingest_email(&config, "agent@test.com", raw).unwrap();
+
+        let catchall_dir = tmp.path().join("catchall");
+        let entries: Vec<_> = std::fs::read_dir(&catchall_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        assert_eq!(entries.len(), 1);
+
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("subject: Test DKIM signed email from Gmail"));
+        assert!(content.contains("from: Test User <testuser@gmail.com>"));
+        assert!(content.contains("CAB1234567890abcdef@mail.gmail.com"));
+    }
+
+    #[test]
+    fn gmail_dkim_fixture_has_dkim_headers() {
+        let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
+        let auth_msg = mail_auth::AuthenticatedMessage::parse(raw);
+        assert!(auth_msg.is_some());
+        let auth_msg = auth_msg.unwrap();
+        assert!(
+            !auth_msg.dkim_headers.is_empty(),
+            "Gmail fixture should have DKIM headers"
+        );
+    }
+
+    #[test]
+    fn gmail_dkim_fixture_extracts_received_ip() {
+        let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
+        let ip = extract_received_ip(raw);
+        assert!(ip.is_some());
+        assert_eq!(ip.unwrap().to_string(), "209.85.128.182");
+    }
+
+    #[test]
+    fn spf_fallback_uses_from_domain_first() {
+        let eml = b"From: sender@sender-domain.com\r\n\
+            Received: from mx.sender-domain.com ([203.0.113.5])\r\n\
+            To: agent@recipient.com\r\n\
+            Subject: SPF test\r\n\
+            \r\n\
+            body\r\n";
+
+        let mail_from = extract_mail_from(eml).unwrap_or_default();
+        let from_domain = mail_from.split('@').nth(1).unwrap_or("");
+        assert_eq!(from_domain, "sender-domain.com");
+    }
+
+    #[test]
+    fn spf_fallback_uses_rcpt_domain_when_no_from() {
+        let eml = b"Received: from mx.unknown.com ([203.0.113.5])\r\n\
+            To: agent@recipient.com\r\n\
+            Subject: SPF test\r\n\
+            \r\n\
+            body\r\n";
+
+        let mail_from = extract_mail_from(eml).unwrap_or_default();
+        let from_domain = mail_from.split('@').nth(1).unwrap_or("");
+        let rcpt = "agent@recipient.com";
+
+        let helo_domain = if !from_domain.is_empty() {
+            from_domain
+        } else {
+            rcpt.split('@').nth(1).unwrap_or("")
+        };
+        assert_eq!(helo_domain, "recipient.com");
     }
 }

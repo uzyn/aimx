@@ -521,7 +521,7 @@ sudo aimx setup agent.yourdomain.com
 
 ---
 
-## Sprint 5.5 — Non-blocking Cleanup (Days 12.5–13) [IN PROGRESS]
+## Sprint 5.5 — Non-blocking Cleanup (Days 12.5–13) [DONE]
 
 **Goal:** Address accumulated non-blocking improvements from sprint reviews.
 
@@ -529,23 +529,23 @@ sudo aimx setup agent.yourdomain.com
 
 ### S5.5-1: Serialization + Error Handling
 
-- [ ] Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation *(from Sprint 2.5 review)*
-- [ ] Narrow `tokio` features from `"full"` to specific needed features *(from Sprint 3 review)*
+- [x] Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation *(from Sprint 2.5 review)*
+- [x] Narrow `tokio` features from `"full"` to specific needed features *(from Sprint 3 review)*
 
 ### S5.5-2: Send Module Improvements
 
-- [ ] Add unit test for `write_common_headers` with `references = Some(...)` path *(from Sprint 3 review)*
+- [x] Add unit test for `write_common_headers` with `references = Some(...)` path *(from Sprint 3 review)*
 
 ### S5.5-3: Channel/Ingest Improvements
 
-- [ ] Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` *(from Sprint 4 review)*
-- [ ] Fix SPF domain fallback semantics — variable naming and fallback logic *(from Sprint 4 review)*
-- [ ] Add captured DKIM-signed `.eml` fixture from Gmail for verification testing *(from Sprint 4 review)*
-- [ ] Verify `mail-auth` `dkim_headers` field is stable public API *(from Sprint 4 review)*
+- [x] Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` *(from Sprint 4 review)*
+- [x] Fix SPF domain fallback semantics — variable naming and fallback logic *(from Sprint 4 review)*
+- [x] Add captured DKIM-signed `.eml` fixture from Gmail for verification testing *(from Sprint 4 review)*
+- [x] Verify `mail-auth` `dkim_headers` field is stable public API *(from Sprint 4 review)*
 
 ### S5.5-4: Setup Improvements
 
-- [ ] Implement timestamped backup for pre-aimx OpenSMTPD config *(from Sprint 5 review)*
+- [x] Implement timestamped backup for pre-aimx OpenSMTPD config *(from Sprint 5 review)*
 
 ---
 
