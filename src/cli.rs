@@ -74,9 +74,13 @@ pub struct SendArgs {
     #[arg(long)]
     pub body: String,
 
-    /// Message-ID to reply to (sets In-Reply-To and References headers)
+    /// Message-ID to reply to (sets In-Reply-To header)
     #[arg(long)]
     pub reply_to: Option<String>,
+
+    /// Full References header chain for threading
+    #[arg(long, hide = true)]
+    pub references: Option<String>,
 
     /// File paths to attach
     #[arg(long = "attachment")]

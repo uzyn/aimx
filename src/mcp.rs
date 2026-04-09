@@ -165,7 +165,7 @@ impl AimxMcpServer {
             params.from.as_deref(),
             params.since.as_deref(),
             params.subject.as_deref(),
-        );
+        )?;
 
         if filtered.is_empty() {
             return Ok("No emails found.".to_string());
@@ -190,6 +190,7 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailReadParams>,
     ) -> Result<String, String> {
         let config = self.load_config()?;
+        validate_email_id(&params.id)?;
 
         if !config.mailboxes.contains_key(&params.mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
@@ -213,6 +214,7 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
+        validate_email_id(&params.id)?;
         let config = self.load_config()?;
         set_read_status(&config, &params.mailbox, &params.id, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
@@ -223,6 +225,7 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
+        validate_email_id(&params.id)?;
         let config = self.load_config()?;
         set_read_status(&config, &params.mailbox, &params.id, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
@@ -243,6 +246,12 @@ impl AimxMcpServer {
         }
 
         let from_address = &config.mailboxes[&params.from_mailbox].address;
+        if from_address.starts_with('*') {
+            return Err(format!(
+                "Cannot send from '{}': catchall mailbox has no valid sender address. Use a named mailbox.",
+                params.from_mailbox
+            ));
+        }
 
         let args = SendArgs {
             from: from_address.clone(),
@@ -250,16 +259,15 @@ impl AimxMcpServer {
             subject: params.subject,
             body: params.body,
             reply_to: None,
+            references: None,
             attachments: params.attachments.unwrap_or_default(),
         };
 
-        let private_key = dkim::load_private_key(&config.data_dir).map_err(|e| e.to_string());
+        let private_key = load_dkim_key(&config);
         let transport = send::SendmailTransport;
-
-        let dkim_info = match &private_key {
-            Ok(k) => Some((k, config.domain.as_str(), config.dkim_selector.as_str())),
-            Err(_) => None,
-        };
+        let dkim_info = private_key
+            .as_ref()
+            .map(|k| (k, config.domain.as_str(), config.dkim_selector.as_str()));
 
         let message_id =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
@@ -276,6 +284,7 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailReplyParams>,
     ) -> Result<String, String> {
         let config = self.load_config()?;
+        validate_email_id(&params.id)?;
 
         if !config.mailboxes.contains_key(&params.mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
@@ -298,6 +307,12 @@ impl AimxMcpServer {
             .ok_or_else(|| "Failed to parse email frontmatter.".to_string())?;
 
         let from_address = &config.mailboxes[&params.mailbox].address;
+        if from_address.starts_with('*') {
+            return Err(format!(
+                "Cannot reply from '{}': catchall mailbox has no valid sender address. Use a named mailbox.",
+                params.mailbox
+            ));
+        }
 
         let reply_to_addr = &meta.from;
         let reply_to_email = extract_email_address(reply_to_addr);
@@ -308,10 +323,18 @@ impl AimxMcpServer {
             format!("Re: {}", meta.subject)
         };
 
-        let reply_to_id = if meta.message_id.is_empty() {
-            None
+        let (reply_to_id, references) = if meta.message_id.is_empty() {
+            (None, None)
         } else {
-            Some(meta.message_id.clone())
+            let refs = send::build_references(
+                if meta.references.is_empty() {
+                    None
+                } else {
+                    Some(&meta.references)
+                },
+                &meta.message_id,
+            );
+            (Some(meta.message_id.clone()), Some(refs))
         };
 
         let args = SendArgs {
@@ -320,16 +343,15 @@ impl AimxMcpServer {
             subject,
             body: params.body,
             reply_to: reply_to_id,
+            references,
             attachments: vec![],
         };
 
-        let private_key = dkim::load_private_key(&config.data_dir).map_err(|e| e.to_string());
+        let private_key = load_dkim_key(&config);
         let transport = send::SendmailTransport;
-
-        let dkim_info = match &private_key {
-            Ok(k) => Some((k, config.domain.as_str(), config.dkim_selector.as_str())),
-            Err(_) => None,
-        };
+        let dkim_info = private_key
+            .as_ref()
+            .map(|k| (k, config.domain.as_str(), config.dkim_selector.as_str()));
 
         let message_id =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
@@ -418,14 +440,17 @@ pub fn filter_emails(
     from: Option<&str>,
     since: Option<&str>,
     subject: Option<&str>,
-) -> Vec<EmailMetadata> {
-    let since_dt = since.and_then(|s| {
-        chrono::DateTime::parse_from_rfc3339(s)
-            .ok()
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-    });
+) -> Result<Vec<EmailMetadata>, String> {
+    let since_dt = match since {
+        Some(s) => Some(
+            chrono::DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| format!("Invalid 'since' datetime '{}': {}", s, e))?,
+        ),
+        None => None,
+    };
 
-    emails
+    let result = emails
         .into_iter()
         .filter(|e| {
             if let Some(unread_filter) = unread {
@@ -457,10 +482,13 @@ pub fn filter_emails(
             }
             true
         })
-        .collect()
+        .collect();
+    Ok(result)
 }
 
 pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> Result<(), String> {
+    validate_email_id(id)?;
+
     if !config.mailboxes.contains_key(mailbox) {
         return Err(format!("Mailbox '{mailbox}' does not exist."));
     }
@@ -498,6 +526,20 @@ pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> 
 
     std::fs::write(&filepath, result).map_err(|e| format!("Failed to write email: {e}"))?;
 
+    Ok(())
+}
+
+fn load_dkim_key(config: &Config) -> Option<rsa::RsaPrivateKey> {
+    dkim::load_private_key(&config.data_dir).ok()
+}
+
+fn validate_email_id(id: &str) -> Result<(), String> {
+    if id.is_empty() {
+        return Err("Email ID cannot be empty.".to_string());
+    }
+    if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains('\0') {
+        return Err("Email ID contains invalid characters.".to_string());
+    }
     Ok(())
 }
 
@@ -627,7 +669,7 @@ mod tests {
             sample_meta("003", "c@test.com", "C", false),
         ];
 
-        let filtered = filter_emails(emails, Some(true), None, None, None);
+        let filtered = filter_emails(emails, Some(true), None, None, None).unwrap();
         assert_eq!(filtered.len(), 2);
         assert!(filtered.iter().all(|e| !e.read));
     }
@@ -639,7 +681,7 @@ mod tests {
             sample_meta("002", "b@test.com", "B", true),
         ];
 
-        let filtered = filter_emails(emails, Some(false), None, None, None);
+        let filtered = filter_emails(emails, Some(false), None, None, None).unwrap();
         assert_eq!(filtered.len(), 1);
         assert!(filtered[0].read);
     }
@@ -652,7 +694,7 @@ mod tests {
             sample_meta("003", "Alice Smith <alice@work.com>", "C", false),
         ];
 
-        let filtered = filter_emails(emails, None, Some("alice"), None, None);
+        let filtered = filter_emails(emails, None, Some("alice"), None, None).unwrap();
         assert_eq!(filtered.len(), 2);
     }
 
@@ -664,7 +706,7 @@ mod tests {
             sample_meta("003", "c@test.com", "Re: meeting notes", false),
         ];
 
-        let filtered = filter_emails(emails, None, None, None, Some("meeting"));
+        let filtered = filter_emails(emails, None, None, None, Some("meeting")).unwrap();
         assert_eq!(filtered.len(), 2);
     }
 
@@ -677,7 +719,8 @@ mod tests {
         e2.date = "2025-06-15T00:00:00Z".to_string();
 
         let emails = vec![e1, e2];
-        let filtered = filter_emails(emails, None, None, Some("2025-06-01T00:00:00Z"), None);
+        let filtered =
+            filter_emails(emails, None, None, Some("2025-06-01T00:00:00Z"), None).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "002");
     }
@@ -700,7 +743,8 @@ mod tests {
             Some("alice"),
             Some("2025-06-01T00:00:00Z"),
             Some("meeting"),
-        );
+        )
+        .unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, "001");
     }
@@ -712,7 +756,7 @@ mod tests {
             sample_meta("002", "b@test.com", "B", true),
         ];
 
-        let filtered = filter_emails(emails, None, None, None, None);
+        let filtered = filter_emails(emails, None, None, None, None).unwrap();
         assert_eq!(filtered.len(), 2);
     }
 
@@ -831,5 +875,40 @@ mod tests {
         assert!(names.contains(&"email_mark_unread"));
         assert!(names.contains(&"email_send"));
         assert!(names.contains(&"email_reply"));
+    }
+
+    #[test]
+    fn validate_email_id_rejects_path_traversal() {
+        assert!(validate_email_id("../../etc/passwd").is_err());
+        assert!(validate_email_id("foo/bar").is_err());
+        assert!(validate_email_id("foo\\bar").is_err());
+        assert!(validate_email_id("").is_err());
+        assert!(validate_email_id("foo\0bar").is_err());
+    }
+
+    #[test]
+    fn validate_email_id_accepts_valid() {
+        assert!(validate_email_id("2025-06-01-001").is_ok());
+        assert!(validate_email_id("2025-01-01-999").is_ok());
+    }
+
+    #[test]
+    fn filter_emails_invalid_since_returns_error() {
+        let emails = vec![sample_meta("001", "a@test.com", "A", false)];
+        let result = filter_emails(emails, None, None, Some("not-a-date"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Invalid 'since' datetime"));
+    }
+
+    #[test]
+    fn set_read_status_rejects_path_traversal() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        setup_config(&config);
+
+        std::fs::create_dir_all(tmp.path().join("alice")).unwrap();
+        let result = set_read_status(&config, "alice", "../../etc/passwd", true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("invalid characters"));
     }
 }
