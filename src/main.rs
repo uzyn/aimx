@@ -3,6 +3,7 @@ mod config;
 mod dkim;
 mod ingest;
 mod mailbox;
+mod mcp;
 mod send;
 
 use clap::Parser;
@@ -26,10 +27,10 @@ fn main() {
             };
             dkim::run_keygen(&config.data_dir, &config.domain, &selector, force)
         }
-        Command::Mcp => {
-            eprintln!("MCP server not yet implemented");
-            Ok(())
-        }
+        Command::Mcp => match tokio::runtime::Runtime::new() {
+            Ok(rt) => rt.block_on(mcp::run(cli.data_dir.as_deref())),
+            Err(e) => Err(format!("Failed to create runtime: {e}").into()),
+        },
         Command::Setup { domain: _ } => {
             eprintln!("Setup wizard not yet implemented");
             Ok(())
