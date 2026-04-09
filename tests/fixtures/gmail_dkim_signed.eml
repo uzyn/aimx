@@ -1,0 +1,41 @@
+Delivered-To: agent@aimx.example.com
+Received: from mail-yw1-f182.google.com (mail-yw1-f182.google.com [209.85.128.182])
+	by aimx.example.com (OpenSMTPD) with ESMTPS id abc123def
+	for <agent@aimx.example.com>;
+	Mon, 07 Apr 2025 10:30:00 +0000
+Received: by mail-yw1-f182.google.com with SMTP id 00721157ae682-7012abc1234so12345678b3.0
+	for <agent@aimx.example.com>;
+	Mon, 07 Apr 2025 03:30:00 -0700 (PDT)
+DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+	d=gmail.com; s=20230601; t=1712489400; x=1713094200;
+	h=to:subject:message-id:date:from:mime-version:from:to:cc:subject
+	 :date:message-id:reply-to;
+	bh=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=;
+	b=FAKE_SIGNATURE_FOR_FIXTURE_TESTING_ONLY_NOT_A_REAL_DKIM_SIGNATURE
+	 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+	 BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB
+	 CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=
+X-Google-DKIM-Signature: v=1; a=rsa-sha256; c=relaxed/relaxed;
+	d=1e100.net; s=20230601; t=1712489400; x=1713094200;
+	h=to:subject:message-id:date:from:mime-version:x-gm-message-state
+	 :from:to:cc:subject:date:message-id:reply-to;
+	bh=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG=;
+	b=FAKE_GOOGLE_SIGNATURE_FOR_FIXTURE_TESTING_ONLY_NOT_REAL
+	 DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+	 EEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEEE=
+X-Gm-Message-State: AOJu0Yx1234567890abcdef
+X-Google-Smtp-Source: AGHT+IF1234567890abcdef
+MIME-Version: 1.0
+From: Test User <testuser@gmail.com>
+Date: Mon, 07 Apr 2025 10:30:00 +0000
+Message-ID: <CAB1234567890abcdef@mail.gmail.com>
+Subject: Test DKIM signed email from Gmail
+To: agent@aimx.example.com
+Content-Type: text/plain; charset="UTF-8"
+
+This is a test email sent from Gmail with DKIM signing.
+It is used as a fixture to verify that DKIM-signed emails
+are correctly parsed by the ingest pipeline.
+
+The DKIM signature above is not cryptographically valid
+but has the correct structure for parser testing.
