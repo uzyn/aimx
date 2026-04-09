@@ -1,6 +1,8 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::process::{Command as StdCommand, Stdio};
 use tempfile::TempDir;
 
 fn setup_test_env(tmp: &Path) -> String {
@@ -334,4 +336,395 @@ fn dkim_keygen_force_overwrite() {
 
     let new = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
     assert_ne!(original, new);
+}
+
+fn aimx_binary_path() -> std::path::PathBuf {
+    assert_cmd::cargo::cargo_bin("aimx")
+}
+
+struct McpClient {
+    child: std::process::Child,
+    stdin: std::process::ChildStdin,
+    reader: BufReader<std::process::ChildStdout>,
+    id: i64,
+}
+
+impl McpClient {
+    fn spawn(data_dir: &Path) -> Self {
+        let mut child = StdCommand::new(aimx_binary_path())
+            .arg("--data-dir")
+            .arg(data_dir)
+            .arg("mcp")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("Failed to spawn aimx mcp");
+
+        let stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+        let reader = BufReader::new(stdout);
+
+        Self {
+            child,
+            stdin,
+            reader,
+            id: 0,
+        }
+    }
+
+    fn send_request(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        self.id += 1;
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": self.id,
+            "method": method,
+            "params": params
+        });
+
+        let msg = serde_json::to_string(&request).unwrap();
+        writeln!(self.stdin, "{msg}").unwrap();
+        self.stdin.flush().unwrap();
+
+        let mut line = String::new();
+        self.reader.read_line(&mut line).unwrap();
+        serde_json::from_str(line.trim()).unwrap()
+    }
+
+    fn send_notification(&mut self, method: &str, params: serde_json::Value) {
+        let notification = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params
+        });
+
+        let msg = serde_json::to_string(&notification).unwrap();
+        writeln!(self.stdin, "{msg}").unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn initialize(&mut self) -> serde_json::Value {
+        let resp = self.send_request(
+            "initialize",
+            serde_json::json!({
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "test-client",
+                    "version": "0.1.0"
+                }
+            }),
+        );
+
+        self.send_notification("notifications/initialized", serde_json::json!({}));
+
+        resp
+    }
+
+    fn call_tool(&mut self, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+        self.send_request(
+            "tools/call",
+            serde_json::json!({
+                "name": name,
+                "arguments": arguments
+            }),
+        )
+    }
+
+    fn list_tools(&mut self) -> serde_json::Value {
+        self.send_request("tools/list", serde_json::json!({}))
+    }
+
+    fn shutdown(mut self) {
+        drop(self.stdin);
+        let _ = self.child.wait();
+    }
+}
+
+fn get_tool_text(response: &serde_json::Value) -> String {
+    response["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
+}
+
+fn is_tool_error(response: &serde_json::Value) -> bool {
+    response["result"]["isError"].as_bool().unwrap_or(false)
+}
+
+#[test]
+fn mcp_initialize_handshake() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    let resp = client.initialize();
+
+    assert!(resp["result"]["serverInfo"].is_object());
+    assert!(resp["result"]["capabilities"]["tools"].is_object());
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_list_tools() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.list_tools();
+    let tools = resp["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 9);
+
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"mailbox_create"));
+    assert!(names.contains(&"mailbox_list"));
+    assert!(names.contains(&"mailbox_delete"));
+    assert!(names.contains(&"email_list"));
+    assert!(names.contains(&"email_read"));
+    assert!(names.contains(&"email_mark_read"));
+    assert!(names.contains(&"email_mark_unread"));
+    assert!(names.contains(&"email_send"));
+    assert!(names.contains(&"email_reply"));
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_mailbox_create_list_delete() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "support"}));
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("created"),
+        "Expected creation message, got: {text}"
+    );
+    assert!(tmp.path().join("support").is_dir());
+
+    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("catchall"));
+    assert!(text.contains("support"));
+    assert!(text.contains("alice"));
+
+    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("deleted"));
+    assert!(!tmp.path().join("support").exists());
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_mailbox_delete_catchall_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "catchall"}));
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("Cannot delete"), "Got: {text}");
+
+    client.shutdown();
+}
+
+fn create_email_file(dir: &Path, id: &str, from: &str, subject: &str, read: bool) {
+    std::fs::create_dir_all(dir).unwrap();
+    let content = format!(
+        "---\nid: {id}\nmessage_id: \"<{id}@test.com>\"\nfrom: {from}\nto: alice@test.com\nsubject: {subject}\ndate: '2025-06-01T12:00:00Z'\nin_reply_to: ''\nreferences: ''\nattachments: []\nmailbox: alice\nread: {read}\n---\n\nBody of {id}.\n"
+    );
+    std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
+}
+
+#[test]
+fn mcp_email_list_and_read() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let alice_dir = tmp.path().join("alice");
+    create_email_file(
+        &alice_dir,
+        "2025-06-01-001",
+        "sender@example.com",
+        "Hello",
+        false,
+    );
+    create_email_file(
+        &alice_dir,
+        "2025-06-01-002",
+        "other@example.com",
+        "World",
+        true,
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "alice"}));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("2025-06-01-001"));
+    assert!(text.contains("2025-06-01-002"));
+    assert!(text.contains("sender@example.com"));
+
+    let resp = client.call_tool(
+        "email_list",
+        serde_json::json!({"mailbox": "alice", "unread": true}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(text.contains("2025-06-01-001"));
+    assert!(!text.contains("2025-06-01-002"));
+
+    let resp = client.call_tool(
+        "email_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(text.contains("Body of 2025-06-01-001"));
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_read_nonexistent_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_read",
+        serde_json::json!({"mailbox": "alice", "id": "nonexistent"}),
+    );
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("not found"), "Got: {text}");
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_list_nonexistent_mailbox_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "nonexistent"}));
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("does not exist"), "Got: {text}");
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_mark_read_unread() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let alice_dir = tmp.path().join("alice");
+    create_email_file(
+        &alice_dir,
+        "2025-06-01-001",
+        "sender@example.com",
+        "Hello",
+        false,
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_mark_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(text.contains("marked as read"));
+
+    let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+    assert!(content.contains("read: true"));
+
+    let resp = client.call_tool(
+        "email_mark_unread",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(text.contains("marked as unread"));
+
+    let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+    assert!(content.contains("read: false"));
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_send_missing_mailbox_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "nonexistent",
+            "to": "user@example.com",
+            "subject": "Test",
+            "body": "Hello"
+        }),
+    );
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("does not exist"), "Got: {text}");
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_reply_nonexistent_email_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_reply",
+        serde_json::json!({
+            "mailbox": "alice",
+            "id": "nonexistent",
+            "body": "Reply text"
+        }),
+    );
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("not found"), "Got: {text}");
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_clean_exit_on_stdin_close() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    drop(client.stdin);
+    let status = client.child.wait().unwrap();
+    assert!(status.success() || status.code() == Some(0));
 }

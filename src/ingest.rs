@@ -4,7 +4,7 @@ use serde::Serialize;
 use std::io::Read;
 use std::path::Path;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct EmailMetadata {
     pub id: String,
     pub message_id: String,
@@ -19,7 +19,7 @@ pub struct EmailMetadata {
     pub read: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct AttachmentMeta {
     pub filename: String,
     pub content_type: String,
