@@ -140,6 +140,7 @@ mod tests {
         Config {
             domain: "test.com".to_string(),
             data_dir: tmp.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
             mailboxes,
         }
     }
