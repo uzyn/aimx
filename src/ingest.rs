@@ -145,10 +145,16 @@ fn extract_attachments(
     let attachments_dir = mailbox_dir.join("attachments");
 
     for attachment in message.attachments() {
-        let filename = match attachment.attachment_name() {
+        let raw_name = match attachment.attachment_name() {
             Some(name) => name.to_string(),
             None => continue,
         };
+
+        let filename = Path::new(&raw_name)
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_string();
 
         if filename.is_empty() {
             continue;
@@ -244,7 +250,13 @@ fn yaml_escape(s: &str) -> String {
         || s.starts_with(' ')
         || s.ends_with(' ')
     {
-        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+        format!(
+            "\"{}\"",
+            s.replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('\n', "\\n")
+                .replace('\r', "\\r")
+        )
     } else {
         s.to_string()
     }
@@ -598,5 +610,51 @@ mod tests {
     fn extract_local_part_works() {
         assert_eq!(extract_local_part("alice@test.com"), "alice");
         assert_eq!(extract_local_part("bob"), "bob");
+    }
+
+    #[test]
+    fn attachment_path_traversal_sanitized() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+
+        let eml = b"From: sender@example.com\r\n\
+            To: alice@test.com\r\n\
+            Subject: Malicious\r\n\
+            Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+            Message-ID: <evil@example.com>\r\n\
+            MIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"evilbound\"\r\n\
+            \r\n\
+            --evilbound\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\
+            \r\n\
+            Body.\r\n\
+            --evilbound\r\n\
+            Content-Type: text/plain; name=\"../../../etc/cron.d/evil\"\r\n\
+            Content-Disposition: attachment; filename=\"../../../etc/cron.d/evil\"\r\n\
+            \r\n\
+            malicious content\r\n\
+            --evilbound--\r\n";
+
+        ingest_email(&config, "alice@test.com", eml).unwrap();
+
+        let att_dir = tmp.path().join("alice/attachments");
+        assert!(att_dir.join("evil").exists());
+        assert!(!tmp.path().join("etc").exists());
+    }
+
+    #[test]
+    fn yaml_escape_newline_injection() {
+        let escaped = yaml_escape("test\n---\ninjected: true");
+        assert!(!escaped.contains('\n'));
+        assert!(escaped.contains("\\n"));
+
+        let yaml_str = format!("subject: {}\n", escaped);
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
+        let val = parsed.as_mapping().unwrap();
+        let subject = val
+            .get(&serde_yaml::Value::String("subject".to_string()))
+            .unwrap();
+        assert_eq!(subject.as_str().unwrap(), "test\n---\ninjected: true");
     }
 }
