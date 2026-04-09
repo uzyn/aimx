@@ -64,7 +64,11 @@ fn write_common_headers(msg: &mut String, args: &SendArgs, date: &str, message_i
     if let Some(ref reply_to) = args.reply_to {
         let reply_id = normalize_message_id(reply_to);
         msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
-        msg.push_str(&format!("References: {reply_id}\r\n"));
+        let refs = match &args.references {
+            Some(r) if !r.trim().is_empty() => r.clone(),
+            _ => reply_id.clone(),
+        };
+        msg.push_str(&format!("References: {refs}\r\n"));
     }
 
     msg.push_str("MIME-Version: 1.0\r\n");
@@ -164,7 +168,6 @@ fn validate_attachments(paths: &[String]) -> Result<(), Box<dyn std::error::Erro
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn build_references(original_references: Option<&str>, original_message_id: &str) -> String {
     let mid = normalize_message_id(original_message_id);
 
@@ -245,6 +248,7 @@ mod tests {
             subject: "Test Subject".to_string(),
             body: "Hello, world!".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec![],
         }
     }
@@ -400,6 +404,7 @@ mod tests {
             subject: "With attachment".to_string(),
             body: "See attached.".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
         };
 
@@ -425,6 +430,7 @@ mod tests {
             subject: "Multiple attachments".to_string(),
             body: "Two files.".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec![
                 file1.to_string_lossy().to_string(),
                 file2.to_string_lossy().to_string(),
@@ -455,6 +461,7 @@ mod tests {
             subject: "MIME test".to_string(),
             body: "body".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec![
                 pdf.to_string_lossy().to_string(),
                 png.to_string_lossy().to_string(),
@@ -478,6 +485,7 @@ mod tests {
             subject: "test".to_string(),
             body: "body".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec!["/nonexistent/file.txt".to_string()],
         };
 
@@ -534,6 +542,7 @@ mod tests {
             subject: "Re: Data".to_string(),
             body: "Here is the data.".to_string(),
             reply_to: Some("<orig@example.com>".to_string()),
+            references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
         };
 
@@ -558,6 +567,7 @@ mod tests {
             subject: "test".to_string(),
             body: "body".to_string(),
             reply_to: None,
+            references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
         };
 
