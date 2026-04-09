@@ -8,7 +8,7 @@
 
 ---
 
-## Sprint 1 — Core Pipeline + Idea Validation (Days 1–2.5)
+## Sprint 1 — Core Pipeline + Idea Validation (Days 1–2.5) [IN PROGRESS]
 
 **Goal:** Get the inbound and outbound email pipeline working end-to-end so the core idea can be validated on a real VPS with manual OpenSMTPD configuration. Establish CI and test infrastructure from day one.
 
@@ -139,7 +139,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 2 — DKIM + Production-Quality Outbound (Days 3–5)
+## Sprint 2 — DKIM + Production-Quality Outbound (Days 3–5) [NOT STARTED]
 
 **Goal:** Make outbound email pass authentication checks (DKIM/SPF/DMARC) so messages land in inboxes, not spam folders.
 
@@ -236,7 +236,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 3 — MCP Server (Days 5.5–7.5)
+## Sprint 3 — MCP Server (Days 5.5–7.5) [NOT STARTED]
 
 **Goal:** Give AI agents full email access via MCP so that Claude Code (or any MCP client) can read, send, and manage email programmatically.
 
@@ -315,7 +315,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 4 — Channel Manager + Inbound Trust (Days 8–10)
+## Sprint 4 — Channel Manager + Inbound Trust (Days 8–10) [NOT STARTED]
 
 **Goal:** Enable automated reactions to incoming email (triggers) with security gating so that agents can act on email automatically while being protected from spoofed senders.
 
@@ -414,7 +414,7 @@ cat /var/lib/aimx/catchall/*.md | head -20
 
 ---
 
-## Sprint 5 — Setup Wizard (Days 10.5–12.5)
+## Sprint 5 — Setup Wizard (Days 10.5–12.5) [NOT STARTED]
 
 **Goal:** Replace all manual VPS setup with a single `aimx setup <domain>` command that handles everything from preflight checks to DNS verification.
 
@@ -498,7 +498,7 @@ sudo aimx setup agent.yourdomain.com
 
 ---
 
-## Sprint 6 — Verify Service + Polish (Days 13–15)
+## Sprint 6 — Verify Service + Polish (Days 13–15) [NOT STARTED]
 
 **Goal:** Complete the product with the hosted verification service, remaining CLI commands, and documentation for open source release.
 
