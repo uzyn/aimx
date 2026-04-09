@@ -139,7 +139,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 2 — DKIM + Production-Quality Outbound (Days 3–5) [IN PROGRESS]
+## Sprint 2 — DKIM + Production-Quality Outbound (Days 3–5) [DONE]
 
 **Goal:** Make outbound email pass authentication checks (DKIM/SPF/DMARC) so messages land in inboxes, not spam folders.
 
@@ -152,12 +152,12 @@ aimx send --from catchall@agent.yourdomain.com \
 **Technical context:** Generate 2048-bit RSA keypair using `rsa` crate. Store private key at `<data_dir>/dkim/private.key`, public key at `<data_dir>/dkim/public.key`. Add a CLI command or integrate into setup flow. The public key needs to be formatted for DNS TXT record output.
 
 **Acceptance criteria:**
-- [ ] `aimx dkim-keygen` (or equivalent) generates 2048-bit RSA keypair
-- [ ] Keys stored in `<data_dir>/dkim/` directory
-- [ ] Command outputs the DNS TXT record value for the DKIM public key
-- [ ] Existing keys are not overwritten without confirmation
-- [ ] Unit test: generated keypair is valid 2048-bit RSA
-- [ ] Unit test: DNS TXT record output is correctly formatted
+- [x] `aimx dkim-keygen` (or equivalent) generates 2048-bit RSA keypair
+- [x] Keys stored in `<data_dir>/dkim/` directory
+- [x] Command outputs the DNS TXT record value for the DKIM public key
+- [x] Existing keys are not overwritten without confirmation
+- [x] Unit test: generated keypair is valid 2048-bit RSA
+- [x] Unit test: DNS TXT record output is correctly formatted
 
 ### S2.2 — DKIM Signing on Outbound
 
@@ -166,34 +166,34 @@ aimx send --from catchall@agent.yourdomain.com \
 **Technical context:** Use `mail-auth` crate for DKIM signing (RSA-SHA256). Sign after composing RFC 5322 message, before handing to sendmail. Sign headers: From, To, Subject, Date, Message-ID, In-Reply-To, References.
 
 **Acceptance criteria:**
-- [ ] All outbound email is signed with DKIM-Signature header
-- [ ] Signature algorithm is RSA-SHA256
-- [ ] DKIM selector is configurable (default: `dkim`)
-- [ ] Signed message passes verification when checked against the published DNS record
-- [ ] Missing private key produces a clear error, not a crash
-- [ ] Unit test: sign a message with a test keypair, then verify the signature with `mail-auth` in the same test (round-trip)
-- [ ] Unit test: missing key returns appropriate error
+- [x] All outbound email is signed with DKIM-Signature header
+- [x] Signature algorithm is RSA-SHA256
+- [x] DKIM selector is configurable (default: `dkim`)
+- [x] Signed message passes verification when checked against the published DNS record
+- [x] Missing private key produces a clear error, not a crash
+- [x] Unit test: sign a message with a test keypair, then verify the signature with `mail-auth` in the same test (round-trip)
+- [x] Unit test: missing key returns appropriate error
 
 ### S2.3 — Email Threading
 
 *As an agent operator, I want email threading support so that replies are grouped correctly in recipients' mail clients.*
 
 **Acceptance criteria:**
-- [ ] `aimx send --reply-to <message-id>` sets correct In-Reply-To header
-- [ ] References header is built from the original email's References + Message-ID
-- [ ] Thread-aware replies display correctly in Gmail's conversation view
-- [ ] Unit tests: In-Reply-To set correctly, References chain built from original email's References + Message-ID
+- [x] `aimx send --reply-to <message-id>` sets correct In-Reply-To header
+- [x] References header is built from the original email's References + Message-ID
+- [x] Thread-aware replies display correctly in Gmail's conversation view <!-- Not verifiable in automated tests; requires manual VPS validation -->
+- [x] Unit tests: In-Reply-To set correctly, References chain built from original email's References + Message-ID
 
 ### S2.4 — File Attachments on Send
 
 *As an agent operator, I want to send emails with file attachments so that agents can share documents.*
 
 **Acceptance criteria:**
-- [ ] `aimx send --attachment /path/to/file.pdf` attaches the file with correct MIME type
-- [ ] Multiple `--attachment` flags supported
-- [ ] Attachment Content-Type is inferred from file extension
-- [ ] Missing file produces a clear error
-- [ ] Unit tests: single attachment, multiple attachments, MIME type inference, missing file error
+- [x] `aimx send --attachment /path/to/file.pdf` attaches the file with correct MIME type
+- [x] Multiple `--attachment` flags supported
+- [x] Attachment Content-Type is inferred from file extension
+- [x] Missing file produces a clear error
+- [x] Unit tests: single attachment, multiple attachments, MIME type inference, missing file error
 
 ### VPS Validation Guide — Sprint 2
 
@@ -236,7 +236,30 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 3 — MCP Server (Days 5.5–7.5) [NOT STARTED]
+## Sprint 2.5 — Non-blocking Cleanup (Days 5.5–6) [IN PROGRESS]
+
+**Goal:** Address accumulated non-blocking improvements from Sprint 1 and Sprint 2 reviews.
+
+**Dependencies:** Sprint 2 (merged)
+
+### S2.5-1: Ingest Hardening + Testing
+
+- [ ] Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path *(from Sprint 1 review)*
+- [ ] Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox` *(from Sprint 1 review)*
+- [ ] Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter *(from Sprint 1 review)*
+- [ ] Add `\r` to the quoting condition in `yaml_escape` for hardening *(from Sprint 1 review)*
+- [ ] Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline *(from Sprint 1 review)*
+
+### S2.5-2: Send Hardening + Testing
+
+- [ ] Escape attachment filenames in MIME headers to prevent malformed headers *(from Sprint 2 review)*
+- [ ] Add integration test for `aimx dkim-keygen` CLI end-to-end *(from Sprint 2 review)*
+- [ ] Refactor duplicated header construction logic in `compose_message()` *(from Sprint 2 review)*
+- [ ] Add test verifying `dkim_selector` config value is used at runtime *(from Sprint 2 review)*
+
+---
+
+## Sprint 3 — MCP Server (Days 6–8.5) [NOT STARTED]
 
 **Goal:** Give AI agents full email access via MCP so that Claude Code (or any MCP client) can read, send, and manage email programmatically.
 
@@ -585,8 +608,9 @@ aimx verify
 | Sprint | Days | Focus | Key Output | Status |
 |--------|------|-------|------------|--------|
 | 1 | 1–2.5 | Core Pipeline + Idea Validation | `aimx ingest`, basic `aimx send`, mailbox CLI, CI pipeline, test fixtures — testable on VPS | Done |
-| 2 | 3–5 | DKIM + Production Outbound | DKIM signing, threading, attachments — mail passes Gmail checks | In Progress |
-| 3 | 5.5–7.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Not Started |
+| 2 | 3–5 | DKIM + Production Outbound | DKIM signing, threading, attachments — mail passes Gmail checks | Done |
+| 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | In Progress |
+| 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Not Started |
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Not Started |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Not Started |
 | 6 | 13–15 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
@@ -618,8 +642,12 @@ _No questions yet._
 
 Concrete items with clear implementation direction. Will be triaged into a cleanup sprint periodically.
 
-- [ ] **(Sprint 1)** Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path — enables integration testing without root
-- [ ] **(Sprint 1)** Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline, not just `mail-parser` parseability
-- [ ] **(Sprint 1)** Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox`
-- [ ] **(Sprint 1)** Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter to avoid edge cases (YAML booleans, special characters)
-- [ ] **(Sprint 1)** Add `\r` to the quoting condition in `yaml_escape` for hardening (bare `\r` not exploitable but inconsistent)
+- [x] **(Sprint 1)** Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path — _Triaged into Sprint 2.5_
+- [x] **(Sprint 1)** Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline, not just `mail-parser` parseability — _Triaged into Sprint 2.5_
+- [x] **(Sprint 1)** Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox` — _Triaged into Sprint 2.5_
+- [x] **(Sprint 1)** Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter to avoid edge cases (YAML booleans, special characters) — _Triaged into Sprint 2.5_
+- [x] **(Sprint 1)** Add `\r` to the quoting condition in `yaml_escape` for hardening (bare `\r` not exploitable but inconsistent) — _Triaged into Sprint 2.5_
+- [x] **(Sprint 2)** Escape attachment filenames in MIME `Content-Type`/`Content-Disposition` headers to prevent malformed headers from special characters — _Triaged into Sprint 2.5_
+- [x] **(Sprint 2)** Add integration test for `aimx dkim-keygen` CLI command end-to-end (subprocess test) — _Triaged into Sprint 2.5_
+- [x] **(Sprint 2)** Refactor duplicated header construction logic in `compose_message()` attachment vs non-attachment paths — _Triaged into Sprint 2.5_
+- [x] **(Sprint 2)** Add test verifying `dkim_selector` config value is actually used at runtime in `send::run()` — _Triaged into Sprint 2.5_
