@@ -6,6 +6,7 @@ mod ingest;
 mod mailbox;
 mod mcp;
 mod send;
+mod setup;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -32,17 +33,18 @@ fn main() {
             Ok(rt) => rt.block_on(mcp::run(cli.data_dir.as_deref())),
             Err(e) => Err(format!("Failed to create runtime: {e}").into()),
         },
-        Command::Setup { domain: _ } => {
-            eprintln!("Setup wizard not yet implemented");
-            Ok(())
+        Command::Setup { domain } => {
+            let sys = setup::RealSystemOps;
+            let net = setup::RealNetworkOps;
+            setup::run_setup(&domain, cli.data_dir.as_deref(), &sys, &net)
         }
         Command::Status => {
             eprintln!("Status not yet implemented");
             Ok(())
         }
         Command::Preflight => {
-            eprintln!("Preflight not yet implemented");
-            Ok(())
+            let net = setup::RealNetworkOps;
+            setup::run_preflight_command(&net)
         }
         Command::Verify => {
             eprintln!("Verify not yet implemented");

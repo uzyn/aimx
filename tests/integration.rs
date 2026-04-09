@@ -971,3 +971,33 @@ mailboxes:
         "Trigger should fire for trusted sender even with trust=verified"
     );
 }
+
+#[test]
+fn setup_help_shows_domain_arg() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["setup", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DOMAIN"));
+}
+
+#[test]
+fn preflight_help_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["preflight", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("preflight"));
+}
+
+#[test]
+fn setup_requires_domain_arg() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("setup")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("DOMAIN"));
+}
