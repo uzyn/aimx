@@ -29,7 +29,8 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("preflight"))
-        .stdout(predicate::str::contains("verify"));
+        .stdout(predicate::str::contains("verify"))
+        .stdout(predicate::str::contains("dkim-keygen"));
 }
 
 #[test]
@@ -38,8 +39,6 @@ fn ingest_plain_fixture() {
     let _config_path = setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    // We can't easily override config path via CLI, so we test the library directly
-    // This test validates the fixture file is parseable
     assert!(!eml.is_empty());
 
     let message = mail_parser::MessageParser::default().parse(&eml).unwrap();
