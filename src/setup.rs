@@ -625,7 +625,17 @@ pub fn finalize_setup(
     let config = if config_path.exists() {
         let mut cfg = Config::load(&config_path)?;
         if cfg.domain != domain {
+            let old_domain = cfg.domain.clone();
             cfg.domain = domain.to_string();
+            for mailbox in cfg.mailboxes.values_mut() {
+                if mailbox.address.ends_with(&format!("@{old_domain}")) {
+                    let local_part = mailbox
+                        .address
+                        .strip_suffix(&format!("@{old_domain}"))
+                        .unwrap_or(&mailbox.address);
+                    mailbox.address = format!("{local_part}@{domain}");
+                }
+            }
             cfg.save(&config_path)?;
         }
         if !cfg.mailboxes.contains_key("catchall") {
@@ -1377,6 +1387,8 @@ mod tests {
 
         let config = Config::load_from_data_dir(tmp.path()).unwrap();
         assert_eq!(config.domain, "new.example.com");
+        let catchall = config.mailboxes.get("catchall").unwrap();
+        assert_eq!(catchall.address, "*@new.example.com");
     }
 
     #[test]
