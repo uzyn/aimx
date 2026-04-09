@@ -1,0 +1,17 @@
+From: Charlie <charlie@example.com>
+To: catchall@agent.example.com
+Subject: Multipart test
+Date: Thu, 01 Jan 2025 14:00:00 +0000
+Message-ID: <multi-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/alternative; boundary="alt-boundary"
+
+--alt-boundary
+Content-Type: text/plain; charset=utf-8
+
+This is the plain text version.
+--alt-boundary
+Content-Type: text/html; charset=utf-8
+
+<html><body><p>This is the HTML version.</p></body></html>
+--alt-boundary--

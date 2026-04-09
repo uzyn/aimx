@@ -1,0 +1,9 @@
+From: Alice <alice@example.com>
+To: catchall@agent.example.com
+Subject: Plain text test
+Date: Thu, 01 Jan 2025 12:00:00 +0000
+Message-ID: <plain-001@example.com>
+
+This is a plain text email for testing.
+
+It has multiple paragraphs.

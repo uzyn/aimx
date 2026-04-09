@@ -1,0 +1,17 @@
+From: Bob <bob@example.com>
+To: catchall@agent.example.com
+Subject: HTML only test
+Date: Thu, 01 Jan 2025 13:00:00 +0000
+Message-ID: <html-001@example.com>
+Content-Type: text/html; charset=utf-8
+
+<html>
+<body>
+<h1>Hello from HTML</h1>
+<p>This is an <strong>HTML-only</strong> email.</p>
+<ul>
+<li>Item one</li>
+<li>Item two</li>
+</ul>
+</body>
+</html>

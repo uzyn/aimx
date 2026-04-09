@@ -1,0 +1,186 @@
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Config {
+    pub domain: String,
+
+    #[serde(default = "default_data_dir")]
+    pub data_dir: PathBuf,
+
+    #[serde(default)]
+    pub mailboxes: HashMap<String, MailboxConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct MailboxConfig {
+    pub address: String,
+
+    #[serde(default)]
+    pub on_receive: Vec<OnReceiveRule>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct OnReceiveRule {
+    #[serde(rename = "type")]
+    pub rule_type: String,
+
+    pub command: String,
+
+    #[serde(default)]
+    pub r#match: Option<MatchFilter>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct MatchFilter {
+    pub from: Option<String>,
+    pub subject: Option<String>,
+    pub has_attachment: Option<bool>,
+}
+
+fn default_data_dir() -> PathBuf {
+    PathBuf::from(DEFAULT_DATA_DIR)
+}
+
+impl Config {
+    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let content = std::fs::read_to_string(path)?;
+        let config: Config = serde_yaml::from_str(&content)?;
+        Ok(config)
+    }
+
+    pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let content = serde_yaml::to_string(self)?;
+        std::fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn config_path(data_dir: &Path) -> PathBuf {
+        data_dir.join("config.yaml")
+    }
+
+    pub fn load_from_data_dir(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load(&Self::config_path(data_dir))
+    }
+
+    pub fn load_default() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_from_data_dir(Path::new(DEFAULT_DATA_DIR))
+    }
+
+    pub fn mailbox_dir(&self, name: &str) -> PathBuf {
+        self.data_dir.join(name)
+    }
+
+    pub fn resolve_mailbox(&self, local_part: &str) -> String {
+        if self.mailboxes.contains_key(local_part) {
+            local_part.to_string()
+        } else {
+            "catchall".to_string()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn sample_yaml() -> &'static str {
+        r#"
+domain: agent.example.com
+data_dir: /tmp/aimx-test
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+  support:
+    address: support@agent.example.com
+    on_receive:
+      - type: cmd
+        command: 'echo "{from}" >> /tmp/log'
+        match:
+          from: "*@gmail.com"
+          subject: urgent
+          has_attachment: true
+"#
+    }
+
+    #[test]
+    fn parse_config() {
+        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        assert_eq!(config.domain, "agent.example.com");
+        assert_eq!(config.data_dir, PathBuf::from("/tmp/aimx-test"));
+        assert_eq!(config.mailboxes.len(), 2);
+        assert!(config.mailboxes.contains_key("catchall"));
+        assert!(config.mailboxes.contains_key("support"));
+    }
+
+    #[test]
+    fn parse_on_receive_rules() {
+        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let support = &config.mailboxes["support"];
+        assert_eq!(support.on_receive.len(), 1);
+        let rule = &support.on_receive[0];
+        assert_eq!(rule.rule_type, "cmd");
+        assert_eq!(rule.command, "echo \"{from}\" >> /tmp/log");
+        let m = rule.r#match.as_ref().unwrap();
+        assert_eq!(m.from.as_deref(), Some("*@gmail.com"));
+        assert_eq!(m.subject.as_deref(), Some("urgent"));
+        assert_eq!(m.has_attachment, Some(true));
+    }
+
+    #[test]
+    fn default_data_dir() {
+        let yaml = "domain: test.com\nmailboxes: {}\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.data_dir, PathBuf::from("/var/lib/aimx"));
+    }
+
+    #[test]
+    fn save_and_load_roundtrip() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.yaml");
+
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+            },
+        );
+
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            mailboxes,
+        };
+
+        config.save(&path).unwrap();
+        let loaded = Config::load(&path).unwrap();
+        assert_eq!(config, loaded);
+    }
+
+    #[test]
+    fn resolve_mailbox_known() {
+        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        assert_eq!(config.resolve_mailbox("support"), "support");
+    }
+
+    #[test]
+    fn resolve_mailbox_unknown_falls_to_catchall() {
+        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        assert_eq!(config.resolve_mailbox("unknown"), "catchall");
+    }
+
+    #[test]
+    fn mailbox_dir() {
+        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        assert_eq!(
+            config.mailbox_dir("support"),
+            PathBuf::from("/tmp/aimx-test/support")
+        );
+    }
+}
