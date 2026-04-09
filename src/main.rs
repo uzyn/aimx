@@ -7,16 +7,17 @@ mod send;
 
 use clap::Parser;
 use cli::{Cli, Command};
+use std::path::Path;
 
 fn main() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Command::Ingest { rcpt } => ingest::run(&rcpt),
-        Command::Send(args) => send::run(args),
-        Command::Mailbox(cmd) => mailbox::run(cmd),
+        Command::Ingest { rcpt } => ingest::run(&rcpt, cli.data_dir.as_deref()),
+        Command::Send(args) => send::run(args, cli.data_dir.as_deref()),
+        Command::Mailbox(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
         Command::DkimKeygen { selector, force } => {
-            let config = match config::Config::load_default() {
+            let config = match load_config(cli.data_dir.as_deref()) {
                 Ok(c) => c,
                 Err(e) => {
                     eprintln!("Error loading config: {e}");
@@ -50,5 +51,12 @@ fn main() {
     if let Err(e) = result {
         eprintln!("Error: {e}");
         std::process::exit(1);
+    }
+}
+
+fn load_config(data_dir: Option<&Path>) -> Result<config::Config, Box<dyn std::error::Error>> {
+    match data_dir {
+        Some(dir) => config::Config::load_from_data_dir(dir),
+        None => config::Config::load_default(),
     }
 }

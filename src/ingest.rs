@@ -1,9 +1,10 @@
 use crate::config::Config;
 use mail_parser::{MessageParser, MimeHeaders};
+use serde::Serialize;
 use std::io::Read;
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EmailMetadata {
     pub id: String,
     pub message_id: String,
@@ -13,11 +14,12 @@ pub struct EmailMetadata {
     pub date: String,
     pub in_reply_to: String,
     pub references: String,
-    pub mailbox: String,
     pub attachments: Vec<AttachmentMeta>,
+    pub mailbox: String,
+    pub read: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct AttachmentMeta {
     pub filename: String,
     pub content_type: String,
@@ -25,8 +27,14 @@ pub struct AttachmentMeta {
     pub path: String,
 }
 
-pub fn run(rcpt: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_default()?;
+pub fn run(
+    rcpt: &str,
+    data_dir: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = match data_dir {
+        Some(dir) => Config::load_from_data_dir(dir)?,
+        None => Config::load_default()?,
+    };
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
     ingest_email(&config, rcpt, &raw)
@@ -111,8 +119,9 @@ pub fn ingest_email(
         date,
         in_reply_to,
         references,
-        mailbox: mailbox.clone(),
         attachments,
+        mailbox: mailbox.clone(),
+        read: false,
     };
 
     let content = format_markdown(&meta, &body);
@@ -230,78 +239,19 @@ fn generate_file_id(mailbox_dir: &Path) -> String {
     }
 }
 
-fn yaml_escape(s: &str) -> String {
-    if s.contains(':')
-        || s.contains('#')
-        || s.contains('\'')
-        || s.contains('"')
-        || s.contains('\n')
-        || s.contains('[')
-        || s.contains(']')
-        || s.contains('{')
-        || s.contains('}')
-        || s.contains('&')
-        || s.contains('*')
-        || s.contains('!')
-        || s.contains('|')
-        || s.contains('>')
-        || s.contains('%')
-        || s.contains('@')
-        || s.starts_with(' ')
-        || s.ends_with(' ')
-    {
-        format!(
-            "\"{}\"",
-            s.replace('\\', "\\\\")
-                .replace('"', "\\\"")
-                .replace('\n', "\\n")
-                .replace('\r', "\\r")
-        )
-    } else {
-        s.to_string()
-    }
-}
-
 fn format_markdown(meta: &EmailMetadata, body: &str) -> String {
-    let mut front = String::new();
-    front.push_str("---\n");
-    front.push_str(&format!("id: {}\n", yaml_escape(&meta.id)));
-    front.push_str(&format!("message_id: {}\n", yaml_escape(&meta.message_id)));
-    front.push_str(&format!("from: {}\n", yaml_escape(&meta.from)));
-    front.push_str(&format!("to: {}\n", yaml_escape(&meta.to)));
-    front.push_str(&format!("subject: {}\n", yaml_escape(&meta.subject)));
-    front.push_str(&format!("date: {}\n", yaml_escape(&meta.date)));
-    front.push_str(&format!(
-        "in_reply_to: {}\n",
-        yaml_escape(&meta.in_reply_to)
-    ));
-    front.push_str(&format!("references: {}\n", yaml_escape(&meta.references)));
-
-    if meta.attachments.is_empty() {
-        front.push_str("attachments: []\n");
-    } else {
-        front.push_str("attachments:\n");
-        for att in &meta.attachments {
-            front.push_str(&format!("  - filename: {}\n", yaml_escape(&att.filename)));
-            front.push_str(&format!(
-                "    content_type: {}\n",
-                yaml_escape(&att.content_type)
-            ));
-            front.push_str(&format!("    size: {}\n", att.size));
-            front.push_str(&format!("    path: {}\n", yaml_escape(&att.path)));
-        }
-    }
-
-    front.push_str(&format!("mailbox: {}\n", yaml_escape(&meta.mailbox)));
-    front.push_str("read: false\n");
-    front.push_str("---\n\n");
-    front.push_str(body);
+    let yaml = serde_yaml::to_string(meta).unwrap_or_default();
+    let mut result = String::new();
+    result.push_str("---\n");
+    result.push_str(&yaml);
+    result.push_str("---\n\n");
+    result.push_str(body);
 
     if !body.ends_with('\n') {
-        front.push('\n');
+        result.push('\n');
     }
 
-    front
+    result
 }
 
 #[cfg(test)]
@@ -437,9 +387,32 @@ mod tests {
         assert_eq!(entries.len(), 1);
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(content.contains("from: \"sender@example.com\""));
-        assert!(content.contains("subject: Hello"));
-        assert!(content.contains("read: false"));
+
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        assert!(parts.len() >= 3);
+        let yaml_str = parts[1].trim();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let map = parsed.as_mapping().unwrap();
+
+        let from_val = map
+            .get(&serde_yaml::Value::String("from".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(from_val, "sender@example.com");
+
+        let subject_val = map
+            .get(&serde_yaml::Value::String("subject".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(subject_val, "Hello");
+
+        let read_val = map
+            .get(&serde_yaml::Value::String("read".to_string()))
+            .unwrap();
+        assert_eq!(read_val, &serde_yaml::Value::Bool(false));
+
         assert!(content.contains("This is a plain text email."));
     }
 
@@ -561,8 +534,29 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(md_content.contains("filename: notes.txt"));
-        assert!(md_content.contains("path: attachments/notes.txt"));
+        let parts: Vec<&str> = md_content.splitn(3, "---").collect();
+        let yaml_str = parts[1].trim();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let map = parsed.as_mapping().unwrap();
+        let attachments = map
+            .get(&serde_yaml::Value::String("attachments".to_string()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(attachments.len(), 1);
+        let att = attachments[0].as_mapping().unwrap();
+        let filename = att
+            .get(&serde_yaml::Value::String("filename".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(filename, "notes.txt");
+        let path_val = att
+            .get(&serde_yaml::Value::String("path".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(path_val, "attachments/notes.txt");
     }
 
     #[test]
@@ -604,7 +598,16 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(md_content.contains("attachments: []"));
+        let parts: Vec<&str> = md_content.splitn(3, "---").collect();
+        let yaml_str = parts[1].trim();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let map = parsed.as_mapping().unwrap();
+        let attachments = map
+            .get(&serde_yaml::Value::String("attachments".to_string()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert!(attachments.is_empty());
     }
 
     #[test]
@@ -645,17 +648,27 @@ mod tests {
     }
 
     #[test]
-    fn yaml_escape_newline_injection() {
-        let escaped = yaml_escape("test\n---\ninjected: true");
-        assert!(!escaped.contains('\n'));
-        assert!(escaped.contains("\\n"));
+    fn serde_yaml_handles_special_characters() {
+        let meta = EmailMetadata {
+            id: "2025-01-01-001".to_string(),
+            message_id: "<test@example.com>".to_string(),
+            from: "test\n---\ninjected: true".to_string(),
+            to: "to@test.com".to_string(),
+            subject: "colons: and #hashes".to_string(),
+            date: "2025-01-01T00:00:00Z".to_string(),
+            in_reply_to: "".to_string(),
+            references: "".to_string(),
+            attachments: vec![],
+            mailbox: "catchall".to_string(),
+            read: false,
+        };
 
-        let yaml_str = format!("subject: {}\n", escaped);
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml_str).unwrap();
-        let val = parsed.as_mapping().unwrap();
-        let subject = val
-            .get(&serde_yaml::Value::String("subject".to_string()))
+        let yaml = serde_yaml::to_string(&meta).unwrap();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+        let map = parsed.as_mapping().unwrap();
+        let from = map
+            .get(&serde_yaml::Value::String("from".to_string()))
             .unwrap();
-        assert_eq!(subject.as_str().unwrap(), "test\n---\ninjected: true");
+        assert_eq!(from.as_str().unwrap(), "test\n---\ninjected: true");
     }
 }

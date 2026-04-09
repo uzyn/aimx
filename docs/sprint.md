@@ -236,7 +236,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 2.5 — Non-blocking Cleanup (Days 5.5–6) [IN PROGRESS]
+## Sprint 2.5 — Non-blocking Cleanup (Days 5.5–6) [DONE]
 
 **Goal:** Address accumulated non-blocking improvements from Sprint 1 and Sprint 2 reviews.
 
@@ -244,18 +244,18 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ### S2.5-1: Ingest Hardening + Testing
 
-- [ ] Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path *(from Sprint 1 review)*
-- [ ] Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox` *(from Sprint 1 review)*
-- [ ] Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter *(from Sprint 1 review)*
-- [ ] Add `\r` to the quoting condition in `yaml_escape` for hardening *(from Sprint 1 review)*
-- [ ] Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline *(from Sprint 1 review)*
+- [x] Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path *(from Sprint 1 review)*
+- [x] Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox` *(from Sprint 1 review)*
+- [x] Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter *(from Sprint 1 review)*
+- [x] Add `\r` to the quoting condition in `yaml_escape` for hardening *(from Sprint 1 review)* — Superseded: `yaml_escape` replaced entirely by `serde_yaml` struct serialization
+- [x] Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline *(from Sprint 1 review)*
 
 ### S2.5-2: Send Hardening + Testing
 
-- [ ] Escape attachment filenames in MIME headers to prevent malformed headers *(from Sprint 2 review)*
-- [ ] Add integration test for `aimx dkim-keygen` CLI end-to-end *(from Sprint 2 review)*
-- [ ] Refactor duplicated header construction logic in `compose_message()` *(from Sprint 2 review)*
-- [ ] Add test verifying `dkim_selector` config value is used at runtime *(from Sprint 2 review)*
+- [x] Escape attachment filenames in MIME headers to prevent malformed headers *(from Sprint 2 review)*
+- [x] Add integration test for `aimx dkim-keygen` CLI end-to-end *(from Sprint 2 review)*
+- [x] Refactor duplicated header construction logic in `compose_message()` *(from Sprint 2 review)*
+- [x] Add test verifying `dkim_selector` config value is used at runtime *(from Sprint 2 review)*
 
 ---
 
@@ -609,7 +609,7 @@ aimx verify
 |--------|------|-------|------------|--------|
 | 1 | 1–2.5 | Core Pipeline + Idea Validation | `aimx ingest`, basic `aimx send`, mailbox CLI, CI pipeline, test fixtures — testable on VPS | Done |
 | 2 | 3–5 | DKIM + Production Outbound | DKIM signing, threading, attachments — mail passes Gmail checks | Done |
-| 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | In Progress |
+| 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | Done |
 | 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Not Started |
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Not Started |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Not Started |
