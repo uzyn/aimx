@@ -233,9 +233,29 @@ async fn verify_spf_async(raw: &[u8], rcpt: &str) -> String {
     }
 }
 
+fn unfold_headers(raw: &str) -> String {
+    let mut result = String::with_capacity(raw.len());
+    for line in raw.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            result.push(' ');
+            result.push_str(line.trim());
+        } else {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+        }
+    }
+    result
+}
+
 fn extract_received_ip(raw: &[u8]) -> Option<IpAddr> {
     let header_section = std::str::from_utf8(raw).ok()?;
-    for line in header_section.lines() {
+    let unfolded = unfold_headers(header_section);
+    for line in unfolded.lines() {
+        if line.is_empty() {
+            break;
+        }
         if (line.starts_with("Received:") || line.starts_with("received:"))
             && let Some(ip) = parse_ip_from_received(line)
         {
@@ -930,5 +950,33 @@ mod tests {
 
         assert!(map.contains_key(&serde_yaml::Value::String("dkim".to_string())));
         assert!(map.contains_key(&serde_yaml::Value::String("spf".to_string())));
+    }
+
+    #[test]
+    fn extract_received_ip_folded_header() {
+        let raw = b"Received: from mail.example.com (mail.example.com\r\n\t[203.0.113.50]) by mx.local with ESMTP\r\n\r\nBody\r\n";
+        let ip = extract_received_ip(raw);
+        assert_eq!(ip, Some("203.0.113.50".parse().unwrap()));
+    }
+
+    #[test]
+    fn extract_received_ip_folded_with_spaces() {
+        let raw = b"Received: from mail.example.com (mail.example.com\r\n    [198.51.100.25]) by mx.local\r\n\r\nBody\r\n";
+        let ip = extract_received_ip(raw);
+        assert_eq!(ip, Some("198.51.100.25".parse().unwrap()));
+    }
+
+    #[test]
+    fn unfold_headers_preserves_single_line() {
+        let input = "Received: from mail.example.com ([192.168.1.1])";
+        let result = unfold_headers(input);
+        assert_eq!(result, input);
+    }
+
+    #[test]
+    fn unfold_headers_joins_continuation() {
+        let input = "Received: from mail.example.com\n\t([192.168.1.1])";
+        let result = unfold_headers(input);
+        assert!(result.contains("Received: from mail.example.com ([192.168.1.1])"));
     }
 }

