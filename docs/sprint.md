@@ -689,3 +689,8 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 4)** Verify `mail-auth` `dkim_headers` field is stable public API, not internal implementation detail — _Triaged into Sprint 5.5_
 - [x] **(Sprint 5)** Implement timestamped backup for pre-aimx OpenSMTPD config to avoid overwriting on repeated setup runs — _Triaged into Sprint 5.5_
 - [ ] **(Sprint 5.5)** Extract SPF domain-selection logic into standalone testable function instead of duplicating inline in tests
+- [ ] **(Sprint 6)** Fix GitHub URL in README.md and services/verify/README.md (currently wrong owner)
+- [ ] **(Sprint 6)** Add IP validation on `/probe` endpoint to reject private/internal IPs (SSRF hardening)
+- [ ] **(Sprint 6)** Handle multiline (folded) Authentication-Results headers in `extract_auth_result`
+- [ ] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance)
+- [ ] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify`
