@@ -259,7 +259,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 3 — MCP Server (Days 6–8.5) [IN PROGRESS]
+## Sprint 3 — MCP Server (Days 6–8.5) [DONE]
 
 **Goal:** Give AI agents full email access via MCP so that Claude Code (or any MCP client) can read, send, and manage email programmatically.
 
@@ -272,39 +272,39 @@ aimx send --from catchall@agent.yourdomain.com \
 **Technical context:** Use `rmcp` crate for MCP stdio transport. `aimx mcp` starts the server, launched on-demand by the MCP client (no daemon). Implement `mailbox_create`, `mailbox_list`, `mailbox_delete` as MCP tools that wrap the existing CLI logic.
 
 **Acceptance criteria:**
-- [ ] `aimx mcp` starts an MCP server in stdio mode
-- [ ] Server responds to MCP `initialize` handshake correctly
-- [ ] `mailbox_create(name)` creates mailbox and returns confirmation
-- [ ] `mailbox_list()` returns all mailboxes with message counts (total and unread)
-- [ ] `mailbox_delete(name)` deletes mailbox (with appropriate safeguards)
-- [ ] Server exits cleanly when stdin closes
-- [ ] Integration tests: spawn `aimx mcp` as child process, send JSON-RPC requests via stdin, assert responses (initialize handshake, tool calls, error cases)
+- [x] `aimx mcp` starts an MCP server in stdio mode
+- [x] Server responds to MCP `initialize` handshake correctly
+- [x] `mailbox_create(name)` creates mailbox and returns confirmation
+- [x] `mailbox_list()` returns all mailboxes with message counts (total and unread)
+- [x] `mailbox_delete(name)` deletes mailbox (with appropriate safeguards)
+- [x] Server exits cleanly when stdin closes
+- [x] Integration tests: spawn `aimx mcp` as child process, send JSON-RPC requests via stdin, assert responses (initialize handshake, tool calls, error cases)
 
 ### S3.2 — Email Read + List Tools
 
 *As an agent operator, I want my agent to list and read emails via MCP so that it can process incoming messages programmatically.*
 
 **Acceptance criteria:**
-- [ ] `email_list(mailbox)` returns frontmatter of all emails in the mailbox
-- [ ] `email_list` supports optional filters: `unread` (bool), `from` (string), `since` (datetime), `subject` (string)
-- [ ] `email_read(mailbox, id)` returns full Markdown content of the email
-- [ ] `email_mark_read(mailbox, id)` updates frontmatter `read: true`
-- [ ] `email_mark_unread(mailbox, id)` updates frontmatter `read: false`
-- [ ] Non-existent mailbox or email ID returns clear MCP error
-- [ ] Unit tests for email listing with each filter type and combinations
-- [ ] Unit tests for mark read/unread (verify frontmatter file is updated correctly)
-- [ ] Integration tests via MCP JSON-RPC: list, read, mark_read, error cases
+- [x] `email_list(mailbox)` returns frontmatter of all emails in the mailbox
+- [x] `email_list` supports optional filters: `unread` (bool), `from` (string), `since` (datetime), `subject` (string)
+- [x] `email_read(mailbox, id)` returns full Markdown content of the email
+- [x] `email_mark_read(mailbox, id)` updates frontmatter `read: true`
+- [x] `email_mark_unread(mailbox, id)` updates frontmatter `read: false`
+- [x] Non-existent mailbox or email ID returns clear MCP error
+- [x] Unit tests for email listing with each filter type and combinations
+- [x] Unit tests for mark read/unread (verify frontmatter file is updated correctly)
+- [x] Integration tests via MCP JSON-RPC: list, read, mark_read, error cases
 
 ### S3.3 — Email Send + Reply Tools
 
 *As an agent operator, I want my agent to send and reply to emails via MCP so that it can compose and respond to messages programmatically.*
 
 **Acceptance criteria:**
-- [ ] `email_send(from_mailbox, to, subject, body, attachments?)` composes, DKIM-signs, and sends
-- [ ] `email_reply(mailbox, id, body)` replies with correct In-Reply-To/References headers
-- [ ] Send/reply return confirmation with the sent Message-ID
-- [ ] Errors (missing mailbox, invalid recipient, missing DKIM key) return clear MCP errors
-- [ ] Integration tests via MCP JSON-RPC: send and reply (using mock MTA trait from Sprint 1)
+- [x] `email_send(from_mailbox, to, subject, body, attachments?)` composes, DKIM-signs, and sends
+- [x] `email_reply(mailbox, id, body)` replies with correct In-Reply-To/References headers
+- [x] Send/reply return confirmation with the sent Message-ID
+- [x] Errors (missing mailbox, invalid recipient, missing DKIM key) return clear MCP errors
+- [x] Integration tests via MCP JSON-RPC: send and reply (using mock MTA trait from Sprint 1)
 
 ### VPS Validation Guide — Sprint 3
 
@@ -338,7 +338,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 4 — Channel Manager + Inbound Trust (Days 8–10) [NOT STARTED]
+## Sprint 4 — Channel Manager + Inbound Trust (Days 8–10) [IN PROGRESS]
 
 **Goal:** Enable automated reactions to incoming email (triggers) with security gating so that agents can act on email automatically while being protected from spoofed senders.
 
@@ -610,8 +610,8 @@ aimx verify
 | 1 | 1–2.5 | Core Pipeline + Idea Validation | `aimx ingest`, basic `aimx send`, mailbox CLI, CI pipeline, test fixtures — testable on VPS | Done |
 | 2 | 3–5 | DKIM + Production Outbound | DKIM signing, threading, attachments — mail passes Gmail checks | Done |
 | 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | Done |
-| 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | In Progress |
-| 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Not Started |
+| 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Done |
+| 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | In Progress |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Not Started |
 | 6 | 13–15 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
 
@@ -652,3 +652,5 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 2)** Refactor duplicated header construction logic in `compose_message()` attachment vs non-attachment paths — _Triaged into Sprint 2.5_
 - [x] **(Sprint 2)** Add test verifying `dkim_selector` config value is actually used at runtime in `send::run()` — _Triaged into Sprint 2.5_
 - [ ] **(Sprint 2.5)** Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation to avoid silent empty frontmatter on serialization failure
+- [ ] **(Sprint 3)** Narrow `tokio` features from `"full"` to specific needed features (`rt-multi-thread`, `macros`, `io-util`, `io-std`) for smaller binary
+- [ ] **(Sprint 3)** Add unit test for `write_common_headers` with `references = Some(...)` path
