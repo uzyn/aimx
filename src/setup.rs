@@ -684,20 +684,46 @@ pub fn finalize_setup(
     Ok(())
 }
 
+fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if domain.is_empty() {
+        return Err("Domain must not be empty".into());
+    }
+    if domain.len() > 253 {
+        return Err("Domain exceeds maximum length of 253 characters".into());
+    }
+    for label in domain.split('.') {
+        if label.is_empty() || label.len() > 63 {
+            return Err(format!("Invalid domain label: '{label}'").into());
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(
+                format!("Domain label must not start or end with a hyphen: '{label}'").into(),
+            );
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(format!("Domain label contains invalid characters: '{label}'").into());
+        }
+    }
+    if domain.split('.').count() < 2 {
+        return Err("Domain must have at least two labels (e.g. example.com)".into());
+    }
+    Ok(())
+}
+
 pub fn run_setup(
     domain: &str,
     data_dir: Option<&Path>,
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_domain(domain)?;
+
     println!("aimx setup for {domain}\n");
 
     let passed = run_preflight(net)?;
     if !passed {
         return Err("Preflight checks failed. Fix the issues above and try again.".into());
     }
-
-    configure_opensmtpd(sys, domain)?;
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
@@ -712,6 +738,8 @@ pub fn run_setup(
     };
 
     finalize_setup(data_dir, domain, &dkim_selector)?;
+
+    configure_opensmtpd(sys, domain)?;
 
     let server_ip = net.get_server_ip()?;
     let dkim_value = dkim::dns_record_value(data_dir)?;
@@ -740,7 +768,7 @@ pub fn run_setup(
 pub fn run_preflight_command(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
     let passed = run_preflight(net)?;
     if !passed {
-        std::process::exit(1);
+        return Err("Preflight checks failed. Fix the issues above and try again.".into());
     }
     Ok(())
 }
@@ -1355,5 +1383,52 @@ mod tests {
     fn compatible_providers_not_empty() {
         assert!(!COMPATIBLE_PROVIDERS.is_empty());
         assert!(COMPATIBLE_PROVIDERS.iter().any(|p| p.contains("Hetzner")));
+    }
+
+    #[test]
+    fn validate_domain_accepts_valid() {
+        assert!(validate_domain("example.com").is_ok());
+        assert!(validate_domain("mail.example.com").is_ok());
+        assert!(validate_domain("my-domain.co.uk").is_ok());
+    }
+
+    #[test]
+    fn validate_domain_rejects_empty() {
+        assert!(validate_domain("").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_single_label() {
+        assert!(validate_domain("localhost").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_special_chars() {
+        assert!(validate_domain("ex ample.com").is_err());
+        assert!(validate_domain("ex\"ample.com").is_err());
+        assert!(validate_domain("ex\nample.com").is_err());
+    }
+
+    #[test]
+    fn validate_domain_rejects_leading_trailing_hyphen() {
+        assert!(validate_domain("-example.com").is_err());
+        assert!(validate_domain("example-.com").is_err());
+    }
+
+    #[test]
+    fn preflight_command_returns_err_on_failure() {
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+        let result = run_preflight_command(&net);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn preflight_command_returns_ok_on_success() {
+        let net = MockNetworkOps::default();
+        let result = run_preflight_command(&net);
+        assert!(result.is_ok());
     }
 }
