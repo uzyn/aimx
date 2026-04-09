@@ -259,7 +259,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ---
 
-## Sprint 3 — MCP Server (Days 6–8.5) [NOT STARTED]
+## Sprint 3 — MCP Server (Days 6–8.5) [IN PROGRESS]
 
 **Goal:** Give AI agents full email access via MCP so that Claude Code (or any MCP client) can read, send, and manage email programmatically.
 
@@ -610,7 +610,7 @@ aimx verify
 | 1 | 1–2.5 | Core Pipeline + Idea Validation | `aimx ingest`, basic `aimx send`, mailbox CLI, CI pipeline, test fixtures — testable on VPS | Done |
 | 2 | 3–5 | DKIM + Production Outbound | DKIM signing, threading, attachments — mail passes Gmail checks | Done |
 | 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | Done |
-| 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Not Started |
+| 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | In Progress |
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Not Started |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Not Started |
 | 6 | 13–15 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
@@ -636,7 +636,7 @@ This section collects non-blocking feedback from sprint reviews. Questions need 
 
 Items needing human judgment. Answer inline by replacing the `_awaiting answer_` text, then check the box.
 
-_No questions yet._
+- [ ] **(Sprint 2.5)** `serde_yaml` 0.9 is unmaintained/deprecated — should we migrate to an alternative YAML serializer? — _awaiting answer_
 
 ### Improvements
 
@@ -651,3 +651,4 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 2)** Add integration test for `aimx dkim-keygen` CLI command end-to-end (subprocess test) — _Triaged into Sprint 2.5_
 - [x] **(Sprint 2)** Refactor duplicated header construction logic in `compose_message()` attachment vs non-attachment paths — _Triaged into Sprint 2.5_
 - [x] **(Sprint 2)** Add test verifying `dkim_selector` config value is actually used at runtime in `send::run()` — _Triaged into Sprint 2.5_
+- [ ] **(Sprint 2.5)** Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation to avoid silent empty frontmatter on serialization failure
