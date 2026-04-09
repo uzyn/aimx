@@ -1,6 +1,6 @@
-# claude-code-boilerplate
+# AIMX
 
-This is my personal Claude Code project boilerplate.
+
 
 ## Documentation
 
@@ -10,7 +10,4 @@ This is my personal Claude Code project boilerplate.
 
 ## Author
 
-U-Zyn Chua <chua@uzyn.com>
-https://uzyn.com
-
-
+[U-Zyn Chua](https://uzyn.com) <chua@uzyn.com>
