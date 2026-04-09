@@ -1,0 +1,342 @@
+use crate::config::Config;
+use crate::ingest::EmailMetadata;
+use std::path::Path;
+
+pub struct StatusInfo {
+    pub domain: String,
+    pub data_dir: String,
+    pub dkim_selector: String,
+    pub dkim_key_present: bool,
+    pub opensmtpd_running: bool,
+    pub mailboxes: Vec<MailboxStatus>,
+}
+
+pub struct MailboxStatus {
+    pub name: String,
+    pub address: String,
+    pub total: usize,
+    pub unread: usize,
+}
+
+pub fn gather_status(config: &Config) -> StatusInfo {
+    let dkim_key_present = config.data_dir.join("dkim/private.key").exists();
+    let opensmtpd_running = check_opensmtpd_running();
+
+    let mut mailboxes: Vec<MailboxStatus> = config
+        .mailboxes
+        .iter()
+        .map(|(name, mb_config)| {
+            let dir = config.mailbox_dir(name);
+            let (total, unread) = count_messages(&dir);
+            MailboxStatus {
+                name: name.clone(),
+                address: mb_config.address.clone(),
+                total,
+                unread,
+            }
+        })
+        .collect();
+
+    mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
+
+    StatusInfo {
+        domain: config.domain.clone(),
+        data_dir: config.data_dir.to_string_lossy().to_string(),
+        dkim_selector: config.dkim_selector.clone(),
+        dkim_key_present,
+        opensmtpd_running,
+        mailboxes,
+    }
+}
+
+fn check_opensmtpd_running() -> bool {
+    std::process::Command::new("systemctl")
+        .args(["is-active", "--quiet", "opensmtpd"])
+        .status()
+        .is_ok_and(|s| s.success())
+}
+
+fn count_messages(dir: &Path) -> (usize, usize) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
+    };
+
+    let mut total = 0;
+    let mut unread = 0;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|ext| ext == "md") {
+            total += 1;
+            if is_unread(&path) {
+                unread += 1;
+            }
+        }
+    }
+
+    (total, unread)
+}
+
+fn is_unread(path: &Path) -> bool {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+
+    let frontmatter = match extract_frontmatter(&content) {
+        Some(fm) => fm,
+        None => return false,
+    };
+
+    match serde_yaml::from_str::<EmailMetadata>(&frontmatter) {
+        Ok(meta) => !meta.read,
+        Err(_) => false,
+    }
+}
+
+fn extract_frontmatter(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with("---") {
+        return None;
+    }
+
+    let after_first = &trimmed[3..];
+    let end = after_first.find("---")?;
+    Some(after_first[..end].to_string())
+}
+
+pub fn format_status(info: &StatusInfo) -> String {
+    let mut out = String::new();
+
+    out.push_str(&format!("Domain:           {}\n", info.domain));
+    out.push_str(&format!("Data directory:   {}\n", info.data_dir));
+    out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
+    out.push_str(&format!(
+        "DKIM key:         {}\n",
+        if info.dkim_key_present {
+            "present"
+        } else {
+            "MISSING - run `aimx dkim-keygen`"
+        }
+    ));
+    out.push_str(&format!(
+        "OpenSMTPD:        {}\n",
+        if info.opensmtpd_running {
+            "running"
+        } else {
+            "not running"
+        }
+    ));
+
+    let total_msgs: usize = info.mailboxes.iter().map(|m| m.total).sum();
+    let total_unread: usize = info.mailboxes.iter().map(|m| m.unread).sum();
+    out.push_str(&format!(
+        "Mailboxes:        {} ({} messages, {} unread)\n",
+        info.mailboxes.len(),
+        total_msgs,
+        total_unread,
+    ));
+
+    if !info.mailboxes.is_empty() {
+        out.push('\n');
+        out.push_str(&format!(
+            "  {:<20} {:<30} {:>8} {:>8}\n",
+            "MAILBOX", "ADDRESS", "TOTAL", "UNREAD"
+        ));
+        for mb in &info.mailboxes {
+            out.push_str(&format!(
+                "  {:<20} {:<30} {:>8} {:>8}\n",
+                mb.name, mb.address, mb.total, mb.unread,
+            ));
+        }
+    }
+
+    out
+}
+
+pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    let config = match data_dir {
+        Some(dir) => Config::load_from_data_dir(dir)?,
+        None => Config::load_default()?,
+    };
+
+    let info = gather_status(&config);
+    print!("{}", format_status(&info));
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_status_no_mailboxes() {
+        let info = StatusInfo {
+            domain: "test.example.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            opensmtpd_running: true,
+            mailboxes: vec![],
+        };
+        let output = format_status(&info);
+        assert!(output.contains("test.example.com"));
+        assert!(output.contains("present"));
+        assert!(output.contains("running"));
+        assert!(output.contains("0 (0 messages, 0 unread)"));
+    }
+
+    #[test]
+    fn format_status_with_mailboxes() {
+        let info = StatusInfo {
+            domain: "agent.example.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            opensmtpd_running: false,
+            mailboxes: vec![
+                MailboxStatus {
+                    name: "catchall".to_string(),
+                    address: "*@agent.example.com".to_string(),
+                    total: 10,
+                    unread: 3,
+                },
+                MailboxStatus {
+                    name: "support".to_string(),
+                    address: "support@agent.example.com".to_string(),
+                    total: 5,
+                    unread: 1,
+                },
+            ],
+        };
+        let output = format_status(&info);
+        assert!(output.contains("agent.example.com"));
+        assert!(output.contains("not running"));
+        assert!(output.contains("2 (15 messages, 4 unread)"));
+        assert!(output.contains("catchall"));
+        assert!(output.contains("support"));
+        assert!(output.contains("MAILBOX"));
+        assert!(output.contains("TOTAL"));
+        assert!(output.contains("UNREAD"));
+    }
+
+    #[test]
+    fn format_status_missing_dkim() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: false,
+            opensmtpd_running: false,
+            mailboxes: vec![],
+        };
+        let output = format_status(&info);
+        assert!(output.contains("MISSING"));
+        assert!(output.contains("dkim-keygen"));
+    }
+
+    #[test]
+    fn extract_frontmatter_valid() {
+        let content = "---\nid: test\nread: false\n---\nBody here";
+        let fm = extract_frontmatter(content).unwrap();
+        assert!(fm.contains("id: test"));
+        assert!(fm.contains("read: false"));
+    }
+
+    #[test]
+    fn extract_frontmatter_no_marker() {
+        assert!(extract_frontmatter("No frontmatter here").is_none());
+    }
+
+    #[test]
+    fn extract_frontmatter_no_end_marker() {
+        assert!(extract_frontmatter("---\nid: test\nno end").is_none());
+    }
+
+    #[test]
+    fn count_messages_empty_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let (total, unread) = count_messages(tmp.path());
+        assert_eq!(total, 0);
+        assert_eq!(unread, 0);
+    }
+
+    #[test]
+    fn count_messages_nonexistent_dir() {
+        let (total, unread) = count_messages(Path::new("/nonexistent/path"));
+        assert_eq!(total, 0);
+        assert_eq!(unread, 0);
+    }
+
+    #[test]
+    fn count_messages_with_emails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let unread_content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        let read_content = "---\nid: \"002\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: true\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+
+        std::fs::write(tmp.path().join("2025-01-01-001.md"), unread_content).unwrap();
+        std::fs::write(tmp.path().join("2025-01-01-002.md"), read_content).unwrap();
+        std::fs::write(tmp.path().join("2025-01-01-003.md"), unread_content).unwrap();
+        std::fs::write(tmp.path().join("notes.txt"), "not an email").unwrap();
+
+        let (total, unread) = count_messages(tmp.path());
+        assert_eq!(total, 3);
+        assert_eq!(unread, 2);
+    }
+
+    #[test]
+    fn is_unread_true() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("test.md");
+        let content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        std::fs::write(&path, content).unwrap();
+        assert!(is_unread(&path));
+    }
+
+    #[test]
+    fn is_unread_false() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("test.md");
+        let content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: true\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        std::fs::write(&path, content).unwrap();
+        assert!(!is_unread(&path));
+    }
+
+    #[test]
+    fn gather_status_with_temp_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path();
+
+        std::fs::create_dir_all(data_dir.join("dkim")).unwrap();
+        std::fs::write(data_dir.join("dkim/private.key"), "test").unwrap();
+
+        std::fs::create_dir_all(data_dir.join("catchall")).unwrap();
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+        };
+
+        let info = gather_status(&config);
+        assert_eq!(info.domain, "test.com");
+        assert!(info.dkim_key_present);
+        assert_eq!(info.mailboxes.len(), 1);
+        assert_eq!(info.mailboxes[0].name, "catchall");
+    }
+}
