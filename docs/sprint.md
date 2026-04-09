@@ -549,7 +549,7 @@ sudo aimx setup agent.yourdomain.com
 
 ---
 
-## Sprint 6 — Verify Service + Polish (Days 13–15.5) [IN PROGRESS]
+## Sprint 6 — Verify Service + Polish (Days 13–15.5) [DONE]
 
 **Goal:** Complete the product with the hosted verification service, remaining CLI commands, and documentation for open source release.
 
@@ -562,12 +562,12 @@ sudo aimx setup agent.yourdomain.com
 **Technical context:** Lightweight HTTP service at `check.aimx.email`. Receives a request with the caller's IP, connects back to that IP on port 25, returns the result. Can be a Cloudflare Worker, a small Rust/Node service, or equivalent. Must be open source and self-hostable.
 
 **Acceptance criteria:**
-- [ ] `check.aimx.email` accepts probe requests with target IP
-- [ ] Service connects to target IP on port 25 and reports open/closed
-- [ ] Response is a simple JSON payload: `{ "reachable": true/false }`
-- [ ] Service source code is in the aimx repo (e.g., `services/verify/`)
-- [ ] Service is self-hostable with clear deployment instructions
-- [ ] Tests for the verify service (unit tests appropriate to the chosen platform — e.g., Cloudflare Worker test harness or Rust integration tests)
+- [x] `check.aimx.email` accepts probe requests with target IP
+- [x] Service connects to target IP on port 25 and reports open/closed
+- [x] Response is a simple JSON payload: `{ "reachable": true/false }`
+- [x] Service source code is in the aimx repo (e.g., `services/verify/`)
+- [x] Service is self-hostable with clear deployment instructions
+- [x] Tests for the verify service (unit tests appropriate to the chosen platform — e.g., Cloudflare Worker test harness or Rust integration tests)
 
 ### S6.2 — Verify Service: Email Echo
 
@@ -576,35 +576,35 @@ sudo aimx setup agent.yourdomain.com
 **Technical context:** Email endpoint at `verify@aimx.email`. Receives a test email from the user's server, verifies DKIM, and sends a reply. The reply confirms DKIM pass/fail status. Used during `aimx setup` and `aimx verify`.
 
 **Acceptance criteria:**
-- [ ] `verify@aimx.email` receives email and sends an auto-reply
-- [ ] Reply includes DKIM/SPF verification result of the received message
-- [ ] Service handles concurrent requests from multiple users
-- [ ] Service source code is in the aimx repo alongside the probe service
+- [x] `verify@aimx.email` receives email and sends an auto-reply
+- [x] Reply includes DKIM/SPF verification result of the received message
+- [x] Service handles concurrent requests from multiple users
+- [x] Service source code is in the aimx repo alongside the probe service
 
 ### S6.3 — CLI Polish: status, preflight, verify
 
 *As an agent operator, I want to check server status and verify my setup with simple commands.*
 
 **Acceptance criteria:**
-- [ ] `aimx status` shows: domain, mailbox count, message counts (total/unread), OpenSMTPD running status, DKIM key presence
-- [ ] `aimx preflight` runs port 25 + DNS checks without installing anything (extracted from setup wizard)
-- [ ] `aimx verify` sends test email to `verify@aimx.email`, waits for reply, reports pass/fail
-- [ ] All commands have clear, formatted output
-- [ ] All commands have `--help` with usage examples
-- [ ] Unit tests for `aimx status` output formatting with various states (no mailboxes, multiple mailboxes, missing DKIM key)
+- [x] `aimx status` shows: domain, mailbox count, message counts (total/unread), OpenSMTPD running status, DKIM key presence
+- [x] `aimx preflight` runs port 25 + DNS checks without installing anything (extracted from setup wizard)
+- [x] `aimx verify` sends test email to `verify@aimx.email`, waits for reply, reports pass/fail
+- [x] All commands have clear, formatted output
+- [x] All commands have `--help` with usage examples
+- [x] Unit tests for `aimx status` output formatting with various states (no mailboxes, multiple mailboxes, missing DKIM key)
 
 ### S6.4 — Documentation
 
 *As a developer discovering aimx, I want clear documentation so that I can understand what it does and get started quickly.*
 
 **Acceptance criteria:**
-- [ ] README.md with: project description, quick start, requirements, installation, usage examples
-- [ ] Compatible VPS providers listed with port 25 status
-- [ ] MCP configuration example for Claude Code
-- [ ] Channel manager configuration examples
-- [ ] Trust policy documentation
-- [ ] `config.yaml` reference with all fields documented
-- [ ] LICENSE file (MIT or Apache-2.0)
+- [x] README.md with: project description, quick start, requirements, installation, usage examples
+- [x] Compatible VPS providers listed with port 25 status
+- [x] MCP configuration example for Claude Code
+- [x] Channel manager configuration examples
+- [x] Trust policy documentation
+- [x] `config.yaml` reference with all fields documented
+- [x] LICENSE file (MIT or Apache-2.0)
 
 ### VPS Validation Guide — Sprint 6
 
@@ -642,7 +642,7 @@ aimx verify
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Done |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Done |
 | 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | Done |
-| 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | In Progress |
+| 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
 
 ## Deferred to v2
 

@@ -1001,3 +1001,52 @@ fn setup_requires_domain_arg() {
         .failure()
         .stderr(predicate::str::contains("DOMAIN"));
 }
+
+#[test]
+fn status_shows_domain_and_mailboxes() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let eml = b"From: sender@example.com\r\nTo: catchall@agent.example.com\r\nSubject: Test\r\nMessage-ID: <status-test@example.com>\r\n\r\nBody\r\n";
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml.to_vec())
+        .assert()
+        .success();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("status")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("agent.example.com"))
+        .stdout(predicate::str::contains("catchall"))
+        .stdout(predicate::str::contains("alice"))
+        .stdout(predicate::str::contains("MAILBOX"));
+}
+
+#[test]
+fn status_help_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["status", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("status"));
+}
+
+#[test]
+fn verify_help_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["verify", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("verify"));
+}
