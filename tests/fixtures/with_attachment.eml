@@ -1,0 +1,19 @@
+From: Dave <dave@example.com>
+To: catchall@agent.example.com
+Subject: Email with attachment
+Date: Thu, 01 Jan 2025 15:00:00 +0000
+Message-ID: <att-001@example.com>
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mix-boundary"
+
+--mix-boundary
+Content-Type: text/plain; charset=utf-8
+
+Please see the attached file.
+--mix-boundary
+Content-Type: text/plain; name="readme.txt"
+Content-Disposition: attachment; filename="readme.txt"
+
+This is the content of the attached file.
+It has multiple lines.
+--mix-boundary--
