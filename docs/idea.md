@@ -2,7 +2,9 @@
 
 > Your server can receive email. Why are you routing through Gmail?
 
-A self-hosted email identity for AI agents. One command to give your agent its own email address — no Gmail, no OAuth, no third-party SaaS.
+SMTP for agents. No middleman.
+
+One command to give your agents their own email addresses — no Gmail, no OAuth, no third-party SaaS.
 
 Built for Claude Code, OpenClaw, Codex, and any agentic system that needs an email channel.
 
@@ -36,7 +38,7 @@ No Gmail. No OAuth. No third parties. No IMAP clients. Just SMTP, directly on yo
 
 ```
 Inbound:
-  Sender → port 25 → OpenSMTPD → aimx deliver → .md file
+  Sender → port 25 → OpenSMTPD → aimx ingest → .md file
                                                         → channel manager (triggers agent)
 s
 Outbound:
@@ -59,7 +61,7 @@ Storage:
 
 ### Key design decisions
 
-- **No daemon.** OpenSMTPD is the only long-running process. It calls `aimx deliver` on each incoming message. The MCP server runs in stdio mode, launched on-demand by Claude Code. Nothing else needs to run.
+- **No daemon.** OpenSMTPD is the only long-running process. It calls `aimx ingest` on each incoming message. The MCP server runs in stdio mode, launched on-demand by Claude Code. Nothing else needs to run.
 - **No IMAP/POP3/JMAP.** No mail clients will connect to this. Agents read `.md` files via MCP or filesystem. The mail server's only job is SMTP transport.
 - **`.md` first.** Emails are stored as Markdown with YAML frontmatter, not raw `.eml`. Agents can `cat` an email and understand it immediately. Attachments are extracted to a sibling directory.
 - **DKIM signing in Rust.** Rather than depending on `opensmtpd-filter-dkimsign`, `aimx send` handles DKIM signing natively before handing the message to OpenSMTPD for delivery. Keeps the dependency tree minimal.
@@ -73,7 +75,7 @@ $ aimx setup agent.mydomain.com
 
 Step 1/6: Preflight checks
   Outbound port 25... (connecting to gmail MX)                ✓ open
-  Inbound port 25...  (asking check.aimx.dev)         ✓ reachable
+  Inbound port 25...  (asking check.aimx.email)         ✓ reachable
   Reverse DNS (PTR)... ⚠ not set
     Warning: Some providers (Gmail, Outlook) may flag outbound
     mail as spam. Set PTR to mail.agent.mydomain.com in your
@@ -104,8 +106,8 @@ Step 4/6: Verifying DNS
   DMARC record.. ✓ valid
 
 Step 5/6: End-to-end verification
-  Sending test to verify@aimx.dev... ✓ delivered, DKIM pass
-  Receiving test from verify@aimx.dev... ✓ received, saved to .md
+  Sending test to verify@aimx.email... ✓ delivered, DKIM pass
+  Receiving test from verify@aimx.email... ✓ received, saved to .md
 
 Step 6/6: Creating default mailbox
   Created: catchall@agent.mydomain.com
@@ -132,7 +134,7 @@ Step 6/6: Creating default mailbox
 
 Outbound is checked locally by connecting to a well-known MX (e.g., `gmail-smtp-in.l.google.com:25`).
 
-Inbound cannot be verified from inside the server. The `aimx` project runs a lightweight probe service at `check.aimx.dev` that connects back to the user's IP on port 25 during preflight. The probe service code is open source and self-hostable.
+Inbound cannot be verified from inside the server. The `aimx` project runs a lightweight probe service at `check.aimx.email` that connects back to the user's IP on port 25 during preflight. The probe service code is open source and self-hostable.
 
 If port 25 is blocked (inbound or outbound), setup stops with a clear message:
 
@@ -174,6 +176,7 @@ attachments:
     size: 45230
     path: "attachments/agenda.pdf"
 mailbox: "schedule"
+read: false
 ---
 
 Hi, can we schedule a meeting next Thursday at 2pm?
@@ -247,7 +250,7 @@ pki mail.agent.mydomain.com cert "/etc/ssl/aimx/cert.pem"
 pki mail.agent.mydomain.com key "/etc/ssl/aimx/key.pem"
 
 listen on 0.0.0.0 tls pki mail.agent.mydomain.com
-action "deliver" mda "/usr/local/bin/aimx deliver %{rcpt}"
+action "deliver" mda "/usr/local/bin/aimx ingest %{rcpt}"
 match from any for domain "agent.mydomain.com" action "deliver"
 ```
 
@@ -265,40 +268,56 @@ mailboxes:
   schedule:
     address: schedule@agent.mydomain.com
     on_receive:
-      - type: shell
+      - type: cmd
         command: 'claude -p "Handle this scheduling request: $(cat {filepath})"'
-      - type: webhook
-        url: "http://localhost:8080/hooks/schedule"
-        method: POST
-
   accounting:
     address: accounting@agent.mydomain.com
     on_receive:
-      - type: shell
+      - type: cmd
         command: 'claude -p "Process this invoice: $(cat {filepath})"'
         match:
           has_attachment: true
-      - type: shell
+      - type: cmd
         command: 'claude -p "Handle this accounting email: $(cat {filepath})"'
 
   family:
     address: family@agent.mydomain.com
     on_receive:
-      - type: webhook
-        url: "http://localhost:3000/api/family-inbox"
-        method: POST
+      - type: cmd
+        command: 'curl -X POST http://localhost:3000/api/family-inbox -d @{filepath}'
 
   catchall:
     address: "*@agent.mydomain.com"
     on_receive:
-      - type: shell
+      - type: cmd
         command: 'ntfy pub agent-mail "New email: {subject} from {from}"'
 ```
 
 ### Supported trigger types
 
-- **shell** — Execute a shell command. Template variables: `{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`.
-- **web4** — POST to an HTTP endpoint. Sends the full `.md` content as the request body with metadata in headers.
+- **cmd** — Execute a shell command. Template variables: `{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`.
+
+### Inbound trust
+
+Channel triggers execute shell commands on incoming mail. Without verification, anyone can email your agent and trigger actions. Trust policies gate trigger execution on sender authenticity.
+
+During `aimx ingest`, verify the sender's DKIM signature and SPF record using the `mail-auth` crate (same library used for outbound signing). Store the result in frontmatter (`dkim: pass|fail|none`, `spf: pass|fail|none`).
+
+Per-mailbox trust policy in `config.yaml`:
+
+```yaml
+schedule:
+  trust: verified          # only trigger on DKIM-pass emails
+  trusted_senders:         # optional allowlist (always trigger, skip verification)
+    - "*@company.com"
+    - "alice@gmail.com"
+```
+
+Trust modes:
+- `none` (default) — all triggers fire regardless of verification result.
+- `verified` — triggers only fire on DKIM-pass emails, unless sender matches `trusted_senders`.
+
+Mail is always stored regardless of trust status. Trust only gates trigger execution.
 
 ### Match filters (optional)
 
@@ -317,7 +336,7 @@ All conditions must match (AND logic). If no `match` is specified, the trigger f
 
 Triggers run synchronously during mail delivery. The delivery pipeline is:
 
-1. OpenSMTPD receives mail, calls `aimx deliver`
+1. OpenSMTPD receives mail, calls `aimx ingest`
 2. Parse `.eml` → save `.md` + extract attachments
 3. Determine mailbox from RCPT TO
 4. Run matching channel rules for that mailbox
@@ -328,10 +347,10 @@ Trigger failures are logged but do not block delivery. The `.md` is always saved
 
 ## Verify Service
 
-`aimx` includes a hosted verification service at `verify@aimx.dev` that provides:
+`aimx` includes a hosted verification service at `verify@aimx.email` that provides:
 
-1. **Preflight port check** — During `aimx setup`, the CLI asks `check.aimx.dev` to probe the user's IP on port 25 to confirm inbound reachability.
-2. **End-to-end delivery test** — After setup, the CLI sends a test email to `verify@aimx.dev` and waits for a reply. This confirms outbound delivery, DKIM signing, and inbound reception all work.
+1. **Preflight port check** — During `aimx setup`, the CLI asks `check.aimx.email` to probe the user's IP on port 25 to confirm inbound reachability.
+2. **End-to-end delivery test** — After setup, the CLI sends a test email to `verify@aimx.email` and waits for a reply. This confirms outbound delivery, DKIM signing, and inbound reception all work.
 
 The verify service is:
 - A lightweight Cloudflare Worker (or equivalent) hosted by the project
@@ -344,7 +363,7 @@ The verify service is:
 ```
 aimx setup <domain>       Interactive setup wizard
 aimx preflight            Run port/DNS checks without installing
-aimx deliver <rcpt>       Delivery command (called by OpenSMTPD, not user-facing)
+aimx ingest <rcpt>       Delivery command (called by OpenSMTPD, not user-facing)
 aimx send <args>          Compose, DKIM-sign, and send an email
 aimx mcp                  Start MCP server in stdio mode (for Claude Code)
 aimx mailbox create <n>   Create a new mailbox
