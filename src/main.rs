@@ -7,6 +7,8 @@ mod mailbox;
 mod mcp;
 mod send;
 mod setup;
+mod status;
+mod verify;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -38,18 +40,12 @@ fn main() {
             let net = setup::RealNetworkOps;
             setup::run_setup(&domain, cli.data_dir.as_deref(), &sys, &net)
         }
-        Command::Status => {
-            eprintln!("Status not yet implemented");
-            Ok(())
-        }
+        Command::Status => status::run(cli.data_dir.as_deref()),
         Command::Preflight => {
             let net = setup::RealNetworkOps;
             setup::run_preflight_command(&net)
         }
-        Command::Verify => {
-            eprintln!("Verify not yet implemented");
-            Ok(())
-        }
+        Command::Verify => verify::run(cli.data_dir.as_deref()),
     };
 
     if let Err(e) = result {

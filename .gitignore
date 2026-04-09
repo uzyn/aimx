@@ -7,3 +7,4 @@ logs/
 .claude/*.local.*
 .worktrees/
 /target/
+**/target/

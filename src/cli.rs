@@ -1,7 +1,15 @@
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "aimx", about = "SMTP for agents. No middleman.")]
+#[command(
+    name = "aimx",
+    about = "SMTP for agents. No middleman.",
+    long_about = "aimx - Self-hosted email for AI agents.\n\n\
+                   One command to give your AI agents their own email addresses.\n\
+                   Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
+                   MCP is built in. Channel rules trigger agent actions on incoming mail.",
+    version
+)]
 pub struct Cli {
     /// Data directory override (default: /var/lib/aimx)
     #[arg(long, env = "AIMX_DATA_DIR", global = true)]
@@ -35,13 +43,13 @@ pub enum Command {
         domain: String,
     },
 
-    /// Show server status
+    /// Show server status, mailbox counts, and configuration
     Status,
 
-    /// Run preflight checks
+    /// Run preflight checks (port 25, PTR) without installing anything
     Preflight,
 
-    /// Run end-to-end verification
+    /// Send test email to verify@aimx.email and wait for verification reply
     Verify,
 
     /// Generate DKIM keypair for email signing
