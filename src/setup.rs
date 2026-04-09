@@ -1,5 +1,6 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -363,10 +364,11 @@ pub fn configure_opensmtpd(
 
     let smtpd_conf = Path::new("/etc/smtpd.conf");
     if sys.file_exists(smtpd_conf) {
-        let backup = PathBuf::from("/etc/smtpd.conf.bak");
+        let timestamp = Utc::now().format("%Y%m%d%H%M%S");
+        let backup = PathBuf::from(format!("/etc/smtpd.conf.bak.{timestamp}"));
         let existing = sys.read_file(smtpd_conf)?;
         sys.write_file(&backup, &existing)?;
-        println!("Backed up existing smtpd.conf to /etc/smtpd.conf.bak");
+        println!("Backed up existing smtpd.conf to {}", backup.display());
     }
 
     let aimx_binary = sys
@@ -1042,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn opensmtpd_backs_up_existing_config() {
+    fn opensmtpd_backs_up_existing_config_with_timestamp() {
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/smtpd.conf"), "old config".to_string());
         let sys = MockSystemOps {
@@ -1051,10 +1053,16 @@ mod tests {
         };
         configure_opensmtpd(&sys, "example.com").unwrap();
         let written = sys.written_files.borrow();
-        assert_eq!(
-            written.get(&PathBuf::from("/etc/smtpd.conf.bak")),
-            Some(&"old config".to_string())
-        );
+        let backup_entry = written
+            .iter()
+            .find(|(k, _)| k.to_string_lossy().starts_with("/etc/smtpd.conf.bak."));
+        assert!(backup_entry.is_some(), "timestamped backup should exist");
+        let (path, content) = backup_entry.unwrap();
+        assert_eq!(content, "old config");
+        let filename = path.to_string_lossy();
+        let timestamp = filename.strip_prefix("/etc/smtpd.conf.bak.").unwrap();
+        assert_eq!(timestamp.len(), 14, "timestamp should be YYYYMMDDHHmmSS");
+        assert!(timestamp.chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
