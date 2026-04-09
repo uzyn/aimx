@@ -3,6 +3,10 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "aimx", about = "SMTP for agents. No middleman.")]
 pub struct Cli {
+    /// Data directory override (default: /var/lib/aimx)
+    #[arg(long, env = "AIMX_DATA_DIR", global = true)]
+    pub data_dir: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Command,
 }
