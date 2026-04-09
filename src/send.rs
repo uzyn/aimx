@@ -223,7 +223,7 @@ pub fn run(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
         .and_then(|c| dkim::load_private_key(&c.data_dir).ok());
 
     let dkim_info = match (&config, &private_key) {
-        (Some(c), Some(k)) => Some((k, c.domain.as_str(), "dkim")),
+        (Some(c), Some(k)) => Some((k, c.domain.as_str(), c.dkim_selector.as_str())),
         _ => {
             eprintln!("Warning: DKIM signing disabled (no key found)");
             None

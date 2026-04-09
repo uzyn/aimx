@@ -22,6 +22,12 @@ pub fn generate_keypair(data_dir: &Path, force: bool) -> Result<(), Box<dyn std:
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
     std::fs::write(&private_path, private_pem.as_bytes())?;
 
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
     let public_key = RsaPublicKey::from(&private_key);
     let public_pem = public_key.to_pkcs1_pem(LineEnding::LF)?;
     std::fs::write(&public_path, public_pem.as_bytes())?;
@@ -225,5 +231,18 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let result = load_private_key(tmp.path());
         assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_key_has_restricted_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        generate_keypair(tmp.path(), false).unwrap();
+
+        let metadata = std::fs::metadata(tmp.path().join("dkim/private.key")).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
