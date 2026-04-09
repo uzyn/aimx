@@ -50,6 +50,8 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         MailboxConfig {
             address: format!("{name}@{}", config.domain),
             on_receive: vec![],
+            trust: "none".to_string(),
+            trusted_senders: vec![],
         },
     );
 
@@ -159,6 +161,8 @@ mod tests {
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
         Config {

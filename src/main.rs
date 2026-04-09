@@ -1,3 +1,4 @@
+mod channel;
 mod cli;
 mod config;
 mod dkim;

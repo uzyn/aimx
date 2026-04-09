@@ -566,6 +566,8 @@ mod tests {
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
         mailboxes.insert(
@@ -573,6 +575,8 @@ mod tests {
             MailboxConfig {
                 address: "alice@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
         Config {
@@ -609,6 +613,8 @@ mod tests {
             attachments: vec![],
             mailbox: "alice".to_string(),
             read,
+            dkim: "none".to_string(),
+            spf: "none".to_string(),
         }
     }
 

@@ -1,7 +1,9 @@
+use crate::channel::{self, TriggerContext};
 use crate::config::Config;
 use mail_parser::{MessageParser, MimeHeaders};
 use serde::Serialize;
 use std::io::Read;
+use std::net::IpAddr;
 use std::path::Path;
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -17,6 +19,14 @@ pub struct EmailMetadata {
     pub attachments: Vec<AttachmentMeta>,
     pub mailbox: String,
     pub read: bool,
+    #[serde(default = "default_auth_result")]
+    pub dkim: String,
+    #[serde(default = "default_auth_result")]
+    pub spf: String,
+}
+
+fn default_auth_result() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
@@ -110,6 +120,8 @@ pub fn ingest_email(
     let filename = format!("{id}.md");
     let filepath = mailbox_dir.join(&filename);
 
+    let (dkim_result, spf_result) = verify_auth(raw, rcpt);
+
     let meta = EmailMetadata {
         id: id.clone(),
         message_id,
@@ -122,12 +134,159 @@ pub fn ingest_email(
         attachments,
         mailbox: mailbox.clone(),
         read: false,
+        dkim: dkim_result,
+        spf: spf_result,
     };
 
     let content = format_markdown(&meta, &body);
     std::fs::write(&filepath, content)?;
 
+    if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
+        let ctx = TriggerContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        channel::execute_triggers(mailbox_config, &ctx);
+    }
+
     Ok(())
+}
+
+fn verify_auth(raw: &[u8], rcpt: &str) -> (String, String) {
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(_) => return ("none".to_string(), "none".to_string()),
+    };
+
+    rt.block_on(async {
+        let dkim_result = verify_dkim_async(raw).await;
+        let spf_result = verify_spf_async(raw, rcpt).await;
+        (dkim_result, spf_result)
+    })
+}
+
+async fn verify_dkim_async(raw: &[u8]) -> String {
+    let auth_msg = match mail_auth::AuthenticatedMessage::parse(raw) {
+        Some(msg) => msg,
+        None => return "none".to_string(),
+    };
+
+    if auth_msg.dkim_headers.is_empty() {
+        return "none".to_string();
+    }
+
+    let resolver = match mail_auth::Resolver::new_system_conf() {
+        Ok(r) => r,
+        Err(_) => match mail_auth::Resolver::new_cloudflare() {
+            Ok(r) => r,
+            Err(_) => return "none".to_string(),
+        },
+    };
+
+    let results = resolver.verify_dkim(&auth_msg).await;
+
+    if results.is_empty() {
+        return "none".to_string();
+    }
+
+    for output in &results {
+        if matches!(output.result(), mail_auth::DkimResult::Pass) {
+            return "pass".to_string();
+        }
+    }
+
+    "fail".to_string()
+}
+
+async fn verify_spf_async(raw: &[u8], rcpt: &str) -> String {
+    let ip = match extract_received_ip(raw) {
+        Some(ip) => ip,
+        None => return "none".to_string(),
+    };
+
+    let sender_domain = rcpt.split('@').nth(1).unwrap_or("");
+    let mail_from = extract_mail_from(raw).unwrap_or_default();
+    let helo_domain = mail_from.split('@').nth(1).unwrap_or(sender_domain);
+
+    if helo_domain.is_empty() {
+        return "none".to_string();
+    }
+
+    let resolver = match mail_auth::Resolver::new_system_conf() {
+        Ok(r) => r,
+        Err(_) => match mail_auth::Resolver::new_cloudflare() {
+            Ok(r) => r,
+            Err(_) => return "none".to_string(),
+        },
+    };
+
+    let spf_output = resolver
+        .verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)
+        .await;
+
+    match spf_output.result() {
+        mail_auth::SpfResult::Pass => "pass".to_string(),
+        mail_auth::SpfResult::Fail => "fail".to_string(),
+        mail_auth::SpfResult::SoftFail => "fail".to_string(),
+        mail_auth::SpfResult::None => "none".to_string(),
+        _ => "fail".to_string(),
+    }
+}
+
+fn extract_received_ip(raw: &[u8]) -> Option<IpAddr> {
+    let header_section = std::str::from_utf8(raw).ok()?;
+    for line in header_section.lines() {
+        if (line.starts_with("Received:") || line.starts_with("received:"))
+            && let Some(ip) = parse_ip_from_received(line)
+        {
+            return Some(ip);
+        }
+    }
+    None
+}
+
+fn parse_ip_from_received(line: &str) -> Option<IpAddr> {
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '[' {
+            let candidate: String = chars.by_ref().take_while(|&ch| ch != ']').collect();
+            if let Ok(ip) = candidate.parse::<IpAddr>()
+                && !ip.is_loopback()
+            {
+                return Some(ip);
+            }
+        }
+    }
+
+    for word in line.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != ':');
+        if let Ok(ip) = trimmed.parse::<IpAddr>()
+            && !ip.is_loopback()
+        {
+            return Some(ip);
+        }
+    }
+
+    None
+}
+
+fn extract_mail_from(raw: &[u8]) -> Option<String> {
+    let header_section = std::str::from_utf8(raw).ok()?;
+    for line in header_section.lines() {
+        if line.is_empty() {
+            break;
+        }
+        if line.to_lowercase().starts_with("from:") {
+            let addr = line[5..].trim();
+            if let Some(start) = addr.find('<')
+                && let Some(end) = addr.find('>')
+            {
+                return Some(addr[start + 1..end].to_string());
+            }
+            return Some(addr.to_string());
+        }
+    }
+    None
 }
 
 fn extract_local_part(rcpt: &str) -> &str {
@@ -268,6 +427,8 @@ mod tests {
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
         mailboxes.insert(
@@ -275,6 +436,8 @@ mod tests {
             MailboxConfig {
                 address: "alice@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
         Config {
@@ -661,6 +824,8 @@ mod tests {
             attachments: vec![],
             mailbox: "catchall".to_string(),
             read: false,
+            dkim: "none".to_string(),
+            spf: "none".to_string(),
         };
 
         let yaml = serde_yaml::to_string(&meta).unwrap();
@@ -670,5 +835,100 @@ mod tests {
             .get(&serde_yaml::Value::String("from".to_string()))
             .unwrap();
         assert_eq!(from.as_str().unwrap(), "test\n---\ninjected: true");
+    }
+
+    #[test]
+    fn unsigned_email_has_dkim_none_spf_none() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        let yaml_str = parts[1].trim();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let map = parsed.as_mapping().unwrap();
+
+        let dkim = map
+            .get(&serde_yaml::Value::String("dkim".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(dkim, "none");
+
+        let spf = map
+            .get(&serde_yaml::Value::String("spf".to_string()))
+            .unwrap()
+            .as_str()
+            .unwrap();
+        assert_eq!(spf, "none");
+    }
+
+    #[test]
+    fn parse_ip_from_received_bracketed() {
+        let line = "Received: from mail.example.com (mail.example.com [192.168.1.100])";
+        let ip = parse_ip_from_received(line);
+        assert_eq!(ip, Some("192.168.1.100".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_ip_from_received_skips_loopback() {
+        let line = "Received: from localhost ([127.0.0.1])";
+        let ip = parse_ip_from_received(line);
+        assert!(ip.is_none());
+    }
+
+    #[test]
+    fn parse_ip_from_received_ipv6() {
+        let line = "Received: from mail.example.com ([2001:db8::1])";
+        let ip = parse_ip_from_received(line);
+        assert_eq!(ip, Some("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn extract_mail_from_basic() {
+        let raw = b"From: sender@example.com\r\nTo: test@test.com\r\n\r\nBody\r\n";
+        let result = extract_mail_from(raw);
+        assert_eq!(result, Some("sender@example.com".to_string()));
+    }
+
+    #[test]
+    fn extract_mail_from_with_display_name() {
+        let raw = b"From: Alice <alice@example.com>\r\nTo: test@test.com\r\n\r\nBody\r\n";
+        let result = extract_mail_from(raw);
+        assert_eq!(result, Some("alice@example.com".to_string()));
+    }
+
+    #[test]
+    fn extract_mail_from_missing() {
+        let raw = b"To: test@test.com\r\n\r\nBody\r\n";
+        let result = extract_mail_from(raw);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn frontmatter_includes_dkim_spf_fields() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+
+        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        let yaml_str = parts[1].trim();
+        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
+        let map = parsed.as_mapping().unwrap();
+
+        assert!(map.contains_key(&serde_yaml::Value::String("dkim".to_string())));
+        assert!(map.contains_key(&serde_yaml::Value::String("spf".to_string())));
     }
 }

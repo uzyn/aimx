@@ -728,3 +728,246 @@ fn mcp_clean_exit_on_stdin_close() {
     let status = client.child.wait().unwrap();
     assert!(status.success() || status.code() == Some(0));
 }
+
+fn setup_test_env_with_triggers(tmp: &Path, trigger_marker: &Path) -> String {
+    let config_content = format!(
+        r#"domain: agent.example.com
+data_dir: {}
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+    on_receive:
+      - type: cmd
+        command: 'touch {}'
+"#,
+        tmp.display(),
+        trigger_marker.display()
+    );
+    std::fs::create_dir_all(tmp.join("catchall")).unwrap();
+    let config_path = tmp.join("config.yaml");
+    std::fs::write(&config_path, &config_content).unwrap();
+    config_path.to_string_lossy().to_string()
+}
+
+#[test]
+fn ingest_trigger_executes_on_delivery() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("trigger.marker");
+    setup_test_env_with_triggers(tmp.path(), &marker);
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(md_files.len(), 1);
+    assert!(
+        marker.exists(),
+        "Trigger marker file should have been created"
+    );
+}
+
+#[test]
+fn ingest_failing_trigger_does_not_block_delivery() {
+    let tmp = TempDir::new().unwrap();
+    let config_content = format!(
+        r#"domain: agent.example.com
+data_dir: {}
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+    on_receive:
+      - type: cmd
+        command: 'false'
+"#,
+        tmp.path().display()
+    );
+    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(
+        md_files.len(),
+        1,
+        "Email should be saved despite trigger failure"
+    );
+}
+
+#[test]
+fn ingest_trust_verified_blocks_unsigned_trigger() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("should_not_exist");
+    let config_content = format!(
+        r#"domain: agent.example.com
+data_dir: {}
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+    trust: verified
+    on_receive:
+      - type: cmd
+        command: 'touch {}'
+"#,
+        tmp.path().display(),
+        marker.display()
+    );
+    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(md_files.len(), 1, "Email should still be saved");
+    assert!(
+        !marker.exists(),
+        "Trigger should NOT fire for unsigned email with trust=verified"
+    );
+}
+
+#[test]
+fn ingest_trust_none_allows_unsigned_trigger() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("triggered");
+    let config_content = format!(
+        r#"domain: agent.example.com
+data_dir: {}
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+    trust: none
+    on_receive:
+      - type: cmd
+        command: 'touch {}'
+"#,
+        tmp.path().display(),
+        marker.display()
+    );
+    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(md_files.len(), 1);
+    assert!(
+        marker.exists(),
+        "Trigger should fire with trust=none even for unsigned email"
+    );
+}
+
+#[test]
+fn ingest_frontmatter_contains_dkim_spf() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(md_files.len(), 1);
+
+    let parsed = read_frontmatter(&md_files[0]);
+    let map = parsed.as_mapping().unwrap();
+
+    let dkim = get_yaml_str(map, "dkim");
+    assert!(
+        dkim == "none" || dkim == "pass" || dkim == "fail",
+        "dkim should be pass|fail|none, got: {dkim}"
+    );
+
+    let spf = get_yaml_str(map, "spf");
+    assert!(
+        spf == "none" || spf == "pass" || spf == "fail",
+        "spf should be pass|fail|none, got: {spf}"
+    );
+}
+
+#[test]
+fn ingest_trusted_sender_bypasses_dkim() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("triggered");
+    let config_content = format!(
+        r#"domain: agent.example.com
+data_dir: {}
+mailboxes:
+  catchall:
+    address: "*@agent.example.com"
+    trust: verified
+    trusted_senders:
+      - "*@example.com"
+    on_receive:
+      - type: cmd
+        command: 'touch {}'
+"#,
+        tmp.path().display(),
+        marker.display()
+    );
+    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(md_files.len(), 1);
+    assert!(
+        marker.exists(),
+        "Trigger should fire for trusted sender even with trust=verified"
+    );
+}

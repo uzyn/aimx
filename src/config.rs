@@ -24,6 +24,16 @@ pub struct MailboxConfig {
 
     #[serde(default)]
     pub on_receive: Vec<OnReceiveRule>,
+
+    #[serde(default = "default_trust")]
+    pub trust: String,
+
+    #[serde(default)]
+    pub trusted_senders: Vec<String>,
+}
+
+fn default_trust() -> String {
+    "none".to_string()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -156,6 +166,8 @@ mailboxes:
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
             },
         );
 
@@ -181,6 +193,40 @@ mailboxes:
     fn resolve_mailbox_unknown_falls_to_catchall() {
         let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
         assert_eq!(config.resolve_mailbox("unknown"), "catchall");
+    }
+
+    #[test]
+    fn parse_trust_settings() {
+        let yaml = r#"
+domain: test.com
+mailboxes:
+  secure:
+    address: secure@test.com
+    trust: verified
+    trusted_senders:
+      - "*@company.com"
+      - "boss@gmail.com"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let secure = &config.mailboxes["secure"];
+        assert_eq!(secure.trust, "verified");
+        assert_eq!(secure.trusted_senders.len(), 2);
+        assert_eq!(secure.trusted_senders[0], "*@company.com");
+        assert_eq!(secure.trusted_senders[1], "boss@gmail.com");
+    }
+
+    #[test]
+    fn default_trust_is_none() {
+        let yaml = r#"
+domain: test.com
+mailboxes:
+  catchall:
+    address: "*@test.com"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let catchall = &config.mailboxes["catchall"];
+        assert_eq!(catchall.trust, "none");
+        assert!(catchall.trusted_senders.is_empty());
     }
 
     #[test]
