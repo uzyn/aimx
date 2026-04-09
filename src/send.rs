@@ -47,6 +47,29 @@ pub struct ComposeResult {
     pub message_id: String,
 }
 
+fn escape_filename(name: &str) -> String {
+    name.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\r', "")
+        .replace('\n', " ")
+}
+
+fn write_common_headers(msg: &mut String, args: &SendArgs, date: &str, message_id: &str) {
+    msg.push_str(&format!("From: {}\r\n", args.from));
+    msg.push_str(&format!("To: {}\r\n", args.to));
+    msg.push_str(&format!("Subject: {}\r\n", args.subject));
+    msg.push_str(&format!("Date: {date}\r\n"));
+    msg.push_str(&format!("Message-ID: {message_id}\r\n"));
+
+    if let Some(ref reply_to) = args.reply_to {
+        let reply_id = normalize_message_id(reply_to);
+        msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
+        msg.push_str(&format!("References: {reply_id}\r\n"));
+    }
+
+    msg.push_str("MIME-Version: 1.0\r\n");
+}
+
 pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::error::Error>> {
     validate_attachments(&args.attachments)?;
 
@@ -54,115 +77,69 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
     let message_id = format!("<{}@{domain}>", Uuid::new_v4());
     let date = Utc::now().to_rfc2822();
 
-    let has_attachments = !args.attachments.is_empty();
-
-    if has_attachments {
-        let boundary = format!("aimx-{}", Uuid::new_v4().simple());
+    if args.attachments.is_empty() {
         let mut msg = String::new();
-
-        msg.push_str(&format!("From: {}\r\n", args.from));
-        msg.push_str(&format!("To: {}\r\n", args.to));
-        msg.push_str(&format!("Subject: {}\r\n", args.subject));
-        msg.push_str(&format!("Date: {date}\r\n"));
-        msg.push_str(&format!("Message-ID: {message_id}\r\n"));
-
-        if let Some(ref reply_to) = args.reply_to {
-            let reply_id = normalize_message_id(reply_to);
-            msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
-            msg.push_str(&format!("References: {reply_id}\r\n"));
-        }
-
-        msg.push_str("MIME-Version: 1.0\r\n");
-        msg.push_str(&format!(
-            "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
-        ));
-        msg.push_str("\r\n");
-
-        msg.push_str(&format!("--{boundary}\r\n"));
+        write_common_headers(&mut msg, args, &date, &message_id);
         msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
         msg.push_str("\r\n");
         msg.push_str(&args.body);
         msg.push_str("\r\n");
 
-        let mut binary_parts: Vec<Vec<u8>> = Vec::new();
-
-        for path_str in &args.attachments {
-            let path = Path::new(path_str);
-            let filename = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("attachment");
-            let content_type = mime_guess::from_path(path)
-                .first_or_octet_stream()
-                .to_string();
-            let file_data = std::fs::read(path)?;
-            let encoded = base64::engine::general_purpose::STANDARD.encode(&file_data);
-
-            let mut part = String::new();
-            part.push_str(&format!("--{boundary}\r\n"));
-            part.push_str(&format!(
-                "Content-Type: {content_type}; name=\"{filename}\"\r\n"
-            ));
-            part.push_str(&format!(
-                "Content-Disposition: attachment; filename=\"{filename}\"\r\n"
-            ));
-            part.push_str("Content-Transfer-Encoding: base64\r\n");
-            part.push_str("\r\n");
-
-            for chunk in encoded.as_bytes().chunks(76) {
-                part.push_str(std::str::from_utf8(chunk).unwrap_or(""));
-                part.push_str("\r\n");
-            }
-
-            binary_parts.push(part.into_bytes());
-        }
-
-        msg.push_str(&format!("--{boundary}--\r\n"));
-
-        let mut result = Vec::new();
-        let closing = format!("--{boundary}--\r\n");
-
-        let msg_bytes = msg.into_bytes();
-        let split_pos = msg_bytes
-            .windows(closing.len())
-            .position(|w| w == closing.as_bytes())
-            .unwrap_or(msg_bytes.len());
-
-        result.extend_from_slice(&msg_bytes[..split_pos]);
-        for part in &binary_parts {
-            result.extend_from_slice(part);
-        }
-        result.extend_from_slice(closing.as_bytes());
-
-        Ok(ComposeResult {
-            message: result,
-            message_id,
-        })
-    } else {
-        let mut msg = String::new();
-        msg.push_str(&format!("From: {}\r\n", args.from));
-        msg.push_str(&format!("To: {}\r\n", args.to));
-        msg.push_str(&format!("Subject: {}\r\n", args.subject));
-        msg.push_str(&format!("Date: {date}\r\n"));
-        msg.push_str(&format!("Message-ID: {message_id}\r\n"));
-
-        if let Some(ref reply_to) = args.reply_to {
-            let reply_id = normalize_message_id(reply_to);
-            msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
-            msg.push_str(&format!("References: {reply_id}\r\n"));
-        }
-
-        msg.push_str("MIME-Version: 1.0\r\n");
-        msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
-        msg.push_str("\r\n");
-        msg.push_str(&args.body);
-        msg.push_str("\r\n");
-
-        Ok(ComposeResult {
+        return Ok(ComposeResult {
             message: msg.into_bytes(),
             message_id,
-        })
+        });
     }
+
+    let boundary = format!("aimx-{}", Uuid::new_v4().simple());
+    let mut msg = String::new();
+    write_common_headers(&mut msg, args, &date, &message_id);
+    msg.push_str(&format!(
+        "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
+    ));
+    msg.push_str("\r\n");
+
+    msg.push_str(&format!("--{boundary}\r\n"));
+    msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+    msg.push_str("\r\n");
+    msg.push_str(&args.body);
+    msg.push_str("\r\n");
+
+    for path_str in &args.attachments {
+        let path = Path::new(path_str);
+        let raw_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("attachment");
+        let safe_name = escape_filename(raw_name);
+        let content_type = mime_guess::from_path(path)
+            .first_or_octet_stream()
+            .to_string();
+        let file_data = std::fs::read(path)?;
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&file_data);
+
+        msg.push_str(&format!("--{boundary}\r\n"));
+        msg.push_str(&format!(
+            "Content-Type: {content_type}; name=\"{safe_name}\"\r\n"
+        ));
+        msg.push_str(&format!(
+            "Content-Disposition: attachment; filename=\"{safe_name}\"\r\n"
+        ));
+        msg.push_str("Content-Transfer-Encoding: base64\r\n");
+        msg.push_str("\r\n");
+
+        for chunk in encoded.as_bytes().chunks(76) {
+            msg.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+            msg.push_str("\r\n");
+        }
+    }
+
+    msg.push_str(&format!("--{boundary}--\r\n"));
+
+    Ok(ComposeResult {
+        message: msg.into_bytes(),
+        message_id,
+    })
 }
 
 fn normalize_message_id(id: &str) -> String {
@@ -214,10 +191,16 @@ pub fn send_with_transport(
     Ok(composed.message_id)
 }
 
-pub fn run(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    args: SendArgs,
+    data_dir: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let transport = SendmailTransport;
 
-    let config = Config::load_default().ok();
+    let config = match data_dir {
+        Some(dir) => Config::load_from_data_dir(dir).ok(),
+        None => Config::load_default().ok(),
+    };
     let private_key = config
         .as_ref()
         .and_then(|c| dkim::load_private_key(&c.data_dir).ok());
@@ -561,5 +544,66 @@ mod tests {
         assert!(text.contains("References: <orig@example.com>"));
         assert!(text.contains("multipart/mixed"));
         assert!(text.contains("filename=\"data.csv\""));
+    }
+
+    #[test]
+    fn attachment_filename_with_quotes_escaped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_path = tmp.path().join("file\"name.txt");
+        std::fs::write(&file_path, "content").unwrap();
+
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "test".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            attachments: vec![file_path.to_string_lossy().to_string()],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("filename=\"file\\\"name.txt\""));
+        assert!(!text.contains("filename=\"file\"name.txt\""));
+    }
+
+    #[test]
+    fn attachment_filename_with_newline_escaped() {
+        let escaped = super::escape_filename("file\nname.txt");
+        assert!(!escaped.contains('\n'));
+        assert_eq!(escaped, "file name.txt");
+    }
+
+    #[test]
+    fn attachment_filename_with_cr_escaped() {
+        let escaped = super::escape_filename("file\rname.txt");
+        assert!(!escaped.contains('\r'));
+    }
+
+    #[test]
+    fn dkim_selector_config_used() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let private_key = crate::dkim::load_private_key(tmp.path()).unwrap();
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let transport = MockTransport {
+            sent: sent.clone(),
+            should_fail: false,
+        };
+
+        let custom_selector = "myselector";
+        let args = test_args();
+        send_with_transport(
+            &args,
+            &transport,
+            Some((&private_key, "example.com", custom_selector)),
+        )
+        .unwrap();
+
+        let messages = sent.lock().unwrap();
+        let text = String::from_utf8(messages[0].clone()).unwrap();
+        assert!(text.contains("s=myselector"));
     }
 }

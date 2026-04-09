@@ -3,8 +3,14 @@ use crate::config::{Config, MailboxConfig};
 use std::io::{self, Write};
 use std::path::Path;
 
-pub fn run(cmd: MailboxCommand) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_default()?;
+pub fn run(
+    cmd: MailboxCommand,
+    data_dir: Option<&std::path::Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = match data_dir {
+        Some(dir) => Config::load_from_data_dir(dir)?,
+        None => Config::load_default()?,
+    };
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),
@@ -12,7 +18,25 @@ pub fn run(cmd: MailboxCommand) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+fn validate_mailbox_name(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if name.is_empty() {
+        return Err("Mailbox name cannot be empty".into());
+    }
+    if name.contains("..") {
+        return Err("Mailbox name cannot contain '..'".into());
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Err("Mailbox name cannot contain path separators".into());
+    }
+    if name.contains('\0') {
+        return Err("Mailbox name cannot contain null bytes".into());
+    }
+    Ok(())
+}
+
 pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    validate_mailbox_name(name)?;
+
     if config.mailboxes.contains_key(name) {
         return Err(format!("Mailbox '{name}' already exists").into());
     }
@@ -238,5 +262,49 @@ mod tests {
         let result = list_mailboxes(&config);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].1, 0);
+    }
+
+    #[test]
+    fn create_empty_name_fails() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        setup_config_file(&config);
+
+        let result = create_mailbox(&config, "");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+    }
+
+    #[test]
+    fn create_path_traversal_fails() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        setup_config_file(&config);
+
+        let result = create_mailbox(&config, "../etc");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains(".."));
+    }
+
+    #[test]
+    fn create_with_slash_fails() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        setup_config_file(&config);
+
+        let result = create_mailbox(&config, "foo/bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path separator"));
+    }
+
+    #[test]
+    fn create_with_backslash_fails() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        setup_config_file(&config);
+
+        let result = create_mailbox(&config, "foo\\bar");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("path separator"));
     }
 }
