@@ -437,7 +437,7 @@ cat /var/lib/aimx/catchall/*.md | head -20
 
 ---
 
-## Sprint 5 — Setup Wizard (Days 10.5–12.5) [IN PROGRESS]
+## Sprint 5 — Setup Wizard (Days 10.5–12.5) [DONE]
 
 **Goal:** Replace all manual VPS setup with a single `aimx setup <domain>` command that handles everything from preflight checks to DNS verification.
 
@@ -450,12 +450,12 @@ cat /var/lib/aimx/catchall/*.md | head -20
 **Technical context:** Outbound check: connect to `gmail-smtp-in.l.google.com:25`. Inbound check: make HTTP request to `check.aimx.email` probe service with callback IP (the probe service connects back on port 25). PTR check: reverse DNS lookup on server IP. If port 25 is blocked, stop with clear error listing compatible providers.
 
 **Acceptance criteria:**
-- [ ] Outbound port 25 check connects to a well-known MX and reports pass/fail
-- [ ] Inbound port 25 check requests probe from `check.aimx.email` and reports pass/fail
-- [ ] PTR record check warns (non-blocking) if not set, with instructions
-- [ ] Port 25 blocked → setup stops with error message listing compatible VPS providers
-- [ ] `aimx preflight` runs these checks standalone without proceeding to setup
-- [ ] Unit tests for each check result path (pass, fail, timeout) using mockable network traits
+- [x] Outbound port 25 check connects to a well-known MX and reports pass/fail
+- [x] Inbound port 25 check requests probe from `check.aimx.email` and reports pass/fail
+- [x] PTR record check warns (non-blocking) if not set, with instructions
+- [x] Port 25 blocked → setup stops with error message listing compatible VPS providers
+- [x] `aimx preflight` runs these checks standalone without proceeding to setup
+- [x] Unit tests for each check result path (pass, fail, timeout) using mockable network traits
 
 ### S5.2 — OpenSMTPD Configuration
 
@@ -464,38 +464,38 @@ cat /var/lib/aimx/catchall/*.md | head -20
 **Technical context:** Install OpenSMTPD via `apt install opensmtpd`. Generate self-signed TLS cert for STARTTLS (`openssl req -x509 ...`). Write `smtpd.conf` with TLS, MDA delivery to `aimx ingest`, and relay for outbound. Restart OpenSMTPD.
 
 **Acceptance criteria:**
-- [ ] Setup installs OpenSMTPD if not present (via apt)
-- [ ] Self-signed TLS cert generated and placed in `/etc/ssl/aimx/`
-- [ ] `smtpd.conf` written with TLS, inbound delivery via `aimx ingest`, and outbound relay
-- [ ] OpenSMTPD restarted successfully after configuration
-- [ ] Existing OpenSMTPD config is backed up before overwriting
-- [ ] Unit test: generated `smtpd.conf` content is correct for a given domain and IP
-- [ ] Unit test: TLS cert generation produces valid self-signed cert
+- [x] Setup installs OpenSMTPD if not present (via apt)
+- [x] Self-signed TLS cert generated and placed in `/etc/ssl/aimx/`
+- [x] `smtpd.conf` written with TLS, inbound delivery via `aimx ingest`, and outbound relay
+- [x] OpenSMTPD restarted successfully after configuration
+- [x] Existing OpenSMTPD config is backed up before overwriting
+- [x] Unit test: generated `smtpd.conf` content is correct for a given domain and IP
+- [x] Unit test: TLS cert generation produces valid self-signed cert
 
 ### S5.3 — DNS Guidance + Verification
 
 *As an agent operator, I want setup to display required DNS records and verify them so that I get clear instructions and confirmation.*
 
 **Acceptance criteria:**
-- [ ] Setup displays all required DNS records: MX, A, SPF, DKIM, DMARC, PTR
-- [ ] Records include the actual values (server IP, DKIM public key)
-- [ ] Setup pauses and waits for user to confirm DNS records are added
-- [ ] After confirmation, setup verifies each record via DNS lookup
-- [ ] Failed verification shows which records are wrong/missing with guidance
-- [ ] Unit test: DNS record display formatting for each record type
-- [ ] Unit test: verification logic handles each record type's pass/fail/missing states
+- [x] Setup displays all required DNS records: MX, A, SPF, DKIM, DMARC, PTR
+- [x] Records include the actual values (server IP, DKIM public key)
+- [x] Setup pauses and waits for user to confirm DNS records are added
+- [x] After confirmation, setup verifies each record via DNS lookup
+- [x] Failed verification shows which records are wrong/missing with guidance
+- [x] Unit test: DNS record display formatting for each record type
+- [x] Unit test: verification logic handles each record type's pass/fail/missing states
 
 ### S5.4 — Setup Finalization
 
 *As an agent operator, I want setup to create a default mailbox and show me the MCP config so that I'm ready to go immediately after setup.*
 
 **Acceptance criteria:**
-- [ ] Default `catchall` mailbox created
-- [ ] DKIM keypair generated (if not already present)
-- [ ] Data directory created with correct permissions
-- [ ] MCP configuration snippet for Claude Code displayed
-- [ ] Gmail whitelist instructions displayed
-- [ ] Setup is idempotent — running again doesn't break existing config
+- [x] Default `catchall` mailbox created
+- [x] DKIM keypair generated (if not already present)
+- [x] Data directory created with correct permissions
+- [x] MCP configuration snippet for Claude Code displayed
+- [x] Gmail whitelist instructions displayed
+- [x] Setup is idempotent — running again doesn't break existing config
 
 ### VPS Validation Guide — Sprint 5
 
@@ -521,7 +521,35 @@ sudo aimx setup agent.yourdomain.com
 
 ---
 
-## Sprint 6 — Verify Service + Polish (Days 13–15) [NOT STARTED]
+## Sprint 5.5 — Non-blocking Cleanup (Days 12.5–13) [IN PROGRESS]
+
+**Goal:** Address accumulated non-blocking improvements from sprint reviews.
+
+**Dependencies:** Sprint 5 (merged)
+
+### S5.5-1: Serialization + Error Handling
+
+- [ ] Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation *(from Sprint 2.5 review)*
+- [ ] Narrow `tokio` features from `"full"` to specific needed features *(from Sprint 3 review)*
+
+### S5.5-2: Send Module Improvements
+
+- [ ] Add unit test for `write_common_headers` with `references = Some(...)` path *(from Sprint 3 review)*
+
+### S5.5-3: Channel/Ingest Improvements
+
+- [ ] Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` *(from Sprint 4 review)*
+- [ ] Fix SPF domain fallback semantics — variable naming and fallback logic *(from Sprint 4 review)*
+- [ ] Add captured DKIM-signed `.eml` fixture from Gmail for verification testing *(from Sprint 4 review)*
+- [ ] Verify `mail-auth` `dkim_headers` field is stable public API *(from Sprint 4 review)*
+
+### S5.5-4: Setup Improvements
+
+- [ ] Implement timestamped backup for pre-aimx OpenSMTPD config *(from Sprint 5 review)*
+
+---
+
+## Sprint 6 — Verify Service + Polish (Days 13–15.5) [NOT STARTED]
 
 **Goal:** Complete the product with the hosted verification service, remaining CLI commands, and documentation for open source release.
 
@@ -612,8 +640,9 @@ aimx verify
 | 2.5 | 5.5–6 | Non-blocking Cleanup | Ingest/send hardening, test gaps, `--data-dir` CLI option | Done |
 | 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Done |
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Done |
-| 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | In Progress |
-| 6 | 13–15 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
+| 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Done |
+| 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | In Progress |
+| 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
 
 ## Deferred to v2
 
@@ -651,10 +680,11 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 2)** Add integration test for `aimx dkim-keygen` CLI command end-to-end (subprocess test) — _Triaged into Sprint 2.5_
 - [x] **(Sprint 2)** Refactor duplicated header construction logic in `compose_message()` attachment vs non-attachment paths — _Triaged into Sprint 2.5_
 - [x] **(Sprint 2)** Add test verifying `dkim_selector` config value is actually used at runtime in `send::run()` — _Triaged into Sprint 2.5_
-- [ ] **(Sprint 2.5)** Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation to avoid silent empty frontmatter on serialization failure
-- [ ] **(Sprint 3)** Narrow `tokio` features from `"full"` to specific needed features (`rt-multi-thread`, `macros`, `io-util`, `io-std`) for smaller binary
-- [ ] **(Sprint 3)** Add unit test for `write_common_headers` with `references = Some(...)` path
-- [ ] **(Sprint 4)** Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` — create once and pass to both
-- [ ] **(Sprint 4)** Fix SPF domain fallback semantics — `sender_domain` derived from `rcpt` is semantically incorrect as fallback for sender's HELO domain
-- [ ] **(Sprint 4)** Add captured DKIM-signed `.eml` fixture from Gmail for verification testing (even if DNS-dependent)
-- [ ] **(Sprint 4)** Verify `mail-auth` `dkim_headers` field is stable public API, not internal implementation detail
+- [x] **(Sprint 2.5)** Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation to avoid silent empty frontmatter on serialization failure — _Triaged into Sprint 5.5_
+- [x] **(Sprint 3)** Narrow `tokio` features from `"full"` to specific needed features (`rt-multi-thread`, `macros`, `io-util`, `io-std`) for smaller binary — _Triaged into Sprint 5.5_
+- [x] **(Sprint 3)** Add unit test for `write_common_headers` with `references = Some(...)` path — _Triaged into Sprint 5.5_
+- [x] **(Sprint 4)** Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` — create once and pass to both — _Triaged into Sprint 5.5_
+- [x] **(Sprint 4)** Fix SPF domain fallback semantics — `sender_domain` derived from `rcpt` is semantically incorrect as fallback for sender's HELO domain — _Triaged into Sprint 5.5_
+- [x] **(Sprint 4)** Add captured DKIM-signed `.eml` fixture from Gmail for verification testing (even if DNS-dependent) — _Triaged into Sprint 5.5_
+- [x] **(Sprint 4)** Verify `mail-auth` `dkim_headers` field is stable public API, not internal implementation detail — _Triaged into Sprint 5.5_
+- [x] **(Sprint 5)** Implement timestamped backup for pre-aimx OpenSMTPD config to avoid overwriting on repeated setup runs — _Triaged into Sprint 5.5_
