@@ -39,6 +39,17 @@ pub enum Command {
 
     /// Run end-to-end verification
     Verify,
+
+    /// Generate DKIM keypair for email signing
+    DkimKeygen {
+        /// DKIM selector name
+        #[arg(long, default_value = "dkim")]
+        selector: String,
+
+        /// Overwrite existing keys
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(clap::Args, Clone)]
@@ -58,6 +69,14 @@ pub struct SendArgs {
     /// Email body
     #[arg(long)]
     pub body: String,
+
+    /// Message-ID to reply to (sets In-Reply-To and References headers)
+    #[arg(long)]
+    pub reply_to: Option<String>,
+
+    /// File paths to attach
+    #[arg(long = "attachment")]
+    pub attachments: Vec<String>,
 }
 
 #[derive(Subcommand, Clone)]

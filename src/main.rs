@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod dkim;
 mod ingest;
 mod mailbox;
 mod send;
@@ -14,6 +15,16 @@ fn main() {
         Command::Ingest { rcpt } => ingest::run(&rcpt),
         Command::Send(args) => send::run(args),
         Command::Mailbox(cmd) => mailbox::run(cmd),
+        Command::DkimKeygen { selector, force } => {
+            let config = match config::Config::load_default() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Error loading config: {e}");
+                    std::process::exit(1);
+                }
+            };
+            dkim::run_keygen(&config.data_dir, &config.domain, &selector, force)
+        }
         Command::Mcp => {
             eprintln!("MCP server not yet implemented");
             Ok(())

@@ -1,5 +1,9 @@
 use crate::cli::SendArgs;
+use crate::config::Config;
+use crate::dkim;
+use base64::Engine;
 use chrono::Utc;
+use std::path::Path;
 use uuid::Uuid;
 
 pub trait MailTransport {
@@ -37,41 +41,197 @@ impl MailTransport for SendmailTransport {
     }
 }
 
-pub fn compose_message(args: &SendArgs) -> Vec<u8> {
-    let message_id = format!(
-        "<{uuid}@{domain}>",
-        uuid = Uuid::new_v4(),
-        domain = args.from.split('@').nth(1).unwrap_or("localhost"),
-    );
+#[derive(Debug)]
+pub struct ComposeResult {
+    pub message: Vec<u8>,
+    pub message_id: String,
+}
+
+pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::error::Error>> {
+    validate_attachments(&args.attachments)?;
+
+    let domain = args.from.split('@').nth(1).unwrap_or("localhost");
+    let message_id = format!("<{}@{domain}>", Uuid::new_v4());
     let date = Utc::now().to_rfc2822();
 
-    let mut msg = String::new();
-    msg.push_str(&format!("From: {}\r\n", args.from));
-    msg.push_str(&format!("To: {}\r\n", args.to));
-    msg.push_str(&format!("Subject: {}\r\n", args.subject));
-    msg.push_str(&format!("Date: {}\r\n", date));
-    msg.push_str(&format!("Message-ID: {message_id}\r\n"));
-    msg.push_str("MIME-Version: 1.0\r\n");
-    msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
-    msg.push_str("\r\n");
-    msg.push_str(&args.body);
-    msg.push_str("\r\n");
+    let has_attachments = !args.attachments.is_empty();
 
-    msg.into_bytes()
+    if has_attachments {
+        let boundary = format!("aimx-{}", Uuid::new_v4().simple());
+        let mut msg = String::new();
+
+        msg.push_str(&format!("From: {}\r\n", args.from));
+        msg.push_str(&format!("To: {}\r\n", args.to));
+        msg.push_str(&format!("Subject: {}\r\n", args.subject));
+        msg.push_str(&format!("Date: {date}\r\n"));
+        msg.push_str(&format!("Message-ID: {message_id}\r\n"));
+
+        if let Some(ref reply_to) = args.reply_to {
+            let reply_id = normalize_message_id(reply_to);
+            msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
+            msg.push_str(&format!("References: {reply_id}\r\n"));
+        }
+
+        msg.push_str("MIME-Version: 1.0\r\n");
+        msg.push_str(&format!(
+            "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
+        ));
+        msg.push_str("\r\n");
+
+        msg.push_str(&format!("--{boundary}\r\n"));
+        msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        msg.push_str("\r\n");
+        msg.push_str(&args.body);
+        msg.push_str("\r\n");
+
+        let mut binary_parts: Vec<Vec<u8>> = Vec::new();
+
+        for path_str in &args.attachments {
+            let path = Path::new(path_str);
+            let filename = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("attachment");
+            let content_type = mime_guess::from_path(path)
+                .first_or_octet_stream()
+                .to_string();
+            let file_data = std::fs::read(path)?;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&file_data);
+
+            let mut part = String::new();
+            part.push_str(&format!("--{boundary}\r\n"));
+            part.push_str(&format!(
+                "Content-Type: {content_type}; name=\"{filename}\"\r\n"
+            ));
+            part.push_str(&format!(
+                "Content-Disposition: attachment; filename=\"{filename}\"\r\n"
+            ));
+            part.push_str("Content-Transfer-Encoding: base64\r\n");
+            part.push_str("\r\n");
+
+            for chunk in encoded.as_bytes().chunks(76) {
+                part.push_str(std::str::from_utf8(chunk).unwrap_or(""));
+                part.push_str("\r\n");
+            }
+
+            binary_parts.push(part.into_bytes());
+        }
+
+        msg.push_str(&format!("--{boundary}--\r\n"));
+
+        let mut result = Vec::new();
+        let closing = format!("--{boundary}--\r\n");
+
+        let msg_bytes = msg.into_bytes();
+        let split_pos = msg_bytes
+            .windows(closing.len())
+            .position(|w| w == closing.as_bytes())
+            .unwrap_or(msg_bytes.len());
+
+        result.extend_from_slice(&msg_bytes[..split_pos]);
+        for part in &binary_parts {
+            result.extend_from_slice(part);
+        }
+        result.extend_from_slice(closing.as_bytes());
+
+        Ok(ComposeResult {
+            message: result,
+            message_id,
+        })
+    } else {
+        let mut msg = String::new();
+        msg.push_str(&format!("From: {}\r\n", args.from));
+        msg.push_str(&format!("To: {}\r\n", args.to));
+        msg.push_str(&format!("Subject: {}\r\n", args.subject));
+        msg.push_str(&format!("Date: {date}\r\n"));
+        msg.push_str(&format!("Message-ID: {message_id}\r\n"));
+
+        if let Some(ref reply_to) = args.reply_to {
+            let reply_id = normalize_message_id(reply_to);
+            msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
+            msg.push_str(&format!("References: {reply_id}\r\n"));
+        }
+
+        msg.push_str("MIME-Version: 1.0\r\n");
+        msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        msg.push_str("\r\n");
+        msg.push_str(&args.body);
+        msg.push_str("\r\n");
+
+        Ok(ComposeResult {
+            message: msg.into_bytes(),
+            message_id,
+        })
+    }
+}
+
+fn normalize_message_id(id: &str) -> String {
+    let trimmed = id.trim();
+    if trimmed.starts_with('<') && trimmed.ends_with('>') {
+        trimmed.to_string()
+    } else {
+        format!("<{trimmed}>")
+    }
+}
+
+fn validate_attachments(paths: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    for path_str in paths {
+        let path = Path::new(path_str);
+        if !path.exists() {
+            return Err(format!("Attachment file not found: {path_str}").into());
+        }
+        if !path.is_file() {
+            return Err(format!("Attachment path is not a file: {path_str}").into());
+        }
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+pub fn build_references(original_references: Option<&str>, original_message_id: &str) -> String {
+    let mid = normalize_message_id(original_message_id);
+
+    match original_references {
+        Some(refs) if !refs.trim().is_empty() => format!("{} {mid}", refs.trim()),
+        _ => mid,
+    }
 }
 
 pub fn send_with_transport(
     args: &SendArgs,
     transport: &dyn MailTransport,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let message = compose_message(args);
-    transport.send(&message)
+    dkim_key: Option<(&rsa::RsaPrivateKey, &str, &str)>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let composed = compose_message(args)?;
+
+    let final_message = if let Some((key, domain, selector)) = dkim_key {
+        dkim::sign_message(&composed.message, key, domain, selector)?
+    } else {
+        composed.message
+    };
+
+    transport.send(&final_message)?;
+    Ok(composed.message_id)
 }
 
 pub fn run(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
     let transport = SendmailTransport;
-    send_with_transport(&args, &transport)?;
-    println!("Email sent successfully.");
+
+    let config = Config::load_default().ok();
+    let private_key = config
+        .as_ref()
+        .and_then(|c| dkim::load_private_key(&c.data_dir).ok());
+
+    let dkim_info = match (&config, &private_key) {
+        (Some(c), Some(k)) => Some((k, c.domain.as_str(), c.dkim_selector.as_str())),
+        _ => {
+            eprintln!("Warning: DKIM signing disabled (no key found)");
+            None
+        }
+    };
+
+    let message_id = send_with_transport(&args, &transport, dkim_info)?;
+    println!("Email sent successfully. Message-ID: {message_id}");
     Ok(())
 }
 
@@ -101,14 +261,16 @@ mod tests {
             to: "user@gmail.com".to_string(),
             subject: "Test Subject".to_string(),
             body: "Hello, world!".to_string(),
+            reply_to: None,
+            attachments: vec![],
         }
     }
 
     #[test]
     fn compose_has_required_headers() {
         let args = test_args();
-        let message = compose_message(&args);
-        let text = String::from_utf8(message).unwrap();
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("From: agent@example.com\r\n"));
         assert!(text.contains("To: user@gmail.com\r\n"));
@@ -121,8 +283,8 @@ mod tests {
     #[test]
     fn compose_has_body() {
         let args = test_args();
-        let message = compose_message(&args);
-        let text = String::from_utf8(message).unwrap();
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("\r\n\r\nHello, world!\r\n"));
     }
@@ -130,8 +292,8 @@ mod tests {
     #[test]
     fn message_id_format() {
         let args = test_args();
-        let message = compose_message(&args);
-        let text = String::from_utf8(message).unwrap();
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
 
         let mid_line = text.lines().find(|l| l.starts_with("Message-ID:")).unwrap();
         assert!(mid_line.contains('<'));
@@ -148,7 +310,7 @@ mod tests {
         };
 
         let args = test_args();
-        send_with_transport(&args, &transport).unwrap();
+        send_with_transport(&args, &transport, None).unwrap();
 
         let messages = sent.lock().unwrap();
         assert_eq!(messages.len(), 1);
@@ -165,7 +327,7 @@ mod tests {
         };
 
         let args = test_args();
-        let result = send_with_transport(&args, &transport);
+        let result = send_with_transport(&args, &transport, None);
         assert!(result.is_err());
         assert!(
             result
@@ -173,5 +335,231 @@ mod tests {
                 .to_string()
                 .contains("Mock transport failure")
         );
+    }
+
+    #[test]
+    fn reply_to_sets_in_reply_to_header() {
+        let mut args = test_args();
+        args.reply_to = Some("<original123@example.com>".to_string());
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("In-Reply-To: <original123@example.com>\r\n"));
+    }
+
+    #[test]
+    fn reply_to_sets_references_header() {
+        let mut args = test_args();
+        args.reply_to = Some("<original123@example.com>".to_string());
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("References: <original123@example.com>\r\n"));
+    }
+
+    #[test]
+    fn reply_to_normalizes_bare_message_id() {
+        let mut args = test_args();
+        args.reply_to = Some("original123@example.com".to_string());
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("In-Reply-To: <original123@example.com>\r\n"));
+        assert!(text.contains("References: <original123@example.com>\r\n"));
+    }
+
+    #[test]
+    fn no_reply_to_omits_threading_headers() {
+        let args = test_args();
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(!text.contains("In-Reply-To:"));
+        assert!(!text.contains("References:"));
+    }
+
+    #[test]
+    fn build_references_from_message_id_only() {
+        let refs = build_references(None, "abc@example.com");
+        assert_eq!(refs, "<abc@example.com>");
+    }
+
+    #[test]
+    fn build_references_appends_to_existing() {
+        let refs = build_references(Some("<first@example.com>"), "<second@example.com>");
+        assert_eq!(refs, "<first@example.com> <second@example.com>");
+    }
+
+    #[test]
+    fn build_references_chain() {
+        let refs = build_references(
+            Some("<first@example.com> <second@example.com>"),
+            "<third@example.com>",
+        );
+        assert_eq!(
+            refs,
+            "<first@example.com> <second@example.com> <third@example.com>"
+        );
+    }
+
+    #[test]
+    fn single_attachment() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_path = tmp.path().join("test.txt");
+        std::fs::write(&file_path, "file content").unwrap();
+
+        let args = SendArgs {
+            from: "agent@example.com".to_string(),
+            to: "user@gmail.com".to_string(),
+            subject: "With attachment".to_string(),
+            body: "See attached.".to_string(),
+            reply_to: None,
+            attachments: vec![file_path.to_string_lossy().to_string()],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("Content-Disposition: attachment; filename=\"test.txt\""));
+        assert!(text.contains("See attached."));
+    }
+
+    #[test]
+    fn multiple_attachments() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file1 = tmp.path().join("doc.pdf");
+        let file2 = tmp.path().join("image.png");
+        std::fs::write(&file1, "pdf content").unwrap();
+        std::fs::write(&file2, "png content").unwrap();
+
+        let args = SendArgs {
+            from: "agent@example.com".to_string(),
+            to: "user@gmail.com".to_string(),
+            subject: "Multiple attachments".to_string(),
+            body: "Two files.".to_string(),
+            reply_to: None,
+            attachments: vec![
+                file1.to_string_lossy().to_string(),
+                file2.to_string_lossy().to_string(),
+            ],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("filename=\"doc.pdf\""));
+        assert!(text.contains("filename=\"image.png\""));
+    }
+
+    #[test]
+    fn attachment_mime_type_inference() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let pdf = tmp.path().join("doc.pdf");
+        let png = tmp.path().join("image.png");
+        let txt = tmp.path().join("notes.txt");
+        std::fs::write(&pdf, "pdf").unwrap();
+        std::fs::write(&png, "png").unwrap();
+        std::fs::write(&txt, "txt").unwrap();
+
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "MIME test".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            attachments: vec![
+                pdf.to_string_lossy().to_string(),
+                png.to_string_lossy().to_string(),
+                txt.to_string_lossy().to_string(),
+            ],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("application/pdf"));
+        assert!(text.contains("image/png"));
+        assert!(text.contains("text/plain"));
+    }
+
+    #[test]
+    fn missing_attachment_file_error() {
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "test".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            attachments: vec!["/nonexistent/file.txt".to_string()],
+        };
+
+        let result = compose_message(&args);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn send_with_dkim_signing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let private_key = crate::dkim::load_private_key(tmp.path()).unwrap();
+
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let transport = MockTransport {
+            sent: sent.clone(),
+            should_fail: false,
+        };
+
+        let args = test_args();
+        send_with_transport(
+            &args,
+            &transport,
+            Some((&private_key, "example.com", "dkim")),
+        )
+        .unwrap();
+
+        let messages = sent.lock().unwrap();
+        assert_eq!(messages.len(), 1);
+        let text = String::from_utf8(messages[0].clone()).unwrap();
+        assert!(text.contains("DKIM-Signature:"));
+        assert!(text.contains("From: agent@example.com"));
+    }
+
+    #[test]
+    fn compose_returns_message_id() {
+        let args = test_args();
+        let result = compose_message(&args).unwrap();
+        assert!(result.message_id.starts_with('<'));
+        assert!(result.message_id.ends_with('>'));
+        assert!(result.message_id.contains('@'));
+    }
+
+    #[test]
+    fn attachment_with_reply_to() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let file_path = tmp.path().join("data.csv");
+        std::fs::write(&file_path, "a,b,c").unwrap();
+
+        let args = SendArgs {
+            from: "agent@example.com".to_string(),
+            to: "user@gmail.com".to_string(),
+            subject: "Re: Data".to_string(),
+            body: "Here is the data.".to_string(),
+            reply_to: Some("<orig@example.com>".to_string()),
+            attachments: vec![file_path.to_string_lossy().to_string()],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(text.contains("In-Reply-To: <orig@example.com>"));
+        assert!(text.contains("References: <orig@example.com>"));
+        assert!(text.contains("multipart/mixed"));
+        assert!(text.contains("filename=\"data.csv\""));
     }
 }

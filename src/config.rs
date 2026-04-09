@@ -11,6 +11,9 @@ pub struct Config {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
+    #[serde(default = "default_dkim_selector")]
+    pub dkim_selector: String,
+
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
 }
@@ -43,6 +46,10 @@ pub struct MatchFilter {
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR)
+}
+
+fn default_dkim_selector() -> String {
+    "dkim".to_string()
 }
 
 impl Config {
@@ -155,6 +162,7 @@ mailboxes:
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "dkim".to_string(),
             mailboxes,
         };
 
