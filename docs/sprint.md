@@ -549,7 +549,7 @@ sudo aimx setup agent.yourdomain.com
 
 ---
 
-## Sprint 6 — Verify Service + Polish (Days 13–15.5) [NOT STARTED]
+## Sprint 6 — Verify Service + Polish (Days 13–15.5) [IN PROGRESS]
 
 **Goal:** Complete the product with the hosted verification service, remaining CLI commands, and documentation for open source release.
 
@@ -641,8 +641,8 @@ aimx verify
 | 3 | 6–8.5 | MCP Server | All 9 MCP tools — Claude Code can read/send email | Done |
 | 4 | 8–10 | Channel Manager + Inbound Trust | Triggers, match filters, DKIM/SPF verification, trust gating | Done |
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Done |
-| 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | In Progress |
-| 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Not Started |
+| 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | Done |
+| 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | In Progress |
 
 ## Deferred to v2
 
@@ -688,3 +688,4 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 4)** Add captured DKIM-signed `.eml` fixture from Gmail for verification testing (even if DNS-dependent) — _Triaged into Sprint 5.5_
 - [x] **(Sprint 4)** Verify `mail-auth` `dkim_headers` field is stable public API, not internal implementation detail — _Triaged into Sprint 5.5_
 - [x] **(Sprint 5)** Implement timestamped backup for pre-aimx OpenSMTPD config to avoid overwriting on repeated setup runs — _Triaged into Sprint 5.5_
+- [ ] **(Sprint 5.5)** Extract SPF domain-selection logic into standalone testable function instead of duplicating inline in tests
