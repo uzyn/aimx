@@ -196,24 +196,27 @@ async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::Resolver) -> String
     "fail".to_string()
 }
 
-async fn verify_spf_async(raw: &[u8], rcpt: &str, resolver: &mail_auth::Resolver) -> String {
+pub fn spf_domain(mail_from: &str) -> Option<&str> {
+    let domain = mail_from.split('@').nth(1).unwrap_or("");
+    if domain.is_empty() {
+        None
+    } else {
+        Some(domain)
+    }
+}
+
+async fn verify_spf_async(raw: &[u8], _rcpt: &str, resolver: &mail_auth::Resolver) -> String {
     let ip = match extract_received_ip(raw) {
         Some(ip) => ip,
         None => return "none".to_string(),
     };
 
     let mail_from = extract_mail_from(raw).unwrap_or_default();
-    let from_domain = mail_from.split('@').nth(1).unwrap_or("");
 
-    let helo_domain = if !from_domain.is_empty() {
-        from_domain
-    } else {
-        rcpt.split('@').nth(1).unwrap_or("")
+    let helo_domain = match spf_domain(&mail_from) {
+        Some(d) => d,
+        None => return "none".to_string(),
     };
-
-    if helo_domain.is_empty() {
-        return "none".to_string();
-    }
 
     let spf_output = resolver
         .verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)
@@ -488,6 +491,8 @@ mod tests {
             data_dir: tmp.to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
+            probe_url: None,
+            verify_address: None,
         }
     }
 
@@ -1139,5 +1144,25 @@ mod tests {
         let (id1, _, _) = create_file_atomic(&mailbox_dir, &meta, "body1").unwrap();
         let (id2, _, _) = create_file_atomic(&mailbox_dir, &meta, "body2").unwrap();
         assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn spf_domain_with_valid_sender() {
+        assert_eq!(spf_domain("user@example.com"), Some("example.com"));
+    }
+
+    #[test]
+    fn spf_domain_empty_sender_returns_none() {
+        assert_eq!(spf_domain(""), None);
+    }
+
+    #[test]
+    fn spf_domain_no_at_returns_none() {
+        assert_eq!(spf_domain("nodomain"), None);
+    }
+
+    #[test]
+    fn spf_domain_empty_domain_part_returns_none() {
+        assert_eq!(spf_domain("user@"), None);
     }
 }

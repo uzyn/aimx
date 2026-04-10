@@ -2,10 +2,17 @@ use crate::config::Config;
 use crate::send;
 use std::path::Path;
 
-const VERIFY_ADDRESS: &str = "verify@aimx.email";
+const DEFAULT_VERIFY_ADDRESS: &str = "verify@aimx.email";
 const VERIFY_SUBJECT: &str = "aimx verify";
 const POLL_INTERVAL_SECS: u64 = 5;
 const MAX_WAIT_SECS: u64 = 120;
+
+pub fn resolve_verify_address(config: &Config) -> String {
+    config
+        .verify_address
+        .clone()
+        .unwrap_or_else(|| DEFAULT_VERIFY_ADDRESS.to_string())
+}
 
 pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let config = match data_dir {
@@ -13,6 +20,7 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
         None => Config::load_default()?,
     };
 
+    let verify_address = resolve_verify_address(&config);
     let from = format!("catchall@{}", config.domain);
 
     println!("aimx verify - End-to-end email verification\n");
@@ -30,11 +38,11 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     // arrives between send and snapshot, causing it to be missed.
     let before: Vec<String> = list_md_files(&catchall_dir);
 
-    println!("Sending test email from {from} to {VERIFY_ADDRESS}...");
+    println!("Sending test email from {from} to {verify_address}...");
 
     let send_args = crate::cli::SendArgs {
         from: from.clone(),
-        to: VERIFY_ADDRESS.to_string(),
+        to: verify_address.clone(),
         subject: VERIFY_SUBJECT.to_string(),
         body: format!(
             "This is an automated verification email from aimx on {}.\n\
@@ -49,7 +57,7 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     send::run(send_args, data_dir)?;
     println!("Test email sent.\n");
 
-    println!("Waiting for reply from {VERIFY_ADDRESS}...");
+    println!("Waiting for reply from {verify_address}...");
     println!("(This may take up to {MAX_WAIT_SECS} seconds)\n");
 
     let mut elapsed = 0u64;
@@ -62,7 +70,7 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
 
         for file in &new_files {
             let content = std::fs::read_to_string(file).unwrap_or_default();
-            if content.contains("aimx verification result") || content.contains(VERIFY_ADDRESS) {
+            if content.contains("aimx verification result") || content.contains(&verify_address) {
                 println!("Reply received!\n");
                 print_verification_result(&content);
                 return Ok(());
@@ -75,11 +83,11 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n");
     Err(format!(
-        "Timed out waiting for reply from {VERIFY_ADDRESS}.\n\
+        "Timed out waiting for reply from {verify_address}.\n\
          This could mean:\n\
          - DNS records are not yet propagated\n\
          - DKIM signing is not configured correctly\n\
-         - The verify service at aimx.email is temporarily unavailable\n\n\
+         - The verify service is temporarily unavailable\n\n\
          Run `aimx status` to check your configuration."
     )
     .into())
@@ -147,13 +155,28 @@ mod tests {
     }
 
     #[test]
-    fn verify_address_is_correct() {
-        assert_eq!(VERIFY_ADDRESS, "verify@aimx.email");
+    fn default_verify_address_is_correct() {
+        assert_eq!(DEFAULT_VERIFY_ADDRESS, "verify@aimx.email");
     }
 
     #[test]
     fn verify_subject_is_correct() {
         assert_eq!(VERIFY_SUBJECT, "aimx verify");
+    }
+
+    #[test]
+    fn resolve_verify_address_uses_default() {
+        let config: Config = serde_yaml::from_str("domain: test.com\nmailboxes: {}\n").unwrap();
+        assert_eq!(resolve_verify_address(&config), "verify@aimx.email");
+    }
+
+    #[test]
+    fn resolve_verify_address_uses_custom() {
+        let config: Config = serde_yaml::from_str(
+            "domain: test.com\nmailboxes: {}\nverify_address: verify@custom.example.com\n",
+        )
+        .unwrap();
+        assert_eq!(resolve_verify_address(&config), "verify@custom.example.com");
     }
 
     #[test]

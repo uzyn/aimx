@@ -589,6 +589,8 @@ mod tests {
             data_dir: tmp.to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
+            probe_url: None,
+            verify_address: None,
         }
     }
 
