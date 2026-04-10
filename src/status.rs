@@ -406,7 +406,6 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             probe_url: None,
-            verify_address: None,
         };
 
         let info = gather_status(&config);
@@ -497,7 +496,6 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             probe_url: None,
-            verify_address: None,
         };
 
         let activity = gather_recent_activity(&config);

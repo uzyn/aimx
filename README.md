@@ -36,7 +36,7 @@ Outbound:
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
 - **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
 - **Inbound trust** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
-- **Verify service** -- self-hostable port probe and email echo for setup verification
+- **Verify service** -- self-hostable port probe and port 25 listener for setup verification
 
 ## Requirements
 
@@ -96,7 +96,7 @@ aimx preflight
 # Check server status
 aimx status
 
-# End-to-end verification
+# Check port 25 connectivity
 aimx verify
 ```
 
@@ -298,10 +298,10 @@ Hello, this is the email body in plain text.
 
 The verify service (`services/verify/`) is a separate deployable service that provides:
 
-1. **Port probe** at `check.aimx.email` -- tests inbound port 25 reachability during `aimx setup`
-2. **Email echo** at `verify@aimx.email` -- receives test emails and replies with DKIM/SPF verification results
+1. **Port probe** at `check.aimx.email` -- performs EHLO handshake back to caller's IP on port 25 to verify inbound SMTP reachability
+2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so aimx clients can test outbound port 25 reachability
 
-The service is open source and self-hostable. See `services/verify/README.md` for deployment instructions.
+No MTA is required on the verify server. The service is open source and self-hostable. See `services/verify/README.md` for deployment instructions.
 
 ## DNS records
 

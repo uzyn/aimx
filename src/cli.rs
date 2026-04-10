@@ -49,7 +49,7 @@ pub enum Command {
     /// Run preflight checks (port 25, PTR) without installing anything
     Preflight,
 
-    /// Send test email to verify@aimx.email and wait for verification reply
+    /// Check port 25 connectivity (outbound, inbound EHLO, PTR)
     Verify,
 
     /// Generate DKIM keypair for email signing

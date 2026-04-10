@@ -1,200 +1,177 @@
 use crate::config::Config;
-use crate::send;
+use crate::setup::{self, DEFAULT_PROBE_URL, NetworkOps};
 use std::path::Path;
-
-const DEFAULT_VERIFY_ADDRESS: &str = "verify@aimx.email";
-const VERIFY_SUBJECT: &str = "aimx verify";
-const POLL_INTERVAL_SECS: u64 = 5;
-const MAX_WAIT_SECS: u64 = 120;
-
-pub fn resolve_verify_address(config: &Config) -> String {
-    config
-        .verify_address
-        .clone()
-        .unwrap_or_else(|| DEFAULT_VERIFY_ADDRESS.to_string())
-}
 
 pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)?,
-        None => Config::load_default()?,
+        Some(dir) => Config::load_from_data_dir(dir).ok(),
+        None => Config::load_default().ok(),
     };
 
-    let verify_address = resolve_verify_address(&config);
-    let from = format!("catchall@{}", config.domain);
+    let probe_url = config
+        .as_ref()
+        .and_then(|c| c.probe_url.clone())
+        .unwrap_or_else(|| DEFAULT_PROBE_URL.to_string());
 
-    println!("aimx verify - End-to-end email verification\n");
+    let net = setup::RealNetworkOps::from_probe_url(probe_url);
 
-    let catchall_dir = config.mailbox_dir("catchall");
-    if !catchall_dir.exists() {
-        return Err(format!(
-            "Catchall mailbox directory does not exist: {}\nRun `aimx setup` first.",
-            catchall_dir.display()
-        )
-        .into());
-    }
-
-    // Take snapshot BEFORE sending to avoid race condition where a fast reply
-    // arrives between send and snapshot, causing it to be missed.
-    let before: Vec<String> = list_md_files(&catchall_dir);
-
-    println!("Sending test email from {from} to {verify_address}...");
-
-    let send_args = crate::cli::SendArgs {
-        from: from.clone(),
-        to: verify_address.clone(),
-        subject: VERIFY_SUBJECT.to_string(),
-        body: format!(
-            "This is an automated verification email from aimx on {}.\n\
-             Please verify DKIM and SPF and reply with results.",
-            config.domain
-        ),
-        reply_to: None,
-        references: None,
-        attachments: vec![],
-    };
-
-    send::run(send_args, data_dir)?;
-    println!("Test email sent.\n");
-
-    println!("Waiting for reply from {verify_address}...");
-    println!("(This may take up to {MAX_WAIT_SECS} seconds)\n");
-
-    let mut elapsed = 0u64;
-    while elapsed < MAX_WAIT_SECS {
-        std::thread::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
-        elapsed += POLL_INTERVAL_SECS;
-
-        let after = list_md_files(&catchall_dir);
-        let new_files: Vec<&String> = after.iter().filter(|f| !before.contains(f)).collect();
-
-        for file in &new_files {
-            let content = std::fs::read_to_string(file).unwrap_or_default();
-            if content.contains("aimx verification result") || content.contains(&verify_address) {
-                println!("Reply received!\n");
-                print_verification_result(&content);
-                return Ok(());
-            }
-        }
-
-        print!(".");
-        std::io::Write::flush(&mut std::io::stdout())?;
-    }
-
-    println!("\n");
-    Err(format!(
-        "Timed out waiting for reply from {verify_address}.\n\
-         This could mean:\n\
-         - DNS records are not yet propagated\n\
-         - DKIM signing is not configured correctly\n\
-         - The verify service is temporarily unavailable\n\n\
-         Run `aimx status` to check your configuration."
-    )
-    .into())
+    run_with_net(&net)
 }
 
-fn list_md_files(dir: &Path) -> Vec<String> {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                .map(|e| e.path().to_string_lossy().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
-}
+pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
+    println!("aimx verify - Port 25 connectivity check\n");
 
-fn print_verification_result(content: &str) {
-    let parts: Vec<&str> = content.splitn(3, "+++").collect();
-    if parts.len() >= 3 {
-        let body = parts[2].trim();
-        if !body.is_empty() {
-            println!("Verification reply body:");
-            println!("{body}");
+    let mut all_pass = true;
+
+    print!("  Outbound port 25... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    match setup::check_outbound(net) {
+        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Fail(msg) => {
+            println!("FAIL");
+            eprintln!("  {msg}");
+            all_pass = false;
         }
+        setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+    }
+
+    print!("  Inbound port 25 (EHLO probe)... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    match setup::check_inbound(net) {
+        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Fail(msg) => {
+            println!("FAIL");
+            eprintln!("  {msg}");
+            all_pass = false;
+        }
+        setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+    }
+
+    print!("  PTR record... ");
+    std::io::Write::flush(&mut std::io::stdout())?;
+    match setup::check_ptr(net) {
+        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Fail(msg) => {
+            println!("FAIL: {msg}");
+            all_pass = false;
+        }
+        setup::PreflightResult::Warn(msg) => println!("WARN\n  {msg}"),
+    }
+
+    println!();
+
+    if all_pass {
+        println!("All checks passed. Port 25 is reachable.");
+        Ok(())
+    } else {
+        Err("Some checks failed. See details above.".into())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::DEFAULT_CHECK_SERVICE_SMTP_ADDR;
+    use std::net::IpAddr;
 
-    #[test]
-    fn list_md_files_empty() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let files = list_md_files(tmp.path());
-        assert!(files.is_empty());
+    struct MockNetworkOps {
+        outbound: bool,
+        inbound: bool,
+        ptr: Option<String>,
+    }
+
+    impl NetworkOps for MockNetworkOps {
+        fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(self.outbound)
+        }
+        fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(self.inbound)
+        }
+        fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
+            Ok(self.ptr.clone())
+        }
+        fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
+            Ok("1.2.3.4".parse().unwrap())
+        }
+        fn resolve_mx(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn resolve_a(&self, _domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn resolve_txt(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
     }
 
     #[test]
-    fn list_md_files_finds_md() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("2025-01-01-001.md"), "test").unwrap();
-        std::fs::write(tmp.path().join("2025-01-01-002.md"), "test").unwrap();
-        std::fs::write(tmp.path().join("notes.txt"), "not md").unwrap();
-        let files = list_md_files(tmp.path());
-        assert_eq!(files.len(), 2);
+    fn verify_all_pass() {
+        let net = MockNetworkOps {
+            outbound: true,
+            inbound: true,
+            ptr: Some("mail.example.com.".into()),
+        };
+        assert!(run_with_net(&net).is_ok());
     }
 
     #[test]
-    fn list_md_files_nonexistent_dir() {
-        let files = list_md_files(Path::new("/nonexistent/dir"));
-        assert!(files.is_empty());
+    fn verify_outbound_fail() {
+        let net = MockNetworkOps {
+            outbound: false,
+            inbound: true,
+            ptr: Some("mail.example.com.".into()),
+        };
+        assert!(run_with_net(&net).is_err());
     }
 
     #[test]
-    fn print_verification_result_does_not_panic() {
-        let content = "+++\nid = \"test\"\n+++\nDKIM: pass\nSPF: pass\n";
-        print_verification_result(content);
+    fn verify_inbound_fail() {
+        let net = MockNetworkOps {
+            outbound: true,
+            inbound: false,
+            ptr: Some("mail.example.com.".into()),
+        };
+        assert!(run_with_net(&net).is_err());
     }
 
     #[test]
-    fn print_verification_result_empty() {
-        print_verification_result("");
+    fn verify_ptr_warn_still_passes() {
+        let net = MockNetworkOps {
+            outbound: true,
+            inbound: true,
+            ptr: None,
+        };
+        assert!(run_with_net(&net).is_ok());
     }
 
     #[test]
-    fn default_verify_address_is_correct() {
-        assert_eq!(DEFAULT_VERIFY_ADDRESS, "verify@aimx.email");
+    fn verify_all_fail() {
+        let net = MockNetworkOps {
+            outbound: false,
+            inbound: false,
+            ptr: None,
+        };
+        assert!(run_with_net(&net).is_err());
     }
 
     #[test]
-    fn verify_subject_is_correct() {
-        assert_eq!(VERIFY_SUBJECT, "aimx verify");
+    fn config_without_verify_address_parses() {
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.domain, "test.com");
     }
 
     #[test]
-    fn resolve_verify_address_uses_default() {
-        let config: Config = toml::from_str("domain = \"test.com\"\n[mailboxes]\n").unwrap();
-        assert_eq!(resolve_verify_address(&config), "verify@aimx.email");
+    fn config_with_legacy_verify_address_parses() {
+        // serde should ignore unknown fields (verify_address was removed)
+        // This works because Config does NOT have #[serde(deny_unknown_fields)]
+        let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.domain, "test.com");
     }
 
     #[test]
-    fn resolve_verify_address_uses_custom() {
-        let config: Config = toml::from_str(
-            "domain = \"test.com\"\nverify_address = \"verify@custom.example.com\"\n[mailboxes]\n",
-        )
-        .unwrap();
-        assert_eq!(resolve_verify_address(&config), "verify@custom.example.com");
-    }
-
-    #[test]
-    fn run_errors_on_missing_catchall_dir() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        // Create config but no catchall directory
-        let config_content = format!(
-            "domain = \"test.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@test.com\"\n",
-            tmp.path().display()
-        );
-        std::fs::write(tmp.path().join("config.toml"), config_content).unwrap();
-
-        let result = run(Some(tmp.path()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Catchall mailbox directory does not exist"),
-            "Expected missing catchall error, got: {err}"
-        );
+    fn default_check_service_smtp_addr() {
+        assert_eq!(DEFAULT_CHECK_SERVICE_SMTP_ADDR, "check.aimx.email:25");
     }
 }
