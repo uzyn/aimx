@@ -53,7 +53,6 @@ Outbound:
 | OVH / Kimsufi | Open by default | |
 | Vultr | Unblockable on request | |
 | BuyVM (Frantech) | Open by default | |
-| DigitalOcean | On request | Submit support ticket |
 | Linode / Akamai | On request | Submit support ticket |
 
 ## Quick start
@@ -77,7 +76,7 @@ aimx status
 ## Installation
 
 ```bash
-git clone https://github.com/nicholasgasior/aimx.git
+git clone https://github.com/uzyn/aimx.git
 cd aimx
 cargo build --release
 sudo cp target/release/aimx /usr/local/bin/

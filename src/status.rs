@@ -9,6 +9,7 @@ pub struct StatusInfo {
     pub dkim_key_present: bool,
     pub opensmtpd_running: bool,
     pub mailboxes: Vec<MailboxStatus>,
+    pub recent_activity: Vec<RecentEmail>,
 }
 
 pub struct MailboxStatus {
@@ -16,6 +17,14 @@ pub struct MailboxStatus {
     pub address: String,
     pub total: usize,
     pub unread: usize,
+}
+
+pub struct RecentEmail {
+    pub mailbox: String,
+    pub id: String,
+    pub from: String,
+    pub subject: String,
+    pub date: String,
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
@@ -39,6 +48,8 @@ pub fn gather_status(config: &Config) -> StatusInfo {
 
     mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let recent_activity = gather_recent_activity(config);
+
     StatusInfo {
         domain: config.domain.clone(),
         data_dir: config.data_dir.to_string_lossy().to_string(),
@@ -46,7 +57,57 @@ pub fn gather_status(config: &Config) -> StatusInfo {
         dkim_key_present,
         opensmtpd_running,
         mailboxes,
+        recent_activity,
     }
+}
+
+fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
+    let mut all: Vec<RecentEmail> = Vec::new();
+
+    for name in config.mailboxes.keys() {
+        let dir = config.mailbox_dir(name);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+
+        let mut md_files: Vec<_> = entries
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .collect();
+
+        md_files.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+
+        for entry in md_files.into_iter().take(3) {
+            let path = entry.path();
+            let content = match std::fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let fm = match extract_frontmatter(&content) {
+                Some(fm) => fm,
+                None => continue,
+            };
+
+            let meta: EmailMetadata = match serde_yaml::from_str(&fm) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+
+            all.push(RecentEmail {
+                mailbox: name.clone(),
+                id: meta.id,
+                from: meta.from,
+                subject: meta.subject,
+                date: meta.date,
+            });
+        }
+    }
+
+    all.sort_by(|a, b| b.date.cmp(&a.date));
+    all.truncate(5);
+    all
 }
 
 fn check_opensmtpd_running() -> bool {
@@ -152,6 +213,16 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     }
 
+    if !info.recent_activity.is_empty() {
+        out.push_str("\nRecent activity:\n");
+        for email in &info.recent_activity {
+            out.push_str(&format!(
+                "  [{}] {} {} - {} ({})\n",
+                email.mailbox, email.id, email.from, email.subject, email.date,
+            ));
+        }
+    }
+
     out
 }
 
@@ -180,6 +251,7 @@ mod tests {
             dkim_key_present: true,
             opensmtpd_running: true,
             mailboxes: vec![],
+            recent_activity: vec![],
         };
         let output = format_status(&info);
         assert!(output.contains("test.example.com"));
@@ -210,6 +282,7 @@ mod tests {
                     unread: 1,
                 },
             ],
+            recent_activity: vec![],
         };
         let output = format_status(&info);
         assert!(output.contains("agent.example.com"));
@@ -231,6 +304,7 @@ mod tests {
             dkim_key_present: false,
             opensmtpd_running: false,
             mailboxes: vec![],
+            recent_activity: vec![],
         };
         let output = format_status(&info);
         assert!(output.contains("MISSING"));
@@ -331,6 +405,8 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
+            probe_url: None,
+            verify_address: None,
         };
 
         let info = gather_status(&config);
@@ -338,5 +414,96 @@ mod tests {
         assert!(info.dkim_key_present);
         assert_eq!(info.mailboxes.len(), 1);
         assert_eq!(info.mailboxes[0].name, "catchall");
+    }
+
+    #[test]
+    fn format_status_includes_recent_activity() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            opensmtpd_running: true,
+            mailboxes: vec![],
+            recent_activity: vec![
+                RecentEmail {
+                    mailbox: "catchall".to_string(),
+                    id: "2025-01-15-001".to_string(),
+                    from: "alice@example.com".to_string(),
+                    subject: "Hello".to_string(),
+                    date: "2025-01-15T10:30:00Z".to_string(),
+                },
+                RecentEmail {
+                    mailbox: "support".to_string(),
+                    id: "2025-01-14-001".to_string(),
+                    from: "bob@example.com".to_string(),
+                    subject: "Help needed".to_string(),
+                    date: "2025-01-14T08:00:00Z".to_string(),
+                },
+            ],
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("Recent activity:"),
+            "Output should contain recent activity section"
+        );
+        assert!(output.contains("alice@example.com"));
+        assert!(output.contains("Hello"));
+        assert!(output.contains("bob@example.com"));
+        assert!(output.contains("Help needed"));
+        assert!(output.contains("[catchall]"));
+        assert!(output.contains("[support]"));
+    }
+
+    #[test]
+    fn format_status_no_recent_activity() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            opensmtpd_running: true,
+            mailboxes: vec![],
+            recent_activity: vec![],
+        };
+        let output = format_status(&info);
+        assert!(!output.contains("Recent activity:"));
+    }
+
+    #[test]
+    fn gather_recent_activity_reads_emails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path();
+        let catchall = data_dir.join("catchall");
+        std::fs::create_dir_all(&catchall).unwrap();
+
+        let email_content = "---\nid: \"2025-01-15-001\"\nmessage_id: \"<a@b>\"\nfrom: \"alice@example.com\"\nto: \"c@d\"\nsubject: \"Test email\"\ndate: \"2025-01-15T10:30:00Z\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody here";
+        std::fs::write(catchall.join("2025-01-15-001.md"), email_content).unwrap();
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            probe_url: None,
+            verify_address: None,
+        };
+
+        let activity = gather_recent_activity(&config);
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].from, "alice@example.com");
+        assert_eq!(activity[0].subject, "Test email");
+        assert_eq!(activity[0].mailbox, "catchall");
     }
 }
