@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 6
-**Timeline:** 15 calendar days
-**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS.
+**Total sprints:** 8 (6 original + 2 post-audit hardening)
+**Timeline:** ~21.5 calendar days
+**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit.
 
 ---
 
@@ -631,6 +631,314 @@ aimx verify
 
 ---
 
+## Sprint 7 — Security Hardening + Critical Fixes (Days 16–18.5) [NOT STARTED]
+
+**Goal:** Fix all critical and high-severity issues found in the post-v1 code review audit. These address security vulnerabilities, data loss risks, and PRD compliance gaps.
+
+**Dependencies:** Sprint 6 (merged)
+
+### S7.1 — Enforce DKIM Signing on All Outbound Email
+
+*As an agent operator, I expect outbound email to always be DKIM-signed, and to get a clear error if signing is impossible — not a silently unsigned message that may land in spam.*
+
+**Context:** There are two outbound code paths and both silently skip DKIM when the key is missing:
+
+1. **CLI path** (`src/send.rs`, `run()` function, ~line 197): Config is loaded with `.ok()` (line 203–206), swallowing any load error. The private key is loaded with `.ok()` (line 209). If either is `None`, the code prints `eprintln!("Warning: DKIM signing disabled (no key found)")` (line 214) and proceeds to send the email unsigned. The `send_with_transport()` function (line 180) accepts `dkim_key: Option<...>` and simply skips signing when `None`.
+
+2. **MCP path** (`src/mcp.rs`): Both `email_send` (~line 238) and `email_reply` (~line 278) call `load_dkim_key(&config)` (a helper at line 532 that returns `Option<RsaPrivateKey>` via `.ok()`). The result is passed through `.as_ref().map(...)` to build `dkim_info` (lines 268–270 for send, lines 350–354 for reply). If the key is missing, `dkim_info` is `None` and `send_with_transport` sends unsigned — with **no warning or error message at all**.
+
+**What should happen:** Both paths should return an error when the DKIM key can't be loaded, refusing to send unsigned email. This was the original intent per FR-18 ("Sign message with DKIM"), S2.2 AC ("Missing private key produces a clear error, not a crash"), and S3.3 AC ("Errors … missing DKIM key … return clear MCP errors").
+
+**Approach:** Change `send::run()` to propagate config/key load errors instead of using `.ok()`. In MCP, change `load_dkim_key` to return `Result` and have `email_send`/`email_reply` return `Err(...)` when the key is missing.
+
+**Acceptance criteria:**
+- [ ] `send::run()` returns an error when DKIM config or private key cannot be loaded — send must not proceed unsigned
+- [ ] MCP `email_send` returns a clear MCP error when DKIM key is unavailable
+- [ ] MCP `email_reply` returns a clear MCP error when DKIM key is unavailable
+- [ ] Unit test: `send::run()` with missing DKIM key returns error (not warning)
+- [ ] Unit test: MCP send/reply with missing DKIM key returns error response
+
+### S7.2 — Sanitize Email Headers Against CRLF Injection
+
+*As a security-conscious operator, I need outbound email composition to be safe from header injection, even when input comes from an AI agent via MCP.*
+
+**Context:** In `src/send.rs`, the function `write_common_headers()` (line 57) builds MIME headers by directly interpolating user-controlled values:
+
+```rust
+msg.push_str(&format!("From: {}\r\n", args.from));   // line 58
+msg.push_str(&format!("To: {}\r\n", args.to));       // line 59
+msg.push_str(&format!("Subject: {}\r\n", args.subject)); // line 60
+```
+
+If any of these values contain `\r\n`, an attacker can inject arbitrary additional headers or even start the message body early. For example, a subject of `"Hello\r\nBcc: victim@evil.com\r\n\r\nInjected body"` would inject a Bcc header and replace the body.
+
+Note that attachment filenames **are** already sanitized — `escape_filename()` (line 50) strips `\r` and `\n`. The same pattern needs to be applied (or a stricter one — reject rather than strip) to the From/To/Subject header values.
+
+The primary attack vector is MCP tool calls (`email_send`/`email_reply` in `src/mcp.rs`) where input originates from an AI agent that may be processing untrusted data. CLI args are lower risk since shells typically don't pass raw CRLF, but defense-in-depth applies.
+
+**Approach:** Add a `sanitize_header_value()` function that strips `\r` and `\n` characters (matching the `escape_filename` approach), and call it in `write_common_headers()` for all three fields. Alternatively, return an error from `compose_message()` if any header value contains CRLF — this is stricter and may be preferable for a security fix.
+
+**Acceptance criteria:**
+- [ ] From, To, and Subject values are sanitized to strip or reject CRLF sequences before header interpolation
+- [ ] Sanitization covers both `\r\n` and bare `\n` injection vectors
+- [ ] `compose_message()` returns an error if a header value contains CRLF after sanitization (defense in depth)
+- [ ] Unit test: subject containing `\r\n` does not produce injected headers
+- [ ] Unit test: from/to containing `\r\n` does not produce injected headers
+- [ ] Unit test: normal headers with no CRLF pass through unchanged
+
+### S7.3 — Atomic File ID Generation in Ingest
+
+*As an operator running a production mail server, I need concurrent deliveries to never overwrite each other.*
+
+**Context:** In `src/ingest.rs`, the function `generate_file_id()` (line 407) generates email IDs using a check-then-act pattern:
+
+```rust
+fn generate_file_id(mailbox_dir: &Path) -> String {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut counter = 1u32;
+    loop {
+        let candidate = format!("{today}-{counter:03}");
+        let path = mailbox_dir.join(format!("{candidate}.md"));
+        if !path.exists() {       // <-- checks existence (line 414)
+            return candidate;      // <-- returns ID, but doesn't create the file
+        }
+        counter += 1;
+    }
+}
+```
+
+The ID is returned to `ingest_email()` which later writes the file at line 142: `std::fs::write(&filepath, content)?;`. Between the existence check and the write, a concurrent `aimx ingest` process could pick the same ID, and the second write would silently overwrite the first email.
+
+While OpenSMTPD's default MDA delivery is typically serialized per-recipient, this is not architecturally guaranteed — custom configs, multiple domains, or future changes could introduce concurrency.
+
+**Approach:** Merge ID generation and file creation into a single atomic operation. Replace `generate_file_id()` + `fs::write()` with a function that uses `OpenOptions::new().write(true).create_new(true).open(...)` in a loop. `create_new(true)` atomically fails if the file already exists (maps to `O_CREAT | O_EXCL`), so the loop increments the counter and retries on collision. The function should return both the ID and the open file handle (or just write the content directly).
+
+**Acceptance criteria:**
+- [ ] File creation uses `OpenOptions::new().create_new(true)` (or equivalent atomic create) to prevent TOCTOU race
+- [ ] On collision, the ID counter increments and retries
+- [ ] Unit test: two rapid `generate_file_id` calls for the same day produce different IDs
+- [ ] Unit test: pre-existing file triggers retry rather than overwrite
+
+### S7.4 — Fix Verify Race Condition
+
+*As an operator running `aimx verify`, I need the reply detection to work reliably regardless of timing.*
+
+**Context:** In `src/verify.rs`, the `run()` function (line 10) has a race condition in its reply detection logic. The current execution order is:
+
+```
+line 35:  send::run(send_args, data_dir)?;           // 1. Send test email
+line 36:  println!("Test email sent.\n");
+...
+line 43:  let before: Vec<String> = list_md_files(&catchall_dir);  // 2. Snapshot "before" files
+line 46:  while elapsed < MAX_WAIT_SECS {             // 3. Poll for new files
+line 50:      let after = list_md_files(&catchall_dir);
+line 51:      let new_files = after.iter().filter(|f| !before.contains(f)).collect();
+```
+
+The problem: the "before" snapshot (step 2) is taken **after** the email is sent (step 1). If the verify service at `verify@aimx.email` replies very quickly, the reply could arrive and be written to the catchall directory between steps 1 and 2. In that case, the reply file would appear in the "before" set and would never be detected as "new" by the polling loop — causing a false timeout.
+
+**Fix:** Swap lines 35 and 43 — take the snapshot before sending. This is a two-line reorder. The `catchall_dir` is already computed earlier (line 41: `let catchall_dir = config.mailbox_dir("catchall")`), so moving the snapshot before the send is straightforward.
+
+Also handle the edge case where the catchall mailbox directory doesn't exist — `list_md_files` (line 78) returns an empty Vec on error via `unwrap_or_default()`, which silently hides a misconfigured catchall. If the directory is missing, `verify` should error immediately with a clear message.
+
+**Acceptance criteria:**
+- [ ] "Before" file snapshot is taken *before* sending the test email
+- [ ] Existing unit tests still pass after reordering
+- [ ] Handle edge case: missing catchall mailbox directory produces a clear error instead of silently returning empty *(also addresses Sprint 6 backlog item)*
+
+### S7.5 — Integrate End-to-End Verify into Setup
+
+*As an operator completing setup, I want the wizard to confirm the full pipeline works — not just that DNS records exist.*
+
+**Context:** In `src/setup.rs`, the `run_setup()` function (line 725) currently ends after DNS record verification:
+
+```
+line 766:  let results = verify_all_dns(net, domain, &server_ip, &dkim_selector);
+line 767:  let all_pass = display_dns_verification(&results);
+line 769-775: if all_pass { "ready!" } else { "some records not correct" }
+line 777:  Ok(())  // <-- setup ends here, no end-to-end email test
+```
+
+The PRD requirement FR-8 states: "Run end-to-end verification by sending/receiving test email via `verify@aimx.email`." The `verify::run()` function already exists in `src/verify.rs` and does exactly this — it sends a test email, polls for a reply, and reports pass/fail. But `run_setup()` never calls it.
+
+The sprint 6 VPS validation guide (sprint.md line 614) explicitly says: "Setup should now include the end-to-end verify step using verify@aimx.email."
+
+**Approach:** After the DNS verification block (line 775), add a prompt asking the user if they want to run end-to-end verification. If yes, call `verify::run(Some(data_dir))`. Make the verify step non-blocking — if it fails (likely due to DNS propagation delays), print a warning suggesting the user run `aimx verify` later, and still exit successfully. The existing interactive pattern in setup (line 761–764: "press Enter to verify...") provides a good template for the UX.
+
+Note: `run_setup()` takes `sys: &dyn SystemOps` and `net: &dyn NetworkOps` for testability. The verify call uses `send::run()` internally which calls real sendmail — this isn't mockable via the existing traits. For unit testing, consider adding a flag or trait method to skip the actual verify call, or test the prompt/flow logic separately from the email send.
+
+**Acceptance criteria:**
+- [ ] After DNS verification passes, `run_setup()` offers to run end-to-end email verification
+- [ ] If verify fails, setup completes with a warning (non-blocking — DNS may still be propagating)
+- [ ] If verify passes, setup reports full success including email delivery confirmation
+- [ ] If user declines verify, setup completes normally (verify is optional during setup since DNS propagation may be pending)
+- [ ] Unit test: `run_setup()` flow includes verify step call (using mockable traits)
+
+---
+
+## Sprint 8 — Setup Robustness, CI & Documentation (Days 19–21.5) [NOT STARTED]
+
+**Goal:** Fix medium and low-severity issues: strengthen DNS verification, propagate configuration correctly, add CI coverage for the verify service, and resolve documentation inconsistencies.
+
+**Dependencies:** Sprint 7
+
+### S8.1 — Improve DNS Verification Accuracy
+
+*As an operator, I want DNS verification to catch real misconfiguration, not just confirm that records exist.*
+
+**Context:** In `src/setup.rs`, the three DNS verification functions are overly permissive:
+
+1. **SPF** — `verify_spf()` (line 496): Filters TXT records for those starting with `"v=spf1"`, then checks `spf.iter().any(|r| r.contains(expected_ip))` (line 503). This is a bare substring match — if the expected IP is `"1.2.3.4"`, it would also match a record containing `"ip4:1.2.3.45"` or `"ip4:11.2.3.4"`. Should instead parse the SPF mechanisms and match the exact IP.
+
+2. **DKIM** — `verify_dkim()` (line 516): Looks up `{selector}._domainkey.{domain}` TXT, filters for records containing `"v=DKIM1"` (line 520), and returns Pass if any match exists. It does **not** check that the `p=` public key in the DNS record matches the private key on disk (`<data_dir>/dkim/private.key`). An operator could publish the wrong key and setup would still say PASS.
+
+3. **DMARC** — `verify_dmarc()` (line 531): Looks up `_dmarc.{domain}` TXT, filters for `"v=DMARC1"` (line 535), and returns Pass if any match. A record of `"v=DMARC1; p=none"` passes — but `p=none` means no enforcement, which defeats the purpose of DMARC for deliverability. Should warn when policy is too permissive.
+
+All three functions use the same `DnsVerifyResult` enum (Pass/Fail/Missing) and are called via `verify_all_dns()` (line 546) and displayed by `display_dns_verification()`. The existing mock infrastructure (`MockNetworkOps` with `txt_records` HashMap) makes these fully testable.
+
+**Acceptance criteria:**
+- [ ] SPF verification checks for the IP in proper SPF mechanisms (`ip4:X.X.X.X/32`, `ip4:X.X.X.X `, or end-of-string) — not bare substring
+- [ ] DKIM verification extracts the `p=` value from the DNS record and confirms it matches the local public key
+- [ ] DMARC verification warns if policy is `p=none` (too permissive for production)
+- [ ] Unit test: SPF with similar-prefix IP (e.g., "1.2.3.4" vs "1.2.3.45") correctly fails
+- [ ] Unit test: DKIM record with mismatched public key reports failure
+- [ ] Unit test: DMARC with `p=none` reports warning
+
+### S8.2 — Propagate --data-dir to OpenSMTPD Ingest Command
+
+*As an operator using a custom data directory, I need OpenSMTPD's MDA command to use the same path.*
+
+**Context:** In `src/setup.rs`, `generate_smtpd_conf()` (line 324) takes `domain` and `aimx_binary` parameters and generates the OpenSMTPD config. The MDA action is hardcoded as:
+
+```rust
+action "deliver" mda "{aimx_binary} ingest %{{rcpt}}"  // line 335
+```
+
+Meanwhile, `run_setup()` (line 725) accepts an optional `data_dir` parameter (line 727) and defaults to `/var/lib/aimx` (line 740). All config and mailbox operations use this custom path. But the generated `smtpd.conf` doesn't pass `--data-dir` to the ingest command.
+
+**Result:** If an operator runs `sudo aimx setup mydomain.com --data-dir /opt/aimx`, setup creates config at `/opt/aimx/config.yaml` and mailboxes under `/opt/aimx/`. But when OpenSMTPD delivers mail, it invokes `aimx ingest user@domain.com` (no `--data-dir`), which defaults to `/var/lib/aimx` — so ingest looks for config in the wrong place and mail either fails or goes to the wrong directory.
+
+**Approach:** Add a `data_dir: Option<&Path>` parameter to `generate_smtpd_conf()`. When the data dir is non-default, generate `action "deliver" mda "{aimx_binary} ingest --data-dir {data_dir} %{{rcpt}}"`. The caller in `configure_opensmtpd()` (line 344) and `run_setup()` need to thread the data dir through. There's an existing unit test `generated smtpd.conf content is correct` that will need updating.
+
+**Acceptance criteria:**
+- [ ] `generate_smtpd_conf()` accepts a data directory parameter
+- [ ] When data dir is non-default, the MDA command includes `--data-dir <path>`
+- [ ] Default path (`/var/lib/aimx`) omits the flag for cleaner config
+- [ ] Unit test: custom data dir produces `--data-dir` in smtpd.conf
+- [ ] Unit test: default data dir omits `--data-dir` in smtpd.conf
+
+### S8.3 — Fix SPF Verification Domain Fallback
+
+*As an operator, I want SPF verification results to be accurate, not evaluated against the wrong domain.*
+
+**Context:** In `src/ingest.rs`, the `verify_spf_async()` function (line 204) determines which domain to use for SPF evaluation:
+
+```rust
+let mail_from = extract_mail_from(raw).unwrap_or_default();       // line 210
+let from_domain = mail_from.split('@').nth(1).unwrap_or("");      // line 211
+
+let helo_domain = if !from_domain.is_empty() {
+    from_domain                                                     // line 213: use sender domain
+} else {
+    rcpt.split('@').nth(1).unwrap_or("")                           // line 216: FALLBACK to recipient domain
+};
+```
+
+When the sender's From domain can't be determined (empty mail_from or missing @), the code falls back to using the **recipient's** domain for SPF evaluation (line 216). This is semantically wrong — SPF records are published by the sending domain. Evaluating the recipient domain's SPF record against the sending IP is meaningless and could produce false passes (if the recipient domain's SPF happens to include the sending IP) or false fails.
+
+The `helo_domain` variable is then used both as the HELO domain **and** the mail-from domain in the `mail-auth` call: `resolver.verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)` (line 223–224).
+
+Note: Sprint 5.5 partially addressed this (renamed variables, clarified fallback logic) but the fundamental issue — falling back to recipient domain — was not fixed.
+
+**Approach:** When `from_domain` is empty, return `"none"` immediately instead of falling back. Also extract the domain-selection logic into a standalone function (e.g., `fn spf_domain(mail_from: &str, rcpt: &str) -> Option<&str>`) that returns `None` when the sender domain can't be determined. This was already an open backlog item from Sprint 5.5.
+
+**Acceptance criteria:**
+- [ ] SPF verification returns `spf: none` when the sender domain cannot be determined, instead of falling back to recipient domain
+- [ ] SPF domain-selection logic extracted into a standalone testable function *(also resolves Sprint 5.5 backlog item)*
+- [ ] Unit test: empty sender domain produces `spf: none`, not evaluation against recipient domain
+- [ ] Unit test: valid sender domain is used correctly
+
+### S8.4 — Configurable Verify Service URLs
+
+*As an operator self-hosting the verify service, I need to point the client at my own instance.*
+
+**Context:** Two values are hardcoded as constants with no configuration override:
+
+1. **Probe URL** — In `src/setup.rs`, `check_inbound_port25()` (line 141) shells out to `curl` with a hardcoded URL:
+   ```rust
+   .args(["-s", "-m", "15", "https://check.aimx.email/probe"])  // line 143
+   ```
+
+2. **Verify address** — In `src/verify.rs`, the target email for end-to-end testing:
+   ```rust
+   const VERIFY_ADDRESS: &str = "verify@aimx.email";  // line 5
+   ```
+
+The verify service README (`services/verify/README.md`, line 54–60) documents self-hosting instructions and explicitly tells users to "point the probe URL to your service" — but there's no `config.yaml` field or CLI flag to do so.
+
+The `Config` struct is defined in `src/config.rs` and currently has: `domain`, `data_dir`, `dkim_selector`, `mailboxes`. New optional fields need to be added there with serde defaults.
+
+**Approach:** Add `probe_url: Option<String>` and `verify_address: Option<String>` to `Config`. In `check_inbound_port25()`, read the URL from config (or pass it as a parameter). In `verify::run()`, read the address from config. Both fall back to the current hardcoded defaults when not set. Also add `--probe-url` and `--verify-address` CLI flags to `aimx setup` and `aimx verify` that override the config value. Update the verify service README to reference these config fields.
+
+**Acceptance criteria:**
+- [ ] `config.yaml` supports optional `probe_url` and `verify_address` fields
+- [ ] `check_inbound_port25()` uses configured probe URL, defaulting to `https://check.aimx.email/probe`
+- [ ] `verify::run()` uses configured verify address, defaulting to `verify@aimx.email`
+- [ ] Unit test: custom probe URL is used when configured
+- [ ] Unit test: custom verify address is used when configured
+- [ ] Update verify service README to document the config fields
+
+### S8.5 — CI Coverage for Verify Service
+
+*As a contributor, I need CI to catch regressions in the verify service, not just the main crate.*
+
+**Context:** The verify service at `services/verify/` is a standalone Cargo project (package name `aimx-verify`, see `services/verify/Cargo.toml`). It is **not** a workspace member of the root `Cargo.toml`.
+
+The CI workflow (`.github/workflows/ci.yml`) runs three checks, all at the repo root only:
+
+```yaml
+- name: Check formatting
+  run: cargo fmt -- --check           # line 28 — only checks root crate
+
+- name: Clippy
+  run: cargo clippy -- -D warnings    # line 31 — only checks root crate
+
+- name: Run tests
+  run: cargo test                      # line 34 — only runs root crate tests
+```
+
+This means the verify service can accumulate lint warnings, formatting drift, or test failures without CI catching them.
+
+**Approach:** Add a second job (or additional steps in the existing job) that runs the same checks with `working-directory: services/verify`. Alternatively, convert to a Cargo workspace — but that may pull in the verify service's dependencies (actix-web, etc.) into the main binary's build, so separate CI steps are likely cleaner.
+
+**Acceptance criteria:**
+- [ ] CI workflow runs `cargo test` in `services/verify/` directory
+- [ ] CI workflow runs `cargo clippy -- -D warnings` for `services/verify/`
+- [ ] CI workflow runs `cargo fmt -- --check` for `services/verify/`
+
+### S8.6 — Documentation & Status Fixes
+
+*As a user reading docs or running `aimx status`, I expect accuracy and consistency.*
+
+**Context — Status "recent activity":** The PRD (FR-47, `docs/prd.md` line 132) specifies: "`aimx status` — show server status, mailbox counts, recent activity." The current `format_status()` in `src/status.rs` (line 109) outputs domain, data dir, DKIM selector, DKIM key presence, OpenSMTPD status, and mailbox table (name, address, total, unread) — but no "recent activity" section. The `StatusInfo` struct (line 5) would need a new field, and `gather_status()` (line 21) would need to read the most recent email(s) per mailbox (e.g., last 3–5 by date from the `.md` frontmatter).
+
+**Context — DigitalOcean inconsistency:** Two docs make contradictory claims:
+- `README.md` line 56: `| DigitalOcean | On request | Submit support ticket |` — listed as a compatible provider
+- `docs/idea.md` line 434: `| DigitalOcean | Permanently blocks SMTP, recommends against self-hosted mail |` — listed under "Not supported"
+
+One of these is wrong. Research suggests DigitalOcean's current policy is closer to the idea.md version (SMTP is restricted and difficult to unblock), but this should be verified. Pick the accurate position and update both files to match.
+
+**Context — GitHub URLs:** Existing Sprint 6 backlog item: GitHub repo URLs in `README.md` and `services/verify/README.md` reference the wrong owner/org. Find and fix all occurrences.
+
+**Acceptance criteria:**
+- [ ] `aimx status` includes a "Recent activity" section showing the last few emails received (most recent per mailbox)
+- [ ] `StatusInfo` struct extended with recent activity data; `gather_status()` reads recent emails from mailbox directories
+- [ ] README.md and docs/idea.md are consistent on DigitalOcean — pick the accurate position and update both
+- [ ] Fix GitHub URLs in README.md and services/verify/README.md *(existing Sprint 6 backlog item)*
+- [ ] Unit test: `format_status` output includes recent activity section
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -643,6 +951,8 @@ aimx verify
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Done |
 | 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | Done |
 | 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
+| 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Not Started |
+| 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Not Started |
 
 ## Deferred to v2
 
@@ -688,9 +998,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 4)** Add captured DKIM-signed `.eml` fixture from Gmail for verification testing (even if DNS-dependent) — _Triaged into Sprint 5.5_
 - [x] **(Sprint 4)** Verify `mail-auth` `dkim_headers` field is stable public API, not internal implementation detail — _Triaged into Sprint 5.5_
 - [x] **(Sprint 5)** Implement timestamped backup for pre-aimx OpenSMTPD config to avoid overwriting on repeated setup runs — _Triaged into Sprint 5.5_
-- [ ] **(Sprint 5.5)** Extract SPF domain-selection logic into standalone testable function instead of duplicating inline in tests
-- [ ] **(Sprint 6)** Fix GitHub URL in README.md and services/verify/README.md (currently wrong owner)
+- [x] **(Sprint 5.5)** Extract SPF domain-selection logic into standalone testable function instead of duplicating inline in tests — _Triaged into Sprint 8 (S8.3)_
+- [x] **(Sprint 6)** Fix GitHub URL in README.md and services/verify/README.md (currently wrong owner) — _Triaged into Sprint 8 (S8.6)_
 - [ ] **(Sprint 6)** Add IP validation on `/probe` endpoint to reject private/internal IPs (SSRF hardening)
 - [ ] **(Sprint 6)** Handle multiline (folded) Authentication-Results headers in `extract_auth_result`
 - [ ] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance)
-- [ ] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify`
+- [x] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify` — _Triaged into Sprint 7 (S7.4)_
