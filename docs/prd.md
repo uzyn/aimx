@@ -67,14 +67,15 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ## 6. Functional Requirements
 
 ### 6.1 Setup Wizard (`aimx setup <domain>`)
-- FR-1: Run preflight checks: outbound port 25 (connect to known MX), inbound port 25 (via `check.aimx.email` probe service).
-- FR-2: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
-- FR-3: Check reverse DNS (PTR) and warn (non-blocking) if not set.
-- FR-4: Install and configure OpenSMTPD with TLS and MDA delivery to `aimx ingest`.
-- FR-5: Generate 2048-bit RSA DKIM keypair.
-- FR-6: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation.
-- FR-7: Verify DNS records are correctly set.
-- FR-8: Run end-to-end verification by sending/receiving test email via `verify@aimx.email`.
+- FR-1: Require root. Exit with clear message if not running as root.
+- FR-1b: Detect MTA conflict on port 25. If non-OpenSMTPD MTA is running, exit with process name and instructions. If OpenSMTPD is already running, prompt user to confirm smtpd.conf overwrite and create .bak backup.
+- FR-2: Install and configure OpenSMTPD with TLS and MDA delivery to `aimx ingest`.
+- FR-3: Run port 25 checks after OpenSMTPD is installed: outbound (connect to check service port 25), inbound (check service performs EHLO handshake back to caller).
+- FR-4: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
+- FR-5: Check reverse DNS (PTR) and warn (non-blocking) if not set.
+- FR-6: Generate 2048-bit RSA DKIM keypair.
+- FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation.
+- FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` mailbox.
 - FR-10: Display MCP configuration snippet for Claude Code.
 
@@ -118,9 +119,10 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
 
 ### 6.8 Verify Service
-- FR-38: Hosted probe service at `check.aimx.email` that connects back to caller's IP on port 25.
-- FR-39: Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.
-- FR-40: Verify service is open source and self-hostable.
+- FR-38: Hosted probe service at `check.aimx.email` that performs SMTP EHLO handshake with caller's IP on port 25, confirming a real SMTP server is responding.
+- FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
+- FR-39b: Port 25 listener on the verify service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
+- FR-40: Verify service is open source and self-hostable. No MTA required on the verify server.
 
 ### 6.9 CLI Commands
 - FR-41: `aimx setup <domain>` — interactive setup wizard.
@@ -130,7 +132,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-45: `aimx mcp` — start MCP server in stdio mode.
 - FR-46: `aimx mailbox create|list|delete <name>` — mailbox management.
 - FR-47: `aimx status` — show server status, mailbox counts, recent activity.
-- FR-48: `aimx verify` — run end-to-end verification.
+- FR-48: `aimx verify` — check port 25 connectivity (outbound via check service port 25, inbound via EHLO probe, PTR record).
 
 ## 7. Non-Functional Requirements
 
