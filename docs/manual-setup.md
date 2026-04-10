@@ -23,7 +23,7 @@ The aimx-verify service provides two functions:
   - One for the HTTP probe (e.g. `check.aimx.email`)
   - One for receiving verification emails (e.g. `aimx.email` with MX record)
 - Rust toolchain (`rustup`)
-- A reverse proxy (nginx or caddy) for HTTPS on the probe endpoint
+- Caddy (for automatic HTTPS on the probe endpoint)
 - OpenSMTPD (for the email echo component)
 
 ### A2: Build aimx-verify
@@ -67,21 +67,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now aimx-verify
 ```
 
-Set up a reverse proxy to terminate HTTPS. Example for nginx:
+Set up Caddy as a reverse proxy (handles TLS automatically via Let's Encrypt):
 
-```nginx
-server {
-    listen 443 ssl;
-    server_name check.aimx.email;
+```bash
+sudo apt-get install -y caddy
+```
 
-    ssl_certificate     /etc/letsencrypt/live/check.aimx.email/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/check.aimx.email/privkey.pem;
+Add to `/etc/caddy/Caddyfile`:
 
-    location / {
-        proxy_pass http://127.0.0.1:3025;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
+```
+check.aimx.email {
+    reverse_proxy 127.0.0.1:3025
 }
+```
+
+```bash
+sudo systemctl reload caddy
 ```
 
 Verify:
