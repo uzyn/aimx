@@ -1,5 +1,6 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
+use crate::verify;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::io::{self, Write};
@@ -29,6 +30,18 @@ pub trait NetworkOps {
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
     fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
+}
+
+pub trait VerifyRunner {
+    fn run_verify(&self, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>;
+}
+
+pub struct RealVerifyRunner;
+
+impl VerifyRunner for RealVerifyRunner {
+    fn run_verify(&self, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+        verify::run(data_dir)
+    }
 }
 
 pub struct RealSystemOps;
@@ -728,6 +741,16 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    run_setup_with_verify(domain, data_dir, sys, net, &RealVerifyRunner)
+}
+
+pub fn run_setup_with_verify(
+    domain: &str,
+    data_dir: Option<&Path>,
+    sys: &dyn SystemOps,
+    net: &dyn NetworkOps,
+    verify_runner: &dyn VerifyRunner,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_domain(domain)?;
 
     println!("aimx setup for {domain}\n");
@@ -768,6 +791,27 @@ pub fn run_setup(
 
     if all_pass {
         println!("All DNS records verified. Your email server is ready!");
+
+        println!("\nWould you like to run end-to-end email verification? (y/N) ");
+        io::stdout().flush()?;
+        let mut verify_input = String::new();
+        io::stdin().read_line(&mut verify_input)?;
+
+        if verify_input.trim().eq_ignore_ascii_case("y") {
+            match verify_runner.run_verify(Some(data_dir)) {
+                Ok(()) => {
+                    println!("End-to-end email verification passed!");
+                }
+                Err(e) => {
+                    println!("End-to-end verification did not pass: {e}");
+                    println!("This is expected if DNS records are still propagating.");
+                    println!("Run `aimx verify` later to retry.");
+                }
+            }
+        } else {
+            println!("Skipping end-to-end verification.");
+            println!("Run `aimx verify` later to test the full pipeline.");
+        }
     } else {
         println!("Some DNS records are not yet correct.");
         println!("DNS propagation can take up to 48 hours.");
@@ -1450,5 +1494,66 @@ mod tests {
         let net = MockNetworkOps::default();
         let result = run_preflight_command(&net);
         assert!(result.is_ok());
+    }
+
+    struct MockVerifyRunner {
+        called: RefCell<bool>,
+        should_pass: bool,
+    }
+
+    impl MockVerifyRunner {
+        fn new(should_pass: bool) -> Self {
+            Self {
+                called: RefCell::new(false),
+                should_pass,
+            }
+        }
+
+        fn was_called(&self) -> bool {
+            *self.called.borrow()
+        }
+    }
+
+    impl VerifyRunner for MockVerifyRunner {
+        fn run_verify(&self, _data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+            *self.called.borrow_mut() = true;
+            if self.should_pass {
+                Ok(())
+            } else {
+                Err("verify service unavailable".into())
+            }
+        }
+    }
+
+    #[test]
+    fn verify_runner_trait_mock_pass() {
+        let runner = MockVerifyRunner::new(true);
+        assert!(runner.run_verify(None).is_ok());
+        assert!(runner.was_called());
+    }
+
+    #[test]
+    fn verify_runner_trait_mock_fail() {
+        let runner = MockVerifyRunner::new(false);
+        let result = runner.run_verify(None);
+        assert!(result.is_err());
+        assert!(runner.was_called());
+    }
+
+    #[test]
+    fn setup_verify_step_available() {
+        // Verify that run_setup_with_verify accepts a VerifyRunner trait object.
+        // We can't fully test it here because it reads stdin, but this
+        // compile-time check confirms the trait integration is wired up.
+        let runner = MockVerifyRunner::new(true);
+        let _: &dyn VerifyRunner = &runner;
+        let _fn_ptr: fn(
+            &str,
+            Option<&std::path::Path>,
+            &dyn SystemOps,
+            &dyn NetworkOps,
+            &dyn VerifyRunner,
+        ) -> Result<(), Box<dyn std::error::Error>> = run_setup_with_verify;
+        let _ = _fn_ptr;
     }
 }

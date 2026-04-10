@@ -263,11 +263,13 @@ impl AimxMcpServer {
             attachments: params.attachments.unwrap_or_default(),
         };
 
-        let private_key = load_dkim_key(&config);
+        let private_key = load_dkim_key(&config)?;
         let transport = send::SendmailTransport;
-        let dkim_info = private_key
-            .as_ref()
-            .map(|k| (k, config.domain.as_str(), config.dkim_selector.as_str()));
+        let dkim_info = Some((
+            &private_key,
+            config.domain.as_str(),
+            config.dkim_selector.as_str(),
+        ));
 
         let message_id =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
@@ -347,11 +349,13 @@ impl AimxMcpServer {
             attachments: vec![],
         };
 
-        let private_key = load_dkim_key(&config);
+        let private_key = load_dkim_key(&config)?;
         let transport = send::SendmailTransport;
-        let dkim_info = private_key
-            .as_ref()
-            .map(|k| (k, config.domain.as_str(), config.dkim_selector.as_str()));
+        let dkim_info = Some((
+            &private_key,
+            config.domain.as_str(),
+            config.dkim_selector.as_str(),
+        ));
 
         let message_id =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
@@ -529,8 +533,9 @@ pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> 
     Ok(())
 }
 
-fn load_dkim_key(config: &Config) -> Option<rsa::RsaPrivateKey> {
-    dkim::load_private_key(&config.data_dir).ok()
+fn load_dkim_key(config: &Config) -> Result<rsa::RsaPrivateKey, String> {
+    dkim::load_private_key(&config.data_dir)
+        .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))
 }
 
 fn validate_email_id(id: &str) -> Result<(), String> {
@@ -916,5 +921,27 @@ mod tests {
         let result = set_read_status(&config, "alice", "../../etc/passwd", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));
+    }
+
+    #[test]
+    fn load_dkim_key_missing_returns_error() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let result = load_dkim_key(&config);
+        assert!(result.is_err());
+        assert!(
+            result.as_ref().unwrap_err().contains("DKIM"),
+            "Error should mention DKIM: {}",
+            result.unwrap_err()
+        );
+    }
+
+    #[test]
+    fn load_dkim_key_present_returns_ok() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let result = load_dkim_key(&config);
+        assert!(result.is_ok());
     }
 }

@@ -16,6 +16,20 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     let from = format!("catchall@{}", config.domain);
 
     println!("aimx verify - End-to-end email verification\n");
+
+    let catchall_dir = config.mailbox_dir("catchall");
+    if !catchall_dir.exists() {
+        return Err(format!(
+            "Catchall mailbox directory does not exist: {}\nRun `aimx setup` first.",
+            catchall_dir.display()
+        )
+        .into());
+    }
+
+    // Take snapshot BEFORE sending to avoid race condition where a fast reply
+    // arrives between send and snapshot, causing it to be missed.
+    let before: Vec<String> = list_md_files(&catchall_dir);
+
     println!("Sending test email from {from} to {VERIFY_ADDRESS}...");
 
     let send_args = crate::cli::SendArgs {
@@ -37,10 +51,6 @@ pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Waiting for reply from {VERIFY_ADDRESS}...");
     println!("(This may take up to {MAX_WAIT_SECS} seconds)\n");
-
-    let catchall_dir = config.mailbox_dir("catchall");
-
-    let before: Vec<String> = list_md_files(&catchall_dir);
 
     let mut elapsed = 0u64;
     while elapsed < MAX_WAIT_SECS {
@@ -144,5 +154,24 @@ mod tests {
     #[test]
     fn verify_subject_is_correct() {
         assert_eq!(VERIFY_SUBJECT, "aimx verify");
+    }
+
+    #[test]
+    fn run_errors_on_missing_catchall_dir() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create config but no catchall directory
+        let config_content = format!(
+            "domain: test.com\ndata_dir: {}\nmailboxes:\n  catchall:\n    address: \"*@test.com\"\n",
+            tmp.path().display()
+        );
+        std::fs::write(tmp.path().join("config.yaml"), config_content).unwrap();
+
+        let result = run(Some(tmp.path()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Catchall mailbox directory does not exist"),
+            "Expected missing catchall error, got: {err}"
+        );
     }
 }
