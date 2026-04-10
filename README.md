@@ -25,13 +25,13 @@ Outbound:
 
 - **No daemon.** OpenSMTPD is the only long-running process. `aimx` commands are short-lived.
 - **No IMAP/POP3.** Agents read `.md` files via MCP or filesystem.
-- **Markdown-first.** Emails stored as Markdown with YAML frontmatter -- agents can `cat` and understand immediately.
+- **Markdown-first.** Emails stored as Markdown with TOML frontmatter -- agents can `cat` and understand immediately.
 - **Single binary.** Written in Rust. No runtime dependencies beyond OpenSMTPD.
 
 ## Features
 
 - **Setup wizard** -- preflight checks, OpenSMTPD config, DKIM keygen, DNS guidance, verification
-- **Email delivery** -- EML to Markdown with YAML frontmatter, attachment extraction, mailbox routing
+- **Email delivery** -- EML to Markdown with TOML frontmatter, attachment extraction, mailbox routing
 - **Email sending** -- RFC 5322 composition, DKIM signing (RSA-SHA256), threading support, attachments
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
 - **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
@@ -183,51 +183,49 @@ aimx dkim-keygen --selector mykey
 
 ## Configuration
 
-Configuration is stored in `config.yaml` in the data directory (default: `/var/lib/aimx/`).
+Configuration is stored in `config.toml` in the data directory (default: `/var/lib/aimx/`).
 
-### config.yaml reference
+### config.toml reference
 
-```yaml
+```toml
 # Domain for this email server (required)
-domain: agent.yourdomain.com
+domain = "agent.yourdomain.com"
 
 # Data directory (default: /var/lib/aimx)
-data_dir: /var/lib/aimx
+data_dir = "/var/lib/aimx"
 
 # DKIM selector name (default: dkim)
-dkim_selector: dkim
+dkim_selector = "dkim"
 
-# Mailbox definitions
-mailboxes:
-  # Catchall mailbox (receives all unmatched addresses)
-  catchall:
-    address: "*@agent.yourdomain.com"
+# Catchall mailbox (receives all unmatched addresses)
+[mailboxes.catchall]
+address = "*@agent.yourdomain.com"
 
-  # Named mailbox
-  support:
-    address: support@agent.yourdomain.com
+# Named mailbox
+[mailboxes.support]
+address = "support@agent.yourdomain.com"
 
-    # Channel rules: trigger commands on incoming email
-    on_receive:
-      - type: cmd
-        command: 'echo "New email from {from}: {subject}" >> /tmp/email.log'
+# Trust policy (default: none)
+# none: all triggers fire regardless of DKIM/SPF
+# verified: triggers only fire on DKIM-pass emails
+trust = "verified"
 
-      - type: cmd
-        command: 'ntfy pub my-topic "Email from {from}: {subject}"'
-        match:
-          from: "*@gmail.com"        # Glob pattern on sender
-          subject: "urgent"          # Substring match (case-insensitive)
-          has_attachment: true        # Filter on attachment presence
+# Trusted senders bypass DKIM verification (glob patterns)
+trusted_senders = ["*@company.com", "boss@gmail.com"]
 
-    # Trust policy (default: none)
-    # none: all triggers fire regardless of DKIM/SPF
-    # verified: triggers only fire on DKIM-pass emails
-    trust: verified
+# Channel rules: trigger commands on incoming email
+[[mailboxes.support.on_receive]]
+type = "cmd"
+command = 'echo "New email from {from}: {subject}" >> /tmp/email.log'
 
-    # Trusted senders bypass DKIM verification (glob patterns)
-    trusted_senders:
-      - "*@company.com"
-      - "boss@gmail.com"
+[[mailboxes.support.on_receive]]
+type = "cmd"
+command = 'ntfy pub my-topic "Email from {from}: {subject}"'
+
+[mailboxes.support.on_receive.match]
+from = "*@gmail.com"        # Glob pattern on sender
+subject = "urgent"           # Substring match (case-insensitive)
+has_attachment = true        # Filter on attachment presence
 ```
 
 ### Channel manager template variables
@@ -259,7 +257,7 @@ Email is always stored regardless of trust result. Trust only gates trigger exec
 
 ```
 /var/lib/aimx/
-├── config.yaml
+├── config.toml
 ├── dkim/
 │   ├── private.key
 │   └── public.key
@@ -274,24 +272,24 @@ Email is always stored regardless of trust result. Trust only gates trigger exec
 
 ### Email format
 
-Emails are stored as Markdown with YAML frontmatter:
+Emails are stored as Markdown with TOML frontmatter:
 
 ```markdown
----
-id: "2025-01-15-001"
-message_id: "<abc123@example.com>"
-from: "Alice <alice@example.com>"
-to: "support@agent.yourdomain.com"
-subject: "Hello"
-date: "2025-01-15T10:30:00Z"
-in_reply_to: ""
-references: ""
-attachments: []
-mailbox: "support"
-read: false
-dkim: "pass"
-spf: "pass"
----
++++
+id = "2025-01-15-001"
+message_id = "<abc123@example.com>"
+from = "Alice <alice@example.com>"
+to = "support@agent.yourdomain.com"
+subject = "Hello"
+date = "2025-01-15T10:30:00Z"
+in_reply_to = ""
+references = ""
+attachments = []
+mailbox = "support"
+read = false
+dkim = "pass"
+spf = "pass"
++++
 
 Hello, this is the email body in plain text.
 ```

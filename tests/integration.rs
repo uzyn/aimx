@@ -7,30 +7,28 @@ use tempfile::TempDir;
 
 fn setup_test_env(tmp: &Path) -> String {
     let config_content = format!(
-        "domain: agent.example.com\ndata_dir: {}\nmailboxes:\n  catchall:\n    address: \"*@agent.example.com\"\n  alice:\n    address: alice@agent.example.com\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("catchall")).unwrap();
     std::fs::create_dir_all(tmp.join("alice")).unwrap();
-    let config_path = tmp.join("config.yaml");
+    let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     config_path.to_string_lossy().to_string()
 }
 
-fn read_frontmatter(md_path: &Path) -> serde_yaml::Value {
+fn read_frontmatter(md_path: &Path) -> toml::Value {
     let content = std::fs::read_to_string(md_path).unwrap();
-    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    let parts: Vec<&str> = content.splitn(3, "+++").collect();
     assert!(
         parts.len() >= 3,
         "Markdown file missing frontmatter delimiters"
     );
-    serde_yaml::from_str(parts[1].trim()).unwrap()
+    toml::from_str(parts[1].trim()).unwrap()
 }
 
-fn get_yaml_str<'a>(map: &'a serde_yaml::Mapping, key: &str) -> &'a str {
-    map.get(&serde_yaml::Value::String(key.to_string()))
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
+fn get_toml_str<'a>(table: &'a toml::Table, key: &str) -> &'a str {
+    table.get(key).and_then(|v| v.as_str()).unwrap_or("")
 }
 
 fn find_md_files(dir: &Path) -> Vec<std::path::PathBuf> {
@@ -91,16 +89,12 @@ fn ingest_plain_fixture_full_pipeline() {
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
-    let map = parsed.as_mapping().unwrap();
-    assert_eq!(get_yaml_str(map, "from"), "Alice <alice@example.com>");
-    assert_eq!(get_yaml_str(map, "subject"), "Plain text test");
-    assert_eq!(get_yaml_str(map, "message_id"), "plain-001@example.com");
-    assert_eq!(get_yaml_str(map, "mailbox"), "catchall");
-    assert_eq!(
-        map.get(&serde_yaml::Value::String("read".to_string()))
-            .unwrap(),
-        &serde_yaml::Value::Bool(false)
-    );
+    let table = parsed.as_table().unwrap();
+    assert_eq!(get_toml_str(table, "from"), "Alice <alice@example.com>");
+    assert_eq!(get_toml_str(table, "subject"), "Plain text test");
+    assert_eq!(get_toml_str(table, "message_id"), "plain-001@example.com");
+    assert_eq!(get_toml_str(table, "mailbox"), "catchall");
+    assert_eq!(table.get("read").unwrap(), &toml::Value::Boolean(false));
 
     let content = std::fs::read_to_string(&md_files[0]).unwrap();
     assert!(content.contains("This is a plain text email for testing."));
@@ -126,8 +120,8 @@ fn ingest_html_fixture_full_pipeline() {
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
-    let map = parsed.as_mapping().unwrap();
-    assert_eq!(get_yaml_str(map, "subject"), "HTML only test");
+    let table = parsed.as_table().unwrap();
+    assert_eq!(get_toml_str(table, "subject"), "HTML only test");
 
     let content = std::fs::read_to_string(&md_files[0]).unwrap();
     assert!(content.contains("Hello from HTML"));
@@ -183,21 +177,11 @@ fn ingest_attachment_fixture_full_pipeline() {
     assert!(att_content.contains("This is the content of the attached file."));
 
     let parsed = read_frontmatter(&md_files[0]);
-    let map = parsed.as_mapping().unwrap();
-    let attachments = map
-        .get(&serde_yaml::Value::String("attachments".to_string()))
-        .unwrap()
-        .as_sequence()
-        .unwrap();
+    let table = parsed.as_table().unwrap();
+    let attachments = table.get("attachments").unwrap().as_array().unwrap();
     assert_eq!(attachments.len(), 1);
-    let att = attachments[0].as_mapping().unwrap();
-    assert_eq!(
-        att.get(&serde_yaml::Value::String("filename".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap(),
-        "readme.txt"
-    );
+    let att = attachments[0].as_table().unwrap();
+    assert_eq!(att.get("filename").unwrap().as_str().unwrap(), "readme.txt");
 }
 
 #[test]
@@ -541,7 +525,7 @@ fn mcp_mailbox_delete_catchall_error() {
 fn create_email_file(dir: &Path, id: &str, from: &str, subject: &str, read: bool) {
     std::fs::create_dir_all(dir).unwrap();
     let content = format!(
-        "---\nid: {id}\nmessage_id: \"<{id}@test.com>\"\nfrom: {from}\nto: alice@test.com\nsubject: {subject}\ndate: '2025-06-01T12:00:00Z'\nin_reply_to: ''\nreferences: ''\nattachments: []\nmailbox: alice\nread: {read}\n---\n\nBody of {id}.\n"
+        "+++\nid = \"{id}\"\nmessage_id = \"<{id}@test.com>\"\nfrom = \"{from}\"\nto = \"alice@test.com\"\nsubject = \"{subject}\"\ndate = \"2025-06-01T12:00:00Z\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"alice\"\nread = {read}\ndkim = \"none\"\nspf = \"none\"\n+++\n\nBody of {id}.\n"
     );
     std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
 }
@@ -654,7 +638,7 @@ fn mcp_email_mark_read_unread() {
     assert!(text.contains("marked as read"));
 
     let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
-    assert!(content.contains("read: true"));
+    assert!(content.contains("read = true"));
 
     let resp = client.call_tool(
         "email_mark_unread",
@@ -664,7 +648,7 @@ fn mcp_email_mark_read_unread() {
     assert!(text.contains("marked as unread"));
 
     let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
-    assert!(content.contains("read: false"));
+    assert!(content.contains("read = false"));
 
     client.shutdown();
 }
@@ -731,20 +715,21 @@ fn mcp_clean_exit_on_stdin_close() {
 
 fn setup_test_env_with_triggers(tmp: &Path, trigger_marker: &Path) -> String {
     let config_content = format!(
-        r#"domain: agent.example.com
-data_dir: {}
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-    on_receive:
-      - type: cmd
-        command: 'touch {}'
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
 "#,
         tmp.display(),
         trigger_marker.display()
     );
     std::fs::create_dir_all(tmp.join("catchall")).unwrap();
-    let config_path = tmp.join("config.yaml");
+    let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     config_path.to_string_lossy().to_string()
 }
@@ -778,19 +763,20 @@ fn ingest_trigger_executes_on_delivery() {
 fn ingest_failing_trigger_does_not_block_delivery() {
     let tmp = TempDir::new().unwrap();
     let config_content = format!(
-        r#"domain: agent.example.com
-data_dir: {}
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-    on_receive:
-      - type: cmd
-        command: 'false'
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "false"
 "#,
         tmp.path().display()
     );
     std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
@@ -817,21 +803,22 @@ fn ingest_trust_verified_blocks_unsigned_trigger() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("should_not_exist");
     let config_content = format!(
-        r#"domain: agent.example.com
-data_dir: {}
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-    trust: verified
-    on_receive:
-      - type: cmd
-        command: 'touch {}'
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+trust = "verified"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
 "#,
         tmp.path().display(),
         marker.display()
     );
     std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
@@ -858,21 +845,22 @@ fn ingest_trust_none_allows_unsigned_trigger() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
     let config_content = format!(
-        r#"domain: agent.example.com
-data_dir: {}
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-    trust: none
-    on_receive:
-      - type: cmd
-        command: 'touch {}'
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+trust = "none"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
 "#,
         tmp.path().display(),
         marker.display()
     );
     std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
@@ -914,15 +902,15 @@ fn ingest_frontmatter_contains_dkim_spf() {
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
-    let map = parsed.as_mapping().unwrap();
+    let table = parsed.as_table().unwrap();
 
-    let dkim = get_yaml_str(map, "dkim");
+    let dkim = get_toml_str(table, "dkim");
     assert!(
         dkim == "none" || dkim == "pass" || dkim == "fail",
         "dkim should be pass|fail|none, got: {dkim}"
     );
 
-    let spf = get_yaml_str(map, "spf");
+    let spf = get_toml_str(table, "spf");
     assert!(
         spf == "none" || spf == "pass" || spf == "fail",
         "spf should be pass|fail|none, got: {spf}"
@@ -934,23 +922,23 @@ fn ingest_trusted_sender_bypasses_dkim() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
     let config_content = format!(
-        r#"domain: agent.example.com
-data_dir: {}
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-    trust: verified
-    trusted_senders:
-      - "*@example.com"
-    on_receive:
-      - type: cmd
-        command: 'touch {}'
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+trust = "verified"
+trusted_senders = ["*@example.com"]
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
 "#,
         tmp.path().display(),
         marker.display()
     );
     std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.yaml"), &config_content).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 

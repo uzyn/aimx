@@ -445,11 +445,11 @@ fn create_file_atomic(
 }
 
 fn format_markdown(meta: &EmailMetadata, body: &str) -> String {
-    let yaml = serde_yaml::to_string(meta).expect("EmailMetadata must serialize to YAML");
+    let toml_str = toml::to_string_pretty(meta).expect("EmailMetadata must serialize to TOML");
     let mut result = String::new();
-    result.push_str("---\n");
-    result.push_str(&yaml);
-    result.push_str("---\n\n");
+    result.push_str("+++\n");
+    result.push_str(&toml_str);
+    result.push_str("+++\n\n");
     result.push_str(body);
 
     if !body.ends_with('\n') {
@@ -599,30 +599,20 @@ mod tests {
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
 
-        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
         assert!(parts.len() >= 3);
-        let yaml_str = parts[1].trim();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = parsed.as_mapping().unwrap();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
 
-        let from_val = map
-            .get(&serde_yaml::Value::String("from".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let from_val = table.get("from").unwrap().as_str().unwrap();
         assert_eq!(from_val, "sender@example.com");
 
-        let subject_val = map
-            .get(&serde_yaml::Value::String("subject".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let subject_val = table.get("subject").unwrap().as_str().unwrap();
         assert_eq!(subject_val, "Hello");
 
-        let read_val = map
-            .get(&serde_yaml::Value::String("read".to_string()))
-            .unwrap();
-        assert_eq!(read_val, &serde_yaml::Value::Bool(false));
+        let read_val = table.get("read").unwrap();
+        assert_eq!(read_val, &toml::Value::Boolean(false));
 
         assert!(content.contains("This is a plain text email."));
     }
@@ -676,7 +666,7 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_valid_yaml() {
+    fn frontmatter_valid_toml() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
@@ -688,28 +678,26 @@ mod tests {
             .collect();
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
 
-        let parts: Vec<&str> = content.splitn(3, "---").collect();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
         assert!(parts.len() >= 3);
-        let yaml_str = parts[1].trim();
-        let yaml: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = yaml.as_mapping().unwrap();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
 
-        assert!(map.contains_key(&serde_yaml::Value::String("id".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("message_id".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("from".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("to".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("subject".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("date".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("in_reply_to".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("references".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("attachments".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("mailbox".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("read".to_string())));
+        assert!(table.contains_key("id"));
+        assert!(table.contains_key("message_id"));
+        assert!(table.contains_key("from"));
+        assert!(table.contains_key("to"));
+        assert!(table.contains_key("subject"));
+        assert!(table.contains_key("date"));
+        assert!(table.contains_key("in_reply_to"));
+        assert!(table.contains_key("references"));
+        assert!(table.contains_key("attachments"));
+        assert!(table.contains_key("mailbox"));
+        assert!(table.contains_key("read"));
 
-        let read_val = map
-            .get(&serde_yaml::Value::String("read".to_string()))
-            .unwrap();
-        assert_eq!(read_val, &serde_yaml::Value::Bool(false));
+        let read_val = table.get("read").unwrap();
+        assert_eq!(read_val, &toml::Value::Boolean(false));
     }
 
     #[test]
@@ -745,28 +733,16 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let parts: Vec<&str> = md_content.splitn(3, "---").collect();
-        let yaml_str = parts[1].trim();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = parsed.as_mapping().unwrap();
-        let attachments = map
-            .get(&serde_yaml::Value::String("attachments".to_string()))
-            .unwrap()
-            .as_sequence()
-            .unwrap();
+        let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
+        let attachments = table.get("attachments").unwrap().as_array().unwrap();
         assert_eq!(attachments.len(), 1);
-        let att = attachments[0].as_mapping().unwrap();
-        let filename = att
-            .get(&serde_yaml::Value::String("filename".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let att = attachments[0].as_table().unwrap();
+        let filename = att.get("filename").unwrap().as_str().unwrap();
         assert_eq!(filename, "notes.txt");
-        let path_val = att
-            .get(&serde_yaml::Value::String("path".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let path_val = att.get("path").unwrap().as_str().unwrap();
         assert_eq!(path_val, "attachments/notes.txt");
     }
 
@@ -809,15 +785,11 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let parts: Vec<&str> = md_content.splitn(3, "---").collect();
-        let yaml_str = parts[1].trim();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = parsed.as_mapping().unwrap();
-        let attachments = map
-            .get(&serde_yaml::Value::String("attachments".to_string()))
-            .unwrap()
-            .as_sequence()
-            .unwrap();
+        let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
+        let attachments = table.get("attachments").unwrap().as_array().unwrap();
         assert!(attachments.is_empty());
     }
 
@@ -859,11 +831,11 @@ mod tests {
     }
 
     #[test]
-    fn serde_yaml_handles_special_characters() {
+    fn toml_handles_special_characters() {
         let meta = EmailMetadata {
             id: "2025-01-01-001".to_string(),
             message_id: "<test@example.com>".to_string(),
-            from: "test\n---\ninjected: true".to_string(),
+            from: "test\n+++\ninjected: true".to_string(),
             to: "to@test.com".to_string(),
             subject: "colons: and #hashes".to_string(),
             date: "2025-01-01T00:00:00Z".to_string(),
@@ -876,13 +848,11 @@ mod tests {
             spf: "none".to_string(),
         };
 
-        let yaml = serde_yaml::to_string(&meta).unwrap();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
-        let map = parsed.as_mapping().unwrap();
-        let from = map
-            .get(&serde_yaml::Value::String("from".to_string()))
-            .unwrap();
-        assert_eq!(from.as_str().unwrap(), "test\n---\ninjected: true");
+        let toml_str = toml::to_string_pretty(&meta).unwrap();
+        let parsed: toml::Value = toml::from_str(&toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
+        let from = table.get("from").unwrap();
+        assert_eq!(from.as_str().unwrap(), "test\n+++\ninjected: true");
     }
 
     #[test]
@@ -897,23 +867,15 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let parts: Vec<&str> = content.splitn(3, "---").collect();
-        let yaml_str = parts[1].trim();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = parsed.as_mapping().unwrap();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
 
-        let dkim = map
-            .get(&serde_yaml::Value::String("dkim".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let dkim = table.get("dkim").unwrap().as_str().unwrap();
         assert_eq!(dkim, "none");
 
-        let spf = map
-            .get(&serde_yaml::Value::String("spf".to_string()))
-            .unwrap()
-            .as_str()
-            .unwrap();
+        let spf = table.get("spf").unwrap().as_str().unwrap();
         assert_eq!(spf, "none");
     }
 
@@ -971,13 +933,13 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
             .collect();
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        let parts: Vec<&str> = content.splitn(3, "---").collect();
-        let yaml_str = parts[1].trim();
-        let parsed: serde_yaml::Value = serde_yaml::from_str(yaml_str).unwrap();
-        let map = parsed.as_mapping().unwrap();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        let table = parsed.as_table().unwrap();
 
-        assert!(map.contains_key(&serde_yaml::Value::String("dkim".to_string())));
-        assert!(map.contains_key(&serde_yaml::Value::String("spf".to_string())));
+        assert!(table.contains_key("dkim"));
+        assert!(table.contains_key("spf"));
     }
 
     #[test]
@@ -1025,8 +987,8 @@ mod tests {
         assert_eq!(entries.len(), 1);
 
         let content = std::fs::read_to_string(entries[0].path()).unwrap();
-        assert!(content.contains("subject: Test DKIM signed email from Gmail"));
-        assert!(content.contains("from: Test User <testuser@gmail.com>"));
+        assert!(content.contains("subject = \"Test DKIM signed email from Gmail\""));
+        assert!(content.contains("from = \"Test User <testuser@gmail.com>\""));
         assert!(content.contains("CAB1234567890abcdef@mail.gmail.com"));
     }
 

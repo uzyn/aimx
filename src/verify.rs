@@ -106,7 +106,7 @@ fn list_md_files(dir: &Path) -> Vec<String> {
 }
 
 fn print_verification_result(content: &str) {
-    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    let parts: Vec<&str> = content.splitn(3, "+++").collect();
     if parts.len() >= 3 {
         let body = parts[2].trim();
         if !body.is_empty() {
@@ -145,7 +145,7 @@ mod tests {
 
     #[test]
     fn print_verification_result_does_not_panic() {
-        let content = "---\nid: test\n---\nDKIM: pass\nSPF: pass\n";
+        let content = "+++\nid = \"test\"\n+++\nDKIM: pass\nSPF: pass\n";
         print_verification_result(content);
     }
 
@@ -166,14 +166,14 @@ mod tests {
 
     #[test]
     fn resolve_verify_address_uses_default() {
-        let config: Config = serde_yaml::from_str("domain: test.com\nmailboxes: {}\n").unwrap();
+        let config: Config = toml::from_str("domain = \"test.com\"\n[mailboxes]\n").unwrap();
         assert_eq!(resolve_verify_address(&config), "verify@aimx.email");
     }
 
     #[test]
     fn resolve_verify_address_uses_custom() {
-        let config: Config = serde_yaml::from_str(
-            "domain: test.com\nmailboxes: {}\nverify_address: verify@custom.example.com\n",
+        let config: Config = toml::from_str(
+            "domain = \"test.com\"\nverify_address = \"verify@custom.example.com\"\n[mailboxes]\n",
         )
         .unwrap();
         assert_eq!(resolve_verify_address(&config), "verify@custom.example.com");
@@ -184,10 +184,10 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         // Create config but no catchall directory
         let config_content = format!(
-            "domain: test.com\ndata_dir: {}\nmailboxes:\n  catchall:\n    address: \"*@test.com\"\n",
+            "domain = \"test.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@test.com\"\n",
             tmp.path().display()
         );
-        std::fs::write(tmp.path().join("config.yaml"), config_content).unwrap();
+        std::fs::write(tmp.path().join("config.toml"), config_content).unwrap();
 
         let result = run(Some(tmp.path()));
         assert!(result.is_err());
