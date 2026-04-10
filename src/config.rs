@@ -71,18 +71,18 @@ fn default_dkim_selector() -> String {
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path)?;
-        let config: Config = serde_yaml::from_str(&content)?;
+        let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
 
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let content = serde_yaml::to_string(self)?;
+        let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
     }
 
     pub fn config_path(data_dir: &Path) -> PathBuf {
-        data_dir.join("config.yaml")
+        data_dir.join("config.toml")
     }
 
     pub fn load_from_data_dir(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
@@ -111,28 +111,31 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn sample_yaml() -> &'static str {
+    fn sample_toml() -> &'static str {
         r#"
-domain: agent.example.com
-data_dir: /tmp/aimx-test
-mailboxes:
-  catchall:
-    address: "*@agent.example.com"
-  support:
-    address: support@agent.example.com
-    on_receive:
-      - type: cmd
-        command: 'echo "{from}" >> /tmp/log'
-        match:
-          from: "*@gmail.com"
-          subject: urgent
-          has_attachment: true
+domain = "agent.example.com"
+data_dir = "/tmp/aimx-test"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[mailboxes.support]
+address = "support@agent.example.com"
+
+[[mailboxes.support.on_receive]]
+type = "cmd"
+command = 'echo "{from}" >> /tmp/log'
+
+[mailboxes.support.on_receive.match]
+from = "*@gmail.com"
+subject = "urgent"
+has_attachment = true
 "#
     }
 
     #[test]
     fn parse_config() {
-        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let config: Config = toml::from_str(sample_toml()).unwrap();
         assert_eq!(config.domain, "agent.example.com");
         assert_eq!(config.data_dir, PathBuf::from("/tmp/aimx-test"));
         assert_eq!(config.mailboxes.len(), 2);
@@ -142,7 +145,7 @@ mailboxes:
 
     #[test]
     fn parse_on_receive_rules() {
-        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let config: Config = toml::from_str(sample_toml()).unwrap();
         let support = &config.mailboxes["support"];
         assert_eq!(support.on_receive.len(), 1);
         let rule = &support.on_receive[0];
@@ -156,15 +159,15 @@ mailboxes:
 
     #[test]
     fn default_data_dir() {
-        let yaml = "domain: test.com\nmailboxes: {}\n";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.data_dir, PathBuf::from("/var/lib/aimx"));
     }
 
     #[test]
     fn save_and_load_roundtrip() {
         let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.yaml");
+        let path = tmp.path().join("config.toml");
 
         let mut mailboxes = HashMap::new();
         mailboxes.insert(
@@ -193,29 +196,27 @@ mailboxes:
 
     #[test]
     fn resolve_mailbox_known() {
-        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let config: Config = toml::from_str(sample_toml()).unwrap();
         assert_eq!(config.resolve_mailbox("support"), "support");
     }
 
     #[test]
     fn resolve_mailbox_unknown_falls_to_catchall() {
-        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let config: Config = toml::from_str(sample_toml()).unwrap();
         assert_eq!(config.resolve_mailbox("unknown"), "catchall");
     }
 
     #[test]
     fn parse_trust_settings() {
-        let yaml = r#"
-domain: test.com
-mailboxes:
-  secure:
-    address: secure@test.com
-    trust: verified
-    trusted_senders:
-      - "*@company.com"
-      - "boss@gmail.com"
+        let toml_str = r#"
+domain = "test.com"
+
+[mailboxes.secure]
+address = "secure@test.com"
+trust = "verified"
+trusted_senders = ["*@company.com", "boss@gmail.com"]
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         let secure = &config.mailboxes["secure"];
         assert_eq!(secure.trust, "verified");
         assert_eq!(secure.trusted_senders.len(), 2);
@@ -225,13 +226,13 @@ mailboxes:
 
     #[test]
     fn default_trust_is_none() {
-        let yaml = r#"
-domain: test.com
-mailboxes:
-  catchall:
-    address: "*@test.com"
+        let toml_str = r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         let catchall = &config.mailboxes["catchall"];
         assert_eq!(catchall.trust, "none");
         assert!(catchall.trusted_senders.is_empty());
@@ -239,7 +240,7 @@ mailboxes:
 
     #[test]
     fn mailbox_dir() {
-        let config: Config = serde_yaml::from_str(sample_yaml()).unwrap();
+        let config: Config = toml::from_str(sample_toml()).unwrap();
         assert_eq!(
             config.mailbox_dir("support"),
             PathBuf::from("/tmp/aimx-test/support")
@@ -248,13 +249,14 @@ mailboxes:
 
     #[test]
     fn parse_probe_url_and_verify_address() {
-        let yaml = r#"
-domain: test.com
-mailboxes: {}
-probe_url: "https://probe.example.com/check"
-verify_address: "verify@custom.example.com"
+        let toml_str = r#"
+domain = "test.com"
+probe_url = "https://probe.example.com/check"
+verify_address = "verify@custom.example.com"
+
+[mailboxes]
 "#;
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(
             config.probe_url.as_deref(),
             Some("https://probe.example.com/check")
@@ -267,8 +269,8 @@ verify_address: "verify@custom.example.com"
 
     #[test]
     fn probe_url_and_verify_address_default_to_none() {
-        let yaml = "domain: test.com\nmailboxes: {}\n";
-        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.probe_url.is_none());
         assert!(config.verify_address.is_none());
     }

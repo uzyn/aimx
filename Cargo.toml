@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
-serde_yaml = "0.9"
+toml = "0.8"
 mail-parser = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }

@@ -90,7 +90,7 @@ fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
                 None => continue,
             };
 
-            let meta: EmailMetadata = match serde_yaml::from_str(&fm) {
+            let meta: EmailMetadata = match toml::from_str(&fm) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -150,7 +150,7 @@ fn is_unread(path: &Path) -> bool {
         None => return false,
     };
 
-    match serde_yaml::from_str::<EmailMetadata>(&frontmatter) {
+    match toml::from_str::<EmailMetadata>(&frontmatter) {
         Ok(meta) => !meta.read,
         Err(_) => false,
     }
@@ -158,12 +158,12 @@ fn is_unread(path: &Path) -> bool {
 
 fn extract_frontmatter(content: &str) -> Option<String> {
     let trimmed = content.trim_start();
-    if !trimmed.starts_with("---") {
+    if !trimmed.starts_with("+++") {
         return None;
     }
 
     let after_first = &trimmed[3..];
-    let end = after_first.find("---")?;
+    let end = after_first.find("+++")?;
     Some(after_first[..end].to_string())
 }
 
@@ -313,10 +313,10 @@ mod tests {
 
     #[test]
     fn extract_frontmatter_valid() {
-        let content = "---\nid: test\nread: false\n---\nBody here";
+        let content = "+++\nid = \"test\"\nread = false\n+++\nBody here";
         let fm = extract_frontmatter(content).unwrap();
-        assert!(fm.contains("id: test"));
-        assert!(fm.contains("read: false"));
+        assert!(fm.contains("id = \"test\""));
+        assert!(fm.contains("read = false"));
     }
 
     #[test]
@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn extract_frontmatter_no_end_marker() {
-        assert!(extract_frontmatter("---\nid: test\nno end").is_none());
+        assert!(extract_frontmatter("+++\nid = \"test\"\nno end").is_none());
     }
 
     #[test]
@@ -348,8 +348,8 @@ mod tests {
     fn count_messages_with_emails() {
         let tmp = tempfile::TempDir::new().unwrap();
 
-        let unread_content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
-        let read_content = "---\nid: \"002\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: true\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        let unread_content = "+++\nid = \"001\"\nmessage_id = \"<a@b>\"\nfrom = \"a@b\"\nto = \"c@d\"\nsubject = \"Test\"\ndate = \"2025-01-01\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\nBody";
+        let read_content = "+++\nid = \"002\"\nmessage_id = \"<a@b>\"\nfrom = \"a@b\"\nto = \"c@d\"\nsubject = \"Test\"\ndate = \"2025-01-01\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = true\ndkim = \"none\"\nspf = \"none\"\n+++\nBody";
 
         std::fs::write(tmp.path().join("2025-01-01-001.md"), unread_content).unwrap();
         std::fs::write(tmp.path().join("2025-01-01-002.md"), read_content).unwrap();
@@ -365,7 +365,7 @@ mod tests {
     fn is_unread_true() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("test.md");
-        let content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        let content = "+++\nid = \"001\"\nmessage_id = \"<a@b>\"\nfrom = \"a@b\"\nto = \"c@d\"\nsubject = \"Test\"\ndate = \"2025-01-01\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\nBody";
         std::fs::write(&path, content).unwrap();
         assert!(is_unread(&path));
     }
@@ -374,7 +374,7 @@ mod tests {
     fn is_unread_false() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("test.md");
-        let content = "---\nid: \"001\"\nmessage_id: \"<a@b>\"\nfrom: \"a@b\"\nto: \"c@d\"\nsubject: \"Test\"\ndate: \"2025-01-01\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: true\ndkim: \"none\"\nspf: \"none\"\n---\nBody";
+        let content = "+++\nid = \"001\"\nmessage_id = \"<a@b>\"\nfrom = \"a@b\"\nto = \"c@d\"\nsubject = \"Test\"\ndate = \"2025-01-01\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = true\ndkim = \"none\"\nspf = \"none\"\n+++\nBody";
         std::fs::write(&path, content).unwrap();
         assert!(!is_unread(&path));
     }
@@ -477,7 +477,7 @@ mod tests {
         let catchall = data_dir.join("catchall");
         std::fs::create_dir_all(&catchall).unwrap();
 
-        let email_content = "---\nid: \"2025-01-15-001\"\nmessage_id: \"<a@b>\"\nfrom: \"alice@example.com\"\nto: \"c@d\"\nsubject: \"Test email\"\ndate: \"2025-01-15T10:30:00Z\"\nin_reply_to: \"\"\nreferences: \"\"\nattachments: []\nmailbox: \"catchall\"\nread: false\ndkim: \"none\"\nspf: \"none\"\n---\nBody here";
+        let email_content = "+++\nid = \"2025-01-15-001\"\nmessage_id = \"<a@b>\"\nfrom = \"alice@example.com\"\nto = \"c@d\"\nsubject = \"Test email\"\ndate = \"2025-01-15T10:30:00Z\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\nBody here";
         std::fs::write(catchall.join("2025-01-15-001.md"), email_content).unwrap();
 
         let mut mailboxes = std::collections::HashMap::new();

@@ -430,12 +430,12 @@ pub fn list_emails(
 }
 
 pub fn parse_frontmatter(content: &str) -> Option<EmailMetadata> {
-    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    let parts: Vec<&str> = content.splitn(3, "+++").collect();
     if parts.len() < 3 {
         return None;
     }
-    let yaml_str = parts[1].trim();
-    serde_yaml::from_str(yaml_str).ok()
+    let toml_str = parts[1].trim();
+    toml::from_str(toml_str).ok()
 }
 
 pub fn filter_emails(
@@ -507,25 +507,25 @@ pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> 
     let content =
         std::fs::read_to_string(&filepath).map_err(|e| format!("Failed to read email: {e}"))?;
 
-    let parts: Vec<&str> = content.splitn(3, "---").collect();
+    let parts: Vec<&str> = content.splitn(3, "+++").collect();
     if parts.len() < 3 {
         return Err("Invalid email format.".to_string());
     }
 
-    let yaml_str = parts[1].trim();
+    let toml_str = parts[1].trim();
     let mut meta: EmailMetadata =
-        serde_yaml::from_str(yaml_str).map_err(|e| format!("Failed to parse frontmatter: {e}"))?;
+        toml::from_str(toml_str).map_err(|e| format!("Failed to parse frontmatter: {e}"))?;
 
     meta.read = read;
 
-    let yaml = serde_yaml::to_string(&meta)
+    let new_toml = toml::to_string_pretty(&meta)
         .map_err(|e| format!("Failed to serialize frontmatter: {e}"))?;
     let body = parts[2];
 
     let mut result = String::new();
-    result.push_str("---\n");
-    result.push_str(&yaml);
-    result.push_str("---");
+    result.push_str("+++\n");
+    result.push_str(&new_toml);
+    result.push_str("+++");
     result.push_str(body);
 
     std::fs::write(&filepath, result).map_err(|e| format!("Failed to write email: {e}"))?;
@@ -602,8 +602,8 @@ mod tests {
 
     fn create_test_email(dir: &std::path::Path, id: &str, meta: &EmailMetadata) {
         std::fs::create_dir_all(dir).unwrap();
-        let yaml = serde_yaml::to_string(meta).unwrap();
-        let content = format!("---\n{yaml}---\n\nThis is the body of email {id}.\n");
+        let toml_str = toml::to_string_pretty(meta).unwrap();
+        let content = format!("+++\n{toml_str}+++\n\nThis is the body of email {id}.\n");
         std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
     }
 
@@ -628,8 +628,8 @@ mod tests {
     #[test]
     fn parse_frontmatter_valid() {
         let meta = sample_meta("2025-06-01-001", "sender@example.com", "Hello", false);
-        let yaml = serde_yaml::to_string(&meta).unwrap();
-        let content = format!("---\n{yaml}---\n\nBody text.\n");
+        let toml_str = toml::to_string_pretty(&meta).unwrap();
+        let content = format!("+++\n{toml_str}+++\n\nBody text.\n");
 
         let parsed = parse_frontmatter(&content).unwrap();
         assert_eq!(parsed.id, "2025-06-01-001");
