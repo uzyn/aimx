@@ -994,7 +994,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
-## Sprint 10 — Verify Service Overhaul (Days 25–27.5) [NOT STARTED]
+## Sprint 10 — Verify Service Overhaul (Days 25–27.5) [IN PROGRESS]
 
 **Goal:** Simplify the verify service to a port probe with EHLO handshake and a port 25 listener — no email processing, no outbound email, no backscatter risk.
 
