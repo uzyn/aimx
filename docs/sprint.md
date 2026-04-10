@@ -939,7 +939,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
-## Sprint 9 — Migrate from YAML to TOML (Days 22–24.5) [IN PROGRESS]
+## Sprint 9 — Migrate from YAML to TOML (Days 22–24.5) [DONE]
 
 **Goal:** Replace `serde_yaml` (unmaintained) with `toml` for both configuration and email frontmatter, aligning with idiomatic Rust ecosystem conventions.
 
@@ -960,13 +960,13 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 - Update `aimx status` output that references config path
 
 **Acceptance criteria:**
-- [ ] `serde_yaml` removed from `Cargo.toml`; `toml` crate added
-- [ ] `Config::load()` reads `config.toml` using `toml::from_str`
-- [ ] `Config::save()` writes `config.toml` using `toml::to_string_pretty`
-- [ ] `aimx setup` generates `config.toml` (not `config.yaml`)
-- [ ] All references to `config.yaml` updated to `config.toml` in code, docs, and README
-- [ ] All config unit tests updated to TOML format and pass
-- [ ] Integration tests updated and pass
+- [x] `serde_yaml` removed from `Cargo.toml`; `toml` crate added
+- [x] `Config::load()` reads `config.toml` using `toml::from_str`
+- [x] `Config::save()` writes `config.toml` using `toml::to_string_pretty`
+- [x] `aimx setup` generates `config.toml` (not `config.yaml`)
+- [x] All references to `config.yaml` updated to `config.toml` in code, docs, and README
+- [x] All config unit tests updated to TOML format and pass
+- [x] Integration tests updated and pass
 
 ### S9.2 — Migrate Email Frontmatter from YAML to TOML
 
@@ -982,15 +982,15 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 - Update PRD/docs references to "YAML frontmatter" → "TOML frontmatter"
 
 **Acceptance criteria:**
-- [ ] Email frontmatter uses `+++` delimiters and TOML format
-- [ ] `ingest.rs` serializes `EmailMetadata` via `toml::to_string_pretty`
-- [ ] `mcp.rs` frontmatter parsing uses `toml::from_str`
-- [ ] `status.rs` frontmatter parsing uses `toml::from_str`
-- [ ] `verify.rs` frontmatter parsing uses `toml::from_str`
-- [ ] All `serde_yaml::Value`/`Mapping` test assertions migrated to `toml::Value`/`Table`
-- [ ] No remaining `serde_yaml` imports in the codebase
-- [ ] All unit and integration tests pass
-- [ ] `cargo clippy -- -D warnings` clean
+- [x] Email frontmatter uses `+++` delimiters and TOML format
+- [x] `ingest.rs` serializes `EmailMetadata` via `toml::to_string_pretty`
+- [x] `mcp.rs` frontmatter parsing uses `toml::from_str`
+- [x] `status.rs` frontmatter parsing uses `toml::from_str`
+- [x] `verify.rs` frontmatter parsing uses `toml::from_str`
+- [x] All `serde_yaml::Value`/`Mapping` test assertions migrated to `toml::Value`/`Table`
+- [x] No remaining `serde_yaml` imports in the codebase
+- [x] All unit and integration tests pass
+- [x] `cargo clippy -- -D warnings` clean
 
 ---
 
@@ -1008,7 +1008,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 | 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
 | 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Done |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Done |
-| 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | In Progress |
+| 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
 
 ## Deferred to v2
 
