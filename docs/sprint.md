@@ -994,7 +994,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
-## Sprint 10 — Verify Service Overhaul (Days 25–27.5) [IN PROGRESS]
+## Sprint 10 — Verify Service Overhaul (Days 25–27.5) [DONE]
 
 **Goal:** Simplify the verify service to a port probe with EHLO handshake and a port 25 listener — no email processing, no outbound email, no backscatter risk.
 
@@ -1007,12 +1007,12 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 **Technical context:** Delete `services/verify/src/echo.rs` entirely. Remove the `echo` subcommand handling from `main.rs` (lines 79–85). Remove `mail-parser` and `mail-auth` from `services/verify/Cargo.toml`. The `run_echo()` function, `parse_incoming()`, `compose_reply()`, `extract_auth_result()`, and all echo tests are deleted.
 
 **Acceptance criteria:**
-- [ ] `echo.rs` deleted
-- [ ] `echo` subcommand removed from `main.rs`
-- [ ] `mail-parser` and `mail-auth` removed from `Cargo.toml`
-- [ ] `cargo build` succeeds with no echo-related code
-- [ ] `cargo test` passes — all remaining tests still work
-- [ ] `cargo clippy -- -D warnings` clean
+- [x] `echo.rs` deleted
+- [x] `echo` subcommand removed from `main.rs`
+- [x] `mail-parser` and `mail-auth` removed from `Cargo.toml`
+- [x] `cargo build` succeeds with no echo-related code
+- [x] `cargo test` passes — all remaining tests still work
+- [x] `cargo clippy -- -D warnings` clean
 
 ### S10.2 — Add Port 25 Listener
 
@@ -1021,12 +1021,12 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 **Technical context:** Add a minimal SMTP-like listener using `tokio::net::TcpListener` on port 25 (configurable via `SMTP_BIND_ADDR` env var, default `0.0.0.0:25`). On connection: send a `220 check.aimx.email SMTP aimx-verify\r\n` banner, wait for any input (or timeout after 10 seconds), send `221 Bye\r\n`, and close. This is not a real SMTP server — it's just enough to accept connections and respond with a valid SMTP banner. Run this listener as a second `tokio::spawn` task alongside the existing Axum HTTP server.
 
 **Acceptance criteria:**
-- [ ] Service listens on port 25 (configurable via `SMTP_BIND_ADDR` env var)
-- [ ] On TCP connection: sends `220` banner, waits briefly, sends `221 Bye`, closes
-- [ ] Port 25 listener runs concurrently with HTTP server (both in same tokio runtime)
-- [ ] Connection timeout of 10 seconds prevents resource exhaustion from idle connections
-- [ ] Unit test: verify banner format starts with `220`
-- [ ] Integration test: connect to port 25 listener, receive banner, verify valid SMTP greeting
+- [x] Service listens on port 25 (configurable via `SMTP_BIND_ADDR` env var)
+- [x] On TCP connection: sends `220` banner, waits briefly, sends `221 Bye`, closes
+- [x] Port 25 listener runs concurrently with HTTP server (both in same tokio runtime)
+- [x] Connection timeout of 10 seconds prevents resource exhaustion from idle connections
+- [x] Unit test: verify banner format starts with `220`
+- [x] Integration test: connect to port 25 listener, receive banner, verify valid SMTP greeting
 
 ### S10.3 — Upgrade Probe to EHLO Handshake
 
@@ -1035,14 +1035,14 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 **Technical context:** Replace `check_port25()` in `main.rs` — currently a bare `TcpStream::connect` (line 64–74) — with an SMTP handshake function. The new function should: (1) TCP connect with 10s timeout, (2) read the `220` banner, (3) send `EHLO check.aimx.email\r\n`, (4) read the `250` response, (5) send `QUIT\r\n`, (6) close. If any step fails or times out, report `reachable: false`. The overall timeout for the EHLO sequence should be 45 seconds (matching the client-side expectation).
 
 **Acceptance criteria:**
-- [ ] Probe performs SMTP EHLO handshake instead of bare TCP connect
-- [ ] Banner read (`220`), EHLO (`250`), and QUIT sequence completed
-- [ ] Timeout of 45 seconds for the full EHLO handshake
-- [ ] `reachable: true` only if EHLO gets a `250` response
-- [ ] `reachable: false` if connection refused, banner missing, or EHLO rejected
-- [ ] Unit test: mock TCP stream with valid SMTP responses → `reachable: true`
-- [ ] Unit test: mock TCP stream with no banner → `reachable: false`
-- [ ] Unit test: mock TCP stream with non-250 EHLO response → `reachable: false`
+- [x] Probe performs SMTP EHLO handshake instead of bare TCP connect
+- [x] Banner read (`220`), EHLO (`250`), and QUIT sequence completed
+- [x] Timeout of 45 seconds for the full EHLO handshake
+- [x] `reachable: true` only if EHLO gets a `250` response
+- [x] `reachable: false` if connection refused, banner missing, or EHLO rejected
+- [x] Unit test: mock TCP stream with valid SMTP responses → `reachable: true`
+- [x] Unit test: mock TCP stream with no banner → `reachable: false`
+- [x] Unit test: mock TCP stream with non-250 EHLO response → `reachable: false`
 
 ### S10.4 — Remove `ip` Parameter from Probe
 
@@ -1051,16 +1051,16 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 **Technical context:** Remove the `ip` field from `ProbeRequest` and the `ip` query parameter from the `GET /probe` handler. Remove the `POST /probe` endpoint entirely. The probe should only use `ConnectInfo(addr).ip()` to get the caller's IP. Remove all tests for custom IP parameter and POST body.
 
 **Acceptance criteria:**
-- [ ] `GET /probe` uses caller's IP only — no `ip` query parameter
-- [ ] `POST /probe` endpoint removed
-- [ ] `ProbeRequest` struct removed or simplified
-- [ ] Tests updated: probe always uses caller IP
-- [ ] Unit test: probe response contains caller's IP
-- [ ] Old tests for custom `ip` parameter and POST body removed
+- [x] `GET /probe` uses caller's IP only — no `ip` query parameter
+- [x] `POST /probe` endpoint removed
+- [x] `ProbeRequest` struct removed or simplified
+- [x] Tests updated: probe always uses caller IP
+- [x] Unit test: probe response contains caller's IP
+- [x] Old tests for custom `ip` parameter and POST body removed
 
 ---
 
-## Sprint 11 — Setup Flow Rewrite + Client Cleanup (Days 28–30.5) [NOT STARTED]
+## Sprint 11 — Setup Flow Rewrite + Client Cleanup (Days 28–30.5) [IN PROGRESS]
 
 **Goal:** Rewrite the setup flow to check root, detect MTA conflicts, install OpenSMTPD before port checks, and simplify the verify client to port-check-only.
 
@@ -1166,8 +1166,8 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 | 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Done |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Done |
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
-| 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Not Started |
-| 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Not Started |
+| 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Done |
+| 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | In Progress |
 
 ## Deferred to v2
 
@@ -1215,9 +1215,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 5)** Implement timestamped backup for pre-aimx OpenSMTPD config to avoid overwriting on repeated setup runs — _Triaged into Sprint 5.5_
 - [x] **(Sprint 5.5)** Extract SPF domain-selection logic into standalone testable function instead of duplicating inline in tests — _Triaged into Sprint 8 (S8.3)_
 - [x] **(Sprint 6)** Fix GitHub URL in README.md and services/verify/README.md (currently wrong owner) — _Triaged into Sprint 8 (S8.6)_
-- [ ] **(Sprint 6)** Add IP validation on `/probe` endpoint to reject private/internal IPs (SSRF hardening)
-- [ ] **(Sprint 6)** Handle multiline (folded) Authentication-Results headers in `extract_auth_result`
-- [ ] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance)
+- [x] **(Sprint 6)** Add IP validation on `/probe` endpoint to reject private/internal IPs (SSRF hardening) — _Obsolete: `ip` parameter removed in Sprint 10 (S10.4)_
+- [x] **(Sprint 6)** Handle multiline (folded) Authentication-Results headers in `extract_auth_result` — _Obsolete: echo removed in Sprint 10 (S10.1)_
+- [x] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance) — _Obsolete: echo removed in Sprint 10 (S10.1)_
 - [x] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify` — _Triaged into Sprint 7 (S7.4)_
 - [ ] **(Sprint 8)** Add `ip6:` mechanism support to `spf_contains_ip()` for IPv6 server addresses
 - [ ] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces
