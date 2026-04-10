@@ -1,6 +1,6 @@
 # aimx-verify
 
-Verification service for [aimx](https://github.com/nicholasgasior/aimx). Provides two functions:
+Verification service for [aimx](https://github.com/uzyn/aimx). Provides two functions:
 
 1. **Port Probe** (`/probe`) - HTTP endpoint that connects back to a caller's IP on port 25 to verify inbound SMTP reachability.
 2. **Email Echo** (`echo` subcommand) - Receives email via stdin (MDA pipe), parses DKIM/SPF results from Authentication-Results headers, and sends an auto-reply with the verification status.
@@ -57,7 +57,11 @@ To self-host (replacing `check.aimx.email`):
 2. Point your domain's DNS to the server
 3. Configure a reverse proxy (nginx/caddy) for HTTPS
 4. Run with `BIND_ADDR=127.0.0.1:3025`
-5. In your aimx client config, point the probe URL to your service
+5. In your aimx `config.yaml`, set `probe_url` and `verify_address`:
+   ```yaml
+   probe_url: "https://verify.yourdomain.com/probe"
+   verify_address: "verify@yourdomain.com"
+   ```
 
 For the email echo, additionally:
 

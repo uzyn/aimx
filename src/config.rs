@@ -16,6 +16,12 @@ pub struct Config {
 
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_url: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_address: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -176,6 +182,8 @@ mailboxes:
             data_dir: tmp.path().to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
+            probe_url: None,
+            verify_address: None,
         };
 
         config.save(&path).unwrap();
@@ -236,5 +244,32 @@ mailboxes:
             config.mailbox_dir("support"),
             PathBuf::from("/tmp/aimx-test/support")
         );
+    }
+
+    #[test]
+    fn parse_probe_url_and_verify_address() {
+        let yaml = r#"
+domain: test.com
+mailboxes: {}
+probe_url: "https://probe.example.com/check"
+verify_address: "verify@custom.example.com"
+"#;
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.probe_url.as_deref(),
+            Some("https://probe.example.com/check")
+        );
+        assert_eq!(
+            config.verify_address.as_deref(),
+            Some("verify@custom.example.com")
+        );
+    }
+
+    #[test]
+    fn probe_url_and_verify_address_default_to_none() {
+        let yaml = "domain: test.com\nmailboxes: {}\n";
+        let config: Config = serde_yaml::from_str(yaml).unwrap();
+        assert!(config.probe_url.is_none());
+        assert!(config.verify_address.is_none());
     }
 }
