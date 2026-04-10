@@ -116,14 +116,10 @@ pub fn ingest_email(
 
     let attachments = extract_attachments(&message, &mailbox_dir)?;
 
-    let id = generate_file_id(&mailbox_dir);
-    let filename = format!("{id}.md");
-    let filepath = mailbox_dir.join(&filename);
-
     let (dkim_result, spf_result) = verify_auth(raw, rcpt);
 
-    let meta = EmailMetadata {
-        id: id.clone(),
+    let meta_template = EmailMetadata {
+        id: String::new(), // placeholder, set after atomic creation
         message_id,
         from,
         to,
@@ -138,8 +134,7 @@ pub fn ingest_email(
         spf: spf_result,
     };
 
-    let content = format_markdown(&meta, &body);
-    std::fs::write(&filepath, content)?;
+    let (_id, filepath, meta) = create_file_atomic(&mailbox_dir, &meta_template, &body)?;
 
     if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
         let ctx = TriggerContext {
@@ -404,17 +399,35 @@ fn deduplicate_filename(dir: &Path, filename: &str) -> String {
     unreachable!()
 }
 
-fn generate_file_id(mailbox_dir: &Path) -> String {
+fn create_file_atomic(
+    mailbox_dir: &Path,
+    meta_template: &EmailMetadata,
+    body: &str,
+) -> Result<(String, std::path::PathBuf, EmailMetadata), Box<dyn std::error::Error>> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut counter = 1u32;
 
     loop {
         let candidate = format!("{today}-{counter:03}");
         let path = mailbox_dir.join(format!("{candidate}.md"));
-        if !path.exists() {
-            return candidate;
+
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                let mut meta = meta_template.clone();
+                meta.id = candidate.clone();
+                let content = format_markdown(&meta, body);
+                file.write_all(content.as_bytes())?;
+                return Ok((candidate, path, meta));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                counter += 1;
+                continue;
+            }
+            Err(e) => return Err(e.into()),
         }
-        counter += 1;
     }
 }
 
@@ -1054,5 +1067,67 @@ mod tests {
             rcpt.split('@').nth(1).unwrap_or("")
         };
         assert_eq!(helo_domain, "recipient.com");
+    }
+
+    #[test]
+    fn atomic_file_creation_retries_on_collision() {
+        let tmp = TempDir::new().unwrap();
+        let mailbox_dir = tmp.path().join("alice");
+        std::fs::create_dir_all(&mailbox_dir).unwrap();
+
+        // Pre-create a file with today's date and counter 001
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let existing = mailbox_dir.join(format!("{today}-001.md"));
+        std::fs::write(&existing, "pre-existing file").unwrap();
+
+        let meta = EmailMetadata {
+            id: String::new(),
+            message_id: "<test@test.com>".to_string(),
+            from: "sender@test.com".to_string(),
+            to: "alice@test.com".to_string(),
+            subject: "Collision test".to_string(),
+            date: "2025-01-01T00:00:00Z".to_string(),
+            in_reply_to: "".to_string(),
+            references: "".to_string(),
+            attachments: vec![],
+            mailbox: "alice".to_string(),
+            read: false,
+            dkim: "none".to_string(),
+            spf: "none".to_string(),
+        };
+
+        let (id, _path, _meta) = create_file_atomic(&mailbox_dir, &meta, "body").unwrap();
+        assert_eq!(id, format!("{today}-002"));
+
+        // Pre-existing file should not be overwritten
+        let content = std::fs::read_to_string(&existing).unwrap();
+        assert_eq!(content, "pre-existing file");
+    }
+
+    #[test]
+    fn atomic_file_creation_two_rapid_calls_produce_different_ids() {
+        let tmp = TempDir::new().unwrap();
+        let mailbox_dir = tmp.path().join("alice");
+        std::fs::create_dir_all(&mailbox_dir).unwrap();
+
+        let meta = EmailMetadata {
+            id: String::new(),
+            message_id: "<test@test.com>".to_string(),
+            from: "sender@test.com".to_string(),
+            to: "alice@test.com".to_string(),
+            subject: "Rapid test".to_string(),
+            date: "2025-01-01T00:00:00Z".to_string(),
+            in_reply_to: "".to_string(),
+            references: "".to_string(),
+            attachments: vec![],
+            mailbox: "alice".to_string(),
+            read: false,
+            dkim: "none".to_string(),
+            spf: "none".to_string(),
+        };
+
+        let (id1, _, _) = create_file_atomic(&mailbox_dir, &meta, "body1").unwrap();
+        let (id2, _, _) = create_file_atomic(&mailbox_dir, &meta, "body2").unwrap();
+        assert_ne!(id1, id2);
     }
 }

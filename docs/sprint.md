@@ -631,7 +631,7 @@ aimx verify
 
 ---
 
-## Sprint 7 — Security Hardening + Critical Fixes (Days 16–18.5) [NOT STARTED]
+## Sprint 7 — Security Hardening + Critical Fixes (Days 16–18.5) [IN PROGRESS]
 
 **Goal:** Fix all critical and high-severity issues found in the post-v1 code review audit. These address security vulnerabilities, data loss risks, and PRD compliance gaps.
 
@@ -951,7 +951,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 | 5 | 10.5–12.5 | Setup Wizard | `aimx setup` — one-command setup with preflight + DNS | Done |
 | 5.5 | 12.5–13 | Non-blocking Cleanup | Serialization, resolver dedup, SPF fix, setup backup | Done |
 | 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
-| 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Not Started |
+| 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | In Progress |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Not Started |
 
 ## Deferred to v2

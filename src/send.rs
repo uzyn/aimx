@@ -54,10 +54,37 @@ fn escape_filename(name: &str) -> String {
         .replace('\n', " ")
 }
 
-fn write_common_headers(msg: &mut String, args: &SendArgs, date: &str, message_id: &str) {
-    msg.push_str(&format!("From: {}\r\n", args.from));
-    msg.push_str(&format!("To: {}\r\n", args.to));
-    msg.push_str(&format!("Subject: {}\r\n", args.subject));
+fn sanitize_header_value(value: &str) -> String {
+    value.replace(['\r', '\n'], "")
+}
+
+fn validate_header_value(name: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(format!(
+            "Header '{name}' contains CRLF characters — possible header injection"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn write_common_headers(
+    msg: &mut String,
+    args: &SendArgs,
+    date: &str,
+    message_id: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let from = sanitize_header_value(&args.from);
+    let to = sanitize_header_value(&args.to);
+    let subject = sanitize_header_value(&args.subject);
+
+    validate_header_value("From", &from)?;
+    validate_header_value("To", &to)?;
+    validate_header_value("Subject", &subject)?;
+
+    msg.push_str(&format!("From: {from}\r\n"));
+    msg.push_str(&format!("To: {to}\r\n"));
+    msg.push_str(&format!("Subject: {subject}\r\n"));
     msg.push_str(&format!("Date: {date}\r\n"));
     msg.push_str(&format!("Message-ID: {message_id}\r\n"));
 
@@ -72,18 +99,20 @@ fn write_common_headers(msg: &mut String, args: &SendArgs, date: &str, message_i
     }
 
     msg.push_str("MIME-Version: 1.0\r\n");
+    Ok(())
 }
 
 pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::error::Error>> {
     validate_attachments(&args.attachments)?;
 
-    let domain = args.from.split('@').nth(1).unwrap_or("localhost");
+    let sanitized_from = sanitize_header_value(&args.from);
+    let domain = sanitized_from.split('@').nth(1).unwrap_or("localhost");
     let message_id = format!("<{}@{domain}>", Uuid::new_v4());
     let date = Utc::now().to_rfc2822();
 
     if args.attachments.is_empty() {
         let mut msg = String::new();
-        write_common_headers(&mut msg, args, &date, &message_id);
+        write_common_headers(&mut msg, args, &date, &message_id)?;
         msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
         msg.push_str("\r\n");
         msg.push_str(&args.body);
@@ -97,7 +126,7 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
 
     let boundary = format!("aimx-{}", Uuid::new_v4().simple());
     let mut msg = String::new();
-    write_common_headers(&mut msg, args, &date, &message_id);
+    write_common_headers(&mut msg, args, &date, &message_id)?;
     msg.push_str(&format!(
         "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
     ));
@@ -201,20 +230,19 @@ pub fn run(
     let transport = SendmailTransport;
 
     let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir).ok(),
-        None => Config::load_default().ok(),
+        Some(dir) => Config::load_from_data_dir(dir)
+            .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
+        None => Config::load_default()
+            .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
     };
-    let private_key = config
-        .as_ref()
-        .and_then(|c| dkim::load_private_key(&c.data_dir).ok());
+    let private_key = dkim::load_private_key(&config.data_dir)
+        .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))?;
 
-    let dkim_info = match (&config, &private_key) {
-        (Some(c), Some(k)) => Some((k, c.domain.as_str(), c.dkim_selector.as_str())),
-        _ => {
-            eprintln!("Warning: DKIM signing disabled (no key found)");
-            None
-        }
-    };
+    let dkim_info = Some((
+        &private_key,
+        config.domain.as_str(),
+        config.dkim_selector.as_str(),
+    ));
 
     let message_id = send_with_transport(&args, &transport, dkim_info)?;
     println!("Email sent successfully. Message-ID: {message_id}");
@@ -605,6 +633,122 @@ mod tests {
     }
 
     #[test]
+    fn subject_crlf_injection_produces_no_extra_headers() {
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "Hello\r\nBcc: victim@evil.com\r\n\r\nInjected body".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        // After sanitization, the subject is flattened to a single line.
+        // The key security property: no injected Bcc header line exists.
+        for line in text.split("\r\n") {
+            assert!(
+                !line.starts_with("Bcc:"),
+                "CRLF injection created a Bcc header line"
+            );
+        }
+        // Subject should not contain any newlines
+        let subject_line = text
+            .split("\r\n")
+            .find(|l| l.starts_with("Subject:"))
+            .unwrap();
+        assert!(!subject_line.contains('\n'));
+        assert!(!subject_line.contains('\r'));
+    }
+
+    #[test]
+    fn from_crlf_injection_produces_no_extra_headers() {
+        let args = SendArgs {
+            from: "a@b.com\r\nBcc: victim@evil.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "Test".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        for line in text.split("\r\n") {
+            assert!(
+                !line.starts_with("Bcc:"),
+                "CRLF injection created a Bcc header line"
+            );
+        }
+    }
+
+    #[test]
+    fn to_crlf_injection_produces_no_extra_headers() {
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com\r\nBcc: victim@evil.com".to_string(),
+            subject: "Test".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        for line in text.split("\r\n") {
+            assert!(
+                !line.starts_with("Bcc:"),
+                "CRLF injection created a Bcc header line"
+            );
+        }
+    }
+
+    #[test]
+    fn bare_newline_injection_produces_no_extra_headers() {
+        let args = SendArgs {
+            from: "a@b.com".to_string(),
+            to: "c@d.com".to_string(),
+            subject: "Hello\nBcc: victim@evil.com".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        for line in text.split("\r\n") {
+            assert!(
+                !line.starts_with("Bcc:"),
+                "CRLF injection created a Bcc header line"
+            );
+        }
+    }
+
+    #[test]
+    fn normal_headers_pass_unchanged() {
+        let args = SendArgs {
+            from: "sender@example.com".to_string(),
+            to: "recipient@example.com".to_string(),
+            subject: "Normal Subject Line".to_string(),
+            body: "body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        assert!(text.contains("From: sender@example.com\r\n"));
+        assert!(text.contains("To: recipient@example.com\r\n"));
+        assert!(text.contains("Subject: Normal Subject Line\r\n"));
+    }
+
+    #[test]
     fn dkim_selector_config_used() {
         let tmp = tempfile::TempDir::new().unwrap();
         crate::dkim::generate_keypair(tmp.path(), false).unwrap();
@@ -628,5 +772,54 @@ mod tests {
         let messages = sent.lock().unwrap();
         let text = String::from_utf8(messages[0].clone()).unwrap();
         assert!(text.contains("s=myselector"));
+    }
+
+    #[test]
+    fn run_with_missing_dkim_key_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Create a valid config but no DKIM key
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        let config = crate::config::Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+        };
+        config
+            .save(&crate::config::Config::config_path(tmp.path()))
+            .unwrap();
+
+        let args = test_args();
+        let result = run(args, Some(tmp.path()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("DKIM") || err.contains("private key"),
+            "Error should mention DKIM key: {err}"
+        );
+    }
+
+    #[test]
+    fn run_with_missing_config_returns_error() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // No config file exists
+
+        let args = test_args();
+        let result = run(args, Some(tmp.path()));
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("config") || err.contains("DKIM"),
+            "Error should mention config loading: {err}"
+        );
     }
 }
