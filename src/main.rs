@@ -39,20 +39,18 @@ fn main() {
             let sys = setup::RealSystemOps;
             let probe_url = load_config(cli.data_dir.as_deref())
                 .ok()
-                .and_then(|c| c.probe_url);
-            let net = setup::RealNetworkOps {
-                probe_url: probe_url.unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string()),
-            };
+                .and_then(|c| c.probe_url)
+                .unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string());
+            let net = setup::RealNetworkOps::from_probe_url(probe_url);
             setup::run_setup(&domain, cli.data_dir.as_deref(), &sys, &net)
         }
         Command::Status => status::run(cli.data_dir.as_deref()),
         Command::Preflight => {
             let probe_url = load_config(cli.data_dir.as_deref())
                 .ok()
-                .and_then(|c| c.probe_url);
-            let net = setup::RealNetworkOps {
-                probe_url: probe_url.unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string()),
-            };
+                .and_then(|c| c.probe_url)
+                .unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string());
+            let net = setup::RealNetworkOps::from_probe_url(probe_url);
             setup::run_preflight_command(&net)
         }
         Command::Verify => verify::run(cli.data_dir.as_deref()),

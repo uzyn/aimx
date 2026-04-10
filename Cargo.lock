@@ -51,6 +51,7 @@ dependencies = [
  "clap",
  "glob-match",
  "html2text",
+ "libc",
  "mail-auth",
  "mail-parser",
  "mime_guess",
