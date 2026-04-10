@@ -74,13 +74,13 @@ fn write_common_headers(
     date: &str,
     message_id: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    validate_header_value("From", &args.from)?;
+    validate_header_value("To", &args.to)?;
+    validate_header_value("Subject", &args.subject)?;
+
     let from = sanitize_header_value(&args.from);
     let to = sanitize_header_value(&args.to);
     let subject = sanitize_header_value(&args.subject);
-
-    validate_header_value("From", &from)?;
-    validate_header_value("To", &to)?;
-    validate_header_value("Subject", &subject)?;
 
     msg.push_str(&format!("From: {from}\r\n"));
     msg.push_str(&format!("To: {to}\r\n"));
@@ -89,10 +89,10 @@ fn write_common_headers(
     msg.push_str(&format!("Message-ID: {message_id}\r\n"));
 
     if let Some(ref reply_to) = args.reply_to {
-        let reply_id = normalize_message_id(reply_to);
+        let reply_id = normalize_message_id(&sanitize_header_value(reply_to));
         msg.push_str(&format!("In-Reply-To: {reply_id}\r\n"));
         let refs = match &args.references {
-            Some(r) if !r.trim().is_empty() => r.clone(),
+            Some(r) if !r.trim().is_empty() => sanitize_header_value(r),
             _ => reply_id.clone(),
         };
         msg.push_str(&format!("References: {refs}\r\n"));
@@ -633,7 +633,7 @@ mod tests {
     }
 
     #[test]
-    fn subject_crlf_injection_produces_no_extra_headers() {
+    fn subject_crlf_injection_returns_error() {
         let args = SendArgs {
             from: "a@b.com".to_string(),
             to: "c@d.com".to_string(),
@@ -644,27 +644,17 @@ mod tests {
             attachments: vec![],
         };
 
-        let result = compose_message(&args).unwrap();
-        let text = String::from_utf8(result.message).unwrap();
-        // After sanitization, the subject is flattened to a single line.
-        // The key security property: no injected Bcc header line exists.
-        for line in text.split("\r\n") {
-            assert!(
-                !line.starts_with("Bcc:"),
-                "CRLF injection created a Bcc header line"
-            );
-        }
-        // Subject should not contain any newlines
-        let subject_line = text
-            .split("\r\n")
-            .find(|l| l.starts_with("Subject:"))
-            .unwrap();
-        assert!(!subject_line.contains('\n'));
-        assert!(!subject_line.contains('\r'));
+        let result = compose_message(&args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Subject") && err.contains("CRLF"),
+            "Error should mention Subject and CRLF: {err}"
+        );
     }
 
     #[test]
-    fn from_crlf_injection_produces_no_extra_headers() {
+    fn from_crlf_injection_returns_error() {
         let args = SendArgs {
             from: "a@b.com\r\nBcc: victim@evil.com".to_string(),
             to: "c@d.com".to_string(),
@@ -675,18 +665,17 @@ mod tests {
             attachments: vec![],
         };
 
-        let result = compose_message(&args).unwrap();
-        let text = String::from_utf8(result.message).unwrap();
-        for line in text.split("\r\n") {
-            assert!(
-                !line.starts_with("Bcc:"),
-                "CRLF injection created a Bcc header line"
-            );
-        }
+        let result = compose_message(&args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("From") && err.contains("CRLF"),
+            "Error should mention From and CRLF: {err}"
+        );
     }
 
     #[test]
-    fn to_crlf_injection_produces_no_extra_headers() {
+    fn to_crlf_injection_returns_error() {
         let args = SendArgs {
             from: "a@b.com".to_string(),
             to: "c@d.com\r\nBcc: victim@evil.com".to_string(),
@@ -697,18 +686,17 @@ mod tests {
             attachments: vec![],
         };
 
-        let result = compose_message(&args).unwrap();
-        let text = String::from_utf8(result.message).unwrap();
-        for line in text.split("\r\n") {
-            assert!(
-                !line.starts_with("Bcc:"),
-                "CRLF injection created a Bcc header line"
-            );
-        }
+        let result = compose_message(&args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("To") && err.contains("CRLF"),
+            "Error should mention To and CRLF: {err}"
+        );
     }
 
     #[test]
-    fn bare_newline_injection_produces_no_extra_headers() {
+    fn bare_newline_injection_returns_error() {
         let args = SendArgs {
             from: "a@b.com".to_string(),
             to: "c@d.com".to_string(),
@@ -719,12 +707,51 @@ mod tests {
             attachments: vec![],
         };
 
+        let result = compose_message(&args);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Subject") && err.contains("CRLF"),
+            "Error should mention Subject and CRLF: {err}"
+        );
+    }
+
+    #[test]
+    fn reply_to_crlf_injection_sanitized() {
+        let mut args = test_args();
+        args.reply_to = Some("<orig@example.com>\r\nBcc: victim@evil.com".to_string());
+
         let result = compose_message(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
         for line in text.split("\r\n") {
             assert!(
                 !line.starts_with("Bcc:"),
-                "CRLF injection created a Bcc header line"
+                "CRLF injection in In-Reply-To created a Bcc header"
+            );
+        }
+        // After sanitization, CRLF is stripped; normalize may re-wrap but
+        // the key property is no header injection occurs.
+        assert!(text.contains("In-Reply-To:"));
+        let in_reply_line = text
+            .split("\r\n")
+            .find(|l| l.starts_with("In-Reply-To:"))
+            .unwrap();
+        assert!(!in_reply_line.contains('\n'));
+        assert!(!in_reply_line.contains('\r'));
+    }
+
+    #[test]
+    fn references_crlf_injection_sanitized() {
+        let mut args = test_args();
+        args.reply_to = Some("<orig@example.com>".to_string());
+        args.references = Some("<first@example.com>\r\nBcc: victim@evil.com".to_string());
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+        for line in text.split("\r\n") {
+            assert!(
+                !line.starts_with("Bcc:"),
+                "CRLF injection in References created a Bcc header"
             );
         }
     }

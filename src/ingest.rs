@@ -410,7 +410,17 @@ fn create_file_atomic(
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let mut counter = 1u32;
 
+    const MAX_COUNTER: u32 = 999_999;
+
     loop {
+        if counter > MAX_COUNTER {
+            return Err(format!(
+                "Exhausted {MAX_COUNTER} file ID candidates for {today} in {}",
+                mailbox_dir.display()
+            )
+            .into());
+        }
+
         let candidate = format!("{today}-{counter:03}");
         let path = mailbox_dir.join(format!("{candidate}.md"));
 

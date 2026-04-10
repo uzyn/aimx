@@ -1542,14 +1542,18 @@ mod tests {
 
     #[test]
     fn setup_verify_step_available() {
-        // Verify that run_setup_with_verify exists and accepts a VerifyRunner
-        // This test verifies the function signature and that the verify runner
-        // is properly integrated into the setup flow.
+        // Verify that run_setup_with_verify accepts a VerifyRunner trait object.
+        // We can't fully test it here because it reads stdin, but this
+        // compile-time check confirms the trait integration is wired up.
         let runner = MockVerifyRunner::new(true);
-        assert!(!runner.was_called());
-        // We can't fully test run_setup_with_verify here because it reads stdin,
-        // but we confirm the trait integration compiles and the mock works.
-        let _ = runner.run_verify(None);
-        assert!(runner.was_called());
+        let _: &dyn VerifyRunner = &runner;
+        let _fn_ptr: fn(
+            &str,
+            Option<&std::path::Path>,
+            &dyn SystemOps,
+            &dyn NetworkOps,
+            &dyn VerifyRunner,
+        ) -> Result<(), Box<dyn std::error::Error>> = run_setup_with_verify;
+        let _ = _fn_ptr;
     }
 }
