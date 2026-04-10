@@ -81,7 +81,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.2 Email Delivery (`aimx ingest <rcpt>`)
 - FR-11: Accept raw `.eml` from OpenSMTPD via stdin.
 - FR-12: Parse MIME message: extract headers, body (prefer text/plain, fall back to text/html→plaintext), and attachments.
-- FR-13: Generate Markdown file with YAML frontmatter (id, message_id, from, to, subject, date, in_reply_to, references, attachments list, mailbox, read). Set `read: false` on ingest.
+- FR-13: Generate Markdown file with TOML frontmatter (id, message_id, from, to, subject, date, in_reply_to, references, attachments list, mailbox, read). Set `read: false` on ingest.
 - FR-14: Extract attachments to `attachments/` subdirectory within the mailbox folder.
 - FR-15: Route to correct mailbox directory based on RCPT TO local part. Unrecognized addresses go to `catchall`.
 - FR-16: Execute matching channel rules after saving. Trigger failures are logged but do not block delivery.
@@ -100,12 +100,12 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-25: Implement tools: `email_mark_read`, `email_mark_unread`.
 
 ### 6.5 Mailbox Management
-- FR-26: Create mailbox: create directory under `/var/lib/aimx/`, register address in `config.yaml`. No mail server restart required.
+- FR-26: Create mailbox: create directory under `/var/lib/aimx/`, register address in `config.toml`. No mail server restart required.
 - FR-27: List mailboxes with message counts.
 - FR-28: Delete mailbox with confirmation.
 
 ### 6.6 Channel Manager
-- FR-29: Read trigger rules from `config.yaml` per mailbox.
+- FR-29: Read trigger rules from `config.toml` per mailbox.
 - FR-30: Support `cmd` trigger type: execute shell command with template variables (`{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`).
 - FR-31: Support optional match filters: `from` (glob), `subject` (substring), `has_attachment` (bool). All conditions AND.
 - FR-32: Execute triggers synchronously during delivery. Log failures, never block delivery.
@@ -140,13 +140,13 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - **NFR-4: Linux only.** Target Debian/Ubuntu initially. Other distributions are best-effort.
 - **NFR-5: Minimal resource usage.** aimx ingest must complete in < 1 second for typical emails (< 10MB).
 - **NFR-6: Secure defaults.** Self-signed TLS cert for STARTTLS (generated during setup, no Let's Encrypt needed), DKIM signing on all outbound, DMARC reject policy, SPF strict.
-- **NFR-7: Filesystem-based storage.** No database. Mailboxes are directories. Configuration is YAML.
+- **NFR-7: Filesystem-based storage.** No database. Mailboxes are directories. Configuration is TOML.
 
 ## 8. Technical Considerations
 
 ### Language and Stack
 - **Rust** — single binary, no runtime, strong ecosystem for email/crypto.
-- Key crates: `mail-parser` (MIME parsing), `mail-auth` (DKIM signing), `rmcp` (MCP SDK), `clap` (CLI), `serde`+`serde_yaml` (config).
+- Key crates: `mail-parser` (MIME parsing), `mail-auth` (DKIM signing), `rmcp` (MCP SDK), `clap` (CLI), `serde`+`toml` (config).
 
 ### System Dependencies
 - **OpenSMTPD** — SMTP transport. Installed via `apt`. Configured by `aimx setup` to pipe all incoming mail to `aimx ingest`.
@@ -155,7 +155,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### Storage Layout
 ```
 /var/lib/aimx/
-├── config.yaml
+├── config.toml
 ├── dkim/
 │   ├── private.key
 │   └── public.key
@@ -209,7 +209,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | M1: Core Pipeline | Receive and store email as Markdown | `aimx ingest`, EML→MD parser, attachment extraction, mailbox routing |
 | M2: Outbound | Send email with DKIM | `aimx send`, DKIM key generation, DKIM signing, RFC 5322 composition |
 | M3: MCP Server | Agent access via MCP | `aimx mcp` with all email/mailbox tools, stdio transport |
-| M4: Channel Manager | Trigger actions on incoming mail | `cmd` triggers, match filters, config.yaml rules |
+| M4: Channel Manager | Trigger actions on incoming mail | `cmd` triggers, match filters, config.toml rules |
 | M5: Inbound Trust | Gate triggers on sender verification | DKIM/SPF verification during ingest, per-mailbox trust policy, trusted_senders allowlist |
 | M6: Setup Wizard | One-command setup | `aimx setup`, preflight checks, OpenSMTPD config, DNS guidance, verification |
 | M7: Verify Service | Hosted verification endpoint | `check.aimx.email` probe, `verify@aimx.email` endpoint, self-hostable |
@@ -232,5 +232,5 @@ All routes expose sensitive communications to third parties, which is absurd whe
 2. **Email size limits** — Use OpenSMTPD defaults. No separate aimx limit. Trusted environment.
 3. **Mailbox deletion** — Deletes the directory and all emails. No archiving.
 4. **Config hot-reload** — Not needed. `aimx ingest` is short-lived and reads config on each invocation.
-5. **Read/unread tracking** — `read: false` field in YAML frontmatter, set on ingest. `email_mark_read` updates to `read: true`. Self-contained, grepable, no extra files.
+5. **Read/unread tracking** — `read = false` field in TOML frontmatter, set on ingest. `email_mark_read` updates to `read = true`. Self-contained, grepable, no extra files.
 

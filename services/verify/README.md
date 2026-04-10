@@ -57,10 +57,10 @@ To self-host (replacing `check.aimx.email`):
 2. Point your domain's DNS to the server
 3. Configure a reverse proxy (nginx/caddy) for HTTPS
 4. Run with `BIND_ADDR=127.0.0.1:3025`
-5. In your aimx `config.yaml`, set `probe_url` and `verify_address`:
-   ```yaml
-   probe_url: "https://verify.yourdomain.com/probe"
-   verify_address: "verify@yourdomain.com"
+5. In your aimx `config.toml`, set `probe_url` and `verify_address`:
+   ```toml
+   probe_url = "https://verify.yourdomain.com/probe"
+   verify_address = "verify@yourdomain.com"
    ```
 
 For the email echo, additionally:

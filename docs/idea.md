@@ -63,7 +63,7 @@ Storage:
 
 - **No daemon.** OpenSMTPD is the only long-running process. It calls `aimx ingest` on each incoming message. The MCP server runs in stdio mode, launched on-demand by Claude Code. Nothing else needs to run.
 - **No IMAP/POP3/JMAP.** No mail clients will connect to this. Agents read `.md` files via MCP or filesystem. The mail server's only job is SMTP transport.
-- **`.md` first.** Emails are stored as Markdown with YAML frontmatter, not raw `.eml`. Agents can `cat` an email and understand it immediately. Attachments are extracted to a sibling directory.
+- **`.md` first.** Emails are stored as Markdown with TOML frontmatter, not raw `.eml`. Agents can `cat` an email and understand it immediately. Attachments are extracted to a sibling directory.
 - **DKIM signing in Rust.** Rather than depending on `opensmtpd-filter-dkimsign`, `aimx send` handles DKIM signing natively before handing the message to OpenSMTPD for delivery. Keeps the dependency tree minimal.
 - **Mailboxes are directories.** Creating a mailbox = creating a folder + registering an address. No OS users, no passwords, no database.
 
@@ -158,26 +158,27 @@ Also potentially link it to the website if user wants with a referral code.
 
 ## Email Format (.md)
 
-Incoming `.eml` is parsed and stored as Markdown with YAML frontmatter:
+Incoming `.eml` is parsed and stored as Markdown with TOML frontmatter:
 
 ```markdown
----
-id: "msg-2026-04-09-001"
-message_id: "<abc123@gmail.com>"
-from: "alice@example.com"
-to: "schedule@agent.mydomain.com"
-subject: "Meeting next Thursday"
-date: "2026-04-09T14:32:00+08:00"
-in_reply_to: null
-references: []
-attachments:
-  - filename: "agenda.pdf"
-    content_type: "application/pdf"
-    size: 45230
-    path: "attachments/agenda.pdf"
-mailbox: "schedule"
-read: false
----
++++
+id = "msg-2026-04-09-001"
+message_id = "<abc123@gmail.com>"
+from = "alice@example.com"
+to = "schedule@agent.mydomain.com"
+subject = "Meeting next Thursday"
+date = "2026-04-09T14:32:00+08:00"
+in_reply_to = ""
+references = ""
+mailbox = "schedule"
+read = false
+
+[[attachments]]
+filename = "agenda.pdf"
+content_type = "application/pdf"
+size = 45230
+path = "attachments/agenda.pdf"
++++
 
 Hi, can we schedule a meeting next Thursday at 2pm?
 I've attached the agenda.
@@ -229,7 +230,7 @@ email_mark_unread(mailbox: string, id: string)
 
 ```
 /var/lib/aimx/
-├── config.yaml               # mailbox definitions + channel rules
+├── config.toml               # mailbox definitions + channel rules
 ├── schedule/
 │   ├── 2026-04-09-001.md
 │   ├── 2026-04-09-002.md
@@ -257,40 +258,47 @@ match from any for domain "agent.mydomain.com" action "deliver"
 
 ## Channel Manager
 
-The channel manager triggers actions when emails arrive at specific mailboxes. Rules are defined in `config.yaml`.
+The channel manager triggers actions when emails arrive at specific mailboxes. Rules are defined in `config.toml`.
 
 ### Configuration
 
-```yaml
-domain: agent.mydomain.com
+```toml
+domain = "agent.mydomain.com"
 
-mailboxes:
-  schedule:
-    address: schedule@agent.mydomain.com
-    on_receive:
-      - type: cmd
-        command: 'claude -p "Handle this scheduling request: $(cat {filepath})"'
-  accounting:
-    address: accounting@agent.mydomain.com
-    on_receive:
-      - type: cmd
-        command: 'claude -p "Process this invoice: $(cat {filepath})"'
-        match:
-          has_attachment: true
-      - type: cmd
-        command: 'claude -p "Handle this accounting email: $(cat {filepath})"'
+[mailboxes.schedule]
+address = "schedule@agent.mydomain.com"
 
-  family:
-    address: family@agent.mydomain.com
-    on_receive:
-      - type: cmd
-        command: 'curl -X POST http://localhost:3000/api/family-inbox -d @{filepath}'
+[[mailboxes.schedule.on_receive]]
+type = "cmd"
+command = 'claude -p "Handle this scheduling request: $(cat {filepath})"'
 
-  catchall:
-    address: "*@agent.mydomain.com"
-    on_receive:
-      - type: cmd
-        command: 'ntfy pub agent-mail "New email: {subject} from {from}"'
+[mailboxes.accounting]
+address = "accounting@agent.mydomain.com"
+
+[[mailboxes.accounting.on_receive]]
+type = "cmd"
+command = 'claude -p "Process this invoice: $(cat {filepath})"'
+
+[mailboxes.accounting.on_receive.match]
+has_attachment = true
+
+[[mailboxes.accounting.on_receive]]
+type = "cmd"
+command = 'claude -p "Handle this accounting email: $(cat {filepath})"'
+
+[mailboxes.family]
+address = "family@agent.mydomain.com"
+
+[[mailboxes.family.on_receive]]
+type = "cmd"
+command = 'curl -X POST http://localhost:3000/api/family-inbox -d @{filepath}'
+
+[mailboxes.catchall]
+address = "*@agent.mydomain.com"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = 'ntfy pub agent-mail "New email: {subject} from {from}"'
 ```
 
 ### Supported trigger types
@@ -301,16 +309,15 @@ mailboxes:
 
 Channel triggers execute shell commands on incoming mail. Without verification, anyone can email your agent and trigger actions. Trust policies gate trigger execution on sender authenticity.
 
-During `aimx ingest`, verify the sender's DKIM signature and SPF record using the `mail-auth` crate (same library used for outbound signing). Store the result in frontmatter (`dkim: pass|fail|none`, `spf: pass|fail|none`).
+During `aimx ingest`, verify the sender's DKIM signature and SPF record using the `mail-auth` crate (same library used for outbound signing). Store the result in frontmatter (`dkim = "pass|fail|none"`, `spf = "pass|fail|none"`).
 
-Per-mailbox trust policy in `config.yaml`:
+Per-mailbox trust policy in `config.toml`:
 
-```yaml
-schedule:
-  trust: verified          # only trigger on DKIM-pass emails
-  trusted_senders:         # optional allowlist (always trigger, skip verification)
-    - "*@company.com"
-    - "alice@gmail.com"
+```toml
+[mailboxes.schedule]
+trust = "verified"          # only trigger on DKIM-pass emails
+# optional allowlist (always trigger, skip verification)
+trusted_senders = ["*@company.com", "alice@gmail.com"]
 ```
 
 Trust modes:
@@ -323,11 +330,11 @@ Mail is always stored regardless of trust status. Trust only gates trigger execu
 
 Triggers can be conditionally filtered:
 
-```yaml
-match:
-  from: "*@company.com"
-  subject: "invoice"
-  has_attachment: true
+```toml
+[mailboxes.accounting.on_receive.match]
+from = "*@company.com"
+subject = "invoice"
+has_attachment = true
 ```
 
 All conditions must match (AND logic). If no `match` is specified, the trigger fires on every email to that mailbox.

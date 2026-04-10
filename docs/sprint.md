@@ -939,7 +939,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
-## Sprint 9 — Migrate from YAML to TOML (Days 22–24.5) [NOT STARTED]
+## Sprint 9 — Migrate from YAML to TOML (Days 22–24.5) [IN PROGRESS]
 
 **Goal:** Replace `serde_yaml` (unmaintained) with `toml` for both configuration and email frontmatter, aligning with idiomatic Rust ecosystem conventions.
 
@@ -1008,7 +1008,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 | 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
 | 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Done |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Done |
-| 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Not Started |
+| 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | In Progress |
 
 ## Deferred to v2
 
