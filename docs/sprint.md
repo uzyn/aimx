@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 9 (6 original + 2 post-audit hardening + 1 YAML→TOML migration)
-**Timeline:** ~21.5 calendar days
-**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit.
+**Total sprints:** 11 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul)
+**Timeline:** ~30.5 calendar days
+**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check).
 
 ---
 
@@ -994,6 +994,163 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
+## Sprint 10 — Verify Service Overhaul (Days 25–27.5) [NOT STARTED]
+
+**Goal:** Simplify the verify service to a port probe with EHLO handshake and a port 25 listener — no email processing, no outbound email, no backscatter risk.
+
+**Dependencies:** Sprint 9 (merged)
+
+### S10.1 — Remove Email Echo + Strip Dependencies
+
+*As a verify service operator, I want the service to never send email so that there's no backscatter risk and no outbound MTA dependency.*
+
+**Technical context:** Delete `services/verify/src/echo.rs` entirely. Remove the `echo` subcommand handling from `main.rs` (lines 79–85). Remove `mail-parser` and `mail-auth` from `services/verify/Cargo.toml`. The `run_echo()` function, `parse_incoming()`, `compose_reply()`, `extract_auth_result()`, and all echo tests are deleted.
+
+**Acceptance criteria:**
+- [ ] `echo.rs` deleted
+- [ ] `echo` subcommand removed from `main.rs`
+- [ ] `mail-parser` and `mail-auth` removed from `Cargo.toml`
+- [ ] `cargo build` succeeds with no echo-related code
+- [ ] `cargo test` passes — all remaining tests still work
+- [ ] `cargo clippy -- -D warnings` clean
+
+### S10.2 — Add Port 25 Listener
+
+*As an aimx client checking outbound port 25, I want the verify service to accept TCP connections on port 25 so that connecting to it proves my outbound port 25 is working.*
+
+**Technical context:** Add a minimal SMTP-like listener using `tokio::net::TcpListener` on port 25 (configurable via `SMTP_BIND_ADDR` env var, default `0.0.0.0:25`). On connection: send a `220 check.aimx.email SMTP aimx-verify\r\n` banner, wait for any input (or timeout after 10 seconds), send `221 Bye\r\n`, and close. This is not a real SMTP server — it's just enough to accept connections and respond with a valid SMTP banner. Run this listener as a second `tokio::spawn` task alongside the existing Axum HTTP server.
+
+**Acceptance criteria:**
+- [ ] Service listens on port 25 (configurable via `SMTP_BIND_ADDR` env var)
+- [ ] On TCP connection: sends `220` banner, waits briefly, sends `221 Bye`, closes
+- [ ] Port 25 listener runs concurrently with HTTP server (both in same tokio runtime)
+- [ ] Connection timeout of 10 seconds prevents resource exhaustion from idle connections
+- [ ] Unit test: verify banner format starts with `220`
+- [ ] Integration test: connect to port 25 listener, receive banner, verify valid SMTP greeting
+
+### S10.3 — Upgrade Probe to EHLO Handshake
+
+*As an aimx client checking inbound port 25, I want the verify service to perform a proper SMTP EHLO with my server so that the check confirms an actual SMTP server is responding, not just an open port.*
+
+**Technical context:** Replace `check_port25()` in `main.rs` — currently a bare `TcpStream::connect` (line 64–74) — with an SMTP handshake function. The new function should: (1) TCP connect with 10s timeout, (2) read the `220` banner, (3) send `EHLO check.aimx.email\r\n`, (4) read the `250` response, (5) send `QUIT\r\n`, (6) close. If any step fails or times out, report `reachable: false`. The overall timeout for the EHLO sequence should be 45 seconds (matching the client-side expectation).
+
+**Acceptance criteria:**
+- [ ] Probe performs SMTP EHLO handshake instead of bare TCP connect
+- [ ] Banner read (`220`), EHLO (`250`), and QUIT sequence completed
+- [ ] Timeout of 45 seconds for the full EHLO handshake
+- [ ] `reachable: true` only if EHLO gets a `250` response
+- [ ] `reachable: false` if connection refused, banner missing, or EHLO rejected
+- [ ] Unit test: mock TCP stream with valid SMTP responses → `reachable: true`
+- [ ] Unit test: mock TCP stream with no banner → `reachable: false`
+- [ ] Unit test: mock TCP stream with non-250 EHLO response → `reachable: false`
+
+### S10.4 — Remove `ip` Parameter from Probe
+
+*As a verify service operator, I want the probe to only check the caller's own IP so that the service cannot be used as a port scanner proxy.*
+
+**Technical context:** Remove the `ip` field from `ProbeRequest` and the `ip` query parameter from the `GET /probe` handler. Remove the `POST /probe` endpoint entirely. The probe should only use `ConnectInfo(addr).ip()` to get the caller's IP. Remove all tests for custom IP parameter and POST body.
+
+**Acceptance criteria:**
+- [ ] `GET /probe` uses caller's IP only — no `ip` query parameter
+- [ ] `POST /probe` endpoint removed
+- [ ] `ProbeRequest` struct removed or simplified
+- [ ] Tests updated: probe always uses caller IP
+- [ ] Unit test: probe response contains caller's IP
+- [ ] Old tests for custom `ip` parameter and POST body removed
+
+---
+
+## Sprint 11 — Setup Flow Rewrite + Client Cleanup (Days 28–30.5) [NOT STARTED]
+
+**Goal:** Rewrite the setup flow to check root, detect MTA conflicts, install OpenSMTPD before port checks, and simplify the verify client to port-check-only.
+
+**Dependencies:** Sprint 10 (verify service must support EHLO probe and port 25 listener)
+
+### S11.1 — Root Check + MTA Conflict Detection
+
+*As an operator running `aimx setup`, I want clear errors if I'm not root or if a non-OpenSMTPD MTA is on port 25 so that I don't waste time on a setup that will fail.*
+
+**Technical context:** Add two new checks at the top of `run_setup_with_verify()` (line 832), before any other work:
+
+1. **Root check:** Use `libc::geteuid() == 0` or equivalent. If not root, exit: "aimx setup requires root. Run with: sudo aimx setup <domain>"
+
+2. **MTA conflict detection:** Use `ss -tlnp sport = :25` (via `SystemOps` trait method) to check what's on port 25. Parse output to determine: (a) nothing → proceed, (b) OpenSMTPD → warn that smtpd.conf will be overwritten, ask user to confirm, create .bak backup, (c) other MTA (Postfix, Exim, Sendmail) → exit: "SMTP port 25 is already in use by [process]. aimx requires OpenSMTPD. Uninstall the current SMTP server and run `aimx setup` again."
+
+Add `check_root()` and `check_port25_occupancy()` to `SystemOps` trait for testability. Return an enum: `Port25Status::Free`, `Port25Status::OpenSmtpd`, `Port25Status::OtherMta(String)`.
+
+**Acceptance criteria:**
+- [ ] Non-root user gets clear error: "aimx setup requires root. Run with: sudo aimx setup <domain>"
+- [ ] Port 25 occupied by non-OpenSMTPD → exit with process name in error message
+- [ ] Port 25 occupied by OpenSMTPD → prompt user to confirm smtpd.conf overwrite, create .bak backup
+- [ ] User declines overwrite → setup exits cleanly
+- [ ] Port 25 free → proceed silently
+- [ ] `SystemOps` trait extended with `check_root()` and `check_port25_occupancy()` methods
+- [ ] Unit test: non-root detection
+- [ ] Unit test: OpenSMTPD detected → confirmation flow
+- [ ] Unit test: Postfix detected → exit with correct error message
+- [ ] Unit test: nothing on port 25 → proceed
+
+### S11.2 — Reorder Setup Flow: Install Before Check
+
+*As an operator, I want port 25 checks to run after OpenSMTPD is installed so that the inbound check can verify my SMTP server is actually responding with a proper EHLO, not just that the port is open.*
+
+**Technical context:** Restructure `run_setup_with_verify()` to follow the new flow:
+
+1. `check_root()` — exit if not root
+2. `check_port25_occupancy()` — exit if non-OpenSMTPD MTA; confirm if OpenSMTPD exists
+3. `configure_opensmtpd()` — install + configure (existing function, line 375)
+4. `check_outbound()` — connect to `check.aimx.email:25` (check service port 25 listener)
+5. `check_inbound()` — HTTP call to check service `/probe`, which does EHLO back
+6. `check_ptr()` — unchanged
+7. If outbound or inbound fails → exit with clear message and provider list
+8. Continue to DKIM keygen, DNS guidance, verification (unchanged)
+
+Update `check_outbound_port25()` in `RealNetworkOps` to connect to the check service's port 25 instead of `gmail-smtp-in.l.google.com:25`. Derive the SMTP address from `probe_url` host (e.g., `check.aimx.email:25`). Add `check_service_smtp_addr` field to `RealNetworkOps`.
+
+Update the HTTP timeout for `check_inbound_port25()` from 15 seconds to 60 seconds (the check service needs up to 45s for the EHLO handshake).
+
+**Acceptance criteria:**
+- [ ] Setup flow order: root → MTA check → OpenSMTPD install → outbound → inbound → PTR → DKIM → DNS
+- [ ] Outbound check connects to check service port 25 (not `gmail-smtp-in.l.google.com:25`)
+- [ ] Inbound check HTTP timeout increased to 60 seconds
+- [ ] If outbound fails after OpenSMTPD install → clear error with provider list
+- [ ] If inbound fails after OpenSMTPD install → clear error about firewall/provider
+- [ ] Unit test: full setup flow order verified via mock call sequence
+- [ ] Unit test: outbound connects to check service port 25
+- [ ] Unit test: inbound timeout is 60 seconds
+
+### S11.3 — Simplify aimx verify + Remove verify_address
+
+*As an operator, I want `aimx verify` to check port 25 connectivity only so that it's fast, reliable, and doesn't depend on email round-trips.*
+
+**Technical context:** Rewrite `src/verify.rs` completely. The current implementation sends an email, polls the catchall mailbox for a reply, and parses the result (lines 17–94). Replace with: (1) check outbound port 25 by connecting to check service port 25, (2) check inbound port 25 via HTTP probe (EHLO callback), (3) check PTR. Report pass/fail for each. Remove `verify_address` from `Config` in `src/config.rs`. Keep `probe_url`. Update all tests.
+
+Also update `aimx preflight` to use the same check service port 25 for the outbound test.
+
+The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the new `verify::run()` which no longer sends email.
+
+**Acceptance criteria:**
+- [ ] `aimx verify` checks outbound port 25, inbound port 25 (EHLO), and PTR — no email sent
+- [ ] `verify_address` field removed from `Config` struct
+- [ ] `probe_url` field retained in `Config` struct
+- [ ] `aimx preflight` uses check service port 25 for outbound test
+- [ ] Old email-based verify logic removed entirely (no `send::run`, no mailbox polling)
+- [ ] Unit test: verify reports pass/fail for each check
+- [ ] Unit test: config without `verify_address` parses correctly
+- [ ] Unit test: config with legacy `verify_address` field doesn't error (serde ignores unknown — verify with `#[serde(deny_unknown_fields)]` is NOT set)
+
+### S11.4 — Documentation + Backlog Cleanup
+
+*As a user or contributor, I want docs to accurately reflect the simplified verify service and setup flow.*
+
+**Acceptance criteria:**
+- [ ] `services/verify/README.md` updated: remove email echo section, add port 25 listener docs, update self-hosting instructions (no MTA needed on verify server), update systemd example
+- [ ] `README.md` updated: verify service description reflects probe-only, remove references to `verify@aimx.email` and email echo, update `config.toml` reference (remove `verify_address`), update setup flow description
+- [ ] Obsolete non-blocking backlog items in `docs/sprint.md` marked as resolved: multiline Authentication-Results (Sprint 6 — obsolete, echo removed), Message-ID/Date on echo reply (Sprint 6 — obsolete, echo removed), SSRF hardening on `/probe` ip parameter (Sprint 6 — obsolete, ip parameter removed)
+- [ ] PRD updated: FR-8 and S6.2 reflect simplified verify service (port probe only, no email echo)
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -1009,6 +1166,8 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 | 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Done |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Done |
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
+| 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Not Started |
+| 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Not Started |
 
 ## Deferred to v2
 
