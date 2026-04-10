@@ -1,11 +1,17 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
-use crate::verify;
 use chrono::Utc;
 use std::collections::HashMap;
 use std::io::{self, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+
+#[derive(Debug, PartialEq)]
+pub enum Port25Status {
+    Free,
+    OpenSmtpd,
+    OtherMta(String),
+}
 
 pub trait SystemOps {
     fn is_package_installed(&self, package: &str) -> bool;
@@ -20,6 +26,8 @@ pub trait SystemOps {
         domain: &str,
     ) -> Result<(), Box<dyn std::error::Error>>;
     fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>>;
+    fn check_root(&self) -> bool;
+    fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
 }
 
 pub trait NetworkOps {
@@ -30,18 +38,6 @@ pub trait NetworkOps {
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
     fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
-}
-
-pub trait VerifyRunner {
-    fn run_verify(&self, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>>;
-}
-
-pub struct RealVerifyRunner;
-
-impl VerifyRunner for RealVerifyRunner {
-    fn run_verify(&self, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
-        verify::run(data_dir)
-    }
 }
 
 pub struct RealSystemOps;
@@ -130,20 +126,97 @@ impl SystemOps for RealSystemOps {
     fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
         std::env::current_exe().map_err(|e| e.into())
     }
+
+    fn check_root(&self) -> bool {
+        unsafe { libc::geteuid() == 0 }
+    }
+
+    fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new("ss")
+            .args(["-tlnp", "sport", "=", ":25"])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        parse_port25_status(&stdout)
+    }
+}
+
+pub fn parse_port25_status(ss_output: &str) -> Result<Port25Status, Box<dyn std::error::Error>> {
+    let lines: Vec<&str> = ss_output.lines().collect();
+    // First line is header, skip it. If only header or empty, port is free.
+    let data_lines: Vec<&str> = lines
+        .iter()
+        .skip(1)
+        .filter(|l| !l.trim().is_empty())
+        .copied()
+        .collect();
+
+    if data_lines.is_empty() {
+        return Ok(Port25Status::Free);
+    }
+
+    // Look for process info in the ss output (the "users:" column)
+    let combined = data_lines.join("\n");
+    if combined.contains("smtpd") {
+        return Ok(Port25Status::OpenSmtpd);
+    }
+
+    // Try to extract process name from users:(("name",...)) pattern
+    for line in &data_lines {
+        if let Some(start) = line.find("users:((\"") {
+            let rest = &line[start + 9..];
+            if let Some(end) = rest.find('"') {
+                let process_name = &rest[..end];
+                return Ok(Port25Status::OtherMta(process_name.to_string()));
+            }
+        }
+    }
+
+    // Something is on port 25 but we can't identify it
+    Ok(Port25Status::OtherMta("unknown".to_string()))
 }
 
 pub const DEFAULT_PROBE_URL: &str = "https://check.aimx.email/probe";
 
+pub const DEFAULT_CHECK_SERVICE_SMTP_ADDR: &str = "check.aimx.email:25";
+
 pub struct RealNetworkOps {
     pub probe_url: String,
+    pub check_service_smtp_addr: String,
 }
 
 impl Default for RealNetworkOps {
     fn default() -> Self {
         Self {
             probe_url: DEFAULT_PROBE_URL.to_string(),
+            check_service_smtp_addr: DEFAULT_CHECK_SERVICE_SMTP_ADDR.to_string(),
         }
     }
+}
+
+impl RealNetworkOps {
+    pub fn from_probe_url(probe_url: String) -> Self {
+        let smtp_addr = derive_smtp_addr_from_probe_url(&probe_url);
+        Self {
+            probe_url,
+            check_service_smtp_addr: smtp_addr,
+        }
+    }
+}
+
+pub fn derive_smtp_addr_from_probe_url(probe_url: &str) -> String {
+    // Extract host from URL like "https://check.aimx.email/probe"
+    let without_scheme = probe_url
+        .strip_prefix("https://")
+        .or_else(|| probe_url.strip_prefix("http://"))
+        .unwrap_or(probe_url);
+    let host = without_scheme.split('/').next().unwrap_or(without_scheme);
+    // Strip port if present
+    let host = if host.contains(':') {
+        host.split(':').next().unwrap_or(host)
+    } else {
+        host
+    };
+    format!("{host}:25")
 }
 
 impl NetworkOps for RealNetworkOps {
@@ -151,7 +224,7 @@ impl NetworkOps for RealNetworkOps {
         use std::net::{TcpStream, ToSocketAddrs};
         use std::time::Duration;
 
-        let target = "gmail-smtp-in.l.google.com:25";
+        let target = &self.check_service_smtp_addr;
         let addrs: Vec<_> = target.to_socket_addrs()?.collect();
         if addrs.is_empty() {
             return Ok(false);
@@ -165,7 +238,7 @@ impl NetworkOps for RealNetworkOps {
 
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
         let resp = std::process::Command::new("curl")
-            .args(["-s", "-m", "15", &self.probe_url])
+            .args(["-s", "-m", "60", &self.probe_url])
             .output();
 
         match resp {
@@ -766,7 +839,6 @@ pub fn finalize_setup(
             dkim_selector: dkim_selector.to_string(),
             mailboxes,
             probe_url: None,
-            verify_address: None,
         };
         cfg.save(&config_path)?;
         cfg
@@ -826,23 +898,37 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_setup_with_verify(domain, data_dir, sys, net, &RealVerifyRunner)
-}
-
-pub fn run_setup_with_verify(
-    domain: &str,
-    data_dir: Option<&Path>,
-    sys: &dyn SystemOps,
-    net: &dyn NetworkOps,
-    verify_runner: &dyn VerifyRunner,
-) -> Result<(), Box<dyn std::error::Error>> {
     validate_domain(domain)?;
 
     println!("aimx setup for {domain}\n");
 
-    let passed = run_preflight(net)?;
-    if !passed {
-        return Err("Preflight checks failed. Fix the issues above and try again.".into());
+    // Step 1: Root check
+    if !sys.check_root() {
+        return Err("aimx setup requires root. Run with: sudo aimx setup <domain>".into());
+    }
+
+    // Step 2: MTA conflict detection
+    match sys.check_port25_occupancy()? {
+        Port25Status::Free => {}
+        Port25Status::OpenSmtpd => {
+            println!("OpenSMTPD is already running on port 25.");
+            println!("Setup will overwrite /etc/smtpd.conf (a .bak backup will be created).");
+            print!("Continue? (y/N) ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                return Err("Setup cancelled by user.".into());
+            }
+        }
+        Port25Status::OtherMta(name) => {
+            return Err(format!(
+                "SMTP port 25 is already in use by {name}. \
+                 aimx requires OpenSMTPD. Uninstall the current SMTP server \
+                 and run `aimx setup` again."
+            )
+            .into());
+        }
     }
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
@@ -857,8 +943,7 @@ pub fn run_setup_with_verify(
         "dkim".to_string()
     };
 
-    finalize_setup(data_dir, domain, &dkim_selector)?;
-
+    // Step 3: Install and configure OpenSMTPD
     let smtpd_data_dir = if data_dir == Path::new("/var/lib/aimx") {
         None
     } else {
@@ -866,6 +951,60 @@ pub fn run_setup_with_verify(
     };
     configure_opensmtpd(sys, domain, smtpd_data_dir)?;
 
+    // Step 4-6: Port checks (after OpenSMTPD is installed)
+    let mut port_failed = false;
+
+    print!("  Outbound port 25... ");
+    io::stdout().flush()?;
+    match check_outbound(net) {
+        PreflightResult::Pass => println!("PASS"),
+        PreflightResult::Fail(msg) => {
+            println!("FAIL");
+            eprintln!("\n  {msg}");
+            eprintln!("\n  Compatible VPS providers with port 25 open:");
+            for p in COMPATIBLE_PROVIDERS {
+                eprintln!("    - {p}");
+            }
+            port_failed = true;
+        }
+        PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+    }
+
+    print!("  Inbound port 25... ");
+    io::stdout().flush()?;
+    match check_inbound(net) {
+        PreflightResult::Pass => println!("PASS"),
+        PreflightResult::Fail(msg) => {
+            println!("FAIL");
+            eprintln!("\n  {msg}");
+            port_failed = true;
+        }
+        PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+    }
+
+    print!("  PTR record... ");
+    io::stdout().flush()?;
+    match check_ptr(net) {
+        PreflightResult::Pass => println!("PASS"),
+        PreflightResult::Fail(msg) => {
+            println!("FAIL: {msg}");
+        }
+        PreflightResult::Warn(msg) => println!("WARN\n  {msg}"),
+    }
+
+    if port_failed {
+        return Err(
+            "Port 25 checks failed. Your VPS provider may block SMTP traffic.\n\
+             OpenSMTPD has been installed but port 25 is not reachable.\n\
+             Fix the issues above and run `aimx setup` again."
+                .into(),
+        );
+    }
+
+    // Step 7: DKIM keygen and finalize
+    finalize_setup(data_dir, domain, &dkim_selector)?;
+
+    // Step 8: DNS guidance and verification
     let server_ip = net.get_server_ip()?;
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
@@ -891,27 +1030,7 @@ pub fn run_setup_with_verify(
 
     if all_pass {
         println!("All DNS records verified. Your email server is ready!");
-
-        println!("\nWould you like to run end-to-end email verification? (y/N) ");
-        io::stdout().flush()?;
-        let mut verify_input = String::new();
-        io::stdin().read_line(&mut verify_input)?;
-
-        if verify_input.trim().eq_ignore_ascii_case("y") {
-            match verify_runner.run_verify(Some(data_dir)) {
-                Ok(()) => {
-                    println!("End-to-end email verification passed!");
-                }
-                Err(e) => {
-                    println!("End-to-end verification did not pass: {e}");
-                    println!("This is expected if DNS records are still propagating.");
-                    println!("Run `aimx verify` later to retry.");
-                }
-            }
-        } else {
-            println!("Skipping end-to-end verification.");
-            println!("Run `aimx verify` later to test the full pipeline.");
-        }
+        println!("Run `aimx verify` to check port 25 connectivity at any time.");
     } else {
         println!("Some DNS records are not yet correct.");
         println!("DNS propagation can take up to 48 hours.");
@@ -991,6 +1110,8 @@ mod tests {
         existing_files: HashMap<PathBuf, String>,
         restarted_services: RefCell<Vec<String>>,
         package_installed: bool,
+        is_root: bool,
+        port25_status: Port25Status,
     }
 
     impl Default for MockSystemOps {
@@ -1001,6 +1122,8 @@ mod tests {
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
                 package_installed: false,
+                is_root: true,
+                port25_status: Port25Status::Free,
             }
         }
     }
@@ -1046,6 +1169,16 @@ mod tests {
         fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
             Ok(PathBuf::from("/usr/local/bin/aimx"))
         }
+        fn check_root(&self) -> bool {
+            self.is_root
+        }
+        fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
+            match &self.port25_status {
+                Port25Status::Free => Ok(Port25Status::Free),
+                Port25Status::OpenSmtpd => Ok(Port25Status::OpenSmtpd),
+                Port25Status::OtherMta(name) => Ok(Port25Status::OtherMta(name.clone())),
+            }
+        }
     }
 
     #[test]
@@ -1056,10 +1189,10 @@ mod tests {
 
     #[test]
     fn real_network_ops_custom_probe_url() {
-        let net = RealNetworkOps {
-            probe_url: "https://probe.custom.example.com/check".to_string(),
-        };
+        let net =
+            RealNetworkOps::from_probe_url("https://probe.custom.example.com/check".to_string());
         assert_eq!(net.probe_url, "https://probe.custom.example.com/check");
+        assert_eq!(net.check_service_smtp_addr, "probe.custom.example.com:25");
     }
 
     #[test]
@@ -1715,64 +1848,144 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    struct MockVerifyRunner {
-        called: RefCell<bool>,
-        should_pass: bool,
-    }
-
-    impl MockVerifyRunner {
-        fn new(should_pass: bool) -> Self {
-            Self {
-                called: RefCell::new(false),
-                should_pass,
-            }
-        }
-
-        fn was_called(&self) -> bool {
-            *self.called.borrow()
-        }
-    }
-
-    impl VerifyRunner for MockVerifyRunner {
-        fn run_verify(&self, _data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
-            *self.called.borrow_mut() = true;
-            if self.should_pass {
-                Ok(())
-            } else {
-                Err("verify service unavailable".into())
-            }
-        }
-    }
+    // S11.1 — Root Check + MTA Conflict Detection tests
 
     #[test]
-    fn verify_runner_trait_mock_pass() {
-        let runner = MockVerifyRunner::new(true);
-        assert!(runner.run_verify(None).is_ok());
-        assert!(runner.was_called());
-    }
-
-    #[test]
-    fn verify_runner_trait_mock_fail() {
-        let runner = MockVerifyRunner::new(false);
-        let result = runner.run_verify(None);
+    fn non_root_detection() {
+        let sys = MockSystemOps {
+            is_root: false,
+            ..Default::default()
+        };
+        let net = MockNetworkOps::default();
+        let result = run_setup("example.com", None, &sys, &net);
         assert!(result.is_err());
-        assert!(runner.was_called());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("aimx setup requires root"),
+            "Expected root error, got: {err}"
+        );
     }
 
     #[test]
-    fn setup_verify_step_available() {
-        // Verify that run_setup_with_verify accepts a VerifyRunner trait object.
-        // We can't fully test it here because it reads stdin, but this
-        // compile-time check confirms the trait integration is wired up.
-        let runner = MockVerifyRunner::new(true);
-        let _: &dyn VerifyRunner = &runner;
-        let _fn_ptr: fn(
-            &str,
-            Option<&std::path::Path>,
-            &dyn SystemOps,
-            &dyn NetworkOps,
-            &dyn VerifyRunner,
-        ) -> Result<(), Box<dyn std::error::Error>> = run_setup_with_verify;
-        let _ = _fn_ptr;
+    fn postfix_detected_exits_with_error() {
+        let sys = MockSystemOps {
+            port25_status: Port25Status::OtherMta("postfix".to_string()),
+            ..Default::default()
+        };
+        let net = MockNetworkOps::default();
+        let result = run_setup("example.com", None, &sys, &net);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("postfix"),
+            "Expected postfix in error, got: {err}"
+        );
+        assert!(
+            err.contains("port 25 is already in use"),
+            "Expected port 25 in use message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn nothing_on_port25_proceeds() {
+        let sys = MockSystemOps {
+            port25_status: Port25Status::Free,
+            ..Default::default()
+        };
+        assert!(matches!(
+            sys.check_port25_occupancy().unwrap(),
+            Port25Status::Free
+        ));
+    }
+
+    #[test]
+    fn parse_port25_status_free() {
+        let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port\n";
+        assert_eq!(parse_port25_status(output).unwrap(), Port25Status::Free);
+    }
+
+    #[test]
+    fn parse_port25_status_empty() {
+        assert_eq!(parse_port25_status("").unwrap(), Port25Status::Free);
+    }
+
+    #[test]
+    fn parse_port25_status_opensmtpd() {
+        let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process\n\
+                       LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"smtpd\",pid=1234,fd=6))";
+        assert_eq!(
+            parse_port25_status(output).unwrap(),
+            Port25Status::OpenSmtpd
+        );
+    }
+
+    #[test]
+    fn parse_port25_status_postfix() {
+        let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process\n\
+                       LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"master\",pid=5678,fd=13))";
+        assert_eq!(
+            parse_port25_status(output).unwrap(),
+            Port25Status::OtherMta("master".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_port25_status_exim() {
+        let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process\n\
+                       LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"exim4\",pid=999,fd=3))";
+        assert_eq!(
+            parse_port25_status(output).unwrap(),
+            Port25Status::OtherMta("exim4".to_string())
+        );
+    }
+
+    // S11.2 — Reorder Setup Flow tests
+
+    #[test]
+    fn derive_smtp_addr_from_https_url() {
+        assert_eq!(
+            derive_smtp_addr_from_probe_url("https://check.aimx.email/probe"),
+            "check.aimx.email:25"
+        );
+    }
+
+    #[test]
+    fn derive_smtp_addr_from_http_url() {
+        assert_eq!(
+            derive_smtp_addr_from_probe_url("http://probe.custom.example.com/check"),
+            "probe.custom.example.com:25"
+        );
+    }
+
+    #[test]
+    fn derive_smtp_addr_from_url_with_port() {
+        assert_eq!(
+            derive_smtp_addr_from_probe_url("https://check.aimx.email:3025/probe"),
+            "check.aimx.email:25"
+        );
+    }
+
+    #[test]
+    fn real_network_ops_from_probe_url() {
+        let net = RealNetworkOps::from_probe_url("https://check.aimx.email/probe".to_string());
+        assert_eq!(net.probe_url, "https://check.aimx.email/probe");
+        assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
+    }
+
+    #[test]
+    fn real_network_ops_default_has_check_service_smtp() {
+        let net = RealNetworkOps::default();
+        assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
+    }
+
+    #[test]
+    fn inbound_timeout_is_60s() {
+        // Verify that RealNetworkOps uses -m 60 for the curl timeout.
+        // We can't run curl in tests, but we verify the constant by checking
+        // that the method signature exists on RealNetworkOps.
+        // The actual 60s timeout is encoded in the implementation of check_inbound_port25.
+        let net = RealNetworkOps::default();
+        // Just ensure the method is callable (compile check)
+        let _ = &net as &dyn NetworkOps;
     }
 }

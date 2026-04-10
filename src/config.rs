@@ -19,9 +19,6 @@ pub struct Config {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe_url: Option<String>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub verify_address: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -186,7 +183,6 @@ has_attachment = true
             dkim_selector: "dkim".to_string(),
             mailboxes,
             probe_url: None,
-            verify_address: None,
         };
 
         config.save(&path).unwrap();
@@ -248,11 +244,10 @@ address = "*@test.com"
     }
 
     #[test]
-    fn parse_probe_url_and_verify_address() {
+    fn parse_probe_url() {
         let toml_str = r#"
 domain = "test.com"
 probe_url = "https://probe.example.com/check"
-verify_address = "verify@custom.example.com"
 
 [mailboxes]
 "#;
@@ -261,17 +256,20 @@ verify_address = "verify@custom.example.com"
             config.probe_url.as_deref(),
             Some("https://probe.example.com/check")
         );
-        assert_eq!(
-            config.verify_address.as_deref(),
-            Some("verify@custom.example.com")
-        );
     }
 
     #[test]
-    fn probe_url_and_verify_address_default_to_none() {
+    fn probe_url_defaults_to_none() {
         let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.probe_url.is_none());
-        assert!(config.verify_address.is_none());
+    }
+
+    #[test]
+    fn legacy_verify_address_field_ignored() {
+        // Config with removed verify_address should still parse (serde ignores unknown fields)
+        let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.domain, "test.com");
     }
 }
