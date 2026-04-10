@@ -2,7 +2,7 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 8 (6 original + 2 post-audit hardening)
+**Total sprints:** 9 (6 original + 2 post-audit hardening + 1 YAML→TOML migration)
 **Timeline:** ~21.5 calendar days
 **v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit.
 
@@ -939,6 +939,61 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 
 ---
 
+## Sprint 9 — Migrate from YAML to TOML (Days 22–24.5) [NOT STARTED]
+
+**Goal:** Replace `serde_yaml` (unmaintained) with `toml` for both configuration and email frontmatter, aligning with idiomatic Rust ecosystem conventions.
+
+**Dependencies:** Sprint 8 (merged)
+
+### S9.1 — Migrate Config from YAML to TOML
+
+*As a developer, I want configuration in TOML so the project uses an actively maintained serializer and follows Rust ecosystem conventions.*
+
+**Context:** `config.yaml` is parsed in `src/config.rs` via `serde_yaml::from_str`/`to_string`. The `Config` struct uses `#[derive(Serialize, Deserialize)]` which is format-agnostic — only the parse/write calls and file extension need changing. The PRD specifies YAML (NFR-7, section 8), but the owner has approved migrating to TOML. `aimx setup` generates the initial config file. All tests in `config.rs` use inline YAML strings.
+
+**Scope:**
+- Replace `serde_yaml` with `toml` crate in `Cargo.toml`
+- Update `Config::load()` and `Config::save()` in `src/config.rs`
+- Rename `config.yaml` → `config.toml` throughout (code, docs, README)
+- Update `aimx setup` to generate `config.toml`
+- Update all config tests to use TOML format
+- Update `aimx status` output that references config path
+
+**Acceptance criteria:**
+- [ ] `serde_yaml` removed from `Cargo.toml`; `toml` crate added
+- [ ] `Config::load()` reads `config.toml` using `toml::from_str`
+- [ ] `Config::save()` writes `config.toml` using `toml::to_string_pretty`
+- [ ] `aimx setup` generates `config.toml` (not `config.yaml`)
+- [ ] All references to `config.yaml` updated to `config.toml` in code, docs, and README
+- [ ] All config unit tests updated to TOML format and pass
+- [ ] Integration tests updated and pass
+
+### S9.2 — Migrate Email Frontmatter from YAML to TOML
+
+*As a developer, I want email frontmatter in TOML so the entire project uses a single serialization format.*
+
+**Context:** Email `.md` files use YAML frontmatter between `---` delimiters. The `EmailMetadata` struct in `src/ingest.rs` is serialized via `serde_yaml::to_string()` and parsed back in `src/mcp.rs`, `src/status.rs`, and `src/verify.rs` via `serde_yaml::from_str()`. TOML frontmatter uses `+++` delimiters (Hugo convention).
+
+**Scope:**
+- Change frontmatter delimiters from `---` to `+++`
+- Replace `serde_yaml::to_string(meta)` with `toml::to_string_pretty(meta)` in `ingest.rs`
+- Replace all `serde_yaml::from_str` frontmatter parsing in `mcp.rs`, `status.rs`, `verify.rs`
+- Update all `serde_yaml::Value` / `serde_yaml::Mapping` test assertions to use `toml::Value` / `toml::Table` equivalents
+- Update PRD/docs references to "YAML frontmatter" → "TOML frontmatter"
+
+**Acceptance criteria:**
+- [ ] Email frontmatter uses `+++` delimiters and TOML format
+- [ ] `ingest.rs` serializes `EmailMetadata` via `toml::to_string_pretty`
+- [ ] `mcp.rs` frontmatter parsing uses `toml::from_str`
+- [ ] `status.rs` frontmatter parsing uses `toml::from_str`
+- [ ] `verify.rs` frontmatter parsing uses `toml::from_str`
+- [ ] All `serde_yaml::Value`/`Mapping` test assertions migrated to `toml::Value`/`Table`
+- [ ] No remaining `serde_yaml` imports in the codebase
+- [ ] All unit and integration tests pass
+- [ ] `cargo clippy -- -D warnings` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -953,6 +1008,7 @@ One of these is wrong. Research suggests DigitalOcean's current policy is closer
 | 6 | 13–15.5 | Verify Service + Polish | Hosted probe, status/verify CLI, README | Done |
 | 7 | 16–18.5 | Security Hardening + Critical Fixes | DKIM enforcement, header injection fix, atomic ingest, verify race fix, setup e2e verify | Done |
 | 8 | 19–21.5 | Setup Robustness, CI & Documentation | DNS verification accuracy, data-dir propagation, SPF fix, configurable verify URLs, CI coverage, doc fixes | Done |
+| 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Not Started |
 
 ## Deferred to v2
 
@@ -975,7 +1031,7 @@ This section collects non-blocking feedback from sprint reviews. Questions need 
 
 Items needing human judgment. Answer inline by replacing the `_awaiting answer_` text, then check the box.
 
-- [ ] **(Sprint 2.5)** `serde_yaml` 0.9 is unmaintained/deprecated — should we migrate to an alternative YAML serializer? — _awaiting answer_
+- [x] **(Sprint 2.5)** `serde_yaml` 0.9 is unmaintained/deprecated — should we migrate to an alternative YAML serializer? — Migrate to TOML (`toml` crate) instead. _Triaged into Sprint 9_
 
 ### Improvements
 
