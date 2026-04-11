@@ -99,7 +99,7 @@ The echo component requires an MTA to receive email and pipe it to `aimx-verify 
 **Install OpenSMTPD:**
 
 ```bash
-sudo apt-get update && sudo apt-get install -y opensmtpd
+sudo apt-get update && sudo apt-get install -y --no-install-recommends opensmtpd
 ```
 
 **Generate a TLS certificate** (self-signed or use Let's Encrypt):
@@ -259,7 +259,7 @@ sudo aimx setup agent.yourdomain.com
 The setup wizard performs these steps automatically:
 
 1. Runs preflight checks (port 25 outbound/inbound, PTR)
-2. Installs OpenSMTPD via `apt-get install opensmtpd`
+2. Installs OpenSMTPD via `apt-get install --no-install-recommends opensmtpd` (skips `opensmtpd-extras`, which pulls in unused MySQL/PostgreSQL/Redis/SQLite client libraries)
 3. Generates a self-signed TLS certificate at `/etc/ssl/aimx/`
 4. Writes `/etc/smtpd.conf` (backs up any existing config)
 5. Restarts OpenSMTPD
