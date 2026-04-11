@@ -1,12 +1,14 @@
 use axum::{
-    extract::ConnectInfo,
+    extract::{ConnectInfo, Request},
     http::{HeaderMap, StatusCode},
+    middleware::{self, Next},
+    response::Response,
     routing::get,
     Json, Router,
 };
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
@@ -142,24 +144,83 @@ fn is_blocked_ipv6(ip: &Ipv6Addr) -> bool {
     false
 }
 
+/// Extension handlers insert into their response so the logging middleware
+/// can include the probe/reach `reachable` outcome in the per-request log
+/// line. Keeping the middleware as the single source of truth for request
+/// logs avoids duplicated log lines per request.
+#[derive(Clone, Copy)]
+struct ReachableOutcome(bool);
+
+/// Per-request logging middleware.
+///
+/// Emits exactly one `info!` line per HTTP request, containing the method,
+/// path, resolved caller IP (or `unknown` if the Layer 3 trust check
+/// rejected the request before the handler ran), response status, elapsed
+/// ms, and — for `/probe` and `/reach` — the reachable outcome recorded by
+/// the handler via `ReachableOutcome`.
+async fn log_request(
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let start = Instant::now();
+    let method = req.method().clone();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let caller_ip = resolve_client_ip(&peer, req.headers())
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16();
+    let elapsed_ms = start.elapsed().as_millis();
+    let reachable = response.extensions().get::<ReachableOutcome>().map(|o| o.0);
+
+    match reachable {
+        Some(r) => tracing::info!(
+            method = %method,
+            path = %path,
+            caller_ip = %caller_ip,
+            status = status,
+            elapsed_ms = elapsed_ms,
+            reachable = r,
+            "http request"
+        ),
+        None => tracing::info!(
+            method = %method,
+            path = %path,
+            caller_ip = %caller_ip,
+            status = status,
+            elapsed_ms = elapsed_ms,
+            "http request"
+        ),
+    }
+
+    response
+}
+
 async fn probe(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-) -> Result<Json<ProbeResponse>, StatusCode> {
+) -> Result<ProbeBody, StatusCode> {
     let caller_ip = match resolve_client_ip(&addr, &headers) {
         Some(ip) => ip,
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
     if is_blocked_target(&caller_ip) {
-        return Ok(Json(ProbeResponse {
+        return Ok(ProbeBody(ProbeResponse {
             reachable: false,
             ip: caller_ip.to_string(),
         }));
     }
 
     let reachable = check_port25_ehlo(&caller_ip).await;
-    Ok(Json(ProbeResponse {
+    Ok(ProbeBody(ProbeResponse {
         reachable,
         ip: caller_ip.to_string(),
     }))
@@ -168,24 +229,40 @@ async fn probe(
 async fn reach(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-) -> Result<Json<ProbeResponse>, StatusCode> {
+) -> Result<ProbeBody, StatusCode> {
     let caller_ip = match resolve_client_ip(&addr, &headers) {
         Some(ip) => ip,
         None => return Err(StatusCode::BAD_REQUEST),
     };
 
     if is_blocked_target(&caller_ip) {
-        return Ok(Json(ProbeResponse {
+        return Ok(ProbeBody(ProbeResponse {
             reachable: false,
             ip: caller_ip.to_string(),
         }));
     }
 
     let reachable = check_port25_tcp(&caller_ip).await;
-    Ok(Json(ProbeResponse {
+    Ok(ProbeBody(ProbeResponse {
         reachable,
         ip: caller_ip.to_string(),
     }))
+}
+
+/// Newtype wrapper that converts to a `Json` response and attaches a
+/// `ReachableOutcome` extension so the logging middleware can record the
+/// probe result alongside the standard request metadata.
+struct ProbeBody(ProbeResponse);
+
+impl axum::response::IntoResponse for ProbeBody {
+    fn into_response(self) -> Response {
+        let reachable = self.0.reachable;
+        let mut response = Json(self.0).into_response();
+        response
+            .extensions_mut()
+            .insert(ReachableOutcome(reachable));
+        response
+    }
 }
 
 async fn check_port25_tcp(ip: &IpAddr) -> bool {
@@ -261,23 +338,39 @@ async fn run_smtp_listener() {
     // Concurrency is currently unbounded. With `SMTP_CONNECTION_TIMEOUT = 30s`
     // and `SMTP_MAX_LINE_BYTES = 1 KiB` per line, a single client is tightly
     // bounded, but a distributed flood could still saturate the tokio
-    // runtime. Adding a semaphore here is tracked as Sprint 14 follow-up
-    // hardening (see PR #21 review, non-blocker #4) — kept out of Sprint 12
-    // to avoid scope creep into general DoS hardening, which was not part
-    // of this sprint's charter.
+    // runtime. A bounded semaphore would be defense-in-depth DoS hardening;
+    // Sprint 14 is strictly a request-logging sprint so this stays deferred.
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                tokio::spawn(async move {
-                    if let Err(e) = handle_smtp_connection(stream).await {
-                        tracing::debug!("SMTP connection from {peer} error: {e}");
-                    }
-                });
+                tokio::spawn(spawn_smtp_connection(stream, peer));
             }
             Err(e) => {
                 tracing::warn!("SMTP accept error: {e}");
             }
         }
+    }
+}
+
+/// Per-connection body shared by the real accept loop and the logging test
+/// so the test exercises the exact production code path instead of an
+/// inlined copy that could drift.
+async fn spawn_smtp_connection(stream: TcpStream, peer: SocketAddr) {
+    let start = Instant::now();
+    let peer_ip = peer.ip();
+    tracing::info!(peer_ip = %peer_ip, "smtp connection accepted");
+    match handle_smtp_connection(stream).await {
+        Ok(()) => tracing::info!(
+            peer_ip = %peer_ip,
+            elapsed_ms = start.elapsed().as_millis(),
+            "smtp connection closed cleanly"
+        ),
+        Err(e) => tracing::warn!(
+            peer_ip = %peer_ip,
+            elapsed_ms = start.elapsed().as_millis(),
+            error = %e,
+            "smtp connection closed with error"
+        ),
     }
 }
 
@@ -354,7 +447,8 @@ fn main() {
             .route("/", get(health))
             .route("/health", get(health))
             .route("/probe", get(probe))
-            .route("/reach", get(reach));
+            .route("/reach", get(reach))
+            .layer(middleware::from_fn(log_request));
 
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3025".to_string());
         let listener = tokio::net::TcpListener::bind(&bind_addr)
@@ -917,8 +1011,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let headers = headers_with_client_ip("192.0.2.1");
         let result = reach(ConnectInfo(addr), headers).await.unwrap();
-        assert_eq!(result.ip, "192.0.2.1");
-        assert!(!result.reachable);
+        assert_eq!(result.0.ip, "192.0.2.1");
+        assert!(!result.0.reachable);
     }
 
     #[tokio::test]
@@ -933,8 +1027,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let headers = headers_with_client_ip("192.0.2.1");
         let result = probe(ConnectInfo(addr), headers).await.unwrap();
-        assert_eq!(result.ip, "192.0.2.1");
-        assert!(!result.reachable);
+        assert_eq!(result.0.ip, "192.0.2.1");
+        assert!(!result.0.reachable);
     }
 
     // -----------------------------------------------------------------
@@ -1102,5 +1196,222 @@ mod tests {
                 "expected 221 Bye after QUIT, got: {second}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Request logging (Sprint 14)
+    // -----------------------------------------------------------------
+
+    use std::io;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::fmt::MakeWriter;
+
+    /// Shared buffer test writer: every tracing event writes a copy of its
+    /// bytes into an `Arc<Mutex<Vec<u8>>>` that the test can inspect.
+    #[derive(Clone)]
+    struct BufWriter {
+        buf: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl BufWriter {
+        fn new() -> Self {
+            Self {
+                buf: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.buf.lock().unwrap()).to_string()
+        }
+    }
+
+    impl io::Write for BufWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.buf.lock().unwrap().extend_from_slice(data);
+            Ok(data.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> MakeWriter<'a> for BufWriter {
+        type Writer = BufWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn test_subscriber(writer: BufWriter) -> tracing::subscriber::DefaultGuard {
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer)
+            .with_ansi(false)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        tracing::subscriber::set_default(subscriber)
+    }
+
+    /// Drive one real HTTP GET through the full axum router + middleware and
+    /// return the captured log contents so we can assert on them.
+    async fn run_http_request(path: &str, client_ip_header: Option<&str>) -> String {
+        let writer = BufWriter::new();
+        let _guard = test_subscriber(writer.clone());
+
+        let app = Router::new()
+            .route("/", get(health))
+            .route("/health", get(health))
+            .route("/probe", get(probe))
+            .route("/reach", get(reach))
+            .layer(middleware::from_fn(log_request));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap();
+        });
+
+        // Build a minimal HTTP/1.1 request by hand — avoids pulling in
+        // reqwest/hyper-client just for tests.
+        let mut req = format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
+        if let Some(ip) = client_ip_header {
+            req.push_str(&format!("{CLIENT_IP_HEADER}: {ip}\r\n"));
+        }
+        req.push_str("\r\n");
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream.write_all(req.as_bytes()).await.unwrap();
+        stream.flush().await.unwrap();
+
+        // Read until EOF — `Connection: close` ensures the server drops us.
+        let mut response = Vec::new();
+        let _ = stream.read_to_end(&mut response).await;
+        drop(stream);
+
+        server.abort();
+        let _ = server.await;
+
+        writer.contents()
+    }
+
+    #[tokio::test]
+    async fn log_request_logs_health_with_caller_ip() {
+        // /health has no ReachableOutcome — the middleware should still
+        // emit one info line with method, path, status, elapsed, caller_ip.
+        // Peer is loopback + we send a trusted X-AIMX-Client-IP so the
+        // resolver returns the public header IP.
+        let logs = run_http_request("/health", Some("203.0.113.42")).await;
+        assert!(
+            logs.contains("http request"),
+            "expected 'http request' log line, got: {logs}"
+        );
+        assert!(
+            logs.contains("caller_ip=203.0.113.42"),
+            "expected resolved caller_ip in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("path=/health"),
+            "expected /health path in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("method=GET"),
+            "expected GET method in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("status=200"),
+            "expected status=200 in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("elapsed_ms="),
+            "expected elapsed_ms field in logs, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_request_logs_reach_with_reachable_outcome() {
+        // /reach with a public IP in the trusted header — TEST-NET-1 is
+        // unroutable so reachable will be false, but the important thing
+        // is that `reachable=false` appears in the log line alongside the
+        // other fields.
+        let logs = run_http_request("/reach", Some("192.0.2.1")).await;
+        assert!(
+            logs.contains("path=/reach"),
+            "expected /reach path in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("caller_ip=192.0.2.1"),
+            "expected resolved caller_ip=192.0.2.1, got: {logs}"
+        );
+        assert!(
+            logs.contains("reachable=false"),
+            "expected reachable=false in logs, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn log_request_logs_bad_request_with_unknown_caller_ip() {
+        // /probe with loopback peer and no trusted header — resolver fails,
+        // handler returns 400. The middleware should still log one line and
+        // record caller_ip=unknown with status=400.
+        let logs = run_http_request("/probe", None).await;
+        assert!(
+            logs.contains("status=400"),
+            "expected status=400 in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("caller_ip=unknown"),
+            "expected caller_ip=unknown in logs, got: {logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn smtp_listener_logs_peer_ip_on_accept_and_close() {
+        // Bind an ephemeral listener, accept one connection, and hand it to
+        // the same `spawn_smtp_connection` helper the real accept loop uses
+        // so the test exercises the production logging path directly.
+        let writer = BufWriter::new();
+        let _guard = test_subscriber(writer.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, peer) = listener.accept().await.unwrap();
+            spawn_smtp_connection(stream, peer).await;
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let _banner = read_line(&mut stream).await;
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+        let _bye = read_line(&mut stream).await;
+
+        // Let the server task finish so its close-path log event lands in
+        // the buffer before we read it.
+        server.await.unwrap();
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("smtp connection accepted"),
+            "expected 'smtp connection accepted' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("smtp connection closed cleanly"),
+            "expected 'smtp connection closed cleanly' in logs, got: {logs}"
+        );
+        assert!(
+            logs.contains("peer_ip=127.0.0.1"),
+            "expected peer_ip=127.0.0.1 in logs, got: {logs}"
+        );
     }
 }
