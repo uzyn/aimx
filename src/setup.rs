@@ -181,40 +181,41 @@ pub fn parse_port25_status(ss_output: &str) -> Result<Port25Status, Box<dyn std:
     Ok(Port25Status::OtherMta("unknown".to_string()))
 }
 
-pub const DEFAULT_PROBE_URL: &str = "https://check.aimx.email/probe";
+pub const DEFAULT_VERIFY_HOST: &str = "https://check.aimx.email";
 
 pub const DEFAULT_CHECK_SERVICE_SMTP_ADDR: &str = "check.aimx.email:25";
 
 pub struct RealNetworkOps {
-    pub probe_url: String,
+    pub verify_host: String,
     pub check_service_smtp_addr: String,
 }
 
 impl Default for RealNetworkOps {
     fn default() -> Self {
         Self {
-            probe_url: DEFAULT_PROBE_URL.to_string(),
+            verify_host: DEFAULT_VERIFY_HOST.to_string(),
             check_service_smtp_addr: DEFAULT_CHECK_SERVICE_SMTP_ADDR.to_string(),
         }
     }
 }
 
 impl RealNetworkOps {
-    pub fn from_probe_url(probe_url: String) -> Self {
-        let smtp_addr = derive_smtp_addr_from_probe_url(&probe_url);
+    pub fn from_verify_host(verify_host: String) -> Self {
+        let trimmed = verify_host.trim_end_matches('/').to_string();
+        let smtp_addr = derive_smtp_addr_from_verify_host(&trimmed);
         Self {
-            probe_url,
+            verify_host: trimmed,
             check_service_smtp_addr: smtp_addr,
         }
     }
 }
 
-pub fn derive_smtp_addr_from_probe_url(probe_url: &str) -> String {
-    // Extract host from URL like "https://check.aimx.email/probe"
-    let without_scheme = probe_url
+pub fn derive_smtp_addr_from_verify_host(verify_host: &str) -> String {
+    // Extract host from URL like "https://check.aimx.email"
+    let without_scheme = verify_host
         .strip_prefix("https://")
-        .or_else(|| probe_url.strip_prefix("http://"))
-        .unwrap_or(probe_url);
+        .or_else(|| verify_host.strip_prefix("http://"))
+        .unwrap_or(verify_host);
     let host = without_scheme.split('/').next().unwrap_or(without_scheme);
     // Strip port if present
     let host = if host.contains(':') {
@@ -243,8 +244,9 @@ impl NetworkOps for RealNetworkOps {
     }
 
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let probe_url = format!("{}/probe", self.verify_host);
         let resp = std::process::Command::new("curl")
-            .args(["-s", "-m", "60", &self.probe_url])
+            .args(["-s", "-m", "60", &probe_url])
             .output();
 
         match resp {
@@ -844,7 +846,7 @@ pub fn finalize_setup(
             data_dir: data_dir.to_path_buf(),
             dkim_selector: dkim_selector.to_string(),
             mailboxes,
-            probe_url: None,
+            verify_host: None,
         };
         cfg.save(&config_path)?;
         cfg
@@ -1188,17 +1190,23 @@ mod tests {
     }
 
     #[test]
-    fn real_network_ops_default_probe_url() {
+    fn real_network_ops_default_verify_host() {
         let net = RealNetworkOps::default();
-        assert_eq!(net.probe_url, DEFAULT_PROBE_URL);
+        assert_eq!(net.verify_host, DEFAULT_VERIFY_HOST);
     }
 
     #[test]
-    fn real_network_ops_custom_probe_url() {
-        let net =
-            RealNetworkOps::from_probe_url("https://probe.custom.example.com/check".to_string());
-        assert_eq!(net.probe_url, "https://probe.custom.example.com/check");
-        assert_eq!(net.check_service_smtp_addr, "probe.custom.example.com:25");
+    fn real_network_ops_custom_verify_host() {
+        let net = RealNetworkOps::from_verify_host("https://verify.custom.example.com".to_string());
+        assert_eq!(net.verify_host, "https://verify.custom.example.com");
+        assert_eq!(net.check_service_smtp_addr, "verify.custom.example.com:25");
+    }
+
+    #[test]
+    fn real_network_ops_from_verify_host_strips_trailing_slash() {
+        let net = RealNetworkOps::from_verify_host("https://check.aimx.email/".to_string());
+        assert_eq!(net.verify_host, "https://check.aimx.email");
+        assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
     }
 
     #[test]
@@ -1950,7 +1958,7 @@ mod tests {
     #[test]
     fn derive_smtp_addr_from_https_url() {
         assert_eq!(
-            derive_smtp_addr_from_probe_url("https://check.aimx.email/probe"),
+            derive_smtp_addr_from_verify_host("https://check.aimx.email"),
             "check.aimx.email:25"
         );
     }
@@ -1958,23 +1966,23 @@ mod tests {
     #[test]
     fn derive_smtp_addr_from_http_url() {
         assert_eq!(
-            derive_smtp_addr_from_probe_url("http://probe.custom.example.com/check"),
-            "probe.custom.example.com:25"
+            derive_smtp_addr_from_verify_host("http://verify.custom.example.com"),
+            "verify.custom.example.com:25"
         );
     }
 
     #[test]
     fn derive_smtp_addr_from_url_with_port() {
         assert_eq!(
-            derive_smtp_addr_from_probe_url("https://check.aimx.email:3025/probe"),
+            derive_smtp_addr_from_verify_host("https://check.aimx.email:3025"),
             "check.aimx.email:25"
         );
     }
 
     #[test]
-    fn real_network_ops_from_probe_url() {
-        let net = RealNetworkOps::from_probe_url("https://check.aimx.email/probe".to_string());
-        assert_eq!(net.probe_url, "https://check.aimx.email/probe");
+    fn real_network_ops_from_verify_host() {
+        let net = RealNetworkOps::from_verify_host("https://check.aimx.email".to_string());
+        assert_eq!(net.verify_host, "https://check.aimx.email");
         assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
     }
 

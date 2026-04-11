@@ -1,21 +1,33 @@
 use crate::config::Config;
-use crate::setup::{self, DEFAULT_PROBE_URL, NetworkOps};
+use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps};
 use std::path::Path;
 
-pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(
+    data_dir: Option<&Path>,
+    host_override: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir).ok(),
         None => Config::load_default().ok(),
     };
 
-    let probe_url = config
-        .as_ref()
-        .and_then(|c| c.probe_url.clone())
-        .unwrap_or_else(|| DEFAULT_PROBE_URL.to_string());
-
-    let net = setup::RealNetworkOps::from_probe_url(probe_url);
+    let verify_host = resolve_verify_host(host_override, config.as_ref(), DEFAULT_VERIFY_HOST);
+    let net = setup::RealNetworkOps::from_verify_host(verify_host);
 
     run_with_net(&net)
+}
+
+pub fn resolve_verify_host(
+    host_override: Option<&str>,
+    config: Option<&Config>,
+    default: &str,
+) -> String {
+    if let Some(host) = host_override {
+        return host.to_string();
+    }
+    config
+        .and_then(|c| c.verify_host.clone())
+        .unwrap_or_else(|| default.to_string())
 }
 
 pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
@@ -173,5 +185,44 @@ mod tests {
     #[test]
     fn default_check_service_smtp_addr() {
         assert_eq!(DEFAULT_CHECK_SERVICE_SMTP_ADDR, "check.aimx.email:25");
+    }
+
+    fn cfg_with_verify_host(host: Option<&str>) -> Config {
+        let toml_str = match host {
+            Some(h) => format!("domain = \"test.com\"\nverify_host = \"{h}\"\n[mailboxes]\n"),
+            None => "domain = \"test.com\"\n[mailboxes]\n".to_string(),
+        };
+        toml::from_str(&toml_str).unwrap()
+    }
+
+    #[test]
+    fn resolve_host_prefers_cli_override_over_config_and_default() {
+        let config = cfg_with_verify_host(Some("https://config.example.com"));
+        let resolved = resolve_verify_host(
+            Some("https://cli.example.com"),
+            Some(&config),
+            "https://default.example.com",
+        );
+        assert_eq!(resolved, "https://cli.example.com");
+    }
+
+    #[test]
+    fn resolve_host_uses_config_when_no_cli_override() {
+        let config = cfg_with_verify_host(Some("https://config.example.com"));
+        let resolved = resolve_verify_host(None, Some(&config), "https://default.example.com");
+        assert_eq!(resolved, "https://config.example.com");
+    }
+
+    #[test]
+    fn resolve_host_falls_back_to_default_when_config_missing_field() {
+        let config = cfg_with_verify_host(None);
+        let resolved = resolve_verify_host(None, Some(&config), "https://default.example.com");
+        assert_eq!(resolved, "https://default.example.com");
+    }
+
+    #[test]
+    fn resolve_host_falls_back_to_default_when_no_config() {
+        let resolved = resolve_verify_host(None, None, "https://default.example.com");
+        assert_eq!(resolved, "https://default.example.com");
     }
 }

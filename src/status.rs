@@ -405,7 +405,7 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
-            probe_url: None,
+            verify_host: None,
         };
 
         let info = gather_status(&config);
@@ -495,7 +495,7 @@ mod tests {
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
-            probe_url: None,
+            verify_host: None,
         };
 
         let activity = gather_recent_activity(&config);
