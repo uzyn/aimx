@@ -90,7 +90,7 @@ To self-host (replacing `check.aimx.email`):
    ```toml
    verify_host = "https://check.yourdomain.com"
    ```
-   aimx appends `/probe` (or `/reach`) to this base URL when making HTTP checks.
+   aimx appends `/probe` to this base URL when making HTTP checks. (A future release will also append `/reach` for pre-install preflight.)
 
    You can also override it per-invocation:
    ```

@@ -7,13 +7,19 @@ use axum::{
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 
 const CLIENT_IP_HEADER: &str = "X-AIMX-Client-IP";
 const SMTP_HOSTNAME: &str = "check.aimx.email";
 const SMTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const SMTP_LINE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap on bytes consumed per SMTP request line. RFC 5321 sets the
+/// maximum command line length to 512 octets; 1024 leaves generous headroom
+/// for oversized but still-well-intentioned clients and closes off a trivial
+/// DoS where a peer streams megabytes into a growing `String` buffer before
+/// the per-line timeout fires.
+const SMTP_MAX_LINE_BYTES: u64 = 1024;
 const REACH_TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_EHLO_TIMEOUT: Duration = Duration::from_secs(45);
 
@@ -36,6 +42,23 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
+/// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its underlying
+/// IPv4 form so that the Layer 4 guards and trust-boundary checks see one
+/// canonical representation. Linux dual-stack sockets will silently downgrade
+/// `TcpStream::connect("[::ffff:127.0.0.1]:port")` to an IPv4 loopback
+/// connection, so without this canonicalization every mapped form
+/// (`::ffff:127.0.0.1`, `::ffff:10.0.0.1`, `::ffff:169.254.169.254`,
+/// `::ffff:0.0.0.0`, …) would bypass the guards below.
+fn canonicalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
+}
+
 /// Layer 3: resolve the caller's real IP given the TCP peer and request headers.
 ///
 /// Trust boundary: if the TCP peer is non-loopback, the service is exposed
@@ -45,12 +68,14 @@ async fn health() -> Json<HealthResponse> {
 /// `X-Forwarded-For` — Caddy strips it, and the app must not re-introduce a
 /// vulnerability by trusting it.
 fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr> {
-    if !peer.ip().is_loopback() {
-        return Some(peer.ip());
+    let peer_ip = canonicalize_ip(peer.ip());
+    if !peer_ip.is_loopback() {
+        return Some(peer_ip);
     }
 
     let value = headers.get(CLIENT_IP_HEADER)?.to_str().ok()?;
-    let ip: IpAddr = value.trim().parse().ok()?;
+    let parsed: IpAddr = value.trim().parse().ok()?;
+    let ip = canonicalize_ip(parsed);
 
     if is_blocked_target(&ip) {
         return None;
@@ -65,13 +90,18 @@ fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr> {
 /// RFC 4193 (IPv6 ULA), and similar ranges. Used by both `/probe` and
 /// `/reach` before any outbound connection is attempted, and also by
 /// `resolve_client_ip` to reject bogus `X-AIMX-Client-IP` values.
+///
+/// IPv4-mapped IPv6 addresses are canonicalized to their IPv4 form before
+/// the checks run, so `::ffff:127.0.0.1` and similar are blocked as if the
+/// caller had supplied `127.0.0.1` directly.
 fn is_blocked_target(ip: &IpAddr) -> bool {
+    let ip = canonicalize_ip(*ip);
     if ip.is_loopback() || ip.is_unspecified() {
         return true;
     }
     match ip {
-        IpAddr::V4(v4) => is_blocked_ipv4(v4),
-        IpAddr::V6(v6) => is_blocked_ipv6(v6),
+        IpAddr::V4(v4) => is_blocked_ipv4(&v4),
+        IpAddr::V6(v6) => is_blocked_ipv6(&v6),
     }
 }
 
@@ -228,6 +258,13 @@ async fn run_smtp_listener() {
 
     tracing::info!("SMTP listener on {bind_addr}");
 
+    // Concurrency is currently unbounded. With `SMTP_CONNECTION_TIMEOUT = 30s`
+    // and `SMTP_MAX_LINE_BYTES = 1 KiB` per line, a single client is tightly
+    // bounded, but a distributed flood could still saturate the tokio
+    // runtime. Adding a semaphore here is tracked as Sprint 14 follow-up
+    // hardening (see PR #21 review, non-blocker #4) — kept out of Sprint 12
+    // to avoid scope creep into general DoS hardening, which was not part
+    // of this sprint's charter.
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -256,18 +293,25 @@ async fn handle_smtp_connection(stream: TcpStream) -> std::io::Result<()> {
         .unwrap_or(Ok(()))
 }
 
-async fn smtp_session(stream: TcpStream) -> std::io::Result<()> {
-    let (reader, mut writer) = tokio::io::split(stream);
+async fn smtp_session<S>(stream: S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
+    let (reader, writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
+    let mut writer = writer;
 
     let banner = format!("220 {SMTP_HOSTNAME} SMTP aimx-verify\r\n");
     writer.write_all(banner.as_bytes()).await?;
     writer.flush().await?;
 
     loop {
-        let mut line = String::new();
+        let mut line = Vec::new();
+        // Cap per-line reads so a misbehaving peer cannot stream unbounded
+        // data into our buffer before the per-line timeout trips.
+        let mut limited = (&mut reader).take(SMTP_MAX_LINE_BYTES);
         let read_result =
-            tokio::time::timeout(SMTP_LINE_TIMEOUT, reader.read_line(&mut line)).await;
+            tokio::time::timeout(SMTP_LINE_TIMEOUT, limited.read_until(b'\n', &mut line)).await;
 
         let n = match read_result {
             Ok(Ok(n)) => n,
@@ -279,7 +323,8 @@ async fn smtp_session(stream: TcpStream) -> std::io::Result<()> {
             return Ok(());
         }
 
-        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let text = std::str::from_utf8(&line).unwrap_or("");
+        let trimmed = text.trim_end_matches(['\r', '\n']);
         let upper = trimmed.to_ascii_uppercase();
 
         if upper.starts_with("EHLO") || upper.starts_with("HELO") {
@@ -334,7 +379,6 @@ fn main() {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use tokio::io::AsyncReadExt;
 
     fn empty_headers() -> HeaderMap {
         HeaderMap::new()
@@ -859,7 +903,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Integration: /probe handler resolves IP via X-AIMX-Client-IP header
+    // Integration: /probe and /reach handlers resolve IP via header
     // -----------------------------------------------------------------
 
     #[tokio::test]
@@ -875,5 +919,188 @@ mod tests {
         let result = reach(ConnectInfo(addr), headers).await.unwrap();
         assert_eq!(result.ip, "192.0.2.1");
         assert!(!result.reachable);
+    }
+
+    #[tokio::test]
+    async fn probe_resolves_caller_ip_from_header_on_loopback() {
+        // Same test, but against /probe — the spec explicitly asks for header
+        // resolution on /probe in addition to /reach. TEST-NET-1 is
+        // unroutable, so the EHLO handshake fails and we get reachable: false
+        // with the correct ip field. What we're actually asserting is that
+        // the handler resolved the target from the header, not from the
+        // (loopback) peer — if it used the peer the response ip would be
+        // "127.0.0.1".
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("192.0.2.1");
+        let result = probe(ConnectInfo(addr), headers).await.unwrap();
+        assert_eq!(result.ip, "192.0.2.1");
+        assert!(!result.reachable);
+    }
+
+    // -----------------------------------------------------------------
+    // IPv4-mapped IPv6 bypass regression tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn is_blocked_target_rejects_ipv4_mapped_ipv6() {
+        // Rust's `Ipv6Addr::is_loopback`/`is_unspecified` only match the
+        // canonical v6 forms, and our link-local/ULA/multicast checks likewise
+        // only match canonical v6 segments. Without canonicalization, every
+        // `::ffff:a.b.c.d` form would sneak past the guard and Linux dual-stack
+        // sockets would silently downgrade to the underlying v4 address. These
+        // are the exact payloads flagged in the PR review.
+        let blocked = [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:10.255.255.255",
+            "::ffff:172.16.0.1",
+            "::ffff:192.168.1.1",
+            "::ffff:169.254.1.1",
+            "::ffff:169.254.169.254", // cloud instance metadata
+            "::ffff:0.0.0.0",
+            "::ffff:100.64.0.1", // CGNAT
+        ];
+        for ip_str in blocked {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(is_blocked_target(&ip), "{ip_str} should be blocked");
+        }
+    }
+
+    #[test]
+    fn is_blocked_target_allows_ipv4_mapped_public() {
+        // Canonicalization must not over-block: mapped public IPv4 addresses
+        // should pass through, since the underlying v4 form is allowed.
+        let allowed = ["::ffff:1.1.1.1", "::ffff:8.8.8.8", "::ffff:203.0.113.1"];
+        for ip_str in allowed {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(!is_blocked_target(&ip), "{ip_str} should be allowed");
+        }
+    }
+
+    #[test]
+    fn resolve_client_ip_rejects_ipv4_mapped_loopback_header() {
+        // An attacker-controlled header carrying a mapped loopback must be
+        // rejected by `resolve_client_ip`, not passed through to the handler.
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        for ip_str in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:0.0.0.0",
+        ] {
+            let headers = headers_with_client_ip(ip_str);
+            assert!(
+                resolve_client_ip(&peer, &headers).is_none(),
+                "mapped header {ip_str} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_client_ip_treats_ipv4_mapped_loopback_peer_as_loopback() {
+        // Dual-stack bind (`[::]:3025`) makes an IPv4 loopback client show up
+        // with `peer.ip() == ::ffff:127.0.0.1`. That must be treated as a
+        // loopback peer — i.e. require a trusted header — not as a "direct"
+        // caller that the handler then probes.
+        let peer: SocketAddr = "[::ffff:127.0.0.1]:12345".parse().unwrap();
+        assert!(resolve_client_ip(&peer, &empty_headers()).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_canonicalizes_ipv4_mapped_public_header() {
+        // A mapped public v4 address in the header should be canonicalized
+        // to its v4 form before being returned, so downstream logging and
+        // target-guard checks see one representation.
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("::ffff:203.0.113.5");
+        let ip = resolve_client_ip(&peer, &headers).unwrap();
+        assert_eq!(ip.to_string(), "203.0.113.5");
+    }
+
+    // -----------------------------------------------------------------
+    // SMTP session: idle timeout and oversized-line hardening
+    // -----------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn smtp_session_idle_times_out() {
+        // Prove that a silent client hits SMTP_LINE_TIMEOUT and the session
+        // closes cleanly without the tests actually waiting 10 seconds.
+        // `start_paused` auto-advances virtual time when all tasks are idle,
+        // so the timeout inside `smtp_session` fires immediately. We use an
+        // in-memory duplex pipe instead of a real TCP socket specifically
+        // so the runtime's virtual clock applies to the timeout.
+        let (server_side, mut client_side) = tokio::io::duplex(1024);
+
+        let server = tokio::spawn(async move { smtp_session(server_side).await });
+
+        // Consume the 220 banner so the server is blocked in `read_line`.
+        let mut banner = vec![0u8; 128];
+        let n = client_side.read(&mut banner).await.unwrap();
+        assert!(
+            std::str::from_utf8(&banner[..n])
+                .unwrap()
+                .starts_with("220"),
+            "expected banner, got: {:?}",
+            &banner[..n]
+        );
+        // Stay silent. The session must give up after SMTP_LINE_TIMEOUT and
+        // return Ok(()). With start_paused + auto-advance this completes
+        // in virtual time.
+
+        let result = server.await.expect("server task panicked");
+        assert!(
+            result.is_ok(),
+            "idle-timeout close should be reported as clean"
+        );
+    }
+
+    #[tokio::test]
+    async fn smtp_session_oversized_line_is_bounded() {
+        // Send a >2 KiB single-line "command" with no CRLF terminator. The
+        // take-limited reader should return at SMTP_MAX_LINE_BYTES without
+        // blowing up the session's memory. Once we then send a real QUIT,
+        // the session must still respond.
+        //
+        // Note: because the oversized chunk contains no newline, read_until
+        // will keep reading until it hits the cap. With the cap in place,
+        // the session continues with a well-formed "unknown command" reply
+        // to the truncated buffer (likely `500`), then handles QUIT normally.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_smtp_connection(stream).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let _banner = read_line(&mut stream).await;
+
+        // ~2 KiB of junk, no terminator. The cap is 1024 bytes, so the
+        // server reads only the first 1024 and treats it as one "line".
+        let junk = vec![b'A'; 2048];
+        stream.write_all(&junk).await.unwrap();
+        // Terminate the chunk so the cap-bounded read completes.
+        stream.write_all(b"\r\nQUIT\r\n").await.unwrap();
+
+        // We expect at least one response line (500) followed by 221 Bye.
+        // Read generously and assert both are present.
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        let first = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(
+            first.starts_with("500") || first.contains("221"),
+            "unexpected first response after oversized line: {first}"
+        );
+        if !first.contains("221") {
+            let n2 = stream.read(&mut buf).await.unwrap();
+            let second = String::from_utf8_lossy(&buf[..n2]).to_string();
+            assert!(
+                second.starts_with("221"),
+                "expected 221 Bye after QUIT, got: {second}"
+            );
+        }
     }
 }
