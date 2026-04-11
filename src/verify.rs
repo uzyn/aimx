@@ -4,25 +4,25 @@ use std::path::Path;
 
 pub fn run(
     data_dir: Option<&Path>,
-    host_override: Option<&str>,
+    verify_host: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir).ok(),
         None => Config::load_default().ok(),
     };
 
-    let verify_host = resolve_verify_host(host_override, config.as_ref(), DEFAULT_VERIFY_HOST);
-    let net = setup::RealNetworkOps::from_verify_host(verify_host);
+    let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
+    let net = setup::RealNetworkOps::from_verify_host(host)?;
 
     run_with_net(&net)
 }
 
-pub fn resolve_verify_host(
-    host_override: Option<&str>,
+pub(crate) fn resolve_verify_host(
+    cli_override: Option<&str>,
     config: Option<&Config>,
     default: &str,
 ) -> String {
-    if let Some(host) = host_override {
+    if let Some(host) = cli_override {
         return host.to_string();
     }
     config
