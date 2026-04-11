@@ -54,7 +54,13 @@ impl SystemOps for RealSystemOps {
 
     fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>> {
         let status = std::process::Command::new("sudo")
-            .args(["apt-get", "install", "-y", package])
+            .args([
+                "apt-get",
+                "install",
+                "-y",
+                "--no-install-recommends",
+                package,
+            ])
             .status()?;
         if !status.success() {
             return Err(format!("Failed to install {package}").into());
