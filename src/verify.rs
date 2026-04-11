@@ -38,7 +38,7 @@ pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Erro
     print!("  Outbound port 25... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_outbound(net) {
-        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Pass(_) => println!("PASS"),
         setup::PreflightResult::Fail(msg) => {
             println!("FAIL");
             eprintln!("  {msg}");
@@ -47,10 +47,13 @@ pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Erro
         setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
     }
 
+    // `aimx verify` is a post-setup sanity check — the user already has a
+    // working mail server, so the full EHLO handshake via `/probe` is the
+    // correct validation.
     print!("  Inbound port 25 (EHLO probe)... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_inbound(net) {
-        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Pass(_) => println!("PASS"),
         setup::PreflightResult::Fail(msg) => {
             println!("FAIL");
             eprintln!("  {msg}");
@@ -62,7 +65,8 @@ pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Erro
     print!("  PTR record... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_ptr(net) {
-        setup::PreflightResult::Pass => println!("PASS"),
+        setup::PreflightResult::Pass(Some(ptr)) => println!("PASS ({ptr})"),
+        setup::PreflightResult::Pass(None) => println!("PASS"),
         setup::PreflightResult::Fail(msg) => {
             println!("FAIL: {msg}");
             all_pass = false;
@@ -88,8 +92,29 @@ mod tests {
 
     struct MockNetworkOps {
         outbound: bool,
+        /// Result for `check_inbound_port25` (EHLO via `/probe`). This is the
+        /// variant `aimx verify` should be using.
         inbound: bool,
+        /// Result for `check_inbound_reachable` (plain TCP via `/reach`).
+        /// `aimx verify` must NOT call this; set to the opposite of `inbound`
+        /// in tests that verify `aimx verify` uses the EHLO variant.
+        inbound_reachable: bool,
         ptr: Option<String>,
+        /// Track whether `check_inbound_reachable` was called during the test
+        /// — used to assert `aimx verify` never touches the `/reach` path.
+        reach_called: std::cell::Cell<bool>,
+    }
+
+    impl Default for MockNetworkOps {
+        fn default() -> Self {
+            Self {
+                outbound: true,
+                inbound: true,
+                inbound_reachable: true,
+                ptr: Some("mail.example.com.".into()),
+                reach_called: std::cell::Cell::new(false),
+            }
+        }
     }
 
     impl NetworkOps for MockNetworkOps {
@@ -98,6 +123,10 @@ mod tests {
         }
         fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
             Ok(self.inbound)
+        }
+        fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            self.reach_called.set(true);
+            Ok(self.inbound_reachable)
         }
         fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
             Ok(self.ptr.clone())
@@ -118,11 +147,7 @@ mod tests {
 
     #[test]
     fn verify_all_pass() {
-        let net = MockNetworkOps {
-            outbound: true,
-            inbound: true,
-            ptr: Some("mail.example.com.".into()),
-        };
+        let net = MockNetworkOps::default();
         assert!(run_with_net(&net).is_ok());
     }
 
@@ -130,8 +155,7 @@ mod tests {
     fn verify_outbound_fail() {
         let net = MockNetworkOps {
             outbound: false,
-            inbound: true,
-            ptr: Some("mail.example.com.".into()),
+            ..Default::default()
         };
         assert!(run_with_net(&net).is_err());
     }
@@ -139,9 +163,8 @@ mod tests {
     #[test]
     fn verify_inbound_fail() {
         let net = MockNetworkOps {
-            outbound: true,
             inbound: false,
-            ptr: Some("mail.example.com.".into()),
+            ..Default::default()
         };
         assert!(run_with_net(&net).is_err());
     }
@@ -149,9 +172,8 @@ mod tests {
     #[test]
     fn verify_ptr_warn_still_passes() {
         let net = MockNetworkOps {
-            outbound: true,
-            inbound: true,
             ptr: None,
+            ..Default::default()
         };
         assert!(run_with_net(&net).is_ok());
     }
@@ -162,8 +184,27 @@ mod tests {
             outbound: false,
             inbound: false,
             ptr: None,
+            ..Default::default()
         };
         assert!(run_with_net(&net).is_err());
+    }
+
+    /// Regression test for S13.1: `aimx verify` must continue to use the
+    /// EHLO-based `/probe` path (not the plain-TCP `/reach` path). If the
+    /// EHLO path says `inbound: false` but the reach path says
+    /// `inbound_reachable: true`, `aimx verify` should still fail.
+    #[test]
+    fn verify_uses_ehlo_not_reach() {
+        let net = MockNetworkOps {
+            inbound: false,
+            inbound_reachable: true,
+            ..Default::default()
+        };
+        assert!(run_with_net(&net).is_err());
+        assert!(
+            !net.reach_called.get(),
+            "aimx verify must not call check_inbound_reachable (the /reach endpoint)"
+        );
     }
 
     #[test]
