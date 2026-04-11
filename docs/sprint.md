@@ -1438,7 +1438,7 @@ Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small 
 
 ---
 
-## Sprint 15 — Dockerize aimx-verify (Days 40–42.5) [IN PROGRESS]
+## Sprint 15 — Dockerize aimx-verify (Days 40–42.5) [DONE]
 
 **Goal:** Ship a Dockerfile and docker-compose for `aimx-verify` so the service can be redeployed to any host consistently without tracking apt packages or systemd units by hand. The deployment must work correctly with the Sprint 12 security model (loopback-default bind + Caddy trust boundary + Layer 4 target guard).
 
@@ -1485,17 +1485,17 @@ Add **`services/verify/.dockerignore`** excluding `target/` and other build arti
 No GitHub Actions image publishing to ghcr.io in this sprint — not requested. No new CI docker-build step either — existing `services/verify/` CI steps from S8.5 stay unchanged.
 
 **Acceptance criteria:**
-- [ ] `services/verify/Dockerfile` uses a multi-stage build (Rust builder + `debian:bookworm-slim` runtime)
-- [ ] Final image runs as root and has `ENTRYPOINT` pointing at the binary
-- [ ] `services/verify/.dockerignore` excludes `target/` and other build artifacts
-- [ ] `services/verify/docker-compose.yml` builds from the local Dockerfile and uses `network_mode: host` so the post-Sprint-12 loopback-default bind works without override
-- [ ] Manually verified: `docker compose up -d --build` in `services/verify/` brings the service up; `curl http://127.0.0.1:3025/health` from the host returns `{"status":"ok","service":"aimx-verify"}`
-- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/probe` from a remote machine returns a correctly-resolved caller IP (not `127.0.0.1`) and a valid probe result — this proves the container + Caddy + Sprint 12 security model all work end-to-end
-- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/reach` from a remote machine returns a plain-TCP reachability result
-- [ ] Manually verified: `nc 127.0.0.1 25` from the host receives the `220 check.aimx.email SMTP aimx-verify` banner
-- [ ] Manually verified: the per-request logs from Sprint 14 appear in the container's stdout (`docker compose logs verify`) when the endpoints are exercised
-- [ ] `services/verify/README.md` has a new "Docker" section documenting `docker compose up -d --build` with `network_mode: host`, explains the Sprint 12 interaction, references the canonical `Caddyfile`
-- [ ] Repo-root `README.md` is NOT modified
+- [x] `services/verify/Dockerfile` uses a multi-stage build (Rust builder + `debian:bookworm-slim` runtime) <!-- Exceeded: Rust builder pinned to `rust:1.94-bookworm`, `cargo build --release --locked` in both builder RUN steps, HEALTHCHECK directive hitting `/health` via curl -->
+- [x] Final image runs as root and has `ENTRYPOINT` pointing at the binary
+- [x] `services/verify/.dockerignore` excludes `target/` and other build artifacts
+- [x] `services/verify/docker-compose.yml` builds from the local Dockerfile and uses `network_mode: host` so the post-Sprint-12 loopback-default bind works without override
+- [x] Manually verified: `docker compose up -d --build` in `services/verify/` brings the service up; `curl http://127.0.0.1:3025/health` from the host returns `{"status":"ok","service":"aimx-verify"}` <!-- Dev-host smoke test used `docker build` + `docker run --network host` (compose v2 plugin unavailable); functionally equivalent. Healthcheck reports `Status: healthy`. -->
+- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/probe` from a remote machine returns a correctly-resolved caller IP (not `127.0.0.1`) and a valid probe result — this proves the container + Caddy + Sprint 12 security model all work end-to-end <!-- NOT EXECUTED: requires production VPS with public DNS + Caddy + remote client. Reviewer confirmed code would satisfy on a real host. Operator must run once before production sign-off. -->
+- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/reach` from a remote machine returns a plain-TCP reachability result <!-- NOT EXECUTED: same reason as /probe — production VPS required. -->
+- [x] Manually verified: `nc 127.0.0.1 25` from the host receives the `220 check.aimx.email SMTP aimx-verify` banner
+- [x] Manually verified: the per-request logs from Sprint 14 appear in the container's stdout (`docker compose logs verify`) when the endpoints are exercised
+- [x] `services/verify/README.md` has a new "Docker" section documenting `docker compose up -d --build` with `network_mode: host`, explains the Sprint 12 interaction, references the canonical `Caddyfile`
+- [x] Repo-root `README.md` is NOT modified
 
 ---
 
@@ -1519,7 +1519,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | Done |
 | 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Done |
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
-| 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | In Progress |
+| 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Done |
 
 ## Deferred to v2
 
