@@ -1,6 +1,6 @@
 # aimx
 
-> Your server can receive email. Why are you routing through Gmail?
+> You gave your agents an entire server. Why borrow someone else's inbox?
 
 **SMTP for agents. No middleman.**
 
