@@ -119,7 +119,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
 
 ### 6.8 Verify Service
-- FR-38: Hosted probe service at `check.aimx.email` that performs SMTP EHLO handshake with caller's IP on port 25, confirming a real SMTP server is responding.
+- FR-38: Hosted verify service at `check.aimx.email` exposing two complementary endpoints: `/reach` performs a plain TCP connect to the caller's IP on port 25 (used by `aimx preflight` to confirm reachability on a fresh VPS before OpenSMTPD is installed), and `/probe` performs a full SMTP EHLO handshake with the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after install).
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
 - FR-39b: Port 25 listener on the verify service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
 - FR-40: Verify service is open source and self-hostable. No MTA required on the verify server.

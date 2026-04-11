@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 13 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 verify ops)
-**Timeline:** ~36.5 calendar days
-**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 are review-driven operational quality work on the verify service (request logging, Docker packaging).
+**Total sprints:** 15 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops)
+**Timeline:** ~42.5 calendar days
+**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verify service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verify service (request logging, Docker packaging).
 
 ---
 
@@ -1151,13 +1151,264 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 
 ---
 
-## Sprint 12 — Request Logging for aimx-verify (Days 31–33.5) [NOT STARTED]
+## Sprint 12 — aimx-verify Security Hardening + /reach Endpoint (Days 31–33.5) [NOT STARTED]
 
-**Goal:** Add per-request logging to every call served by `aimx-verify` — HTTP and SMTP — so operators can see who's using the service, diagnose issues, and spot abuse directly from the shell output.
+**Goal:** Fix three real bugs in the verify service discovered during post-Sprint-11 debugging: the Caddy self-probe loop (ConnectInfo reports loopback when behind a reverse proxy, so the service probes itself), the SSRF / port-scan-as-a-service risk in naive X-Forwarded-For handling, and the self-EHLO trap in the built-in SMTP listener. Also add a plain-TCP `/reach` endpoint so `aimx preflight` (Sprint 13) can check port 25 reachability on a fresh VPS without requiring a live SMTP server.
 
 **Dependencies:** Sprint 11 (merged)
 
-### S12.1 — Log All HTTP and SMTP Calls
+**Background — the bugs this sprint fixes:**
+
+1. **Caddy self-probe loop.** `services/verify/src/main.rs:26` uses `ConnectInfo(addr)` to identify the caller, but when the axum server is behind Caddy (as the deployed `check.aimx.email` is), the TCP peer is the loopback Caddy→axum connection. So every `/probe` call resolves the caller IP to `127.0.0.1`, connects to `127.0.0.1:25`, hits the service's OWN built-in SMTP listener (`run_smtp_listener`, line 92), gets a malformed SMTP exchange, and returns `{"reachable": false, "ip": "127.0.0.1"}`. Real users hitting the public endpoint have been getting garbage results. Verified: `curl https://check.test.aimx.email/probe` returns `{"reachable":false,"ip":"127.0.0.1"}`.
+
+2. **SSRF / port-scan-as-a-service via XFF poisoning.** Even with an X-Forwarded-For fallback added naively, Caddy's default behavior APPENDS rather than replaces the header. A client sending `X-Forwarded-For: 8.8.8.8` gets that value forwarded through as the leftmost entry — so a "leftmost = client" parser would let any internet caller make the service probe port 25 on any host of their choosing. Needs a trust-boundary design, not just a fallback.
+
+3. **Self-EHLO trap.** `handle_smtp_connection` (line 117) sends `220` banner → waits for any input → sends `221 Bye` and closes. It never sends `250` in response to EHLO. So any EHLO-speaking client (including the service's own `/probe` loop) reads `221` after `EHLO` and fails the handshake. The listener is not a valid SMTP responder.
+
+**Additional scope — `/reach` endpoint for Sprint 13.** `aimx preflight` needs to check inbound port 25 reachability on a fresh VPS before OpenSMTPD is installed, which means there's nothing on :25 answering SMTP yet. The current `/probe` endpoint requires a full EHLO handshake and will always fail in that state. The clean fix is a second endpoint that only does a plain TCP reachability test (equivalent to `nc -z <ip> 25`), matching what preflight actually means. `/probe` stays unchanged for `aimx setup` and `aimx verify`, which run after OpenSMTPD is installed and SHOULD validate a real SMTP responder.
+
+### S12.1 — 4-Layer Caddy Self-Probe Fix + /reach Endpoint
+
+*As a user calling the verify service from the public internet, I want `/probe` to correctly identify my IP and probe it — not the service's own loopback — and as a security-conscious operator of the service, I want it protected against being used as a port-scanner proxy via XFF spoofing. Additionally, as an operator running `aimx preflight` on a fresh VPS, I want a plain-TCP `/reach` endpoint that passes when port 25 is reachable, even if no SMTP server is answering yet.*
+
+**Technical context:** Implements a 4-layer defense against the Caddy self-probe bug + XFF SSRF risk, applied uniformly to both `/probe` (existing EHLO endpoint) and a new `/reach` (plain TCP endpoint). Each layer fails closed without the others.
+
+**Layer 1 — Network (bind loopback by default).** `services/verify/src/main.rs:141` currently defaults `BIND_ADDR` to `0.0.0.0:3025`. Change the default to `127.0.0.1:3025`. `BIND_ADDR` env var still overrides for operators who know what they're doing. This removes the ability for external callers to skip Caddy and hit the backend directly with arbitrary headers. **Breaking change for the currently-deployed service** — operators must either (a) put Caddy in front, (b) set `BIND_ADDR=0.0.0.0:3025` explicitly and accept the risk, or (c) use the Dockerized deployment from Sprint 15 which binds loopback inside the container and publishes via docker-compose port mapping. Document the change in the README.
+
+**Layer 2 — Proxy (Caddyfile + header contract).** Commit a canonical `services/verify/Caddyfile` with:
+
+```caddyfile
+{$DOMAIN:check.aimx.email} {
+    reverse_proxy 127.0.0.1:3025 {
+        header_up -X-Forwarded-For
+        header_up X-AIMX-Client-IP {remote_host}
+    }
+}
+```
+
+- `header_up -X-Forwarded-For` strips any client-supplied XFF so downstream code is not tempted to trust it.
+- `header_up X-AIMX-Client-IP {remote_host}` authoritatively sets a dedicated header to Caddy's view of the real TCP peer. Caddy's `header_up <name> <value>` REPLACES, not appends, so a client cannot pre-seed `X-AIMX-Client-IP` — Caddy always overwrites.
+- `{$DOMAIN:check.aimx.email}` uses Caddy's env-var interpolation with a default. Canonical file works out of the box for the production deployment; operators running `check.test.aimx.email` or a self-hosted instance set `DOMAIN=...` and reuse the same file.
+
+**Layer 3 — App (trusted header resolver).** Add `fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr>` to `main.rs`:
+
+- If `peer.ip().is_loopback()` is **false** → not from Caddy, return `Some(peer.ip())`. Direct-connect semantics for `BIND_ADDR=0.0.0.0` mode or local testing.
+- If peer IS loopback → the request came through a trusted reverse proxy. Require `X-AIMX-Client-IP`. Parse it as an `IpAddr`. Reject loopback / unspecified / link-local / RFC 1918 / RFC 4193 values. Return `Some(ip)` if valid, `None` otherwise.
+- Apply to BOTH `/probe` and `/reach` handlers (shared helper). When the resolver returns `None` on a loopback peer, return **HTTP 400** — per owner decision, this is an API contract violation (Caddy should have set the header), not a silent probe of the wrong target.
+- Do NOT read `X-Forwarded-For` anywhere. Caddy strips it; app must not re-introduce a vulnerability by parsing it.
+
+**Layer 4 — Probe guard (target validation).** In both `check_port25_ehlo` (`/probe`) and the new TCP-only check (`/reach`), before attempting any connection, validate the resolved target IP:
+
+- Reject: loopback, unspecified (`0.0.0.0`, `::`), link-local (`169.254.0.0/16`, `fe80::/10`), RFC 1918 (`10/8`, `172.16/12`, `192.168/16`), RFC 4193 (`fc00::/7`).
+- Return `reachable: false` immediately on rejection — do not reveal whether the blocked target would have been reachable.
+- Use `std::net::IpAddr::is_loopback()` and similar stdlib helpers where available; hand-roll RFC 1918 / RFC 4193 checks as a small helper with unit tests.
+
+**New `/reach` endpoint.** Add `GET /reach` route to the axum router at line 139:
+
+- Resolves caller IP via `resolve_client_ip` (same as `/probe`).
+- Runs a plain `TcpStream::connect("{caller_ip}:25")` with a 10-second timeout. No banner read, no EHLO, no handshake, no `221 Bye`.
+- Returns `{"reachable": bool, "ip": "..."}` — same response shape as `/probe` for client-code symmetry.
+- Applies the Layer 4 target guard.
+- Does NOT share code with `check_port25_ehlo` beyond the target guard — keep the TCP-only path simple.
+
+**Acceptance criteria:**
+- [ ] Default HTTP bind address changed from `0.0.0.0:3025` to `127.0.0.1:3025` in `services/verify/src/main.rs`
+- [ ] `services/verify/Caddyfile` committed with `header_up -X-Forwarded-For`, `header_up X-AIMX-Client-IP {remote_host}`, and `{$DOMAIN:check.aimx.email}` interpolation
+- [ ] `resolve_client_ip(peer, headers)` helper added to `main.rs` with the trust-boundary logic described above
+- [ ] `/probe` handler uses `resolve_client_ip`; returns HTTP 400 when peer is loopback and `X-AIMX-Client-IP` is missing, unparseable, or a rejected range
+- [ ] New `GET /reach` route added that uses `resolve_client_ip` and does a plain 10-second TCP connect to `{caller_ip}:25`, returning `{"reachable": bool, "ip": "..."}`
+- [ ] Layer 4 target guard rejects loopback / unspecified / link-local / RFC 1918 / RFC 4193 targets in both `/probe` and `/reach`
+- [ ] App does NOT read `X-Forwarded-For` anywhere — grep confirms
+- [ ] Unit test: `resolve_client_ip` returns peer IP when peer is a public IPv4/IPv6 address (direct-connect mode)
+- [ ] Unit test: `resolve_client_ip` returns `X-AIMX-Client-IP` value when peer is loopback and header is a valid public IP
+- [ ] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header is missing
+- [ ] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header value is loopback / private / unspecified / link-local
+- [ ] Unit test: `/probe` handler returns 400 when peer is loopback and `X-AIMX-Client-IP` is missing
+- [ ] Unit test: `/reach` handler returns 400 under the same conditions
+- [ ] Unit test: Layer 4 target guard rejects `127.0.0.1`, `::1`, `0.0.0.0`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, `169.254.1.1`, `fe80::1`, `fc00::1`
+- [ ] Unit test: `/reach` against an unreachable host returns `reachable: false` within the 10-second timeout window
+- [ ] Unit test: `/reach` against a listening TCP socket (no SMTP) returns `reachable: true` — this is the key semantic difference from `/probe`
+- [ ] Integration test: end-to-end `/probe` with a hand-rolled loopback caller setting `X-AIMX-Client-IP` returns the expected resolved IP (not `127.0.0.1`)
+- [ ] Existing `/probe` EHLO handshake tests still pass — no regression
+- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
+
+### S12.2 — Fix Self-EHLO Trap in Built-in SMTP Listener
+
+*As a user probing the verify service's built-in port 25 listener with a real EHLO client, I want a correct SMTP exchange so the listener is actually useful as a reachability test target — not a malformed conversation that breaks real clients.*
+
+**Technical context:** `handle_smtp_connection` at `services/verify/src/main.rs:117-129` currently does: write `220 check.aimx.email SMTP aimx-verify\r\n` → read up to 512 bytes with 10s timeout → write `221 Bye\r\n` → close. It never sends `250` in response to EHLO. Any real EHLO client (including the verify service's own `check_port25_ehlo` loop from the Caddy bug) reads `221 Bye` instead of `250 ...`, which starts with neither `250 ` nor `250-`, and the handshake fails.
+
+Rewrite `handle_smtp_connection` to implement a minimal but correct SMTP exchange:
+
+1. Send `220 {hostname} SMTP aimx-verify\r\n` (hostname from existing `SMTP_BANNER` constant or derived similarly)
+2. Loop:
+   - Read a CRLF-terminated line with a read timeout (5-10s per line)
+   - If the line starts with `EHLO` or `HELO` (case-insensitive) → send `250 {hostname}\r\n` and continue the loop
+   - If the line starts with `QUIT` (case-insensitive) → send `221 Bye\r\n`, close, return
+   - If the line is any other command → send `500 Command not recognized\r\n` and continue the loop
+   - If read returns 0 bytes (peer closed) → close, return
+   - If read times out → close, return
+3. Overall connection has a hard wall-clock timeout (~30s total) to prevent idle connection pinning
+
+Use `tokio::io::BufReader` and `AsyncBufReadExt::read_line` for line-delimited reads. Still not a real SMTP server (no MAIL FROM, RCPT TO, DATA, or AUTH) — it exists only as a correct-enough handshake target for external EHLO-based reachability probes that hit the verify server directly (e.g., `aimx setup`'s outbound check at `check.aimx.email:25`, and any operator's own manual testing).
+
+**Acceptance criteria:**
+- [ ] `handle_smtp_connection` responds to `EHLO` with `250 {hostname}\r\n` and continues the session
+- [ ] `handle_smtp_connection` responds to `HELO` with `250 {hostname}\r\n` and continues the session
+- [ ] `handle_smtp_connection` responds to `QUIT` with `221 Bye\r\n` and closes cleanly
+- [ ] `handle_smtp_connection` responds to unknown commands with `500 Command not recognized\r\n` and continues
+- [ ] Connection is closed cleanly on peer close or idle/read timeout
+- [ ] Overall wall-clock connection timeout prevents indefinite resource pinning (~30s)
+- [ ] Unit test: full exchange `220` → `EHLO` → `250` → `QUIT` → `221` completes correctly
+- [ ] Unit test: unknown command returns `500` without closing the connection
+- [ ] Unit test: client closing the connection mid-session is handled without error
+- [ ] Unit test: idle timeout closes the connection
+- [ ] Existing `smtp_listener_sends_banner_and_bye` test is updated or replaced for the new semantics (it currently asserts behavior that was itself the bug)
+- [ ] Integration test: `check_port25_ehlo` successfully probes this listener — this test is the round-trip that proves the self-loop scenario is now well-formed (even though Layer 4 would block the self-probe in production, the handshake itself must be correct)
+
+### S12.3 — Caddyfile Docs + README + manual-setup + PRD Update
+
+*As a self-hoster of the verify service, I need docs that explain the new Caddy deployment contract, the loopback-bind default, and the two-endpoint split.*
+
+**Technical context:** The code changes in S12.1 break existing deployments of the verify service (default bind moves to loopback, `/probe` now returns 400 on a loopback peer without `X-AIMX-Client-IP`). Docs must cover the new deployment contract so operators can migrate without guesswork.
+
+**`services/verify/README.md` updates:**
+- New "Caddy deployment" section referencing the canonical `services/verify/Caddyfile`, explaining why `-X-Forwarded-For` and `X-AIMX-Client-IP {remote_host}` are both required, and how to set `DOMAIN` for non-default hostnames.
+- Expand the "API Endpoints" section to document both `/probe` (full SMTP EHLO handshake — for post-install verification via `aimx setup` and `aimx verify`) and `/reach` (plain TCP reachability — for pre-install preflight via `aimx preflight`). Make the semantic difference explicit.
+- Note that the HTTP default bind is `127.0.0.1:3025` and that direct `0.0.0.0:3025` binding is NOT supported in production — there is no trust boundary without a reverse proxy setting `X-AIMX-Client-IP`. Document the `BIND_ADDR` override for operators who understand the trade-off.
+- Update the systemd example to reflect the new defaults.
+
+**`docs/manual-setup.md` updates:**
+- Part A (verify service self-hosting): update to reflect the Caddyfile, the loopback bind default, and the two-endpoint model. Remove any stale instructions that assumed `0.0.0.0:3025`.
+- Add a note about `DOMAIN` env var for the Caddyfile.
+
+**`README.md` at repo root:** NOT modified. Per prior decision, end users don't run verify — the verify-specific docs stay scoped to `services/verify/README.md`.
+
+**PRD update (`docs/prd.md`) — small case-(b) extension:** Section 6.8 Verify Service currently has FR-38 describing a single `check.aimx.email` probe that performs an SMTP EHLO handshake, and FR-39b describing the port 25 listener. Update FR-38 to reflect that the verify service now exposes TWO complementary HTTP endpoints:
+- `/reach` — plain TCP reachability test (for `aimx preflight` on fresh VPSes before OpenSMTPD is installed)
+- `/probe` — full SMTP EHLO handshake (for `aimx setup` / `aimx verify` post-install validation)
+
+Keep the rest of section 6.8 as-is. This is a small, uncontroversial extension — the two-endpoint design is a refinement, not a scope change.
+
+**Acceptance criteria:**
+- [ ] `services/verify/README.md` has a "Caddy deployment" section referencing the canonical `Caddyfile` and explaining the `header_up` directives
+- [ ] `services/verify/README.md` "API Endpoints" section documents both `/probe` (EHLO) and `/reach` (plain TCP) with their distinct use cases
+- [ ] `services/verify/README.md` notes the new `127.0.0.1:3025` default bind and warns against direct `0.0.0.0` exposure without a reverse proxy
+- [ ] `services/verify/README.md` systemd example updated to reflect new defaults
+- [ ] `docs/manual-setup.md` Part A updated for the Caddyfile, loopback bind, and two-endpoint model
+- [ ] `docs/prd.md` FR-38 updated to describe the two-endpoint design (`/reach` + `/probe`)
+- [ ] Repo-root `README.md` is NOT modified
+- [ ] No stale references to naive XFF handling or `0.0.0.0:3025` default in any doc
+
+---
+
+## Sprint 13 — Preflight Flow Fix + PTR Display (Days 34–36.5) [NOT STARTED]
+
+**Goal:** Fix the preflight chicken-and-egg problem on fresh VPSes (preflight currently fails because `/probe` requires a live SMTP responder that isn't installed yet) by routing the preflight inbound check at the new `/reach` endpoint from Sprint 12. Also fix the PTR display ordering bug that mangles output when the inbound check fails.
+
+**Dependencies:** Sprint 12 (merged) — requires `/reach` to exist on the deployed verify service
+
+**Background — the bugs this sprint fixes:**
+
+1. **Preflight chicken-and-egg.** `aimx preflight` is meant to be run on a fresh VPS before `aimx setup` installs OpenSMTPD. But the inbound check in `RealNetworkOps::check_inbound_port25()` (src/setup.rs:270-283) calls `{verify_host}/probe`, which does a full SMTP EHLO handshake against the caller's port 25. On a fresh VPS nothing is listening there yet, so the handshake fails and preflight reports `FAIL: Inbound port 25 is not reachable` — even when port 25 is actually reachable at the TCP level (verified: the operator tested with `sudo nc -l -p 25` and `curl https://check.test.aimx.email/probe` still returns `reachable: false` because `nc` doesn't speak SMTP). The fix is to route preflight at the new plain-TCP `/reach` endpoint added in Sprint 12. `aimx setup` (which installs OpenSMTPD before the port check per S11.2) and `aimx verify` (which runs post-setup) continue to use `/probe` for full EHLO validation — no regression in their flows.
+
+2. **PTR display ordering bug.** `check_ptr` at `src/setup.rs:383-388` emits its own `println!("  PTR record: {ptr}")` at line 386 BEFORE returning `PreflightResult::Pass`. But the caller in `run_preflight` (line 431) uses `print!("  PTR record... ")` without a newline, waiting for the match result to append `PASS`. The unflushed `print!` + the `println!` inside `check_ptr` interleave, producing mangled output like:
+
+```
+  Inbound port 25 is not reachable. Check your firewall and VPS provider settings.
+  PTR record...   PTR record: vps-198f7320.vps.ovh.net.
+PASS
+```
+
+Per owner decision, PTR stays in preflight as advisory (Warn on missing, Pass on present, never Fail — non-blocking), but the display ordering needs to produce a single well-formed line.
+
+### S13.1 — Route Preflight Inbound at /reach; Keep Setup/Verify at /probe
+
+*As an operator running `aimx preflight` on a fresh VPS with nothing on port 25, I want the inbound check to PASS when the TCP path is reachable, without requiring a live SMTP server. As an operator running `aimx setup` or `aimx verify` on a configured box, I want the existing full EHLO handshake validation to remain unchanged.*
+
+**Technical context:** Split the inbound check into two distinct operations in the `NetworkOps` trait and route each caller at the right one.
+
+**`NetworkOps` trait (`src/setup.rs:34-36`) changes:**
+- Add `fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>>;` — calls `{verify_host}/reach`, used by `aimx preflight`.
+- Keep `fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;` as-is (still calls `/probe` and does EHLO) for `aimx setup` and `aimx verify`. Optionally rename to `check_inbound_ehlo()` for clarity if the developer prefers — either keep the name and let the different call sites document the semantics, or rename both for symmetry (`check_inbound_reachable` + `check_inbound_ehlo`). Developer's call; document the choice in the PR.
+
+**`RealNetworkOps` (`src/setup.rs:270-283`):**
+- Implement `check_inbound_reachable()` by curl-ing `{verify_host}/reach` with the existing 60s timeout and parsing `"reachable":true` — mirror the current `check_inbound_port25()` implementation exactly, just with a different path.
+- Existing `check_inbound_port25()` implementation stays unchanged (still calls `/probe`).
+
+**Callers to update:**
+- `run_preflight()` at `src/setup.rs:419-429` — change `check_inbound` (which wraps `check_inbound_port25`) to use the reachable variant. Either update `check_inbound()` helper to take a flag, or add a parallel `check_inbound_reachable()` helper. Keep the display text `Inbound port 25...` — the semantic is still "is my inbound port 25 reachable."
+- `run_setup_with_verify()` — keep using the EHLO variant (`/probe`). Setup installs OpenSMTPD before the port check per Sprint 11's install-before-check reorder, so the EHLO handshake is the right test at that point. **No regression.**
+- `src/verify.rs` (the `aimx verify` CLI) — keep using the EHLO variant. `aimx verify` is a post-setup sanity check; the user already has a working mail server and we want to validate it responds correctly.
+- Any mock `NetworkOps` impls in tests (`src/setup.rs:1116-1122`, `src/verify.rs:96-102`, and the mocks referenced in `src/setup.rs:2076`-area tests) — extend to cover both methods, preserving existing test coverage for `check_inbound_port25` and adding new tests for `check_inbound_reachable`.
+
+**Acceptance criteria:**
+- [ ] `NetworkOps` trait gains `check_inbound_reachable()` method
+- [ ] `RealNetworkOps::check_inbound_reachable()` implementation calls `{verify_host}/reach`, parses `"reachable":true`, uses the same 60s timeout as the existing `/probe` call
+- [ ] `run_preflight()` calls the reachable variant for its inbound check
+- [ ] `run_setup_with_verify()` continues to call `check_inbound_port25()` (EHLO via `/probe`) for its post-install inbound check — verified by test and by reading the setup flow
+- [ ] `src/verify.rs` (`aimx verify` command) continues to call `check_inbound_port25()` (EHLO via `/probe`) — verified by test
+- [ ] All mock `NetworkOps` impls in tests implement both methods
+- [ ] Unit test: `run_preflight` with a mock `NetworkOps` where `check_inbound_reachable` returns `Ok(true)` reports inbound `PASS` — this is the fresh-VPS scenario
+- [ ] Unit test: `run_setup_with_verify` still uses `check_inbound_port25` (EHLO) after OpenSMTPD install — no regression
+- [ ] Integration test: preflight against a mock verify service that implements `/reach` completes all checks cleanly
+- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in the root crate
+
+### S13.2 — Fix PTR Display Ordering Bug
+
+*As an operator running `aimx preflight`, I want the PTR output to appear as a single well-formed line — not mangled into the middle of the inbound check's error block.*
+
+**Technical context:** Two tightly coupled changes in `src/setup.rs`:
+
+**(a) Remove the errant `println!` from `check_ptr`.** At `src/setup.rs:385-388`:
+
+```rust
+Ok(Some(ptr)) => {
+    println!("  PTR record: {ptr}");   // <-- this line causes the interleaving
+    PreflightResult::Pass
+}
+```
+
+Delete the `println!`. The PTR value needs to be carried back to the caller some other way.
+
+**(b) Thread the PTR value back to the caller.** Options (developer picks the least-invasive):
+- Extend `PreflightResult::Pass` to carry an optional detail string: `Pass(Option<String>)` — requires updating all match arms across the file
+- Add a variant like `PassWithDetail(String)` alongside `Pass` — more changes but preserves existing `Pass` usage
+- Return `(PreflightResult, Option<String>)` from `check_ptr` specifically — narrowest change, only affects PTR
+- Use an out-parameter or a separate getter on `NetworkOps` — uglier but zero touch to `PreflightResult`
+
+Recommendation: extend `PreflightResult::Pass` to `Pass(Option<String>)` since it's the cleanest model and only `check_ptr` uses it today — most match arms can stay as `Pass(_) => println!("PASS")` with a small exception for the PTR case that prints the detail too. Developer has final say.
+
+**(c) Display the PTR value inline.** In `run_preflight` at `src/setup.rs:431-440`, when the PTR check passes with a detail string, print it on the same line as `PASS`:
+
+```
+  PTR record... PASS (vps-198f7320.vps.ovh.net.)
+```
+
+No interleaving with the inbound error block, no duplicate line, single well-formed output.
+
+PTR remains advisory: `PreflightResult::Warn` on missing/error (non-blocking), `Pass(Some(ptr))` on success. Never `Fail`. Per owner decision, the check stays in preflight because PTR is still useful deliverability guidance even if imperfect (the check can't distinguish a useful PTR from OVH's default, but showing the value to the user at least lets them notice if it's the wrong one).
+
+**Acceptance criteria:**
+- [ ] `check_ptr` no longer calls `println!` directly
+- [ ] PTR value is returned to the caller via `PreflightResult` (or equivalent — developer's choice documented in PR)
+- [ ] `run_preflight` displays PTR value inline with `PASS` marker as a single line (e.g., `  PTR record... PASS (vps-198f7320.vps.ovh.net.)`)
+- [ ] When PTR check returns `Warn` (missing record), the existing `WARN\n  {msg}` output format is preserved
+- [ ] PTR remains non-blocking: `all_pass` stays `true` when PTR is missing (existing behavior, don't change)
+- [ ] Unit test: `run_preflight` with a mock `NetworkOps` returning `Some(ptr)` produces a single well-formed line containing both `PASS` and the PTR value, with no intermediate newline
+- [ ] Unit test: the interleaving bug does not reproduce — assert that the output when inbound fails and PTR passes has the PTR line strictly after the inbound error block, not interleaved
+- [ ] Unit test: `run_preflight` with a mock `NetworkOps` returning `None` for PTR still produces `WARN` + the advisory message, and does not fail the overall preflight
+- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean
+
+---
+
+## Sprint 14 — Request Logging for aimx-verify (Days 37–39.5) [NOT STARTED]
+
+**Goal:** Add per-request logging to every call served by `aimx-verify` — HTTP and SMTP — so operators can see who's using the service, diagnose issues, and spot abuse directly from the shell output.
+
+**Dependencies:** Sprint 13 (merged) — logging applies to the fixed verify service, not the broken one
+
+### S14.1 — Log All HTTP and SMTP Calls
 
 *As an operator of aimx-verify, I want every HTTP and SMTP call logged with the caller's IP and relevant params so that I can see who's using the service, diagnose issues, and spot abuse directly from the shell output.*
 
@@ -1167,14 +1418,16 @@ Add per-request logging to every path. The format stays as the default `tracing-
 
 Log every call, including `/health` (no filtering — owner confirmed ALL calls):
 
-- **HTTP `/probe`**: method, path, caller IP, response status, elapsed ms, and the EHLO handshake outcome (`reachable: true|false`).
+- **HTTP `/probe`**: method, path, caller IP (resolved via Sprint 12's `resolve_client_ip`), response status, elapsed ms, and the EHLO handshake outcome (`reachable: true|false`).
+- **HTTP `/reach`** (added in Sprint 12): method, path, caller IP (same resolver), response status, elapsed ms, and the plain-TCP reachability result (`reachable: true|false`).
 - **HTTP `/health`**: method, path, caller IP, response status, elapsed ms.
-- **SMTP listener (port 25)**: peer IP on accept, and whether the banner/close lifecycle completed cleanly or errored. Existing error-path `tracing::debug!` in `run_smtp_listener` should be promoted to `info` / `warn` where appropriate so connection attempts are visible at the default level.
+- **SMTP listener (port 25)**: peer IP on accept, and whether the banner/EHLO/QUIT lifecycle (fixed in Sprint 12) completed cleanly or errored. Existing error-path `tracing::debug!` in `run_smtp_listener` should be promoted to `info` / `warn` where appropriate so connection attempts are visible at the default level.
 
-Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small middleware that extracts `ConnectInfo<SocketAddr>`, or a hand-rolled `axum::middleware::from_fn` wrapper. There are only two HTTP routes, so a custom middleware is likely simpler than pulling in `tower-http`. Developer's call.
+Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small middleware that extracts `ConnectInfo<SocketAddr>`, or a hand-rolled `axum::middleware::from_fn` wrapper. There are three HTTP routes (`/probe`, `/reach`, `/health`), so a custom middleware is likely simpler than pulling in `tower-http`. Developer's call.
 
 **Acceptance criteria:**
 - [ ] Every `/probe` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
+- [ ] Every `/reach` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
 - [ ] Every `/health` request logs method, path, caller IP, response status, elapsed ms at `info` level
 - [ ] Every TCP connection to the SMTP listener logs peer IP on accept and success/error on close at `info` level
 - [ ] Log output uses the default `tracing-subscriber` text formatter (not JSON)
@@ -1185,17 +1438,24 @@ Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small 
 
 ---
 
-## Sprint 13 — Dockerize aimx-verify (Days 34–36.5) [NOT STARTED]
+## Sprint 15 — Dockerize aimx-verify (Days 40–42.5) [NOT STARTED]
 
-**Goal:** Ship a Dockerfile and docker-compose for `aimx-verify` so the service can be redeployed to any host consistently without tracking apt packages or systemd units by hand.
+**Goal:** Ship a Dockerfile and docker-compose for `aimx-verify` so the service can be redeployed to any host consistently without tracking apt packages or systemd units by hand. The deployment must work correctly with the Sprint 12 security model (loopback-default bind + Caddy trust boundary + Layer 4 target guard).
 
-**Dependencies:** Sprint 12 (merged) — logging should land first so that the first Docker deployment produces the improved log output.
+**Dependencies:** Sprint 14 (merged) — Docker ships the fully-instrumented, logging-enabled, security-hardened service.
 
-### S13.1 — Dockerfile + docker-compose + README Update
+**Note on Sprint 12 interaction:** Sprint 12 changed the default HTTP bind to `127.0.0.1:3025` and introduced a Layer 3 trust check that reads `X-AIMX-Client-IP` only when the TCP peer is loopback. This means the "simple" docker-compose shape of "bind `0.0.0.0:3025` in the container and port-map to the host" is NOT compatible with the security model — Docker's userland proxy presents peer IPs as the Docker bridge gateway (a private IP), which Layer 4's target guard will reject. The correct deployment pattern is either:
 
-*As the maintainer of aimx-verify, I want to deploy the service from a Docker image with docker-compose so that I can redeploy to any host consistently without tracking apt dependencies or systemd units by hand.*
+- **(a) `network_mode: host`** for the verify container, so binding `127.0.0.1:3025` inside the container is the host's loopback, and Caddy (running on the host or as a sibling service) can reverse-proxy to it normally. This is the simplest fix and is the recommended shape.
+- **(b) Caddy as a second docker-compose service** with an internal Docker network where the verify container binds loopback on its internal interface and Caddy is the only client. More portable (no host-network dependency) but more moving pieces.
 
-**Technical context:** The verify service is a standalone Cargo crate at `services/verify/` (package `aimx-verify`). No Dockerfile exists. `services/verify/README.md` currently documents a systemd unit (lines 66–81) as the only deployment path.
+The implementer should pick (a) by default unless there's a reason to avoid `network_mode: host`, in which case (b) is the fallback. Document the choice in the Docker README section.
+
+### S15.1 — Dockerfile + docker-compose + README Update
+
+*As the maintainer of aimx-verify, I want to deploy the service from a Docker image with docker-compose so that I can redeploy to any host consistently without tracking apt dependencies or systemd units by hand — and the deployment must respect the Sprint 12 security model.*
+
+**Technical context:** The verify service is a standalone Cargo crate at `services/verify/` (package `aimx-verify`). No Dockerfile exists yet. After Sprint 12, `services/verify/README.md` will document a Caddyfile + loopback-bind deployment as the recommended non-Docker path. This sprint adds the Docker equivalent without regressing the security model.
 
 Add a **multi-stage Dockerfile** at `services/verify/Dockerfile`:
 - **Builder stage:** `rust:1-bookworm` (or current stable slim). Cache-friendly layering — copy `Cargo.toml` + `Cargo.lock` first, prime the dep cache with a stub build, then copy `src/` and build `cargo build --release`.
@@ -1203,28 +1463,38 @@ Add a **multi-stage Dockerfile** at `services/verify/Dockerfile`:
 - Container **runs as root** (per owner decision) so binding port 25 works without capability fiddling.
 - `EXPOSE 25 3025`; `ENTRYPOINT ["/usr/local/bin/aimx-verify"]`.
 
-Add **`services/verify/docker-compose.yml`**:
+Add **`services/verify/docker-compose.yml`** using **`network_mode: host`** as the default deployment shape:
 - Single `verify` service with `build: .`
-- Host port maps `25:25` and `3025:3025`
-- `environment:` sets `BIND_ADDR=0.0.0.0:3025`, `SMTP_BIND_ADDR=0.0.0.0:25`, with a commented `RUST_LOG` example
+- `network_mode: host` — the container shares the host's network namespace, so the post-Sprint-12 default bind `127.0.0.1:3025` behaves identically to a systemd-native deployment and the Layer 3 loopback check still works.
+- `environment:` block can include a commented `BIND_ADDR` / `SMTP_BIND_ADDR` / `RUST_LOG` example, but defaults inherit from the binary (no override needed).
 - `restart: unless-stopped`
+- No explicit `ports:` mapping when using `network_mode: host` — the container binds directly on the host.
+- Caddy is NOT included in the compose file in this sprint (operators run Caddy separately on the host, using the Sprint 12 canonical `Caddyfile`). A future sprint could add a Caddy sibling service if desired, but it's out of scope here.
 
 Add **`services/verify/.dockerignore`** excluding `target/` and other build artifacts.
 
-**Update `services/verify/README.md`** with a new "Docker" section (the recommended deployment path) above the existing systemd section. Document `docker compose up -d --build` as the primary flow, with a raw `docker build` / `docker run` fallback. Note that the container runs as root so port 25 binds cleanly. **Do NOT update the repo-root `README.md`** — per owner decision, end users don't run verify, so keeping the verify-specific docs scoped to `services/verify/README.md` is intentional.
+**Update `services/verify/README.md`** with a new "Docker" section that:
+- Documents `docker compose up -d --build` as the Docker deployment path, with `network_mode: host` as the default shape
+- Explains the Sprint 12 security model interaction — why `network_mode: host` rather than port mapping
+- References the canonical `services/verify/Caddyfile` from Sprint 12 as the required companion on the host
+- Provides a raw `docker build` + `docker run --network host` example as an alternative
+- Does NOT replace the systemd section from Sprint 12 — both deployment paths coexist
 
-No GitHub Actions image publishing to ghcr.io in this sprint — not requested, and can be added later if needed. No new CI docker-build step either — existing `services/verify/` CI steps from S8.5 stay unchanged.
+**Do NOT update the repo-root `README.md`** — per owner decision, end users don't run verify.
+
+No GitHub Actions image publishing to ghcr.io in this sprint — not requested. No new CI docker-build step either — existing `services/verify/` CI steps from S8.5 stay unchanged.
 
 **Acceptance criteria:**
 - [ ] `services/verify/Dockerfile` uses a multi-stage build (Rust builder + `debian:bookworm-slim` runtime)
-- [ ] Final image runs as root, exposes ports 25 and 3025, and has `ENTRYPOINT` pointing at the binary
+- [ ] Final image runs as root and has `ENTRYPOINT` pointing at the binary
 - [ ] `services/verify/.dockerignore` excludes `target/` and other build artifacts
-- [ ] `services/verify/docker-compose.yml` builds from the local Dockerfile, maps host ports 25 and 3025, and sets `BIND_ADDR` + `SMTP_BIND_ADDR` env vars
-- [ ] Manually verified: `docker compose up -d --build` in `services/verify/` brings the service up; `curl http://localhost:3025/health` returns `{"status":"ok","service":"aimx-verify"}`
-- [ ] Manually verified: `curl http://localhost:3025/probe` returns a JSON probe response with the caller IP
-- [ ] Manually verified: `nc localhost 25` (or equivalent) receives the `220 check.aimx.email SMTP aimx-verify` banner
-- [ ] Manually verified: the per-request logs from Sprint 12 appear in the container's stdout (`docker compose logs verify`) when the endpoints are exercised
-- [ ] `services/verify/README.md` has a new "Docker" section documenting `docker compose up -d --build` as the primary deployment path, kept above the existing systemd section
+- [ ] `services/verify/docker-compose.yml` builds from the local Dockerfile and uses `network_mode: host` so the post-Sprint-12 loopback-default bind works without override
+- [ ] Manually verified: `docker compose up -d --build` in `services/verify/` brings the service up; `curl http://127.0.0.1:3025/health` from the host returns `{"status":"ok","service":"aimx-verify"}`
+- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/probe` from a remote machine returns a correctly-resolved caller IP (not `127.0.0.1`) and a valid probe result — this proves the container + Caddy + Sprint 12 security model all work end-to-end
+- [ ] Manually verified: with the Sprint 12 canonical `Caddyfile` running on the host, `curl https://<domain>/reach` from a remote machine returns a plain-TCP reachability result
+- [ ] Manually verified: `nc 127.0.0.1 25` from the host receives the `220 check.aimx.email SMTP aimx-verify` banner
+- [ ] Manually verified: the per-request logs from Sprint 14 appear in the container's stdout (`docker compose logs verify`) when the endpoints are exercised
+- [ ] `services/verify/README.md` has a new "Docker" section documenting `docker compose up -d --build` with `network_mode: host`, explains the Sprint 12 interaction, references the canonical `Caddyfile`
 - [ ] Repo-root `README.md` is NOT modified
 
 ---
@@ -1246,8 +1516,10 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested, 
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
 | 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Done |
 | 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Done |
-| 12 | 31–33.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Not Started |
-| 13 | 34–36.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml`, `.dockerignore`, verify README update | Not Started |
+| 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | Not Started |
+| 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Not Started |
+| 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Not Started |
+| 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Not Started |
 
 ## Deferred to v2
 
