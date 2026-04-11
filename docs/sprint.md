@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 11 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul)
-**Timeline:** ~30.5 calendar days
-**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check).
+**Total sprints:** 13 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 verify ops)
+**Timeline:** ~36.5 calendar days
+**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 are review-driven operational quality work on the verify service (request logging, Docker packaging).
 
 ---
 
@@ -1151,6 +1151,84 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 
 ---
 
+## Sprint 12 — Request Logging for aimx-verify (Days 31–33.5) [NOT STARTED]
+
+**Goal:** Add per-request logging to every call served by `aimx-verify` — HTTP and SMTP — so operators can see who's using the service, diagnose issues, and spot abuse directly from the shell output.
+
+**Dependencies:** Sprint 11 (merged)
+
+### S12.1 — Log All HTTP and SMTP Calls
+
+*As an operator of aimx-verify, I want every HTTP and SMTP call logged with the caller's IP and relevant params so that I can see who's using the service, diagnose issues, and spot abuse directly from the shell output.*
+
+**Technical context:** The verify service at `services/verify/` already initializes `tracing_subscriber::fmt::init()` in `main()` (line 134), but request logging is almost non-existent. `probe()` (line 26) and `health()` (line 19) log nothing — the caller IP is available via `ConnectInfo(addr)` but discarded. `handle_smtp_connection()` (line 117) logs nothing on the success path; only `run_smtp_listener()` logs bind announcement and accept errors.
+
+Add per-request logging to every path. The format stays as the default `tracing-subscriber` pretty text (not JSON) — per owner decision, operators tail the shell or journalctl, not a JSON log aggregator. Log level defaults to `info` and honors `RUST_LOG` overrides.
+
+Log every call, including `/health` (no filtering — owner confirmed ALL calls):
+
+- **HTTP `/probe`**: method, path, caller IP, response status, elapsed ms, and the EHLO handshake outcome (`reachable: true|false`).
+- **HTTP `/health`**: method, path, caller IP, response status, elapsed ms.
+- **SMTP listener (port 25)**: peer IP on accept, and whether the banner/close lifecycle completed cleanly or errored. Existing error-path `tracing::debug!` in `run_smtp_listener` should be promoted to `info` / `warn` where appropriate so connection attempts are visible at the default level.
+
+Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small middleware that extracts `ConnectInfo<SocketAddr>`, or a hand-rolled `axum::middleware::from_fn` wrapper. There are only two HTTP routes, so a custom middleware is likely simpler than pulling in `tower-http`. Developer's call.
+
+**Acceptance criteria:**
+- [ ] Every `/probe` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
+- [ ] Every `/health` request logs method, path, caller IP, response status, elapsed ms at `info` level
+- [ ] Every TCP connection to the SMTP listener logs peer IP on accept and success/error on close at `info` level
+- [ ] Log output uses the default `tracing-subscriber` text formatter (not JSON)
+- [ ] `RUST_LOG` env var still works for level overrides (e.g., `RUST_LOG=aimx_verify=debug`)
+- [ ] Unit or integration test: hit `/probe` on a local test server and assert a log line containing the caller IP is captured (via `tracing-subscriber`'s test writer or equivalent)
+- [ ] Integration test: connect to the SMTP listener on an ephemeral port and assert a log line with the peer IP is captured
+- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
+
+---
+
+## Sprint 13 — Dockerize aimx-verify (Days 34–36.5) [NOT STARTED]
+
+**Goal:** Ship a Dockerfile and docker-compose for `aimx-verify` so the service can be redeployed to any host consistently without tracking apt packages or systemd units by hand.
+
+**Dependencies:** Sprint 12 (merged) — logging should land first so that the first Docker deployment produces the improved log output.
+
+### S13.1 — Dockerfile + docker-compose + README Update
+
+*As the maintainer of aimx-verify, I want to deploy the service from a Docker image with docker-compose so that I can redeploy to any host consistently without tracking apt dependencies or systemd units by hand.*
+
+**Technical context:** The verify service is a standalone Cargo crate at `services/verify/` (package `aimx-verify`). No Dockerfile exists. `services/verify/README.md` currently documents a systemd unit (lines 66–81) as the only deployment path.
+
+Add a **multi-stage Dockerfile** at `services/verify/Dockerfile`:
+- **Builder stage:** `rust:1-bookworm` (or current stable slim). Cache-friendly layering — copy `Cargo.toml` + `Cargo.lock` first, prime the dep cache with a stub build, then copy `src/` and build `cargo build --release`.
+- **Runtime stage:** `debian:bookworm-slim` (glibc target matches the builder — no musl cross-compile complexity). Install `ca-certificates` only. Copy the release binary from the builder to `/usr/local/bin/aimx-verify`.
+- Container **runs as root** (per owner decision) so binding port 25 works without capability fiddling.
+- `EXPOSE 25 3025`; `ENTRYPOINT ["/usr/local/bin/aimx-verify"]`.
+
+Add **`services/verify/docker-compose.yml`**:
+- Single `verify` service with `build: .`
+- Host port maps `25:25` and `3025:3025`
+- `environment:` sets `BIND_ADDR=0.0.0.0:3025`, `SMTP_BIND_ADDR=0.0.0.0:25`, with a commented `RUST_LOG` example
+- `restart: unless-stopped`
+
+Add **`services/verify/.dockerignore`** excluding `target/` and other build artifacts.
+
+**Update `services/verify/README.md`** with a new "Docker" section (the recommended deployment path) above the existing systemd section. Document `docker compose up -d --build` as the primary flow, with a raw `docker build` / `docker run` fallback. Note that the container runs as root so port 25 binds cleanly. **Do NOT update the repo-root `README.md`** — per owner decision, end users don't run verify, so keeping the verify-specific docs scoped to `services/verify/README.md` is intentional.
+
+No GitHub Actions image publishing to ghcr.io in this sprint — not requested, and can be added later if needed. No new CI docker-build step either — existing `services/verify/` CI steps from S8.5 stay unchanged.
+
+**Acceptance criteria:**
+- [ ] `services/verify/Dockerfile` uses a multi-stage build (Rust builder + `debian:bookworm-slim` runtime)
+- [ ] Final image runs as root, exposes ports 25 and 3025, and has `ENTRYPOINT` pointing at the binary
+- [ ] `services/verify/.dockerignore` excludes `target/` and other build artifacts
+- [ ] `services/verify/docker-compose.yml` builds from the local Dockerfile, maps host ports 25 and 3025, and sets `BIND_ADDR` + `SMTP_BIND_ADDR` env vars
+- [ ] Manually verified: `docker compose up -d --build` in `services/verify/` brings the service up; `curl http://localhost:3025/health` returns `{"status":"ok","service":"aimx-verify"}`
+- [ ] Manually verified: `curl http://localhost:3025/probe` returns a JSON probe response with the caller IP
+- [ ] Manually verified: `nc localhost 25` (or equivalent) receives the `220 check.aimx.email SMTP aimx-verify` banner
+- [ ] Manually verified: the per-request logs from Sprint 12 appear in the container's stdout (`docker compose logs verify`) when the endpoints are exercised
+- [ ] `services/verify/README.md` has a new "Docker" section documenting `docker compose up -d --build` as the primary deployment path, kept above the existing systemd section
+- [ ] Repo-root `README.md` is NOT modified
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -1168,6 +1246,8 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
 | 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Done |
 | 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Done |
+| 12 | 31–33.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Not Started |
+| 13 | 34–36.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml`, `.dockerignore`, verify README update | Not Started |
 
 ## Deferred to v2
 
