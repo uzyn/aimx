@@ -101,6 +101,71 @@ No MTA, no email sending, no DNS records beyond the A record are needed on the v
 - Port 25 open (for the built-in SMTP listener)
 - HTTPS on 443 (via Caddy)
 
+## Deployment with Docker
+
+A `Dockerfile` and `docker-compose.yml` ship alongside this README for operators who prefer container-based deployments. This path coexists with the systemd path below — pick one.
+
+```bash
+cd services/verify
+docker compose up -d --build
+```
+
+That single command builds the multi-stage image (Rust builder → `debian:bookworm-slim` runtime) and starts the service. The container runs as root so it can bind port 25 without capability fiddling, and because `network_mode: host` shares the host's network namespace, the service binds ports `25` (SMTP listener) and `3025` (HTTP) directly on the host's interfaces — no Docker-side port publishing is involved.
+
+### Why `network_mode: host`?
+
+The verify service's security model (Sprint 12) enforces a Layer 3 trust boundary: the HTTP listener binds `127.0.0.1:3025` by default, and the app only reads the `X-AIMX-Client-IP` header when the TCP peer is loopback. Combined with Caddy in front (which injects that header authoritatively), this is the only trust path the app recognises.
+
+The "obvious" docker-compose shape — `ports: "3025:3025"` plus `BIND_ADDR=0.0.0.0:3025` inside the container — **breaks** this model. Docker's userland proxy rewrites connections so the TCP peer the app sees is the bridge gateway (a private RFC 1918 address), which:
+
+1. Fails the Layer 3 loopback-only check, so the app refuses to trust `X-AIMX-Client-IP`.
+2. Would otherwise get rejected by the Layer 4 target guard anyway, since the guard explicitly blocks loopback, link-local, and RFC 1918 / RFC 4193 ranges from being used as SMTP targets.
+
+`network_mode: host` avoids this entirely: the container shares the host's network namespace, so `127.0.0.1:3025` inside the container IS the host's loopback, and Caddy running on the host can reverse-proxy to it exactly as it would for a systemd-native deployment. No explicit `ports:` mapping is needed (or allowed — Docker rejects `ports` in host-network mode).
+
+### Caddy is still required
+
+The Docker deployment does **not** bundle Caddy. Run Caddy on the host using the canonical `services/verify/Caddyfile` committed alongside this README:
+
+```bash
+# On the host, not inside the container
+DOMAIN=check.yourdomain.com caddy run --config services/verify/Caddyfile
+```
+
+The compose file's `network_mode: host` means Caddy's `reverse_proxy 127.0.0.1:3025` directive targets the verify container directly.
+
+### Verifying the deployment
+
+```bash
+# From the host
+curl http://127.0.0.1:3025/health
+# -> {"status":"ok","service":"aimx-verify"}
+
+# SMTP listener banner
+nc 127.0.0.1 25
+# -> 220 check.aimx.email SMTP aimx-verify
+
+# Per-request logs from the container
+docker compose logs -f verify
+```
+
+From a remote machine (with Caddy + DNS configured), `curl https://check.yourdomain.com/probe` and `curl https://check.yourdomain.com/reach` should return JSON with the caller's real public IP — not `127.0.0.1` or a private Docker bridge address.
+
+### Raw `docker run` (without compose)
+
+If you prefer not to use docker-compose:
+
+```bash
+docker build -t aimx-verify:local services/verify
+docker run -d --name aimx-verify \
+  --network host \
+  --restart unless-stopped \
+  -e RUST_LOG=info \
+  aimx-verify:local
+```
+
+Same semantics as the compose shape: host networking, default loopback HTTP bind, Caddy on the host handles TLS + client IP injection.
+
 ## Deployment with systemd
 
 ```ini

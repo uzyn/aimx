@@ -1,0 +1,31 @@
+# docker-compose for aimx-verify.
+#
+# Deployment shape: `network_mode: host`. The verify service defaults to
+# binding HTTP on 127.0.0.1:3025 and SMTP on 0.0.0.0:25. Sprint 12 added a
+# Layer 3 trust check that only reads the `X-AIMX-Client-IP` header when the
+# TCP peer is loopback — Docker's userland proxy would present peer IPs as
+# the bridge gateway (a private IP), which the Layer 4 target guard rejects.
+# Host networking keeps the service's loopback view identical to a systemd
+# deployment, so Caddy on the host can reverse-proxy to 127.0.0.1:3025
+# without any further fiddling.
+#
+# Caddy is NOT part of this compose file. Run Caddy on the host using the
+# canonical `services/verify/Caddyfile` shipped alongside this file.
+services:
+  verify:
+    build: .
+    image: aimx-verify:local
+    container_name: aimx-verify
+    network_mode: host
+    restart: unless-stopped
+    # Defaults inherited from the binary:
+    #   BIND_ADDR=127.0.0.1:3025   (HTTP behind Caddy)
+    #   SMTP_BIND_ADDR=0.0.0.0:25  (built-in SMTP responder)
+    # Uncomment and edit to override. Do NOT expose HTTP directly to the
+    # public internet — the Sprint 12 trust model requires Caddy in front.
+    environment:
+      # BIND_ADDR: "127.0.0.1:3025"
+      # SMTP_BIND_ADDR: "0.0.0.0:25"
+      RUST_LOG: "info"
+    # No `ports:` block — `network_mode: host` makes port mapping both
+    # unnecessary and incompatible (Docker rejects `ports` with host mode).
