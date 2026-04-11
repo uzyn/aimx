@@ -18,7 +18,7 @@ pub struct Config {
     pub mailboxes: HashMap<String, MailboxConfig>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub probe_url: Option<String>,
+    pub verify_host: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -182,7 +182,7 @@ has_attachment = true
             data_dir: tmp.path().to_path_buf(),
             dkim_selector: "dkim".to_string(),
             mailboxes,
-            probe_url: None,
+            verify_host: None,
         };
 
         config.save(&path).unwrap();
@@ -244,25 +244,25 @@ address = "*@test.com"
     }
 
     #[test]
-    fn parse_probe_url() {
+    fn parse_verify_host() {
         let toml_str = r#"
 domain = "test.com"
-probe_url = "https://probe.example.com/check"
+verify_host = "https://verify.example.com"
 
 [mailboxes]
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(
-            config.probe_url.as_deref(),
-            Some("https://probe.example.com/check")
+            config.verify_host.as_deref(),
+            Some("https://verify.example.com")
         );
     }
 
     #[test]
-    fn probe_url_defaults_to_none() {
+    fn verify_host_defaults_to_none() {
         let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert!(config.probe_url.is_none());
+        assert!(config.verify_host.is_none());
     }
 
     #[test]

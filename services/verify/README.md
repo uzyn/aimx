@@ -46,9 +46,15 @@ To self-host (replacing `check.aimx.email`):
 2. Point your domain's DNS to the server
 3. Configure a reverse proxy (Caddy/nginx) for HTTPS on the HTTP port
 4. Run with `BIND_ADDR=127.0.0.1:3025`
-5. In your aimx `config.toml`, set `probe_url`:
+5. In your aimx `config.toml`, set `verify_host` to the base URL of your instance (no path):
    ```toml
-   probe_url = "https://verify.yourdomain.com/probe"
+   verify_host = "https://verify.yourdomain.com"
+   ```
+   aimx appends `/probe` to this base URL when making the HTTP check.
+
+   You can also override it per-invocation:
+   ```
+   aimx verify --verify-host https://verify.yourdomain.com
    ```
 
 No MTA, no email sending, no DNS records needed on the verify server -- it only needs:

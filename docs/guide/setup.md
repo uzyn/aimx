@@ -258,7 +258,12 @@ If you prefer not to use the public instance:
 
 4. Point aimx to your instance in `config.toml`:
    ```toml
-   probe_url = "https://verify.yourdomain.com/probe"
+   verify_host = "https://verify.yourdomain.com"
+   ```
+
+   Or override it per-invocation with `--verify-host`:
+   ```
+   aimx verify --verify-host https://verify.yourdomain.com
    ```
 
 The verify service provides:
