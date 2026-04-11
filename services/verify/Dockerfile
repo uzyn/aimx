@@ -1,7 +1,9 @@
 # syntax=docker/dockerfile:1.6
 
 # ---------- Builder ----------
-FROM rust:1-bookworm AS builder
+# Pinned to a specific minor tag so upstream re-tags of `rust:1-bookworm` do
+# not silently change the compiler used for builds. Bump this deliberately.
+FROM rust:1.94-bookworm AS builder
 
 WORKDIR /build
 
@@ -11,22 +13,26 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
     && echo 'fn main() { println!("stub"); }' > src/main.rs \
-    && cargo build --release \
+    && cargo build --release --locked \
     && rm -rf src target/release/deps/aimx_verify* target/release/aimx-verify*
 
-# Now copy the real sources and build for real. `touch` guarantees Cargo
-# invalidates the leaf-crate fingerprint even if COPY preserves mtimes from
-# the host build context.
+# Now copy the real sources and build for real. The load-bearing step here is
+# `touch src/main.rs`: it guarantees Cargo invalidates the leaf-crate
+# fingerprint even if COPY preserves mtimes from the host build context. The
+# stub-build `rm -rf` in the previous layer is just defense-in-depth to
+# discard the stub artifacts — the touch is what actually forces a rebuild.
 COPY src ./src
 RUN touch src/main.rs \
-    && cargo build --release \
+    && cargo build --release --locked \
     && strip target/release/aimx-verify
 
 # ---------- Runtime ----------
 FROM debian:bookworm-slim AS runtime
 
+# `curl` is installed alongside `ca-certificates` so the HEALTHCHECK below can
+# hit /health from inside the container without dragging in a second tool.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/aimx-verify /usr/local/bin/aimx-verify
@@ -34,6 +40,9 @@ COPY --from=builder /build/target/release/aimx-verify /usr/local/bin/aimx-verify
 # Port 25  -> built-in SMTP listener (outbound reachability target)
 # Port 3025 -> loopback-default HTTP listener (behind Caddy on the host)
 EXPOSE 25 3025
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:3025/health || exit 1
 
 # Runs as root by design so the process can bind port 25 without capability
 # fiddling. The service is a short SMTP responder and two HTTP endpoints; it

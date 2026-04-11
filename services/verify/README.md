@@ -110,7 +110,7 @@ cd services/verify
 docker compose up -d --build
 ```
 
-That single command builds the multi-stage image (Rust builder → `debian:bookworm-slim` runtime) and starts the service. The container runs as root so it can bind port 25 without capability fiddling, and exposes ports `25` (SMTP listener) and `3025` (HTTP) via `network_mode: host`.
+That single command builds the multi-stage image (Rust builder → `debian:bookworm-slim` runtime) and starts the service. The container runs as root so it can bind port 25 without capability fiddling, and because `network_mode: host` shares the host's network namespace, the service binds ports `25` (SMTP listener) and `3025` (HTTP) directly on the host's interfaces — no Docker-side port publishing is involved.
 
 ### Why `network_mode: host`?
 
