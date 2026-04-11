@@ -41,16 +41,28 @@ pub enum Command {
     Setup {
         /// Domain to configure (e.g. agent.example.com)
         domain: String,
+
+        /// Override the verify service host (e.g. https://verify.example.com)
+        #[arg(long)]
+        verify_host: Option<String>,
     },
 
     /// Show server status, mailbox counts, and configuration
     Status,
 
     /// Run preflight checks (port 25, PTR) without installing anything
-    Preflight,
+    Preflight {
+        /// Override the verify service host (e.g. https://verify.example.com)
+        #[arg(long)]
+        verify_host: Option<String>,
+    },
 
     /// Check port 25 connectivity (outbound, inbound EHLO, PTR)
-    Verify,
+    Verify {
+        /// Override the verify service host (e.g. https://verify.example.com)
+        #[arg(long)]
+        verify_host: Option<String>,
+    },
 
     /// Generate DKIM keypair for email signing
     DkimKeygen {
