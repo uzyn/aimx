@@ -343,29 +343,34 @@ async fn run_smtp_listener() {
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                tokio::spawn(async move {
-                    let start = Instant::now();
-                    let peer_ip = peer.ip();
-                    tracing::info!(peer_ip = %peer_ip, "smtp connection accepted");
-                    match handle_smtp_connection(stream).await {
-                        Ok(()) => tracing::info!(
-                            peer_ip = %peer_ip,
-                            elapsed_ms = start.elapsed().as_millis(),
-                            "smtp connection closed cleanly"
-                        ),
-                        Err(e) => tracing::warn!(
-                            peer_ip = %peer_ip,
-                            elapsed_ms = start.elapsed().as_millis(),
-                            error = %e,
-                            "smtp connection closed with error"
-                        ),
-                    }
-                });
+                tokio::spawn(spawn_smtp_connection(stream, peer));
             }
             Err(e) => {
                 tracing::warn!("SMTP accept error: {e}");
             }
         }
+    }
+}
+
+/// Per-connection body shared by the real accept loop and the logging test
+/// so the test exercises the exact production code path instead of an
+/// inlined copy that could drift.
+async fn spawn_smtp_connection(stream: TcpStream, peer: SocketAddr) {
+    let start = Instant::now();
+    let peer_ip = peer.ip();
+    tracing::info!(peer_ip = %peer_ip, "smtp connection accepted");
+    match handle_smtp_connection(stream).await {
+        Ok(()) => tracing::info!(
+            peer_ip = %peer_ip,
+            elapsed_ms = start.elapsed().as_millis(),
+            "smtp connection closed cleanly"
+        ),
+        Err(e) => tracing::warn!(
+            peer_ip = %peer_ip,
+            elapsed_ms = start.elapsed().as_millis(),
+            error = %e,
+            "smtp connection closed with error"
+        ),
     }
 }
 
@@ -1370,35 +1375,18 @@ mod tests {
 
     #[tokio::test]
     async fn smtp_listener_logs_peer_ip_on_accept_and_close() {
-        // Spin up a real copy of the SMTP accept loop on an ephemeral port,
-        // connect, send QUIT, and assert the captured log contains both the
-        // "accepted" and "closed cleanly" events with the peer IP.
+        // Bind an ephemeral listener, accept one connection, and hand it to
+        // the same `spawn_smtp_connection` helper the real accept loop uses
+        // so the test exercises the production logging path directly.
         let writer = BufWriter::new();
         let _guard = test_subscriber(writer.clone());
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
-        // Mirror the `run_smtp_listener` accept-and-spawn body so the test
-        // exercises the same logging path without hardcoding port 25.
         let server = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            let start = std::time::Instant::now();
-            let peer_ip = peer.ip();
-            tracing::info!(peer_ip = %peer_ip, "smtp connection accepted");
-            match handle_smtp_connection(stream).await {
-                Ok(()) => tracing::info!(
-                    peer_ip = %peer_ip,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    "smtp connection closed cleanly"
-                ),
-                Err(e) => tracing::warn!(
-                    peer_ip = %peer_ip,
-                    elapsed_ms = start.elapsed().as_millis(),
-                    error = %e,
-                    "smtp connection closed with error"
-                ),
-            }
+            spawn_smtp_connection(stream, peer).await;
         });
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
