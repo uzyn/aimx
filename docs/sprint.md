@@ -1151,7 +1151,7 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 
 ---
 
-## Sprint 12 — aimx-verify Security Hardening + /reach Endpoint (Days 31–33.5) [IN PROGRESS]
+## Sprint 12 — aimx-verify Security Hardening + /reach Endpoint (Days 31–33.5) [DONE]
 
 **Goal:** Fix three real bugs in the verify service discovered during post-Sprint-11 debugging: the Caddy self-probe loop (ConnectInfo reports loopback when behind a reverse proxy, so the service probes itself), the SSRF / port-scan-as-a-service risk in naive X-Forwarded-For handling, and the self-EHLO trap in the built-in SMTP listener. Also add a plain-TCP `/reach` endpoint so `aimx preflight` (Sprint 13) can check port 25 reachability on a fresh VPS without requiring a live SMTP server.
 
@@ -1212,25 +1212,25 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 - Does NOT share code with `check_port25_ehlo` beyond the target guard — keep the TCP-only path simple.
 
 **Acceptance criteria:**
-- [ ] Default HTTP bind address changed from `0.0.0.0:3025` to `127.0.0.1:3025` in `services/verify/src/main.rs`
-- [ ] `services/verify/Caddyfile` committed with `header_up -X-Forwarded-For`, `header_up X-AIMX-Client-IP {remote_host}`, and `{$DOMAIN:check.aimx.email}` interpolation
-- [ ] `resolve_client_ip(peer, headers)` helper added to `main.rs` with the trust-boundary logic described above
-- [ ] `/probe` handler uses `resolve_client_ip`; returns HTTP 400 when peer is loopback and `X-AIMX-Client-IP` is missing, unparseable, or a rejected range
-- [ ] New `GET /reach` route added that uses `resolve_client_ip` and does a plain 10-second TCP connect to `{caller_ip}:25`, returning `{"reachable": bool, "ip": "..."}`
-- [ ] Layer 4 target guard rejects loopback / unspecified / link-local / RFC 1918 / RFC 4193 targets in both `/probe` and `/reach`
-- [ ] App does NOT read `X-Forwarded-For` anywhere — grep confirms
-- [ ] Unit test: `resolve_client_ip` returns peer IP when peer is a public IPv4/IPv6 address (direct-connect mode)
-- [ ] Unit test: `resolve_client_ip` returns `X-AIMX-Client-IP` value when peer is loopback and header is a valid public IP
-- [ ] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header is missing
-- [ ] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header value is loopback / private / unspecified / link-local
-- [ ] Unit test: `/probe` handler returns 400 when peer is loopback and `X-AIMX-Client-IP` is missing
-- [ ] Unit test: `/reach` handler returns 400 under the same conditions
-- [ ] Unit test: Layer 4 target guard rejects `127.0.0.1`, `::1`, `0.0.0.0`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, `169.254.1.1`, `fe80::1`, `fc00::1`
-- [ ] Unit test: `/reach` against an unreachable host returns `reachable: false` within the 10-second timeout window
-- [ ] Unit test: `/reach` against a listening TCP socket (no SMTP) returns `reachable: true` — this is the key semantic difference from `/probe`
-- [ ] Integration test: end-to-end `/probe` with a hand-rolled loopback caller setting `X-AIMX-Client-IP` returns the expected resolved IP (not `127.0.0.1`)
-- [ ] Existing `/probe` EHLO handshake tests still pass — no regression
-- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
+- [x] Default HTTP bind address changed from `0.0.0.0:3025` to `127.0.0.1:3025` in `services/verify/src/main.rs`
+- [x] `services/verify/Caddyfile` committed with `header_up -X-Forwarded-For`, `header_up X-AIMX-Client-IP {remote_host}`, and `{$DOMAIN:check.aimx.email}` interpolation
+- [x] `resolve_client_ip(peer, headers)` helper added to `main.rs` with the trust-boundary logic described above
+- [x] `/probe` handler uses `resolve_client_ip`; returns HTTP 400 when peer is loopback and `X-AIMX-Client-IP` is missing, unparseable, or a rejected range
+- [x] New `GET /reach` route added that uses `resolve_client_ip` and does a plain 10-second TCP connect to `{caller_ip}:25`, returning `{"reachable": bool, "ip": "..."}`
+- [x] Layer 4 target guard rejects loopback / unspecified / link-local / RFC 1918 / RFC 4193 targets in both `/probe` and `/reach` <!-- Exceeded: also rejects broadcast, multicast, RFC 6598 CGNAT, and IPv4-mapped IPv6 bypass via `canonicalize_ip` -->
+- [x] App does NOT read `X-Forwarded-For` anywhere — grep confirms
+- [x] Unit test: `resolve_client_ip` returns peer IP when peer is a public IPv4/IPv6 address (direct-connect mode)
+- [x] Unit test: `resolve_client_ip` returns `X-AIMX-Client-IP` value when peer is loopback and header is a valid public IP
+- [x] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header is missing
+- [x] Unit test: `resolve_client_ip` returns `None` when peer is loopback and header value is loopback / private / unspecified / link-local
+- [x] Unit test: `/probe` handler returns 400 when peer is loopback and `X-AIMX-Client-IP` is missing
+- [x] Unit test: `/reach` handler returns 400 under the same conditions
+- [x] Unit test: Layer 4 target guard rejects `127.0.0.1`, `::1`, `0.0.0.0`, `10.0.0.1`, `172.16.0.1`, `192.168.1.1`, `169.254.1.1`, `fe80::1`, `fc00::1`
+- [x] Unit test: `/reach` against an unreachable host returns `reachable: false` within the 10-second timeout window
+- [x] Unit test: `/reach` against a listening TCP socket (no SMTP) returns `reachable: true` — this is the key semantic difference from `/probe`
+- [x] Integration test: end-to-end `/probe` with a hand-rolled loopback caller setting `X-AIMX-Client-IP` returns the expected resolved IP (not `127.0.0.1`)
+- [x] Existing `/probe` EHLO handshake tests still pass — no regression
+- [x] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
 
 ### S12.2 — Fix Self-EHLO Trap in Built-in SMTP Listener
 
@@ -1253,18 +1253,18 @@ Rewrite `handle_smtp_connection` to implement a minimal but correct SMTP exchang
 Use `tokio::io::BufReader` and `AsyncBufReadExt::read_line` for line-delimited reads. Still not a real SMTP server (no MAIL FROM, RCPT TO, DATA, or AUTH) — it exists only as a correct-enough handshake target for external EHLO-based reachability probes that hit the verify server directly (e.g., `aimx setup`'s outbound check at `check.aimx.email:25`, and any operator's own manual testing).
 
 **Acceptance criteria:**
-- [ ] `handle_smtp_connection` responds to `EHLO` with `250 {hostname}\r\n` and continues the session
-- [ ] `handle_smtp_connection` responds to `HELO` with `250 {hostname}\r\n` and continues the session
-- [ ] `handle_smtp_connection` responds to `QUIT` with `221 Bye\r\n` and closes cleanly
-- [ ] `handle_smtp_connection` responds to unknown commands with `500 Command not recognized\r\n` and continues
-- [ ] Connection is closed cleanly on peer close or idle/read timeout
-- [ ] Overall wall-clock connection timeout prevents indefinite resource pinning (~30s)
-- [ ] Unit test: full exchange `220` → `EHLO` → `250` → `QUIT` → `221` completes correctly
-- [ ] Unit test: unknown command returns `500` without closing the connection
-- [ ] Unit test: client closing the connection mid-session is handled without error
-- [ ] Unit test: idle timeout closes the connection
-- [ ] Existing `smtp_listener_sends_banner_and_bye` test is updated or replaced for the new semantics (it currently asserts behavior that was itself the bug)
-- [ ] Integration test: `check_port25_ehlo` successfully probes this listener — this test is the round-trip that proves the self-loop scenario is now well-formed (even though Layer 4 would block the self-probe in production, the handshake itself must be correct)
+- [x] `handle_smtp_connection` responds to `EHLO` with `250 {hostname}\r\n` and continues the session
+- [x] `handle_smtp_connection` responds to `HELO` with `250 {hostname}\r\n` and continues the session
+- [x] `handle_smtp_connection` responds to `QUIT` with `221 Bye\r\n` and closes cleanly
+- [x] `handle_smtp_connection` responds to unknown commands with `500 Command not recognized\r\n` and continues
+- [x] Connection is closed cleanly on peer close or idle/read timeout
+- [x] Overall wall-clock connection timeout prevents indefinite resource pinning (~30s) <!-- Exceeded: also caps per-line memory via SMTP_MAX_LINE_BYTES=1024 -->
+- [x] Unit test: full exchange `220` → `EHLO` → `250` → `QUIT` → `221` completes correctly
+- [x] Unit test: unknown command returns `500` without closing the connection
+- [x] Unit test: client closing the connection mid-session is handled without error
+- [x] Unit test: idle timeout closes the connection <!-- Implemented via `#[tokio::test(start_paused = true)]` + `tokio::io::duplex` so virtual time advances without a real wall-clock wait -->
+- [x] Existing `smtp_listener_sends_banner_and_bye` test is updated or replaced for the new semantics (it currently asserts behavior that was itself the bug)
+- [x] Integration test: `check_port25_ehlo` successfully probes this listener — this test is the round-trip that proves the self-loop scenario is now well-formed (even though Layer 4 would block the self-probe in production, the handshake itself must be correct)
 
 ### S12.3 — Caddyfile Docs + README + manual-setup + PRD Update
 
@@ -1291,18 +1291,18 @@ Use `tokio::io::BufReader` and `AsyncBufReadExt::read_line` for line-delimited r
 Keep the rest of section 6.8 as-is. This is a small, uncontroversial extension — the two-endpoint design is a refinement, not a scope change.
 
 **Acceptance criteria:**
-- [ ] `services/verify/README.md` has a "Caddy deployment" section referencing the canonical `Caddyfile` and explaining the `header_up` directives
-- [ ] `services/verify/README.md` "API Endpoints" section documents both `/probe` (EHLO) and `/reach` (plain TCP) with their distinct use cases
-- [ ] `services/verify/README.md` notes the new `127.0.0.1:3025` default bind and warns against direct `0.0.0.0` exposure without a reverse proxy
-- [ ] `services/verify/README.md` systemd example updated to reflect new defaults
-- [ ] `docs/manual-setup.md` Part A updated for the Caddyfile, loopback bind, and two-endpoint model
-- [ ] `docs/prd.md` FR-38 updated to describe the two-endpoint design (`/reach` + `/probe`)
-- [ ] Repo-root `README.md` is NOT modified
-- [ ] No stale references to naive XFF handling or `0.0.0.0:3025` default in any doc
+- [x] `services/verify/README.md` has a "Caddy deployment" section referencing the canonical `Caddyfile` and explaining the `header_up` directives
+- [x] `services/verify/README.md` "API Endpoints" section documents both `/probe` (EHLO) and `/reach` (plain TCP) with their distinct use cases
+- [x] `services/verify/README.md` notes the new `127.0.0.1:3025` default bind and warns against direct `0.0.0.0` exposure without a reverse proxy
+- [x] `services/verify/README.md` systemd example updated to reflect new defaults
+- [x] `docs/manual-setup.md` Part A updated for the Caddyfile, loopback bind, and two-endpoint model
+- [x] `docs/prd.md` FR-38 updated to describe the two-endpoint design (`/reach` + `/probe`)
+- [x] Repo-root `README.md` is NOT modified
+- [x] No stale references to naive XFF handling or `0.0.0.0:3025` default in any doc
 
 ---
 
-## Sprint 13 — Preflight Flow Fix + PTR Display (Days 34–36.5) [NOT STARTED]
+## Sprint 13 — Preflight Flow Fix + PTR Display (Days 34–36.5) [IN PROGRESS]
 
 **Goal:** Fix the preflight chicken-and-egg problem on fresh VPSes (preflight currently fails because `/probe` requires a live SMTP responder that isn't installed yet) by routing the preflight inbound check at the new `/reach` endpoint from Sprint 12. Also fix the PTR display ordering bug that mangles output when the inbound check fails.
 
@@ -1516,8 +1516,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
 | 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Done |
 | 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Done |
-| 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | In Progress |
-| 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Not Started |
+| 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | Done |
+| 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | In Progress |
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Not Started |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Not Started |
 
@@ -1575,3 +1575,5 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces
 - [ ] **(Sprint 11)** `parse_port25_status` uses `smtpd` substring match which could misidentify non-OpenSMTPD processes — low practical risk but could use stricter matching
 - [ ] **(Sprint 11)** Dead `Fail` branch for PTR in `verify.rs` — `check_ptr()` never returns `Fail`, so the match arm is unreachable
+- [ ] **(Sprint 12)** `run_smtp_listener` spawns per-accept with no concurrency bound — deferred from Sprint 12 with an inline comment at `services/verify/src/main.rs` pointing at Sprint 14. Per-connection bounds are already tight (30s wall, 10s per-line, 1 KiB per-line), so this is defense-in-depth DoS hardening. Add a bounded semaphore or `tower::limit::ConcurrencyLimit`-style gate around accept loop
+- [ ] **(Sprint 12)** Cosmetic: in `smtp_session`, fold `let mut writer = writer;` into the destructuring pattern as `let (reader, mut writer) = tokio::io::split(stream);` — zero behavioral change, post-merge cleanup suggestion from reviewer
