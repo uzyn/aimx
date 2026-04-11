@@ -1,0 +1,6 @@
+{$DOMAIN:check.aimx.email} {
+    reverse_proxy 127.0.0.1:3025 {
+        header_up -X-Forwarded-For
+        header_up X-AIMX-Client-IP {remote_host}
+    }
+}

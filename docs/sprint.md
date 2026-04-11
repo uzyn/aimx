@@ -1151,7 +1151,7 @@ The `VerifyRunner` trait in `setup.rs` and `RealVerifyRunner` should call the ne
 
 ---
 
-## Sprint 12 — aimx-verify Security Hardening + /reach Endpoint (Days 31–33.5) [NOT STARTED]
+## Sprint 12 — aimx-verify Security Hardening + /reach Endpoint (Days 31–33.5) [IN PROGRESS]
 
 **Goal:** Fix three real bugs in the verify service discovered during post-Sprint-11 debugging: the Caddy self-probe loop (ConnectInfo reports loopback when behind a reverse proxy, so the service probes itself), the SSRF / port-scan-as-a-service risk in naive X-Forwarded-For handling, and the self-EHLO trap in the built-in SMTP listener. Also add a plain-TCP `/reach` endpoint so `aimx preflight` (Sprint 13) can check port 25 reachability on a fresh VPS without requiring a live SMTP server.
 
@@ -1516,7 +1516,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 9 | 22–24.5 | Migrate from YAML to TOML | Replace serde_yaml with toml crate for config and email frontmatter | Done |
 | 10 | 25–27.5 | Verify Service Overhaul | Remove echo, add port 25 listener, EHLO probe, remove ip parameter — no outbound email | Done |
 | 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Done |
-| 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | Not Started |
+| 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | In Progress |
 | 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Not Started |
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Not Started |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Not Started |
