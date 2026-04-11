@@ -185,6 +185,7 @@ pub const DEFAULT_VERIFY_HOST: &str = "https://check.aimx.email";
 
 pub const DEFAULT_CHECK_SERVICE_SMTP_ADDR: &str = "check.aimx.email:25";
 
+#[derive(Debug)]
 pub struct RealNetworkOps {
     pub verify_host: String,
     pub check_service_smtp_addr: String,
@@ -200,28 +201,51 @@ impl Default for RealNetworkOps {
 }
 
 impl RealNetworkOps {
-    pub fn from_verify_host(verify_host: String) -> Self {
+    pub fn from_verify_host(verify_host: String) -> Result<Self, Box<dyn std::error::Error>> {
         let trimmed = verify_host.trim_end_matches('/').to_string();
+        validate_verify_host(&trimmed)?;
         let smtp_addr = derive_smtp_addr_from_verify_host(&trimmed);
-        Self {
+        Ok(Self {
             verify_host: trimmed,
             check_service_smtp_addr: smtp_addr,
-        }
+        })
     }
 }
 
+pub fn validate_verify_host(verify_host: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if verify_host.is_empty() {
+        return Err("verify-host cannot be empty".into());
+    }
+    if !verify_host.starts_with("http://") && !verify_host.starts_with("https://") {
+        return Err(format!(
+            "verify-host must start with http:// or https:// (got: {verify_host})"
+        )
+        .into());
+    }
+    Ok(())
+}
+
 pub fn derive_smtp_addr_from_verify_host(verify_host: &str) -> String {
-    // Extract host from URL like "https://check.aimx.email"
+    // Extract authority (host[:port]) from URL like "https://check.aimx.email:3025/probe"
     let without_scheme = verify_host
         .strip_prefix("https://")
         .or_else(|| verify_host.strip_prefix("http://"))
         .unwrap_or(verify_host);
-    let host = without_scheme.split('/').next().unwrap_or(without_scheme);
-    // Strip port if present
-    let host = if host.contains(':') {
-        host.split(':').next().unwrap_or(host)
-    } else {
-        host
+    let authority = without_scheme.split('/').next().unwrap_or(without_scheme);
+
+    // Bracketed IPv6 literal: [::1] or [::1]:3025
+    if let Some(rest) = authority.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        let ipv6 = &rest[..end];
+        return format!("[{ipv6}]:25");
+    }
+
+    // Hostname or IPv4: strip :port if present (rsplit handles hosts safely since
+    // non-IPv6 hosts have at most one colon — the port separator).
+    let host = match authority.rsplit_once(':') {
+        Some((h, _port)) => h,
+        None => authority,
     };
     format!("{host}:25")
 }
@@ -1197,16 +1221,44 @@ mod tests {
 
     #[test]
     fn real_network_ops_custom_verify_host() {
-        let net = RealNetworkOps::from_verify_host("https://verify.custom.example.com".to_string());
+        let net = RealNetworkOps::from_verify_host("https://verify.custom.example.com".to_string())
+            .unwrap();
         assert_eq!(net.verify_host, "https://verify.custom.example.com");
         assert_eq!(net.check_service_smtp_addr, "verify.custom.example.com:25");
     }
 
     #[test]
     fn real_network_ops_from_verify_host_strips_trailing_slash() {
-        let net = RealNetworkOps::from_verify_host("https://check.aimx.email/".to_string());
+        let net =
+            RealNetworkOps::from_verify_host("https://check.aimx.email/".to_string()).unwrap();
         assert_eq!(net.verify_host, "https://check.aimx.email");
         assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
+    }
+
+    #[test]
+    fn from_verify_host_rejects_empty() {
+        let err = RealNetworkOps::from_verify_host(String::new()).unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
+    }
+
+    #[test]
+    fn from_verify_host_rejects_bare_hostname() {
+        let err = RealNetworkOps::from_verify_host("check.aimx.email".to_string()).unwrap_err();
+        assert!(err.to_string().contains("http://"));
+    }
+
+    #[test]
+    fn from_verify_host_rejects_non_http_scheme() {
+        let err =
+            RealNetworkOps::from_verify_host("ftp://verify.example.com".to_string()).unwrap_err();
+        assert!(err.to_string().contains("http://"));
+    }
+
+    #[test]
+    fn from_verify_host_rejects_only_slashes() {
+        // trailing-slash strip reduces "/" to empty
+        let err = RealNetworkOps::from_verify_host("/".to_string()).unwrap_err();
+        assert!(err.to_string().contains("cannot be empty"));
     }
 
     #[test]
@@ -1980,8 +2032,32 @@ mod tests {
     }
 
     #[test]
+    fn derive_smtp_addr_from_ipv6_literal_with_port() {
+        assert_eq!(
+            derive_smtp_addr_from_verify_host("https://[::1]:3025"),
+            "[::1]:25"
+        );
+    }
+
+    #[test]
+    fn derive_smtp_addr_from_ipv6_literal_without_port() {
+        assert_eq!(
+            derive_smtp_addr_from_verify_host("https://[2001:db8::1]"),
+            "[2001:db8::1]:25"
+        );
+    }
+
+    #[test]
+    fn derive_smtp_addr_from_ipv6_literal_with_path() {
+        assert_eq!(
+            derive_smtp_addr_from_verify_host("https://[::1]:8080/probe"),
+            "[::1]:25"
+        );
+    }
+
+    #[test]
     fn real_network_ops_from_verify_host() {
-        let net = RealNetworkOps::from_verify_host("https://check.aimx.email".to_string());
+        let net = RealNetworkOps::from_verify_host("https://check.aimx.email".to_string()).unwrap();
         assert_eq!(net.verify_host, "https://check.aimx.email");
         assert_eq!(net.check_service_smtp_addr, "check.aimx.email:25");
     }

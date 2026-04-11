@@ -272,4 +272,19 @@ verify_host = "https://verify.example.com"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.domain, "test.com");
     }
+
+    #[test]
+    fn legacy_probe_url_field_silently_ignored() {
+        // Pre-rename configs used `probe_url`; serde drops unknown fields so those
+        // configs still load, but `verify_host` is left unset (falls back to default).
+        let toml_str = r#"
+domain = "test.com"
+probe_url = "https://old.example.com/probe"
+
+[mailboxes]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.domain, "test.com");
+        assert!(config.verify_host.is_none());
+    }
 }
