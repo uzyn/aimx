@@ -5,26 +5,25 @@ This guide walks through every step needed to launch aimx, from deploying the ve
 - **Part A** — Deploy the verify service (done once, before anything else)
 - **Part B** — Set up an aimx mail server (done per server)
 
-The verify service must be running before any mail server can complete setup, because `aimx setup` calls the probe endpoint to test port 25 reachability, and `aimx verify` sends a test email to the echo endpoint.
+The verify service must be running before any mail server can complete setup, because `aimx setup`, `aimx preflight`, and `aimx verify` all call its `/probe` endpoint (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25).
 
 ---
 
 ## Part A: Deploy the aimx-verify Service
 
-The aimx-verify service provides two functions:
+The aimx-verify service provides two functions, both exposed from a single binary:
 
-1. **Port probe** (`/probe`) — HTTP endpoint that connects back to a target IP on port 25 to test inbound SMTP reachability. Used by `aimx setup` and `aimx preflight`.
-2. **Email echo** (`echo` subcommand) — Receives email via MDA pipe, reads DKIM/SPF results from Authentication-Results headers, and auto-replies with verification status. Used by `aimx verify`.
+1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs an SMTP EHLO handshake. Used to test inbound SMTP reachability. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
+2. **Port 25 listener** — Built-in TCP listener on `:25` that accepts incoming connections and returns a `220 check.aimx.email SMTP aimx-verify` banner, then `221 Bye` after 10 seconds. Used by aimx clients to test that their outbound port 25 is not blocked by their VPS provider. This is a plain tokio listener built into the `aimx-verify` binary — **no OpenSMTPD or other MTA is required on the verify server**.
 
 ### A1: Prerequisites
 
-- A server or VPS (can be separate from the mail server)
-- Two domains (or subdomains) pointed to it:
-  - One for the HTTP probe (e.g. `check.aimx.email`)
-  - One for receiving verification emails (e.g. `aimx.email` with MX record)
+- A server or VPS (can be separate from the mail server) with both **inbound and outbound port 25 open**
+- One domain or subdomain pointed at it (e.g. `check.aimx.email`) for the HTTPS probe endpoint
 - Rust toolchain (`rustup`)
 - Caddy (for automatic HTTPS on the probe endpoint)
-- OpenSMTPD (for the email echo component)
+
+No MTA, SMTP TLS certificate, or MX record is required on the verify server.
 
 ### A2: Build aimx-verify
 
@@ -47,18 +46,23 @@ sudo useradd --system --no-create-home aimx-verify
 sudo tee /etc/systemd/system/aimx-verify.service > /dev/null << 'EOF'
 [Unit]
 Description=aimx verify service
-After=network.target
+Wants=network-online.target
+After=network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/aimx-verify
 Environment=BIND_ADDR=127.0.0.1:3025
+Environment=SMTP_BIND_ADDR=0.0.0.0:25
 Restart=always
 User=aimx-verify
+AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
 WantedBy=multi-user.target
 EOF
 ```
+
+`BIND_ADDR=127.0.0.1:3025` keeps HTTP behind Caddy; `SMTP_BIND_ADDR=0.0.0.0:25` exposes the TCP listener directly to the internet; `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the non-root `aimx-verify` user bind the privileged port 25.
 
 Enable and start:
 
@@ -92,83 +96,37 @@ curl https://check.aimx.email/health
 # Expected: {"status":"ok","service":"aimx-verify"}
 ```
 
-### A4: Deploy the Email Echo
+### A4: Open Inbound Port 25
 
-The echo component requires an MTA to receive email and pipe it to `aimx-verify echo`.
-
-**Install OpenSMTPD:**
+The SMTP listener runs inside the `aimx-verify` binary — no OpenSMTPD, TLS certificate, or MX record is needed. Just make sure port 25 is open inbound in your firewall and at your VPS provider:
 
 ```bash
-sudo apt-get update && sudo apt-get install -y --no-install-recommends opensmtpd
+sudo ufw allow 25/tcp
 ```
 
-**Generate a TLS certificate** (self-signed or use Let's Encrypt):
-
-```bash
-sudo mkdir -p /etc/ssl/aimx-verify
-sudo openssl req -x509 -newkey rsa:2048 \
-    -keyout /etc/ssl/aimx-verify/key.pem \
-    -out /etc/ssl/aimx-verify/cert.pem \
-    -days 3650 -nodes \
-    -subj "/CN=aimx.email"
-```
-
-**Configure OpenSMTPD** (`/etc/smtpd.conf`):
-
-```
-pki aimx.email cert "/etc/ssl/aimx-verify/cert.pem"
-pki aimx.email key "/etc/ssl/aimx-verify/key.pem"
-
-listen on 0.0.0.0 tls pki aimx.email
-listen on :: tls pki aimx.email
-
-action "verify" mda "/usr/local/bin/aimx-verify echo"
-action "relay" relay
-
-match from any for rcpt-to "verify@aimx.email" action "verify"
-match for any action "relay"
-```
-
-**Restart OpenSMTPD:**
-
-```bash
-sudo systemctl restart opensmtpd
-```
-
-**Set up DNS for the echo domain** (e.g. `aimx.email`):
-
-| Type | Name | Value |
-|------|------|-------|
-| A | aimx.email | Verify server IP |
-| MX | aimx.email | 10 aimx.email. |
-| TXT | aimx.email | v=spf1 ip4:VERIFY_SERVER_IP -all |
-
-Note: The echo reply is sent via `sendmail -t`, so outbound port 25 must also be open on the verify server.
+If your provider blocks port 25 on the verify host, the listener will bind successfully but remote aimx clients will not be able to reach it, and their outbound-port-25 check will fail even though their own provider is fine.
 
 ### A5: Test the Verify Service
 
-**Test the probe:**
+**Health check** (confirms HTTPS + service is up):
 
 ```bash
-# Replace with any IP that has port 25 open
-curl "https://check.aimx.email/probe?ip=1.2.3.4"
-# Expected: {"reachable":true,"ip":"1.2.3.4"} (if port 25 is open on that IP)
-# Or: {"reachable":false,"ip":"1.2.3.4"} (if not)
+curl https://check.aimx.email/health
+# Expected: {"status":"ok","service":"aimx-verify"}
 ```
 
-**Test the echo:**
+**SMTP listener smoke test** (confirms port 25 is open and the listener is running):
 
-Send an email from any account to `verify@aimx.email`. You should receive an auto-reply containing:
-
+```bash
+nc check.aimx.email 25
+# Expected: 220 check.aimx.email SMTP aimx-verify
 ```
-aimx verification result
-========================
 
-DKIM: pass (or fail/none)
-SPF:  pass (or fail/none)
+Press Ctrl-C or wait 10 seconds; the listener sends `221 Bye` and closes. The banner hostname is hardcoded as `check.aimx.email` in the binary even on self-hosted instances — don't be surprised to see it on your own domain.
 
-Your email was received and processed by the aimx verify service.
-```
+**Functional `/probe` test:**
+
+The `/probe` endpoint always probes the caller's own IP — there is no `?ip=` parameter. To exercise it end-to-end, run `aimx preflight` (or `aimx verify`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verify service reached back and completed an EHLO handshake.
 
 ### A6: Point aimx Mail Servers at Your Verify Instance
 
@@ -187,6 +145,8 @@ sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
 ```
 
 Precedence is **CLI flag > `verify_host` in `config.toml` > default** (`https://check.aimx.email`). The value must be a base URL starting with `http://` or `https://`; aimx appends `/probe` internally when calling the probe endpoint, and derives the outbound port 25 target (`host:25`) from the same URL. A trailing slash is accepted and stripped.
+
+Because aimx derives the outbound port-25 target from the same `verify_host` URL, the verify service's HTTP probe and its TCP port-25 listener **must run on the same host** (or at least the same hostname in DNS). Self-hosting on a provider that blocks port 25 on the verify host will leave aimx clients unable to exercise the outbound check.
 
 ---
 
@@ -284,17 +244,16 @@ sudo aimx setup agent.yourdomain.com
 
 The setup wizard performs these steps automatically:
 
-1. Runs preflight checks (port 25 outbound/inbound, PTR)
+1. Checks for root privileges and scans port 25 for existing MTA conflicts
 2. Installs OpenSMTPD via `apt-get install --no-install-recommends opensmtpd` (skips `opensmtpd-extras`, which pulls in unused MySQL/PostgreSQL/Redis/SQLite client libraries)
 3. Generates a self-signed TLS certificate at `/etc/ssl/aimx/`
-4. Writes `/etc/smtpd.conf` (backs up any existing config)
-5. Restarts OpenSMTPD
-6. Generates DKIM keypair at `/var/lib/aimx/dkim/`
-7. Creates `/var/lib/aimx/config.toml` with a catchall mailbox
-8. Creates the catchall mailbox directory
-9. Displays the DNS records you need to add (see next step)
-10. Waits for you to add DNS records, then verifies them
-11. Optionally runs end-to-end verification
+4. Writes `/etc/smtpd.conf` (backs up any existing config) and restarts OpenSMTPD
+5. Runs the three port/PTR checks (outbound 25, inbound 25 via `/probe`, PTR)
+6. Generates the DKIM keypair at `/var/lib/aimx/dkim/`, writes `/var/lib/aimx/config.toml`, and creates the catchall mailbox directory
+7. Displays the DNS records you need to add (see next step)
+8. After you add the records and press Enter, resolves and validates each one
+
+Setup ends after DNS verification. There is no end-to-end email test — run `aimx verify` (or `aimx preflight`) later to re-check port 25 connectivity.
 
 ### B6: DNS Configuration
 
@@ -357,7 +316,7 @@ dig +short -x YOUR_SERVER_IP
 aimx verify
 ```
 
-This sends a test email from `catchall@agent.yourdomain.com` to `verify@aimx.email` and waits up to 120 seconds for an echo reply with DKIM/SPF results. A successful result means your outbound signing and DNS are all correct.
+`aimx verify` runs the same three checks as `aimx preflight`: outbound port 25 (to the verify service's built-in TCP listener), inbound port 25 (via `/probe`, which connects back to your server), and PTR record. Use whichever command reads better in your workflow — they are functionally equivalent. Neither sends an actual email or waits for an echo reply.
 
 **Check server status:**
 
@@ -489,7 +448,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 | Preflight: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see compatible providers table) |
 | Preflight: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` |
-| `aimx verify` times out | DNS not propagated, or verify service down | Run `aimx verify` later; check `curl https://check.aimx.email/health` |
+| `aimx verify` shows inbound FAIL | The verify service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, OpenSMTPD down, or DNS `A` record not yet resolving) | `sudo systemctl status opensmtpd`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
 | Emails landing in spam | Missing DNS records or no PTR | Add all DNS records, set PTR, use Gmail filter |
 | OpenSMTPD not running | Service crashed or misconfigured | `sudo systemctl status opensmtpd` and `journalctl -u opensmtpd -e` |
 | Emails not being delivered to mailbox | OpenSMTPD MDA misconfigured | Check `/etc/smtpd.conf` has correct `aimx ingest` path |
@@ -499,7 +458,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 ```bash
 aimx preflight              # Re-run port and PTR checks
 aimx status                 # Show config, mailboxes, and message counts
-aimx verify                 # End-to-end email verification test
+aimx verify                 # Port 25 + PTR check (equivalent to aimx preflight)
 systemctl status opensmtpd  # Check OpenSMTPD service status
 journalctl -u opensmtpd -e  # View OpenSMTPD logs
 ```
