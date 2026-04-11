@@ -1402,7 +1402,7 @@ PTR remains advisory: `PreflightResult::Warn` on missing/error (non-blocking), `
 
 ---
 
-## Sprint 14 — Request Logging for aimx-verify (Days 37–39.5) [IN PROGRESS]
+## Sprint 14 — Request Logging for aimx-verify (Days 37–39.5) [DONE]
 
 **Goal:** Add per-request logging to every call served by `aimx-verify` — HTTP and SMTP — so operators can see who's using the service, diagnose issues, and spot abuse directly from the shell output.
 
@@ -1426,19 +1426,19 @@ Log every call, including `/health` (no filtering — owner confirmed ALL calls)
 Implementation choice is open: axum's `tower_http::trace::TraceLayer` + a small middleware that extracts `ConnectInfo<SocketAddr>`, or a hand-rolled `axum::middleware::from_fn` wrapper. There are three HTTP routes (`/probe`, `/reach`, `/health`), so a custom middleware is likely simpler than pulling in `tower-http`. Developer's call.
 
 **Acceptance criteria:**
-- [ ] Every `/probe` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
-- [ ] Every `/reach` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
-- [ ] Every `/health` request logs method, path, caller IP, response status, elapsed ms at `info` level
-- [ ] Every TCP connection to the SMTP listener logs peer IP on accept and success/error on close at `info` level
-- [ ] Log output uses the default `tracing-subscriber` text formatter (not JSON)
-- [ ] `RUST_LOG` env var still works for level overrides (e.g., `RUST_LOG=aimx_verify=debug`)
-- [ ] Unit or integration test: hit `/probe` on a local test server and assert a log line containing the caller IP is captured (via `tracing-subscriber`'s test writer or equivalent)
-- [ ] Integration test: connect to the SMTP listener on an ephemeral port and assert a log line with the peer IP is captured
-- [ ] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
+- [x] Every `/probe` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level <!-- Implemented via `log_request` middleware + `ReachableOutcome` response extension so exactly one `info!` line is emitted per request, with the `reachable` field joined onto the same line -->
+- [x] Every `/reach` request logs method, path, caller IP, response status, elapsed ms, and the `reachable` result at `info` level
+- [x] Every `/health` request logs method, path, caller IP, response status, elapsed ms at `info` level
+- [x] Every TCP connection to the SMTP listener logs peer IP on accept and success/error on close at `info` level <!-- Factored into shared `spawn_smtp_connection(stream, peer)` helper so test and production exercise exactly the same logging body (anti-drift) -->
+- [x] Log output uses the default `tracing-subscriber` text formatter (not JSON)
+- [x] `RUST_LOG` env var still works for level overrides (e.g., `RUST_LOG=aimx_verify=debug`)
+- [x] Unit or integration test: hit `/probe` on a local test server and assert a log line containing the caller IP is captured (via `tracing-subscriber`'s test writer or equivalent) <!-- Exceeded: three HTTP integration tests cover /health, /reach (with reachable=false), and /probe 400 (caller_ip=unknown) -->
+- [x] Integration test: connect to the SMTP listener on an ephemeral port and assert a log line with the peer IP is captured
+- [x] `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` all clean in `services/verify/`
 
 ---
 
-## Sprint 15 — Dockerize aimx-verify (Days 40–42.5) [NOT STARTED]
+## Sprint 15 — Dockerize aimx-verify (Days 40–42.5) [IN PROGRESS]
 
 **Goal:** Ship a Dockerfile and docker-compose for `aimx-verify` so the service can be redeployed to any host consistently without tracking apt packages or systemd units by hand. The deployment must work correctly with the Sprint 12 security model (loopback-default bind + Caddy trust boundary + Layer 4 target guard).
 
@@ -1518,8 +1518,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 11 | 28–30.5 | Setup Flow Rewrite + Client Cleanup | Root check, MTA conflict detection, install-before-check flow, simplified verify, docs | Done |
 | 12 | 31–33.5 | aimx-verify Security Hardening + /reach Endpoint | 4-layer Caddy self-probe fix, `/reach` TCP-only endpoint, self-EHLO trap fix, canonical `Caddyfile` | Done |
 | 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Done |
-| 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | In Progress |
-| 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Not Started |
+| 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
+| 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | In Progress |
 
 ## Deferred to v2
 
