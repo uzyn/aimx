@@ -1,0 +1,22 @@
+# Build artifacts — always rebuilt inside the Dockerfile builder stage.
+target/
+**/target/
+
+# Docker files themselves — no need to ship into the build context.
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Git metadata and editor cruft.
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Documentation that isn't needed to build the binary.
+README.md
+Caddyfile
