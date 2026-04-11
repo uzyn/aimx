@@ -13,7 +13,12 @@ aimx status
 
 # Check port 25 connectivity (outbound and inbound)
 aimx verify
+
+# Test against a self-hosted verify service instead of the default
+aimx verify --verify-host https://verify.yourdomain.com
 ```
+
+The `--verify-host` flag is also accepted by `aimx setup` and `aimx preflight`, and overrides the `verify_host` value from `config.toml` for the current invocation.
 
 ## Common issues
 

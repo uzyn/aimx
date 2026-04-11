@@ -16,8 +16,14 @@ use std::path::Path;
 
 fn main() {
     let cli = Cli::parse();
+    if let Err(e) = dispatch(cli) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+}
 
-    let result = match cli.command {
+fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    match cli.command {
         Command::Ingest { rcpt } => ingest::run(&rcpt, cli.data_dir.as_deref()),
         Command::Send(args) => send::run(args, cli.data_dir.as_deref()),
         Command::Mailbox(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
@@ -31,34 +37,27 @@ fn main() {
             };
             dkim::run_keygen(&config.data_dir, &config.domain, &selector, force)
         }
-        Command::Mcp => match tokio::runtime::Runtime::new() {
-            Ok(rt) => rt.block_on(mcp::run(cli.data_dir.as_deref())),
-            Err(e) => Err(format!("Failed to create runtime: {e}").into()),
-        },
-        Command::Setup { domain } => {
+        Command::Mcp => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("Failed to create runtime: {e}"))?;
+            rt.block_on(mcp::run(cli.data_dir.as_deref()))
+        }
+        Command::Setup {
+            domain,
+            verify_host,
+        } => {
             let sys = setup::RealSystemOps;
-            let probe_url = load_config(cli.data_dir.as_deref())
-                .ok()
-                .and_then(|c| c.probe_url)
-                .unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string());
-            let net = setup::RealNetworkOps::from_probe_url(probe_url);
+            let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
             setup::run_setup(&domain, cli.data_dir.as_deref(), &sys, &net)
         }
         Command::Status => status::run(cli.data_dir.as_deref()),
-        Command::Preflight => {
-            let probe_url = load_config(cli.data_dir.as_deref())
-                .ok()
-                .and_then(|c| c.probe_url)
-                .unwrap_or_else(|| setup::DEFAULT_PROBE_URL.to_string());
-            let net = setup::RealNetworkOps::from_probe_url(probe_url);
+        Command::Preflight { verify_host } => {
+            let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
             setup::run_preflight_command(&net)
         }
-        Command::Verify => verify::run(cli.data_dir.as_deref()),
-    };
-
-    if let Err(e) = result {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+        Command::Verify { verify_host } => {
+            verify::run(cli.data_dir.as_deref(), verify_host.as_deref())
+        }
     }
 }
 
@@ -67,4 +66,14 @@ fn load_config(data_dir: Option<&Path>) -> Result<config::Config, Box<dyn std::e
         Some(dir) => config::Config::load_from_data_dir(dir),
         None => config::Config::load_default(),
     }
+}
+
+fn build_network_ops(
+    cli_override: Option<&str>,
+    data_dir: Option<&Path>,
+) -> Result<setup::RealNetworkOps, Box<dyn std::error::Error>> {
+    let config = load_config(data_dir).ok();
+    let host =
+        verify::resolve_verify_host(cli_override, config.as_ref(), setup::DEFAULT_VERIFY_HOST);
+    setup::RealNetworkOps::from_verify_host(host)
 }
