@@ -170,6 +170,24 @@ SPF:  pass (or fail/none)
 Your email was received and processed by the aimx verify service.
 ```
 
+### A6: Point aimx Mail Servers at Your Verify Instance
+
+The default verify host is `https://check.aimx.email`. If you deployed your own instance in the steps above, tell aimx to use it either via `config.toml`:
+
+```toml
+verify_host = "https://check.yourdomain.com"
+```
+
+…or per-invocation with the `--verify-host` flag (accepted by `aimx verify`, `aimx setup`, and `aimx preflight`):
+
+```bash
+aimx verify --verify-host https://check.yourdomain.com
+aimx preflight --verify-host https://check.yourdomain.com
+sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
+```
+
+Precedence is **CLI flag > `verify_host` in `config.toml` > default** (`https://check.aimx.email`). The value must be a base URL starting with `http://` or `https://`; aimx appends `/probe` internally when calling the probe endpoint, and derives the outbound port 25 target (`host:25`) from the same URL. A trailing slash is accepted and stripped.
+
 ---
 
 ## Part B: Set Up aimx on a Mail Server
@@ -244,11 +262,19 @@ This checks three things:
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
-| Outbound port 25 | Connects to `gmail-smtp-in.l.google.com:25` | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls `check.aimx.email/probe` to connect back to your IP:25 | Open firewall, ask VPS provider to unblock inbound SMTP |
+| Outbound port 25 | Connects to the verify service host on port 25 | Ask VPS provider to unblock outbound SMTP |
+| Inbound port 25 | Calls `<verify_host>/probe` to connect back to your IP:25 | Open firewall, ask VPS provider to unblock inbound SMTP |
 | PTR record | Reverse DNS lookup on your IP | Set PTR at your VPS provider's control panel |
 
 All three should show PASS (PTR may show WARN, which is acceptable but should be fixed for deliverability).
+
+The default verify host is `https://check.aimx.email`. To point at a self-hosted instance instead (see Part A), set `verify_host` in `config.toml` or pass `--verify-host` on the command line:
+
+```bash
+aimx preflight --verify-host https://check.yourdomain.com
+```
+
+The same flag is accepted by `aimx verify` and `aimx setup`, and takes precedence over the config value.
 
 ### B5: Run Setup Wizard
 

@@ -197,6 +197,12 @@ data_dir = "/var/lib/aimx"
 # DKIM selector name (default: dkim)
 dkim_selector = "dkim"
 
+# Verify service base URL (default: https://check.aimx.email)
+# Used by `aimx verify`, `aimx setup`, and `aimx preflight`. Set this only if
+# you are self-hosting the verify service (see `services/verify/`). aimx appends
+# `/probe` to this base URL internally.
+# verify_host = "https://verify.yourdomain.com"
+
 # Catchall mailbox (receives all unmatched addresses)
 [mailboxes.catchall]
 address = "*@agent.yourdomain.com"
@@ -302,6 +308,20 @@ The verify service (`services/verify/`) is a separate deployable service that pr
 2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so aimx clients can test outbound port 25 reachability
 
 No MTA is required on the verify server. The service is open source and self-hostable. See `services/verify/README.md` for deployment instructions.
+
+To point aimx at a self-hosted instance, set `verify_host` in `config.toml`:
+
+```toml
+verify_host = "https://verify.yourdomain.com"
+```
+
+Or override it per-invocation with the `--verify-host` flag, which is accepted by `aimx verify`, `aimx setup`, and `aimx preflight`:
+
+```bash
+aimx verify --verify-host https://verify.yourdomain.com
+```
+
+Precedence is **CLI flag > config > default** (`https://check.aimx.email`).
 
 ## DNS records
 
