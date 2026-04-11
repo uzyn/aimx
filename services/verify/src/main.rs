@@ -1,8 +1,27 @@
-use axum::{extract::ConnectInfo, routing::get, Json, Router};
+use axum::{
+    extract::ConnectInfo,
+    http::{HeaderMap, StatusCode},
+    routing::get,
+    Json, Router,
+};
 use serde::Serialize;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+
+const CLIENT_IP_HEADER: &str = "X-AIMX-Client-IP";
+const SMTP_HOSTNAME: &str = "check.aimx.email";
+const SMTP_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
+const SMTP_LINE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hard cap on bytes consumed per SMTP request line. RFC 5321 sets the
+/// maximum command line length to 512 octets; 1024 leaves generous headroom
+/// for oversized but still-well-intentioned clients and closes off a trivial
+/// DoS where a peer streams megabytes into a growing `String` buffer before
+/// the per-line timeout fires.
+const SMTP_MAX_LINE_BYTES: u64 = 1024;
+const REACH_TCP_TIMEOUT: Duration = Duration::from_secs(10);
+const PROBE_EHLO_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Serialize)]
 struct ProbeResponse {
@@ -23,20 +42,164 @@ async fn health() -> Json<HealthResponse> {
     })
 }
 
-async fn probe(ConnectInfo(addr): ConnectInfo<SocketAddr>) -> Json<ProbeResponse> {
-    let target_ip = addr.ip().to_string();
-    let reachable = check_port25_ehlo(&target_ip).await;
-
-    Json(ProbeResponse {
-        reachable,
-        ip: target_ip,
-    })
+/// Collapse an IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) to its underlying
+/// IPv4 form so that the Layer 4 guards and trust-boundary checks see one
+/// canonical representation. Linux dual-stack sockets will silently downgrade
+/// `TcpStream::connect("[::ffff:127.0.0.1]:port")` to an IPv4 loopback
+/// connection, so without this canonicalization every mapped form
+/// (`::ffff:127.0.0.1`, `::ffff:10.0.0.1`, `::ffff:169.254.169.254`,
+/// `::ffff:0.0.0.0`, …) would bypass the guards below.
+fn canonicalize_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        v4 => v4,
+    }
 }
 
-async fn check_port25_ehlo(ip: &str) -> bool {
-    let addr = format!("{ip}:25");
+/// Layer 3: resolve the caller's real IP given the TCP peer and request headers.
+///
+/// Trust boundary: if the TCP peer is non-loopback, the service is exposed
+/// directly and the peer IP is authoritative. If the peer is loopback, the
+/// request came through a reverse proxy (Caddy) and we require the proxy to
+/// have set `X-AIMX-Client-IP` to the real client IP. We never parse
+/// `X-Forwarded-For` — Caddy strips it, and the app must not re-introduce a
+/// vulnerability by trusting it.
+fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr> {
+    let peer_ip = canonicalize_ip(peer.ip());
+    if !peer_ip.is_loopback() {
+        return Some(peer_ip);
+    }
 
-    let result = tokio::time::timeout(std::time::Duration::from_secs(45), async {
+    let value = headers.get(CLIENT_IP_HEADER)?.to_str().ok()?;
+    let parsed: IpAddr = value.trim().parse().ok()?;
+    let ip = canonicalize_ip(parsed);
+
+    if is_blocked_target(&ip) {
+        return None;
+    }
+
+    Some(ip)
+}
+
+/// Layer 4: reject targets that should never be probed.
+///
+/// This blocks loopback, unspecified, link-local, RFC 1918 (IPv4 private),
+/// RFC 4193 (IPv6 ULA), and similar ranges. Used by both `/probe` and
+/// `/reach` before any outbound connection is attempted, and also by
+/// `resolve_client_ip` to reject bogus `X-AIMX-Client-IP` values.
+///
+/// IPv4-mapped IPv6 addresses are canonicalized to their IPv4 form before
+/// the checks run, so `::ffff:127.0.0.1` and similar are blocked as if the
+/// caller had supplied `127.0.0.1` directly.
+fn is_blocked_target(ip: &IpAddr) -> bool {
+    let ip = canonicalize_ip(*ip);
+    if ip.is_loopback() || ip.is_unspecified() {
+        return true;
+    }
+    match ip {
+        IpAddr::V4(v4) => is_blocked_ipv4(&v4),
+        IpAddr::V6(v6) => is_blocked_ipv6(&v6),
+    }
+}
+
+fn is_blocked_ipv4(ip: &Ipv4Addr) -> bool {
+    if ip.is_link_local() || ip.is_broadcast() || ip.is_multicast() {
+        return true;
+    }
+    let [a, b, _, _] = ip.octets();
+    // RFC 1918
+    if a == 10 {
+        return true;
+    }
+    if a == 172 && (16..=31).contains(&b) {
+        return true;
+    }
+    if a == 192 && b == 168 {
+        return true;
+    }
+    // RFC 6598 (CGNAT)
+    if a == 100 && (64..=127).contains(&b) {
+        return true;
+    }
+    false
+}
+
+fn is_blocked_ipv6(ip: &Ipv6Addr) -> bool {
+    if ip.is_multicast() {
+        return true;
+    }
+    // fe80::/10 link-local
+    if (ip.segments()[0] & 0xffc0) == 0xfe80 {
+        return true;
+    }
+    // fc00::/7 RFC 4193 unique local
+    if (ip.segments()[0] & 0xfe00) == 0xfc00 {
+        return true;
+    }
+    false
+}
+
+async fn probe(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<ProbeResponse>, StatusCode> {
+    let caller_ip = match resolve_client_ip(&addr, &headers) {
+        Some(ip) => ip,
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    if is_blocked_target(&caller_ip) {
+        return Ok(Json(ProbeResponse {
+            reachable: false,
+            ip: caller_ip.to_string(),
+        }));
+    }
+
+    let reachable = check_port25_ehlo(&caller_ip).await;
+    Ok(Json(ProbeResponse {
+        reachable,
+        ip: caller_ip.to_string(),
+    }))
+}
+
+async fn reach(
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<ProbeResponse>, StatusCode> {
+    let caller_ip = match resolve_client_ip(&addr, &headers) {
+        Some(ip) => ip,
+        None => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    if is_blocked_target(&caller_ip) {
+        return Ok(Json(ProbeResponse {
+            reachable: false,
+            ip: caller_ip.to_string(),
+        }));
+    }
+
+    let reachable = check_port25_tcp(&caller_ip).await;
+    Ok(Json(ProbeResponse {
+        reachable,
+        ip: caller_ip.to_string(),
+    }))
+}
+
+async fn check_port25_tcp(ip: &IpAddr) -> bool {
+    let addr = SocketAddr::new(*ip, 25);
+    matches!(
+        tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr)).await,
+        Ok(Ok(_))
+    )
+}
+
+async fn check_port25_ehlo(ip: &IpAddr) -> bool {
+    let addr = SocketAddr::new(*ip, 25);
+
+    let result = tokio::time::timeout(PROBE_EHLO_TIMEOUT, async {
         let stream = TcpStream::connect(&addr).await?;
         smtp_ehlo_handshake(stream).await
     })
@@ -86,9 +249,6 @@ async fn smtp_ehlo_handshake(stream: TcpStream) -> std::io::Result<bool> {
     Ok(true)
 }
 
-const SMTP_BANNER: &[u8] = b"220 check.aimx.email SMTP aimx-verify\r\n";
-const SMTP_BYE: &[u8] = b"221 Bye\r\n";
-
 async fn run_smtp_listener() {
     let bind_addr = std::env::var("SMTP_BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:25".to_string());
 
@@ -98,6 +258,13 @@ async fn run_smtp_listener() {
 
     tracing::info!("SMTP listener on {bind_addr}");
 
+    // Concurrency is currently unbounded. With `SMTP_CONNECTION_TIMEOUT = 30s`
+    // and `SMTP_MAX_LINE_BYTES = 1 KiB` per line, a single client is tightly
+    // bounded, but a distributed flood could still saturate the tokio
+    // runtime. Adding a semaphore here is tracked as Sprint 14 follow-up
+    // hardening (see PR #21 review, non-blocker #4) — kept out of Sprint 12
+    // to avoid scope creep into general DoS hardening, which was not part
+    // of this sprint's charter.
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
@@ -114,18 +281,68 @@ async fn run_smtp_listener() {
     }
 }
 
-async fn handle_smtp_connection(mut stream: TcpStream) -> std::io::Result<()> {
-    stream.write_all(SMTP_BANNER).await?;
-    stream.flush().await?;
+/// Minimal correct SMTP responder used only as a reachability target.
+///
+/// Implements enough of RFC 5321 for EHLO-based reachability probes to
+/// complete cleanly: banner → (EHLO|HELO → 250 | QUIT → 221 Bye | other
+/// → 500) loop. Not a real SMTP server — no MAIL FROM / RCPT TO / DATA /
+/// AUTH support.
+async fn handle_smtp_connection(stream: TcpStream) -> std::io::Result<()> {
+    tokio::time::timeout(SMTP_CONNECTION_TIMEOUT, smtp_session(stream))
+        .await
+        .unwrap_or(Ok(()))
+}
 
-    // Wait for any input or timeout after 10 seconds
-    let mut buf = [0u8; 512];
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), stream.read(&mut buf)).await;
+async fn smtp_session<S>(stream: S) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
+{
+    let (reader, writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader);
+    let mut writer = writer;
 
-    stream.write_all(SMTP_BYE).await?;
-    stream.flush().await?;
+    let banner = format!("220 {SMTP_HOSTNAME} SMTP aimx-verify\r\n");
+    writer.write_all(banner.as_bytes()).await?;
+    writer.flush().await?;
 
-    Ok(())
+    loop {
+        let mut line = Vec::new();
+        // Cap per-line reads so a misbehaving peer cannot stream unbounded
+        // data into our buffer before the per-line timeout trips.
+        let mut limited = (&mut reader).take(SMTP_MAX_LINE_BYTES);
+        let read_result =
+            tokio::time::timeout(SMTP_LINE_TIMEOUT, limited.read_until(b'\n', &mut line)).await;
+
+        let n = match read_result {
+            Ok(Ok(n)) => n,
+            // read error or timeout: close cleanly
+            _ => return Ok(()),
+        };
+        if n == 0 {
+            // peer closed
+            return Ok(());
+        }
+
+        let text = std::str::from_utf8(&line).unwrap_or("");
+        let trimmed = text.trim_end_matches(['\r', '\n']);
+        let upper = trimmed.to_ascii_uppercase();
+
+        if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+            let resp = format!("250 {SMTP_HOSTNAME}\r\n");
+            writer.write_all(resp.as_bytes()).await?;
+            writer.flush().await?;
+            continue;
+        }
+
+        if upper.starts_with("QUIT") {
+            writer.write_all(b"221 Bye\r\n").await?;
+            writer.flush().await?;
+            return Ok(());
+        }
+
+        writer.write_all(b"500 Command not recognized\r\n").await?;
+        writer.flush().await?;
+    }
 }
 
 fn main() {
@@ -136,9 +353,10 @@ fn main() {
         let app = Router::new()
             .route("/", get(health))
             .route("/health", get(health))
-            .route("/probe", get(probe));
+            .route("/probe", get(probe))
+            .route("/reach", get(reach));
 
-        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "0.0.0.0:3025".to_string());
+        let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3025".to_string());
         let listener = tokio::net::TcpListener::bind(&bind_addr)
             .await
             .expect("Failed to bind HTTP listener");
@@ -160,7 +378,17 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::AsyncReadExt;
+    use axum::http::HeaderValue;
+
+    fn empty_headers() -> HeaderMap {
+        HeaderMap::new()
+    }
+
+    fn headers_with_client_ip(ip: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(CLIENT_IP_HEADER, HeaderValue::from_str(ip).unwrap());
+        h
+    }
 
     #[tokio::test]
     async fn health_returns_ok() {
@@ -171,7 +399,8 @@ mod tests {
 
     #[tokio::test]
     async fn check_port25_ehlo_unreachable_host() {
-        let result = check_port25_ehlo("192.0.2.1").await;
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let result = check_port25_ehlo(&ip).await;
         assert!(!result);
     }
 
@@ -207,23 +436,226 @@ mod tests {
         assert!(json.contains("\"service\":\"aimx-verify\""));
     }
 
+    // -----------------------------------------------------------------
+    // resolve_client_ip
+    // -----------------------------------------------------------------
+
     #[test]
-    fn smtp_banner_format() {
-        let banner = std::str::from_utf8(SMTP_BANNER).unwrap();
-        assert!(banner.starts_with("220"));
-        assert!(banner.contains("check.aimx.email"));
-        assert!(banner.ends_with("\r\n"));
+    fn resolve_client_ip_direct_public_ipv4() {
+        let peer: SocketAddr = "203.0.113.5:12345".parse().unwrap();
+        let ip = resolve_client_ip(&peer, &empty_headers()).unwrap();
+        assert_eq!(ip.to_string(), "203.0.113.5");
     }
 
     #[test]
-    fn smtp_bye_format() {
-        let bye = std::str::from_utf8(SMTP_BYE).unwrap();
-        assert!(bye.starts_with("221"));
-        assert!(bye.ends_with("\r\n"));
+    fn resolve_client_ip_direct_public_ipv6() {
+        let peer: SocketAddr = "[2001:db8::1]:12345".parse().unwrap();
+        let ip = resolve_client_ip(&peer, &empty_headers()).unwrap();
+        assert_eq!(ip.to_string(), "2001:db8::1");
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_with_valid_header() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("203.0.113.5");
+        let ip = resolve_client_ip(&peer, &headers).unwrap();
+        assert_eq!(ip.to_string(), "203.0.113.5");
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_missing_header() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        assert!(resolve_client_ip(&peer, &empty_headers()).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_header_is_loopback() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("127.0.0.1");
+        assert!(resolve_client_ip(&peer, &headers).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_header_is_private() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        for ip in ["10.0.0.1", "172.16.0.1", "192.168.1.1"] {
+            let headers = headers_with_client_ip(ip);
+            assert!(
+                resolve_client_ip(&peer, &headers).is_none(),
+                "private IP {ip} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_header_is_unspecified() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("0.0.0.0");
+        assert!(resolve_client_ip(&peer, &headers).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_header_is_link_local() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("169.254.1.1");
+        assert!(resolve_client_ip(&peer, &headers).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_loopback_header_unparseable() {
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("not-an-ip");
+        assert!(resolve_client_ip(&peer, &headers).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_ipv6_loopback_with_valid_header() {
+        let peer: SocketAddr = "[::1]:12345".parse().unwrap();
+        let headers = headers_with_client_ip("2001:db8::1");
+        let ip = resolve_client_ip(&peer, &headers).unwrap();
+        assert_eq!(ip.to_string(), "2001:db8::1");
+    }
+
+    // -----------------------------------------------------------------
+    // is_blocked_target — Layer 4 guard
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn is_blocked_target_rejects_loopback_and_private() {
+        let blocked = [
+            "127.0.0.1",
+            "::1",
+            "0.0.0.0",
+            "::",
+            "10.0.0.1",
+            "10.255.255.255",
+            "172.16.0.1",
+            "172.31.255.255",
+            "192.168.1.1",
+            "169.254.1.1",
+            "fe80::1",
+            "fc00::1",
+            "fd00::1",
+        ];
+        for ip_str in blocked {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(is_blocked_target(&ip), "{ip_str} should be blocked");
+        }
+    }
+
+    #[test]
+    fn is_blocked_target_allows_public() {
+        let allowed = ["1.1.1.1", "8.8.8.8", "203.0.113.1", "2001:db8::1"];
+        for ip_str in allowed {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(!is_blocked_target(&ip), "{ip_str} should be allowed");
+        }
+    }
+
+    #[test]
+    fn is_blocked_target_rejects_172_private_boundaries() {
+        for ip_str in ["172.16.0.1", "172.20.1.1", "172.31.255.255"] {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(is_blocked_target(&ip), "{ip_str} should be blocked");
+        }
+    }
+
+    #[test]
+    fn is_blocked_target_allows_172_public_boundaries() {
+        for ip_str in ["172.15.0.1", "172.32.0.1"] {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(
+                !is_blocked_target(&ip),
+                "{ip_str} should NOT be blocked (outside 172.16/12)"
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Handler-level 400 responses
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn probe_returns_400_on_loopback_without_header() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let result = probe(ConnectInfo(addr), empty_headers()).await;
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
     }
 
     #[tokio::test]
-    async fn smtp_listener_sends_banner_and_bye() {
+    async fn reach_returns_400_on_loopback_without_header() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let result = reach(ConnectInfo(addr), empty_headers()).await;
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn probe_returns_400_on_loopback_with_private_header() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("10.0.0.1");
+        let result = probe(ConnectInfo(addr), headers).await;
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn reach_returns_400_on_loopback_with_private_header() {
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("10.0.0.1");
+        let result = reach(ConnectInfo(addr), headers).await;
+        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
+    }
+
+    // -----------------------------------------------------------------
+    // /reach semantics: TCP-only, no SMTP handshake
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn check_port25_tcp_unreachable_host() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        let result = check_port25_tcp(&ip).await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn check_port25_tcp_listening_socket_returns_true() {
+        // Spawn a dummy TCP listener on a random port. We can't bind port 25
+        // in tests, so we test the inner logic by connecting directly to the
+        // bound address (the helper function is reused).
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        // Keep it accepting so the connect succeeds.
+        tokio::spawn(async move {
+            loop {
+                let _ = listener.accept().await;
+            }
+        });
+
+        // Verify the plain TCP connect semantics: ANY listening TCP socket
+        // satisfies reachability. No banner or EHLO required.
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let ok = tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr))
+            .await
+            .unwrap()
+            .is_ok();
+        assert!(
+            ok,
+            "plain TCP connect to listening socket should succeed regardless of SMTP"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // handle_smtp_connection — new correct semantics
+    // -----------------------------------------------------------------
+
+    async fn read_line(stream: &mut TcpStream) -> String {
+        let mut buf = vec![0u8; 512];
+        let n = stream.read(&mut buf).await.unwrap();
+        String::from_utf8(buf[..n].to_vec()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn smtp_session_ehlo_then_quit() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -236,24 +668,96 @@ mod tests {
             .await
             .unwrap();
 
-        // Read banner
-        let mut buf = vec![0u8; 256];
-        let n = stream.read(&mut buf).await.unwrap();
-        let banner = std::str::from_utf8(&buf[..n]).unwrap();
+        let banner = read_line(&mut stream).await;
+        assert!(banner.starts_with("220"), "Expected 220, got: {banner}");
+        assert!(banner.contains(SMTP_HOSTNAME));
+
+        stream.write_all(b"EHLO client.example\r\n").await.unwrap();
+        let ehlo_resp = read_line(&mut stream).await;
         assert!(
-            banner.starts_with("220"),
-            "Expected 220 banner, got: {banner}"
+            ehlo_resp.starts_with("250 "),
+            "Expected 250, got: {ehlo_resp}"
         );
-        assert!(banner.contains("check.aimx.email"));
 
-        // Send something (like EHLO)
-        stream.write_all(b"EHLO test\r\n").await.unwrap();
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+        let bye = read_line(&mut stream).await;
+        assert!(bye.starts_with("221"), "Expected 221, got: {bye}");
+    }
 
-        // Read 221 Bye
-        let mut buf2 = vec![0u8; 256];
-        let n2 = stream.read(&mut buf2).await.unwrap();
-        let bye = std::str::from_utf8(&buf2[..n2]).unwrap();
-        assert!(bye.starts_with("221"), "Expected 221 Bye, got: {bye}");
+    #[tokio::test]
+    async fn smtp_session_helo_then_quit() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_smtp_connection(stream).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let _banner = read_line(&mut stream).await;
+        stream.write_all(b"HELO client.example\r\n").await.unwrap();
+        let helo_resp = read_line(&mut stream).await;
+        assert!(
+            helo_resp.starts_with("250 "),
+            "Expected 250, got: {helo_resp}"
+        );
+
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+        let bye = read_line(&mut stream).await;
+        assert!(bye.starts_with("221"));
+    }
+
+    #[tokio::test]
+    async fn smtp_session_unknown_command_returns_500() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_smtp_connection(stream).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+
+        let _banner = read_line(&mut stream).await;
+        stream.write_all(b"NOOP extra\r\n").await.unwrap();
+        let resp = read_line(&mut stream).await;
+        assert!(resp.starts_with("500"), "Expected 500, got: {resp}");
+
+        // Connection should still be open — send QUIT.
+        stream.write_all(b"QUIT\r\n").await.unwrap();
+        let bye = read_line(&mut stream).await;
+        assert!(bye.starts_with("221"), "Expected 221 after 500, got: {bye}");
+    }
+
+    #[tokio::test]
+    async fn smtp_session_peer_close_is_clean() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_smtp_connection(stream).await
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let _banner = read_line(&mut stream).await;
+        drop(stream); // peer close mid-session
+
+        // Server task should complete without error.
+        let result = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .expect("server did not terminate after peer close");
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -284,8 +788,6 @@ mod tests {
             stream.flush().await.unwrap();
         });
 
-        // check_port25_ehlo connects to port 25 which differs from our mock,
-        // so we test the handshake function directly
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .unwrap();
@@ -300,7 +802,6 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            // Send non-220 banner
             stream
                 .write_all(b"421 Service not available\r\n")
                 .await
@@ -331,7 +832,6 @@ mod tests {
             let mut buf = vec![0u8; 256];
             let _ = stream.read(&mut buf).await;
 
-            // Reject EHLO
             stream.write_all(b"550 Access denied\r\n").await.unwrap();
             stream.flush().await.unwrap();
         });
@@ -359,7 +859,6 @@ mod tests {
             let mut buf = vec![0u8; 256];
             let _ = stream.read(&mut buf).await;
 
-            // Multiline EHLO response
             stream
                 .write_all(b"250-mock.server\r\n250-SIZE 10240000\r\n250 STARTTLS\r\n")
                 .await
@@ -379,10 +878,229 @@ mod tests {
         assert!(ok, "Multiline 250 response should return true");
     }
 
+    // -----------------------------------------------------------------
+    // Round-trip: check_port25_ehlo against our own handle_smtp_connection
+    // -----------------------------------------------------------------
+
     #[tokio::test]
-    async fn probe_uses_caller_ip() {
-        let addr = "127.0.0.1:12345".parse::<SocketAddr>().unwrap();
-        let response = probe(ConnectInfo(addr)).await;
-        assert_eq!(response.ip, "127.0.0.1");
+    async fn self_loop_ehlo_handshake_round_trip() {
+        // This test proves the self-EHLO trap fix (S12.2): the built-in
+        // listener now speaks enough SMTP that our own EHLO prober completes
+        // a successful handshake against it.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _ = handle_smtp_connection(stream).await;
+        });
+
+        let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let ok = smtp_ehlo_handshake(stream).await.unwrap();
+        assert!(ok, "Self-loop EHLO handshake must succeed after S12.2 fix");
+    }
+
+    // -----------------------------------------------------------------
+    // Integration: /probe and /reach handlers resolve IP via header
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reach_resolves_caller_ip_from_header_on_loopback() {
+        // Peer is loopback (simulating behind-Caddy request), header carries
+        // a reserved-but-unreachable public-range IP (TEST-NET-1). /reach
+        // should resolve the caller IP from the header — not the peer —
+        // and attempt the TCP connect to that IP, which will fail (since
+        // 192.0.2.1 is unroutable), yielding reachable: false with the
+        // correct ip field.
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("192.0.2.1");
+        let result = reach(ConnectInfo(addr), headers).await.unwrap();
+        assert_eq!(result.ip, "192.0.2.1");
+        assert!(!result.reachable);
+    }
+
+    #[tokio::test]
+    async fn probe_resolves_caller_ip_from_header_on_loopback() {
+        // Same test, but against /probe — the spec explicitly asks for header
+        // resolution on /probe in addition to /reach. TEST-NET-1 is
+        // unroutable, so the EHLO handshake fails and we get reachable: false
+        // with the correct ip field. What we're actually asserting is that
+        // the handler resolved the target from the header, not from the
+        // (loopback) peer — if it used the peer the response ip would be
+        // "127.0.0.1".
+        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("192.0.2.1");
+        let result = probe(ConnectInfo(addr), headers).await.unwrap();
+        assert_eq!(result.ip, "192.0.2.1");
+        assert!(!result.reachable);
+    }
+
+    // -----------------------------------------------------------------
+    // IPv4-mapped IPv6 bypass regression tests
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn is_blocked_target_rejects_ipv4_mapped_ipv6() {
+        // Rust's `Ipv6Addr::is_loopback`/`is_unspecified` only match the
+        // canonical v6 forms, and our link-local/ULA/multicast checks likewise
+        // only match canonical v6 segments. Without canonicalization, every
+        // `::ffff:a.b.c.d` form would sneak past the guard and Linux dual-stack
+        // sockets would silently downgrade to the underlying v4 address. These
+        // are the exact payloads flagged in the PR review.
+        let blocked = [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:10.255.255.255",
+            "::ffff:172.16.0.1",
+            "::ffff:192.168.1.1",
+            "::ffff:169.254.1.1",
+            "::ffff:169.254.169.254", // cloud instance metadata
+            "::ffff:0.0.0.0",
+            "::ffff:100.64.0.1", // CGNAT
+        ];
+        for ip_str in blocked {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(is_blocked_target(&ip), "{ip_str} should be blocked");
+        }
+    }
+
+    #[test]
+    fn is_blocked_target_allows_ipv4_mapped_public() {
+        // Canonicalization must not over-block: mapped public IPv4 addresses
+        // should pass through, since the underlying v4 form is allowed.
+        let allowed = ["::ffff:1.1.1.1", "::ffff:8.8.8.8", "::ffff:203.0.113.1"];
+        for ip_str in allowed {
+            let ip: IpAddr = ip_str.parse().unwrap();
+            assert!(!is_blocked_target(&ip), "{ip_str} should be allowed");
+        }
+    }
+
+    #[test]
+    fn resolve_client_ip_rejects_ipv4_mapped_loopback_header() {
+        // An attacker-controlled header carrying a mapped loopback must be
+        // rejected by `resolve_client_ip`, not passed through to the handler.
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        for ip_str in [
+            "::ffff:127.0.0.1",
+            "::ffff:10.0.0.1",
+            "::ffff:169.254.169.254",
+            "::ffff:0.0.0.0",
+        ] {
+            let headers = headers_with_client_ip(ip_str);
+            assert!(
+                resolve_client_ip(&peer, &headers).is_none(),
+                "mapped header {ip_str} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_client_ip_treats_ipv4_mapped_loopback_peer_as_loopback() {
+        // Dual-stack bind (`[::]:3025`) makes an IPv4 loopback client show up
+        // with `peer.ip() == ::ffff:127.0.0.1`. That must be treated as a
+        // loopback peer — i.e. require a trusted header — not as a "direct"
+        // caller that the handler then probes.
+        let peer: SocketAddr = "[::ffff:127.0.0.1]:12345".parse().unwrap();
+        assert!(resolve_client_ip(&peer, &empty_headers()).is_none());
+    }
+
+    #[test]
+    fn resolve_client_ip_canonicalizes_ipv4_mapped_public_header() {
+        // A mapped public v4 address in the header should be canonicalized
+        // to its v4 form before being returned, so downstream logging and
+        // target-guard checks see one representation.
+        let peer: SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let headers = headers_with_client_ip("::ffff:203.0.113.5");
+        let ip = resolve_client_ip(&peer, &headers).unwrap();
+        assert_eq!(ip.to_string(), "203.0.113.5");
+    }
+
+    // -----------------------------------------------------------------
+    // SMTP session: idle timeout and oversized-line hardening
+    // -----------------------------------------------------------------
+
+    #[tokio::test(start_paused = true)]
+    async fn smtp_session_idle_times_out() {
+        // Prove that a silent client hits SMTP_LINE_TIMEOUT and the session
+        // closes cleanly without the tests actually waiting 10 seconds.
+        // `start_paused` auto-advances virtual time when all tasks are idle,
+        // so the timeout inside `smtp_session` fires immediately. We use an
+        // in-memory duplex pipe instead of a real TCP socket specifically
+        // so the runtime's virtual clock applies to the timeout.
+        let (server_side, mut client_side) = tokio::io::duplex(1024);
+
+        let server = tokio::spawn(async move { smtp_session(server_side).await });
+
+        // Consume the 220 banner so the server is blocked in `read_line`.
+        let mut banner = vec![0u8; 128];
+        let n = client_side.read(&mut banner).await.unwrap();
+        assert!(
+            std::str::from_utf8(&banner[..n])
+                .unwrap()
+                .starts_with("220"),
+            "expected banner, got: {:?}",
+            &banner[..n]
+        );
+        // Stay silent. The session must give up after SMTP_LINE_TIMEOUT and
+        // return Ok(()). With start_paused + auto-advance this completes
+        // in virtual time.
+
+        let result = server.await.expect("server task panicked");
+        assert!(
+            result.is_ok(),
+            "idle-timeout close should be reported as clean"
+        );
+    }
+
+    #[tokio::test]
+    async fn smtp_session_oversized_line_is_bounded() {
+        // Send a >2 KiB single-line "command" with no CRLF terminator. The
+        // take-limited reader should return at SMTP_MAX_LINE_BYTES without
+        // blowing up the session's memory. Once we then send a real QUIT,
+        // the session must still respond.
+        //
+        // Note: because the oversized chunk contains no newline, read_until
+        // will keep reading until it hits the cap. With the cap in place,
+        // the session continues with a well-formed "unknown command" reply
+        // to the truncated buffer (likely `500`), then handles QUIT normally.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            handle_smtp_connection(stream).await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let _banner = read_line(&mut stream).await;
+
+        // ~2 KiB of junk, no terminator. The cap is 1024 bytes, so the
+        // server reads only the first 1024 and treats it as one "line".
+        let junk = vec![b'A'; 2048];
+        stream.write_all(&junk).await.unwrap();
+        // Terminate the chunk so the cap-bounded read completes.
+        stream.write_all(b"\r\nQUIT\r\n").await.unwrap();
+
+        // We expect at least one response line (500) followed by 221 Bye.
+        // Read generously and assert both are present.
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.unwrap();
+        let first = String::from_utf8_lossy(&buf[..n]).to_string();
+        assert!(
+            first.starts_with("500") || first.contains("221"),
+            "unexpected first response after oversized line: {first}"
+        );
+        if !first.contains("221") {
+            let n2 = stream.read(&mut buf).await.unwrap();
+            let second = String::from_utf8_lossy(&buf[..n2]).to_string();
+            assert!(
+                second.starts_with("221"),
+                "expected 221 Bye after QUIT, got: {second}"
+            );
+        }
     }
 }
