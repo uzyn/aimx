@@ -1,6 +1,6 @@
 # aimx
 
-> You gave your agents an entire server. Why borrow someone else's inbox?
+> You give your agents an entire server. Why borrow someone else's inbox?
 
 **SMTP for agents. No middleman.**
 
