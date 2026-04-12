@@ -1,16 +1,18 @@
-# docker-compose for aimx-verify.
+# docker-compose for aimx-verify + Caddy.
 #
-# Deployment shape: `network_mode: host`. The verify service defaults to
-# binding HTTP on 127.0.0.1:3025 and SMTP on 0.0.0.0:25. Sprint 12 added a
-# Layer 3 trust check that only reads the `X-AIMX-Client-IP` header when the
-# TCP peer is loopback — Docker's userland proxy would present peer IPs as
-# the bridge gateway (a private IP), which the Layer 4 target guard rejects.
-# Host networking keeps the service's loopback view identical to a systemd
-# deployment, so Caddy on the host can reverse-proxy to 127.0.0.1:3025
-# without any further fiddling.
+# Deployment shape: both services use `network_mode: host`. The verify service
+# defaults to binding HTTP on 127.0.0.1:3025 and SMTP on 0.0.0.0:25. Caddy
+# terminates TLS on 443 and reverse-proxies to 127.0.0.1:3025, injecting the
+# trusted X-AIMX-Client-IP header.
 #
-# Caddy is NOT part of this compose file. Run Caddy on the host using the
-# canonical `services/verify/Caddyfile` shipped alongside this file.
+# Sprint 12 added a Layer 3 trust check that only reads the X-AIMX-Client-IP
+# header when the TCP peer is loopback — Docker's userland proxy would present
+# peer IPs as the bridge gateway (a private IP), which the Layer 4 target guard
+# rejects. Host networking keeps both services' loopback view identical to a
+# bare-metal deployment, so the trust model works without any fiddling.
+#
+# No `ports:` blocks — `network_mode: host` makes port mapping both
+# unnecessary and incompatible (Docker rejects `ports` with host mode).
 services:
   verify:
     build: .
@@ -27,5 +29,21 @@ services:
       # BIND_ADDR: "127.0.0.1:3025"
       # SMTP_BIND_ADDR: "0.0.0.0:25"
       RUST_LOG: "info"
-    # No `ports:` block — `network_mode: host` makes port mapping both
-    # unnecessary and incompatible (Docker rejects `ports` with host mode).
+
+  caddy:
+    image: caddy:2
+    container_name: aimx-caddy
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    environment:
+      # Domain for TLS cert provisioning. Default matches the Caddyfile's
+      # {$DOMAIN:check.aimx.email} placeholder. Override for self-hosted:
+      DOMAIN: "${DOMAIN:-check.aimx.email}"
+
+volumes:
+  caddy_data:
+  caddy_config:
