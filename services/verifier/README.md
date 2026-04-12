@@ -1,4 +1,4 @@
-# aimx-verify
+# aimx-verifier
 
 Verification service for [aimx](https://github.com/uzyn/aimx). Provides two complementary HTTP endpoints plus a built-in port 25 listener:
 
@@ -6,12 +6,12 @@ Verification service for [aimx](https://github.com/uzyn/aimx). Provides two comp
 2. **`/reach`** — plain TCP connect to the caller's IP on port 25 (no SMTP handshake). Used by `aimx preflight` to confirm port 25 is reachable on a fresh VPS before OpenSMTPD is installed.
 3. **Port 25 listener** — built-in TCP listener on port 25 that implements a minimal but correct SMTP exchange (banner → EHLO/HELO → 250 → QUIT → 221 Bye), allowing aimx clients to test outbound port 25 reachability from their end.
 
-No MTA is required on the verify server.
+No MTA is required on the verifier server.
 
 ## Building
 
 ```bash
-cd services/verify
+cd services/verifier
 cargo build --release
 ```
 
@@ -21,10 +21,10 @@ The HTTP listener binds to **loopback by default** (`127.0.0.1:3025`). In produc
 
 ```bash
 # Default: HTTP on 127.0.0.1:3025, SMTP on 0.0.0.0:25
-./target/release/aimx-verify
+./target/release/aimx-verifier
 
 # Override binds (advanced — see security note below)
-BIND_ADDR=0.0.0.0:8080 SMTP_BIND_ADDR=0.0.0.0:2525 ./target/release/aimx-verify
+BIND_ADDR=0.0.0.0:8080 SMTP_BIND_ADDR=0.0.0.0:2525 ./target/release/aimx-verifier
 ```
 
 **Security note:** Direct `BIND_ADDR=0.0.0.0:3025` exposure is **not supported in production**. Without a trusted reverse proxy in front, there is no trust boundary for the `X-AIMX-Client-IP` header and the app has no way to authoritatively identify the real caller. The `BIND_ADDR` override exists for local testing and for operators running the service inside a container/network that enforces the trust boundary externally.
@@ -32,7 +32,7 @@ BIND_ADDR=0.0.0.0:8080 SMTP_BIND_ADDR=0.0.0.0:2525 ./target/release/aimx-verify
 ### API Endpoints
 
 #### `GET /health`
-Health check. Returns `{"status": "ok", "service": "aimx-verify"}`.
+Health check. Returns `{"status": "ok", "service": "aimx-verifier"}`.
 
 #### `GET /probe`
 Connects back to the caller's IP on port 25 and performs a full SMTP EHLO handshake. Returns `reachable: true` only if a real SMTP server responds with a valid `220` banner, accepts `EHLO`, and replies `250`. Used by `aimx setup` and `aimx verify`, both of which run after OpenSMTPD is installed and should validate that a real SMTP responder is live.
@@ -52,9 +52,9 @@ The service also listens on port 25 (configurable via `SMTP_BIND_ADDR`). When an
 
 ## Caddy Deployment
 
-The verify service is designed to run behind Caddy. Caddy terminates TLS and injects `X-AIMX-Client-IP` with the real TCP peer address, which the app trusts only because the backend is loopback-bound.
+The verifier service is designed to run behind Caddy. Caddy terminates TLS and injects `X-AIMX-Client-IP` with the real TCP peer address, which the app trusts only because the backend is loopback-bound.
 
-A canonical `Caddyfile` is committed at `services/verify/Caddyfile`:
+A canonical `Caddyfile` is committed at `services/verifier/Caddyfile`:
 
 ```caddyfile
 {$DOMAIN:check.aimx.email} {
@@ -84,8 +84,8 @@ To self-host (replacing `check.aimx.email`):
 
 1. Deploy the binary on a server with port 25 open inbound and outbound.
 2. Point your domain's DNS to the server.
-3. Install Caddy and drop in the canonical `services/verify/Caddyfile` (set `DOMAIN` as above).
-4. Run `aimx-verify` with its default loopback bind (`BIND_ADDR=127.0.0.1:3025`).
+3. Install Caddy and drop in the canonical `services/verifier/Caddyfile` (set `DOMAIN` as above).
+4. Run `aimx-verifier` with its default loopback bind (`BIND_ADDR=127.0.0.1:3025`).
 5. In your aimx `config.toml`, set `verify_host` to the base URL of your instance (no path):
    ```toml
    verify_host = "https://check.yourdomain.com"
@@ -97,7 +97,7 @@ To self-host (replacing `check.aimx.email`):
    aimx verify --verify-host https://check.yourdomain.com
    ```
 
-No MTA, no email sending, no DNS records beyond the A record are needed on the verify server — it only needs:
+No MTA, no email sending, no DNS records beyond the A record are needed on the verifier server — it only needs:
 - Port 25 open (for the built-in SMTP listener)
 - HTTPS on 443 (via Caddy)
 
@@ -105,14 +105,14 @@ No MTA, no email sending, no DNS records beyond the A record are needed on the v
 
 A `Dockerfile` and `docker-compose.yml` ship alongside this README for operators who prefer container-based deployments. This path coexists with the systemd path below — pick one.
 
-The compose file brings up **both** the verify service and Caddy in a single command:
+The compose file brings up **both** the verifier service and Caddy in a single command:
 
 ```bash
-cd services/verify
+cd services/verifier
 docker compose up -d --build
 ```
 
-That single command builds the multi-stage verify image (Rust builder → `debian:bookworm-slim` runtime) and pulls the official `caddy:2` image. The verify container runs as root so it can bind port 25 without capability fiddling. Both containers use `network_mode: host`, sharing the host's network namespace — verify binds `127.0.0.1:3025` (HTTP) and `0.0.0.0:25` (SMTP), while Caddy binds `0.0.0.0:443` (HTTPS) and `0.0.0.0:80` (HTTP redirect). No Docker-side port publishing is involved.
+That single command builds the multi-stage verifier image (Rust builder → `debian:bookworm-slim` runtime) and pulls the official `caddy:2` image. The verifier container runs as root so it can bind port 25 without capability fiddling. Both containers use `network_mode: host`, sharing the host's network namespace — the verifier binds `127.0.0.1:3025` (HTTP) and `0.0.0.0:25` (SMTP), while Caddy binds `0.0.0.0:443` (HTTPS) and `0.0.0.0:80` (HTTP redirect). No Docker-side port publishing is involved.
 
 For self-hosted instances, set the domain via environment variable:
 
@@ -124,7 +124,7 @@ Caddy auto-provisions TLS certificates via ACME (Let's Encrypt). The `caddy_data
 
 ### Why `network_mode: host`?
 
-The verify service's security model (Sprint 12) enforces a Layer 3 trust boundary: the HTTP listener binds `127.0.0.1:3025` by default, and the app only reads the `X-AIMX-Client-IP` header when the TCP peer is loopback. Combined with Caddy in front (which injects that header authoritatively), this is the only trust path the app recognises.
+The verifier service's security model (Sprint 12) enforces a Layer 3 trust boundary: the HTTP listener binds `127.0.0.1:3025` by default, and the app only reads the `X-AIMX-Client-IP` header when the TCP peer is loopback. Combined with Caddy in front (which injects that header authoritatively), this is the only trust path the app recognises.
 
 The "obvious" docker-compose shape — `ports: "3025:3025"` plus `BIND_ADDR=0.0.0.0:3025` inside the container — **breaks** this model. Docker's userland proxy rewrites connections so the TCP peer the app sees is the bridge gateway (a private RFC 1918 address), which:
 
@@ -138,18 +138,18 @@ The "obvious" docker-compose shape — `ports: "3025:3025"` plus `BIND_ADDR=0.0.
 ```bash
 # From the host
 curl http://127.0.0.1:3025/health
-# -> {"status":"ok","service":"aimx-verify"}
+# -> {"status":"ok","service":"aimx-verifier"}
 
 # SMTP listener banner
 nc 127.0.0.1 25
-# -> 220 check.aimx.email SMTP aimx-verify
+# -> 220 check.aimx.email SMTP aimx-verifier
 
 # Caddy is proxying
 curl -I https://localhost
 # -> should show Caddy's TLS response (or cert error if DNS isn't pointed yet)
 
 # Per-request logs from both containers
-docker compose logs -f verify
+docker compose logs -f verifier
 docker compose logs -f caddy
 ```
 
@@ -160,19 +160,19 @@ From a remote machine (with DNS configured), `curl https://check.yourdomain.com/
 If you prefer to manage containers individually:
 
 ```bash
-# Verify service
-docker build -t aimx-verify:local services/verify
-docker run -d --name aimx-verify \
+# Verifier service
+docker build -t aimx-verifier:local services/verifier
+docker run -d --name aimx-verifier \
   --network host \
   --restart unless-stopped \
   -e RUST_LOG=info \
-  aimx-verify:local
+  aimx-verifier:local
 
 # Caddy
 docker run -d --name aimx-caddy \
   --network host \
   --restart unless-stopped \
-  -v $(pwd)/services/verify/Caddyfile:/etc/caddy/Caddyfile:ro \
+  -v $(pwd)/services/verifier/Caddyfile:/etc/caddy/Caddyfile:ro \
   -v caddy_data:/data \
   -v caddy_config:/config \
   -e DOMAIN=check.yourdomain.com \
@@ -185,15 +185,15 @@ Same semantics as the compose shape: host networking, default loopback HTTP bind
 
 ```ini
 [Unit]
-Description=aimx verify service
+Description=aimx verifier service
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/aimx-verify
+ExecStart=/usr/local/bin/aimx-verifier
 Environment=BIND_ADDR=127.0.0.1:3025
 Environment=SMTP_BIND_ADDR=0.0.0.0:25
 Restart=always
-User=aimx-verify
+User=aimx-verifier
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]

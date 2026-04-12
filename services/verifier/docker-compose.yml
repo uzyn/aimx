@@ -1,6 +1,6 @@
-# docker-compose for aimx-verify + Caddy.
+# docker-compose for aimx-verifier + Caddy.
 #
-# Deployment shape: both services use `network_mode: host`. The verify service
+# Deployment shape: both services use `network_mode: host`. The verifier service
 # defaults to binding HTTP on 127.0.0.1:3025 and SMTP on 0.0.0.0:25. Caddy
 # terminates TLS on 443 and reverse-proxies to 127.0.0.1:3025, injecting the
 # trusted X-AIMX-Client-IP header.
@@ -14,10 +14,10 @@
 # No `ports:` blocks — `network_mode: host` makes port mapping both
 # unnecessary and incompatible (Docker rejects `ports` with host mode).
 services:
-  verify:
+  verifier:
     build: .
-    image: aimx-verify:local
-    container_name: aimx-verify
+    image: aimx-verifier:local
+    container_name: aimx-verifier
     network_mode: host
     restart: unless-stopped
     # Defaults inherited from the binary:

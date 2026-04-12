@@ -62,7 +62,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - As an agent operator, I want email attachments extracted to the filesystem so that agents can access attached files directly.
 
 ### P2 — Nice to Have
-- As an agent operator, I want end-to-end verification against a public verify service so that I can confirm the full pipeline works after setup.
+- As an agent operator, I want end-to-end verification against a public verifier service so that I can confirm the full pipeline works after setup.
 
 ## 6. Functional Requirements
 
@@ -121,8 +121,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.8 Verifier Service
 - FR-38: Hosted verifier service at `check.aimx.email` exposing two complementary HTTP endpoints that both identify the caller via a Caddy-injected `X-AIMX-Client-IP` header and target the caller's own IP on port 25: `/reach` performs a plain TCP connect (used by `aimx preflight` to confirm reachability on a fresh VPS before OpenSMTPD is installed — any listening socket satisfies this check), and `/probe` performs a full SMTP EHLO handshake (used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after install). Both endpoints apply a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy.
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
-- FR-39b: Port 25 listener on the verify service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
-- FR-40: Verify service is open source and self-hostable. No MTA required on the verify server.
+- FR-39b: Port 25 listener on the verifier service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
+- FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
 
 ### 6.9 CLI Commands
 - FR-41: `aimx setup [domain]` — interactive setup wizard. When domain is omitted, prompt interactively for domain and confirm DNS access.
@@ -190,7 +190,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - MCP server with full email/mailbox tool set
 - Channel manager with `cmd` triggers and match filters
 - Inbound trust: DKIM/SPF verification, per-mailbox trust policy, trusted_senders allowlist
-- Verify service (probe + end-to-end test)
+- Verifier service (probe + end-to-end test)
 - CLI for all operations
 - Linux (Debian/Ubuntu) only
 - Build from source (cargo install)
@@ -227,7 +227,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | OpenSMTPD configuration complexity | Low | Setup fails or is fragile | aimx generates the config automatically. Tested against Debian/Ubuntu packages. |
 | MIME parsing edge cases | Medium | Some emails render poorly as Markdown | Use battle-tested `mail-parser` crate. Accept that HTML-heavy emails may lose formatting. |
 | `mail-auth` crate license compatibility | Low | Can't use for DKIM signing | Verify license before development. Fallback: `mini-mail-auth` or implement RSA-SHA256 signing directly. |
-| Verify service availability | Low | Setup can't run end-to-end test | Make verify service optional (warn, don't block). Provide self-hosted alternative. |
+| Verifier service availability | Low | Setup can't run end-to-end test | Make verifier service optional (warn, don't block). Provide self-hosted alternative. |
 
 ## 11. Resolved Decisions
 

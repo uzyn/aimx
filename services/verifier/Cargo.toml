@@ -1,5 +1,5 @@
 [package]
-name = "aimx-verify"
+name = "aimx-verifier"
 version = "0.1.0"
 edition = "2021"
 description = "Verification service for aimx - port probe and SMTP listener"
