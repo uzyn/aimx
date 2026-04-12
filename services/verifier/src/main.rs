@@ -40,7 +40,7 @@ struct HealthResponse {
 async fn health() -> Json<HealthResponse> {
     Json(HealthResponse {
         status: "ok".to_string(),
-        service: "aimx-verify".to_string(),
+        service: "aimx-verifier".to_string(),
     })
 }
 
@@ -394,7 +394,7 @@ where
     let mut reader = BufReader::new(reader);
     let mut writer = writer;
 
-    let banner = format!("220 {SMTP_HOSTNAME} SMTP aimx-verify\r\n");
+    let banner = format!("220 {SMTP_HOSTNAME} SMTP aimx-verifier\r\n");
     writer.write_all(banner.as_bytes()).await?;
     writer.flush().await?;
 
@@ -455,7 +455,7 @@ fn main() {
             .await
             .expect("Failed to bind HTTP listener");
 
-        tracing::info!("aimx-verify HTTP listening on {bind_addr}");
+        tracing::info!("aimx-verifier HTTP listening on {bind_addr}");
 
         // Spawn SMTP listener concurrently
         tokio::spawn(run_smtp_listener());
@@ -488,7 +488,7 @@ mod tests {
     async fn health_returns_ok() {
         let response = health().await;
         assert_eq!(response.status, "ok");
-        assert_eq!(response.service, "aimx-verify");
+        assert_eq!(response.service, "aimx-verifier");
     }
 
     #[tokio::test]
@@ -523,11 +523,11 @@ mod tests {
     fn health_response_serializes() {
         let resp = HealthResponse {
             status: "ok".to_string(),
-            service: "aimx-verify".to_string(),
+            service: "aimx-verifier".to_string(),
         };
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"status\":\"ok\""));
-        assert!(json.contains("\"service\":\"aimx-verify\""));
+        assert!(json.contains("\"service\":\"aimx-verifier\""));
     }
 
     // -----------------------------------------------------------------
