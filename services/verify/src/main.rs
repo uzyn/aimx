@@ -267,10 +267,11 @@ impl axum::response::IntoResponse for ProbeBody {
 
 async fn check_port25_tcp(ip: &IpAddr) -> bool {
     let addr = SocketAddr::new(*ip, 25);
-    matches!(
-        tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr)).await,
-        Ok(Ok(_))
-    )
+    match tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr)).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+        Err(_) => false, // timeout — firewall likely dropping packets
+    }
 }
 
 async fn check_port25_ehlo(ip: &IpAddr) -> bool {
@@ -735,6 +736,32 @@ mod tests {
         assert!(
             ok,
             "plain TCP connect to listening socket should succeed regardless of SMTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_port25_tcp_connection_refused_is_reachable() {
+        // Bind a listener then immediately drop it — the port is closed but
+        // the OS will respond with RST (ConnectionRefused), proving the
+        // network path is open. This is the fresh-VPS scenario.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+
+        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
+        let result = match tokio::time::timeout(
+            REACH_TCP_TIMEOUT,
+            TcpStream::connect(addr),
+        )
+        .await
+        {
+            Ok(Ok(_)) => true,
+            Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
+            Err(_) => false,
+        };
+        assert!(
+            result,
+            "ConnectionRefused should be treated as reachable (port not firewalled)"
         );
     }
 
