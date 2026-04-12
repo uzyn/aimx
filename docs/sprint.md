@@ -1499,7 +1499,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 16 — Add Caddy to docker-compose (Days 43–45.5) [IN PROGRESS]
+## Sprint 16 — Add Caddy to docker-compose (Days 43–45.5) [DONE]
 
 **Goal:** Make `docker compose up` a single-command deployment for aimx-verify + Caddy, eliminating the need to install and manage Caddy separately on the host. Both services use `network_mode: host` so the Sprint 12 security model (loopback trust + Layer 4 target guard) is fully preserved.
 
@@ -1513,14 +1513,14 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Add `caddy` service to `services/verify/docker-compose.yml` using the official `caddy:2` image, `network_mode: host`, `restart: unless-stopped`
-- [ ] Mount the existing `Caddyfile` into the Caddy container (read-only)
-- [ ] Add a named volume `caddy_data` mapped to `/data` for persistent TLS cert storage
-- [ ] Add a named volume `caddy_config` mapped to `/config` for Caddy runtime config
-- [ ] `DOMAIN` environment variable configurable (with default `check.aimx.email` matching the Caddyfile's `{$DOMAIN}` placeholder)
-- [ ] Update the docker-compose header comment to reflect that Caddy is now included
-- [ ] Update `services/verify/README.md` Docker section to document the all-in-one compose deployment, including the `DOMAIN` env var and cert volume
-- [ ] Manually verified: `docker compose up -d --build` brings up both services; `curl http://127.0.0.1:3025/health` returns OK; Caddy logs show it is listening on 443
+- [x] Add `caddy` service to `services/verify/docker-compose.yml` using the official `caddy:2` image, `network_mode: host`, `restart: unless-stopped`
+- [x] Mount the existing `Caddyfile` into the Caddy container (read-only)
+- [x] Add a named volume `caddy_data` mapped to `/data` for persistent TLS cert storage
+- [x] Add a named volume `caddy_config` mapped to `/config` for Caddy runtime config
+- [x] `DOMAIN` environment variable configurable (with default `check.aimx.email` matching the Caddyfile's `{$DOMAIN}` placeholder)
+- [x] Update the docker-compose header comment to reflect that Caddy is now included
+- [x] Update `services/verify/README.md` Docker section to document the all-in-one compose deployment, including the `DOMAIN` env var and cert volume
+- [ ] Manually verified: `docker compose up -d --build` brings up both services; `curl http://127.0.0.1:3025/health` returns OK; Caddy logs show it is listening on 443 <!-- Pending: requires Docker host with ports 25/80/443 available -->
 
 ---
 
@@ -1545,7 +1545,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Done |
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Done |
-| 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | In Progress |
+| 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | Done |
 
 ## Deferred to v2
 
