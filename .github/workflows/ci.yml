@@ -30,11 +30,11 @@ jobs:
       - name: Run tests
         run: cargo test
 
-  check-verify-service:
+  check-verifier-service:
     runs-on: ubuntu-latest
     defaults:
       run:
-        working-directory: services/verify
+        working-directory: services/verifier
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +44,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: services/verify
+          workspaces: services/verifier
 
       - name: Check formatting
         run: cargo fmt -- --check

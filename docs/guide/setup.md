@@ -221,33 +221,33 @@ ls -la /var/lib/aimx/dkim/private.key
 
 Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailboxes and emails. Additionally, back up `/etc/smtpd.conf` if you've customized it.
 
-## Verify service
+## Verifier service
 
-The verify service is used during setup to test port 25 reachability. aimx uses a public instance at `check.aimx.email` by default.
+The verifier service is used during setup to test port 25 reachability. aimx uses a public instance at `check.aimx.email` by default.
 
-### Self-hosting the verify service
+### Self-hosting the verifier service
 
 If you prefer not to use the public instance:
 
-1. Build the verify service:
+1. Build the verifier service:
    ```bash
-   cd services/verify
+   cd services/verifier
    cargo build --release
-   sudo cp target/release/aimx-verify /usr/local/bin/
+   sudo cp target/release/aimx-verifier /usr/local/bin/
    ```
 
 2. Deploy with systemd:
    ```ini
    [Unit]
-   Description=aimx verify service
+   Description=aimx verifier service
    After=network.target
 
    [Service]
-   ExecStart=/usr/local/bin/aimx-verify
+   ExecStart=/usr/local/bin/aimx-verifier
    Environment=BIND_ADDR=127.0.0.1:3025
    Environment=SMTP_BIND_ADDR=0.0.0.0:25
    Restart=always
-   User=aimx-verify
+   User=aimx-verifier
    AmbientCapabilities=CAP_NET_BIND_SERVICE
 
    [Install]
@@ -271,7 +271,7 @@ The verify service provides:
 - `GET /probe` -- connects back to caller's IP on port 25, performs EHLO handshake
 - Port 25 listener -- accepts TCP connections for outbound port 25 testing
 
-See the [verify service README](../../services/verify/README.md) for full details.
+See the [verifier service README](../../services/verifier/README.md) for full details.
 
 ---
 

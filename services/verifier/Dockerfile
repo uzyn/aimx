@@ -14,7 +14,7 @@ COPY Cargo.toml Cargo.lock ./
 RUN mkdir -p src \
     && echo 'fn main() { println!("stub"); }' > src/main.rs \
     && cargo build --release --locked \
-    && rm -rf src target/release/deps/aimx_verify* target/release/aimx-verify*
+    && rm -rf src target/release/deps/aimx_verifier* target/release/aimx-verifier*
 
 # Now copy the real sources and build for real. The load-bearing step here is
 # `touch src/main.rs`: it guarantees Cargo invalidates the leaf-crate
@@ -24,7 +24,7 @@ RUN mkdir -p src \
 COPY src ./src
 RUN touch src/main.rs \
     && cargo build --release --locked \
-    && strip target/release/aimx-verify
+    && strip target/release/aimx-verifier
 
 # ---------- Runtime ----------
 FROM debian:bookworm-slim AS runtime
@@ -35,7 +35,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/aimx-verify /usr/local/bin/aimx-verify
+COPY --from=builder /build/target/release/aimx-verifier /usr/local/bin/aimx-verifier
 
 # Port 25  -> built-in SMTP listener (outbound reachability target)
 # Port 3025 -> loopback-default HTTP listener (behind Caddy on the host)
@@ -47,4 +47,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
 # Runs as root by design so the process can bind port 25 without capability
 # fiddling. The service is a short SMTP responder and two HTTP endpoints; it
 # does not touch the filesystem.
-ENTRYPOINT ["/usr/local/bin/aimx-verify"]
+ENTRYPOINT ["/usr/local/bin/aimx-verifier"]

@@ -36,7 +36,7 @@ Outbound:
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
 - **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
 - **Inbound trust** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
-- **Verify service** -- self-hostable port probe and port 25 listener for setup verification
+- **Verifier service** -- self-hostable port probe and port 25 listener for setup verification
 
 ## Requirements
 
@@ -197,9 +197,9 @@ data_dir = "/var/lib/aimx"
 # DKIM selector name (default: dkim)
 dkim_selector = "dkim"
 
-# Verify service base URL (default: https://check.aimx.email)
+# Verifier service base URL (default: https://check.aimx.email)
 # Used by `aimx verify`, `aimx setup`, and `aimx preflight`. Set this only if
-# you are self-hosting the verify service (see `services/verify/`). aimx appends
+# you are self-hosting the verifier service (see `services/verifier/`). aimx appends
 # `/probe` to this base URL internally.
 # verify_host = "https://verify.yourdomain.com"
 
@@ -300,14 +300,14 @@ spf = "pass"
 Hello, this is the email body in plain text.
 ```
 
-## Verify service
+## Verifier service
 
-The verify service (`services/verify/`) is a separate deployable service that provides:
+The verifier service (`services/verifier/`) is a separate deployable service that provides:
 
 1. **Port probe** at `check.aimx.email` -- performs EHLO handshake back to caller's IP on port 25 to verify inbound SMTP reachability
 2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so aimx clients can test outbound port 25 reachability
 
-No MTA is required on the verify server. The service is open source and self-hostable. See `services/verify/README.md` for deployment instructions.
+No MTA is required on the verifier server. The service is open source and self-hostable. See `services/verifier/README.md` for deployment instructions.
 
 To point aimx at a self-hosted instance, set `verify_host` in `config.toml`:
 

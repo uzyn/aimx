@@ -31,10 +31,10 @@ cargo fmt -- --check
 cargo fmt
 ```
 
-### Verify service (separate Rust crate)
+### Verifier service (separate Rust crate)
 
 ```bash
-cd services/verify
+cd services/verifier
 cargo build
 cargo test
 cargo clippy -- -D warnings
@@ -48,7 +48,7 @@ CI runs both crates independently (`.github/workflows/ci.yml`).
 ### Two independent Rust crates
 
 1. **`aimx`** (root `Cargo.toml`) — the main CLI binary. Edition 2024.
-2. **`aimx-verify`** (`services/verify/`) — hosted verification service (axum HTTP + SMTP listener). Deployed separately with Docker. Edition 2021.
+2. **`aimx-verifier`** (`services/verifier/`) — hosted verification service (axum HTTP + SMTP listener). Deployed separately with Docker. Edition 2021.
 
 These are NOT a Cargo workspace — they have independent `Cargo.toml` files and `target/` directories.
 
@@ -83,7 +83,7 @@ TOML frontmatter between `+++` delimiters. Fields: `id`, `message_id`, `from`, `
 
 Uses `rmcp` crate with `#[tool]` attribute macros on `AimxMcpServer` methods. Stdio transport (launched on-demand by MCP client, no long-running process). Each tool method loads config and operates on the filesystem directly.
 
-### Verify service
+### Verifier service
 
 Axum HTTP server with `/probe` (EHLO handshake), `/reach` (TCP connect), `/health` endpoints. Runs a concurrent SMTP listener on port 25. Uses `X-AIMX-Client-IP` header from Caddy for caller identification. Deployed via `docker-compose.yml` with `network_mode: host`.
 

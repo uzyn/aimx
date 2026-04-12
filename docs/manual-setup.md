@@ -2,22 +2,22 @@
 
 This guide walks through every step needed to launch aimx, from deploying the verification infrastructure to running a production mail server. It is split into two parts:
 
-- **Part A** — Deploy the verify service (done once, before anything else)
+- **Part A** — Deploy the verifier service (done once, before anything else)
 - **Part B** — Set up an aimx mail server (done per server)
 
-The verify service must be running before any mail server can complete setup, because `aimx setup`, `aimx preflight`, and `aimx verify` all call its HTTP endpoints (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25). `aimx setup` and `aimx verify` use `/probe` (full SMTP EHLO handshake, for post-install validation). `aimx preflight` uses `/reach` (plain TCP connect, works before OpenSMTPD is installed).
+The verifier service must be running before any mail server can complete setup, because `aimx setup`, `aimx preflight`, and `aimx verify` all call its HTTP endpoints (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25). `aimx setup` and `aimx verify` use `/probe` (full SMTP EHLO handshake, for post-install validation). `aimx preflight` uses `/reach` (plain TCP connect, works before OpenSMTPD is installed).
 
 ---
 
-## Part A: Deploy the aimx-verify Service
+## Part A: Deploy the aimx-verifier Service
 
-The aimx-verify service provides three functions, all exposed from a single binary:
+The aimx-verifier service provides three functions, all exposed from a single binary:
 
 1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after OpenSMTPD is installed. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
 2. **Reachability test** (`GET /reach`) — HTTPS endpoint that does a plain TCP connect to the caller's own IP on port 25 with a 10-second timeout. No SMTP handshake. Used by `aimx preflight` to confirm port 25 is reachable on a fresh VPS before OpenSMTPD is installed (any listening socket satisfies this check). Same response shape as `/probe`.
-3. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by aimx clients to test that their outbound port 25 is not blocked by their VPS provider. This is a plain tokio listener built into the `aimx-verify` binary — **no OpenSMTPD or other MTA is required on the verify server**.
+3. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by aimx clients to test that their outbound port 25 is not blocked by their VPS provider. This is a plain tokio listener built into the `aimx-verifier` binary — **no OpenSMTPD or other MTA is required on the verifier server**.
 
-Both `/probe` and `/reach` identify the caller via Caddy's `X-AIMX-Client-IP` header (injected by the canonical `Caddyfile`). Direct exposure of the backend without Caddy is not supported — see the security note in `services/verify/README.md`.
+Both `/probe` and `/reach` identify the caller via Caddy's `X-AIMX-Client-IP` header (injected by the canonical `Caddyfile`). Direct exposure of the backend without Caddy is not supported — see the security note in `services/verifier/README.md`.
 
 ### A1: Prerequisites
 
@@ -26,15 +26,15 @@ Both `/probe` and `/reach` identify the caller via Caddy's `X-AIMX-Client-IP` he
 - Rust toolchain (`rustup`)
 - Caddy (for automatic HTTPS and for setting the trusted `X-AIMX-Client-IP` header — **required**, not optional)
 
-No MTA, SMTP TLS certificate, or MX record is required on the verify server.
+No MTA, SMTP TLS certificate, or MX record is required on the verifier server.
 
-### A2: Build aimx-verify
+### A2: Build aimx-verifier
 
 ```bash
 git clone https://github.com/uzyn/aimx.git
-cd aimx/services/verify
+cd aimx/services/verifier
 cargo build --release
-sudo cp target/release/aimx-verify /usr/local/bin/
+sudo cp target/release/aimx-verifier /usr/local/bin/
 ```
 
 ### A3: Deploy the Probe Service (HTTP)
@@ -42,22 +42,22 @@ sudo cp target/release/aimx-verify /usr/local/bin/
 Create a systemd service:
 
 ```bash
-sudo useradd --system --no-create-home aimx-verify
+sudo useradd --system --no-create-home aimx-verifier
 ```
 
 ```bash
-sudo tee /etc/systemd/system/aimx-verify.service > /dev/null << 'EOF'
+sudo tee /etc/systemd/system/aimx-verifier.service > /dev/null << 'EOF'
 [Unit]
-Description=aimx verify service
+Description=aimx verifier service
 Wants=network-online.target
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/aimx-verify
+ExecStart=/usr/local/bin/aimx-verifier
 Environment=BIND_ADDR=127.0.0.1:3025
 Environment=SMTP_BIND_ADDR=0.0.0.0:25
 Restart=always
-User=aimx-verify
+User=aimx-verifier
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 
 [Install]
@@ -65,13 +65,13 @@ WantedBy=multi-user.target
 EOF
 ```
 
-`BIND_ADDR=127.0.0.1:3025` is the default and keeps HTTP behind Caddy (the app rejects requests from loopback peers that don't carry a trusted `X-AIMX-Client-IP` header, so there's no way for external callers to bypass Caddy and hit the backend directly). `SMTP_BIND_ADDR=0.0.0.0:25` exposes the TCP listener directly to the internet. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the non-root `aimx-verify` user bind the privileged port 25.
+`BIND_ADDR=127.0.0.1:3025` is the default and keeps HTTP behind Caddy (the app rejects requests from loopback peers that don't carry a trusted `X-AIMX-Client-IP` header, so there's no way for external callers to bypass Caddy and hit the backend directly). `SMTP_BIND_ADDR=0.0.0.0:25` exposes the TCP listener directly to the internet. `AmbientCapabilities=CAP_NET_BIND_SERVICE` lets the non-root `aimx-verifier` user bind the privileged port 25.
 
 Enable and start:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now aimx-verify
+sudo systemctl enable --now aimx-verifier
 ```
 
 Set up Caddy as a reverse proxy (handles TLS automatically via Let's Encrypt):
@@ -80,7 +80,7 @@ Set up Caddy as a reverse proxy (handles TLS automatically via Let's Encrypt):
 sudo apt-get install -y caddy
 ```
 
-Copy the canonical Caddyfile from the repo (`services/verify/Caddyfile`) to `/etc/caddy/Caddyfile`:
+Copy the canonical Caddyfile from the repo (`services/verifier/Caddyfile`) to `/etc/caddy/Caddyfile`:
 
 ```caddyfile
 {$DOMAIN:check.aimx.email} {
@@ -115,33 +115,33 @@ Verify:
 
 ```bash
 curl https://check.aimx.email/health
-# Expected: {"status":"ok","service":"aimx-verify"}
+# Expected: {"status":"ok","service":"aimx-verifier"}
 ```
 
 ### A4: Open Inbound Port 25
 
-The SMTP listener runs inside the `aimx-verify` binary — no OpenSMTPD, TLS certificate, or MX record is needed. Just make sure port 25 is open inbound in your firewall and at your VPS provider:
+The SMTP listener runs inside the `aimx-verifier` binary — no OpenSMTPD, TLS certificate, or MX record is needed. Just make sure port 25 is open inbound in your firewall and at your VPS provider:
 
 ```bash
 sudo ufw allow 25/tcp
 ```
 
-If your provider blocks port 25 on the verify host, the listener will bind successfully but remote aimx clients will not be able to reach it, and their outbound-port-25 check will fail even though their own provider is fine.
+If your provider blocks port 25 on the verifier host, the listener will bind successfully but remote aimx clients will not be able to reach it, and their outbound-port-25 check will fail even though their own provider is fine.
 
-### A5: Test the Verify Service
+### A5: Test the Verifier Service
 
 **Health check** (confirms HTTPS + service is up):
 
 ```bash
 curl https://check.aimx.email/health
-# Expected: {"status":"ok","service":"aimx-verify"}
+# Expected: {"status":"ok","service":"aimx-verifier"}
 ```
 
 **SMTP listener smoke test** (confirms port 25 is open and the listener speaks correct SMTP):
 
 ```bash
 nc check.aimx.email 25
-# Expected: 220 check.aimx.email SMTP aimx-verify
+# Expected: 220 check.aimx.email SMTP aimx-verifier
 # Then type: EHLO test
 # Expected: 250 check.aimx.email
 # Then type: QUIT
@@ -152,7 +152,7 @@ The listener implements a minimal but correct SMTP exchange (banner → `EHLO`/`
 
 **Functional `/probe` and `/reach` tests:**
 
-Both endpoints always probe the caller's own IP — there is no `?ip=` parameter. To exercise them end-to-end, run `aimx preflight` (which hits `/reach`) or `aimx verify` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verify service reached back and either (a) completed a plain TCP connect on `/reach` or (b) completed a full EHLO handshake on `/probe`, depending on which command you ran.
+Both endpoints always probe the caller's own IP — there is no `?ip=` parameter. To exercise them end-to-end, run `aimx preflight` (which hits `/reach`) or `aimx verify` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verifier service reached back and either (a) completed a plain TCP connect on `/reach` or (b) completed a full EHLO handshake on `/probe`, depending on which command you ran.
 
 A `curl` from the mail server against either endpoint will also work and is useful for debugging:
 
@@ -164,7 +164,7 @@ curl https://check.aimx.email/probe
 # Expected (after OpenSMTPD is installed): {"reachable":true,"ip":"<your-server-ip>"}
 ```
 
-### A6: Point aimx Mail Servers at Your Verify Instance
+### A6: Point aimx Mail Servers at Your Verifier Instance
 
 The default verify host is `https://check.aimx.email`. If you deployed your own instance in the steps above, tell aimx to use it either via `config.toml`:
 
@@ -182,7 +182,7 @@ sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
 
 Precedence is **CLI flag > `verify_host` in `config.toml` > default** (`https://check.aimx.email`). The value must be a base URL starting with `http://` or `https://`; aimx appends `/probe` internally when calling the probe endpoint, and derives the outbound port 25 target (`host:25`) from the same URL. A trailing slash is accepted and stripped.
 
-Because aimx derives the outbound port-25 target from the same `verify_host` URL, the verify service's HTTP probe and its TCP port-25 listener **must run on the same host** (or at least the same hostname in DNS). Self-hosting on a provider that blocks port 25 on the verify host will leave aimx clients unable to exercise the outbound check.
+Because aimx derives the outbound port-25 target from the same `verify_host` URL, the verifier service's HTTP probe and its TCP port-25 listener **must run on the same host** (or at least the same hostname in DNS). Self-hosting on a provider that blocks port 25 on the verifier host will leave aimx clients unable to exercise the outbound check.
 
 ---
 
@@ -258,7 +258,7 @@ This checks three things:
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
-| Outbound port 25 | Connects to the verify service host on port 25 | Ask VPS provider to unblock outbound SMTP |
+| Outbound port 25 | Connects to the verifier service host on port 25 | Ask VPS provider to unblock outbound SMTP |
 | Inbound port 25 | Calls `<verify_host>/probe` to connect back to your IP:25 | Open firewall, ask VPS provider to unblock inbound SMTP |
 | PTR record | Reverse DNS lookup on your IP | Set PTR at your VPS provider's control panel |
 
@@ -352,7 +352,7 @@ dig +short -x YOUR_SERVER_IP
 aimx verify
 ```
 
-`aimx verify` runs the same three checks as `aimx preflight`: outbound port 25 (to the verify service's built-in TCP listener), inbound port 25 (via `/probe`, which connects back to your server), and PTR record. Use whichever command reads better in your workflow — they are functionally equivalent. Neither sends an actual email or waits for an echo reply.
+`aimx verify` runs the same three checks as `aimx preflight`: outbound port 25 (to the verifier service's built-in TCP listener), inbound port 25 (via `/probe`, which connects back to your server), and PTR record. Use whichever command reads better in your workflow — they are functionally equivalent. Neither sends an actual email or waits for an echo reply.
 
 **Check server status:**
 
@@ -484,7 +484,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 | Preflight: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see compatible providers table) |
 | Preflight: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` |
-| `aimx verify` shows inbound FAIL | The verify service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, OpenSMTPD down, or DNS `A` record not yet resolving) | `sudo systemctl status opensmtpd`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
+| `aimx verify` shows inbound FAIL | The verifier service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, OpenSMTPD down, or DNS `A` record not yet resolving) | `sudo systemctl status opensmtpd`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
 | Emails landing in spam | Missing DNS records or no PTR | Add all DNS records, set PTR, use Gmail filter |
 | OpenSMTPD not running | Service crashed or misconfigured | `sudo systemctl status opensmtpd` and `journalctl -u opensmtpd -e` |
 | Emails not being delivered to mailbox | OpenSMTPD MDA misconfigured | Check `/etc/smtpd.conf` has correct `aimx ingest` path |
