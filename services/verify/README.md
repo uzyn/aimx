@@ -105,12 +105,22 @@ No MTA, no email sending, no DNS records beyond the A record are needed on the v
 
 A `Dockerfile` and `docker-compose.yml` ship alongside this README for operators who prefer container-based deployments. This path coexists with the systemd path below — pick one.
 
+The compose file brings up **both** the verify service and Caddy in a single command:
+
 ```bash
 cd services/verify
 docker compose up -d --build
 ```
 
-That single command builds the multi-stage image (Rust builder → `debian:bookworm-slim` runtime) and starts the service. The container runs as root so it can bind port 25 without capability fiddling, and because `network_mode: host` shares the host's network namespace, the service binds ports `25` (SMTP listener) and `3025` (HTTP) directly on the host's interfaces — no Docker-side port publishing is involved.
+That single command builds the multi-stage verify image (Rust builder → `debian:bookworm-slim` runtime) and pulls the official `caddy:2` image. The verify container runs as root so it can bind port 25 without capability fiddling. Both containers use `network_mode: host`, sharing the host's network namespace — verify binds `127.0.0.1:3025` (HTTP) and `0.0.0.0:25` (SMTP), while Caddy binds `0.0.0.0:443` (HTTPS) and `0.0.0.0:80` (HTTP redirect). No Docker-side port publishing is involved.
+
+For self-hosted instances, set the domain via environment variable:
+
+```bash
+DOMAIN=check.yourdomain.com docker compose up -d --build
+```
+
+Caddy auto-provisions TLS certificates via ACME (Let's Encrypt). The `caddy_data` volume persists certs across container restarts. Ensure the domain's DNS A record points to the server before starting.
 
 ### Why `network_mode: host`?
 
@@ -123,17 +133,6 @@ The "obvious" docker-compose shape — `ports: "3025:3025"` plus `BIND_ADDR=0.0.
 
 `network_mode: host` avoids this entirely: the container shares the host's network namespace, so `127.0.0.1:3025` inside the container IS the host's loopback, and Caddy running on the host can reverse-proxy to it exactly as it would for a systemd-native deployment. No explicit `ports:` mapping is needed (or allowed — Docker rejects `ports` in host-network mode).
 
-### Caddy is still required
-
-The Docker deployment does **not** bundle Caddy. Run Caddy on the host using the canonical `services/verify/Caddyfile` committed alongside this README:
-
-```bash
-# On the host, not inside the container
-DOMAIN=check.yourdomain.com caddy run --config services/verify/Caddyfile
-```
-
-The compose file's `network_mode: host` means Caddy's `reverse_proxy 127.0.0.1:3025` directive targets the verify container directly.
-
 ### Verifying the deployment
 
 ```bash
@@ -145,26 +144,42 @@ curl http://127.0.0.1:3025/health
 nc 127.0.0.1 25
 # -> 220 check.aimx.email SMTP aimx-verify
 
-# Per-request logs from the container
+# Caddy is proxying
+curl -I https://localhost
+# -> should show Caddy's TLS response (or cert error if DNS isn't pointed yet)
+
+# Per-request logs from both containers
 docker compose logs -f verify
+docker compose logs -f caddy
 ```
 
-From a remote machine (with Caddy + DNS configured), `curl https://check.yourdomain.com/probe` and `curl https://check.yourdomain.com/reach` should return JSON with the caller's real public IP — not `127.0.0.1` or a private Docker bridge address.
+From a remote machine (with DNS configured), `curl https://check.yourdomain.com/probe` and `curl https://check.yourdomain.com/reach` should return JSON with the caller's real public IP — not `127.0.0.1` or a private Docker bridge address.
 
-### Raw `docker run` (without compose)
+### Running without compose
 
-If you prefer not to use docker-compose:
+If you prefer to manage containers individually:
 
 ```bash
+# Verify service
 docker build -t aimx-verify:local services/verify
 docker run -d --name aimx-verify \
   --network host \
   --restart unless-stopped \
   -e RUST_LOG=info \
   aimx-verify:local
+
+# Caddy
+docker run -d --name aimx-caddy \
+  --network host \
+  --restart unless-stopped \
+  -v $(pwd)/services/verify/Caddyfile:/etc/caddy/Caddyfile:ro \
+  -v caddy_data:/data \
+  -v caddy_config:/config \
+  -e DOMAIN=check.yourdomain.com \
+  caddy:2
 ```
 
-Same semantics as the compose shape: host networking, default loopback HTTP bind, Caddy on the host handles TLS + client IP injection.
+Same semantics as the compose shape: host networking, default loopback HTTP bind, Caddy handles TLS + client IP injection.
 
 ## Deployment with systemd
 

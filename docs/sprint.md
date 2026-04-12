@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 15 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops)
-**Timeline:** ~42.5 calendar days
+**Total sprints:** 16 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops + 1 deployment)
+**Timeline:** ~45.5 calendar days
 **v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verify service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verify service (request logging, Docker packaging).
 
 ---
@@ -1499,6 +1499,31 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
+## Sprint 16 — Add Caddy to docker-compose (Days 43–45.5) [IN PROGRESS]
+
+**Goal:** Make `docker compose up` a single-command deployment for aimx-verify + Caddy, eliminating the need to install and manage Caddy separately on the host. Both services use `network_mode: host` so the Sprint 12 security model (loopback trust + Layer 4 target guard) is fully preserved.
+
+**Dependencies:** Sprint 15 (merged) — Dockerfile, docker-compose, and `.dockerignore` already exist.
+
+### S16.1 — Add Caddy service to docker-compose
+
+*As the maintainer of aimx-verify, I want a single `docker compose up -d` to bring up both the verify service and Caddy so that I don't have to install, configure, or manage Caddy separately on the host.*
+
+**Context:** Sprint 15 shipped docker-compose with only the verify service and documented "run Caddy on the host separately." This works but means the operator manages two deployment systems (Docker for verify, systemd/package for Caddy). Since both can use `network_mode: host` without any security regression — Caddy connects to verify via real loopback, identical to the current setup — bundling them into one compose file simplifies ops with zero tradeoff.
+
+**Priority:** P1
+
+- [ ] Add `caddy` service to `services/verify/docker-compose.yml` using the official `caddy:2` image, `network_mode: host`, `restart: unless-stopped`
+- [ ] Mount the existing `Caddyfile` into the Caddy container (read-only)
+- [ ] Add a named volume `caddy_data` mapped to `/data` for persistent TLS cert storage
+- [ ] Add a named volume `caddy_config` mapped to `/config` for Caddy runtime config
+- [ ] `DOMAIN` environment variable configurable (with default `check.aimx.email` matching the Caddyfile's `{$DOMAIN}` placeholder)
+- [ ] Update the docker-compose header comment to reflect that Caddy is now included
+- [ ] Update `services/verify/README.md` Docker section to document the all-in-one compose deployment, including the `DOMAIN` env var and cert volume
+- [ ] Manually verified: `docker compose up -d --build` brings up both services; `curl http://127.0.0.1:3025/health` returns OK; Caddy logs show it is listening on 443
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -1520,6 +1545,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 13 | 34–36.5 | Preflight Flow Fix + PTR Display | Route `aimx preflight` at `/reach`, fix PTR display ordering bug | Done |
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Done |
+| 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | In Progress |
 
 ## Deferred to v2
 
