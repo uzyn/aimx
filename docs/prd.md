@@ -66,7 +66,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ## 6. Functional Requirements
 
-### 6.1 Setup Wizard (`aimx setup <domain>`)
+### 6.1 Setup Wizard (`aimx setup [domain]`)
 - FR-1: Require root. Exit with clear message if not running as root.
 - FR-1b: Detect MTA conflict on port 25. If non-OpenSMTPD MTA is running, exit with process name and instructions. If OpenSMTPD is already running, prompt user to confirm smtpd.conf overwrite and create .bak backup.
 - FR-2: Install and configure OpenSMTPD with TLS and MDA delivery to `aimx ingest`.
@@ -77,7 +77,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation.
 - FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` mailbox.
-- FR-10: Display MCP configuration snippet for Claude Code.
+- FR-10: Display MCP configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.).
 
 ### 6.2 Email Delivery (`aimx ingest <rcpt>`)
 - FR-11: Accept raw `.eml` from OpenSMTPD via stdin.
@@ -125,8 +125,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-40: Verify service is open source and self-hostable. No MTA required on the verify server.
 
 ### 6.9 CLI Commands
-- FR-41: `aimx setup <domain>` — interactive setup wizard.
-- FR-42: `aimx preflight` — run port/DNS checks without installing.
+- FR-41: `aimx setup [domain]` — interactive setup wizard. When domain is omitted, prompt interactively for domain and confirm DNS access.
+- FR-41b: Pre-seed OpenSMTPD debconf answers (`mailname` = domain, `root_address` = blank) via `debconf-set-selections` and `DEBIAN_FRONTEND=noninteractive` to suppress interactive screens during install.
+- FR-42: `aimx preflight` — run port 25 reachability checks (outbound and inbound) without installing.
 - FR-43: `aimx ingest <rcpt>` — delivery command (called by OpenSMTPD).
 - FR-44: `aimx send` — compose, sign, and send email.
 - FR-45: `aimx mcp` — start MCP server in stdio mode.
