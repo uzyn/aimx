@@ -266,7 +266,7 @@ If you prefer not to use the public instance:
    aimx verify --verify-host https://verify.yourdomain.com
    ```
 
-The verify service provides:
+The verifier service provides:
 - `GET /health` -- health check
 - `GET /probe` -- connects back to caller's IP on port 25, performs EHLO handshake
 - Port 25 listener -- accepts TCP connections for outbound port 25 testing

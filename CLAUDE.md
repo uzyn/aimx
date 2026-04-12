@@ -61,7 +61,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 - `send.rs` — `aimx send`: composes RFC 5322 message, DKIM-signs it, hands to `/usr/sbin/sendmail`.
 - `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations.
 - `channel.rs` — channel manager: match filters + shell command triggers on ingest.
-- `verify.rs` — `aimx verify`: checks port 25 connectivity via the verify service.
+- `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
 - `setup.rs` also contains `run_preflight` for `aimx preflight`.
 
 ### Trait-based testing pattern
