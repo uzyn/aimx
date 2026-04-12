@@ -1524,7 +1524,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 17 — Rename Verify Service to Verifier (Days 46–48.5) [IN PROGRESS]
+## Sprint 17 — Rename Verify Service to Verifier (Days 46–48.5) [DONE]
 
 **Goal:** Rename the hosted verification service from "verify" / "aimx-verify" to "verifier" / "aimx-verifier" across all code, Docker, CI, and documentation. The service is the verifier; the `aimx verify` CLI command is the client that checks against it — the naming should reflect this distinction. Landing this before the documentation overhaul in Sprint 18 avoids writing docs with the old name.
 
@@ -1536,14 +1536,14 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Rename directory `services/verify/` → `services/verifier/`
-- [ ] Update `services/verifier/Cargo.toml`: package name `aimx-verify` → `aimx-verifier`
-- [ ] Update `services/verifier/Dockerfile`: all references to binary name `aimx-verify` → `aimx-verifier` (strip, COPY, ENTRYPOINT)
-- [ ] Update `services/verifier/docker-compose.yml`: image `aimx-verify:local` → `aimx-verifier:local`, container name `aimx-verify` → `aimx-verifier`, comments
-- [ ] Update `services/verifier/src/main.rs`: service identification strings (`"aimx-verify"` → `"aimx-verifier"` in health response, SMTP banner, log messages)
-- [ ] Update `.github/workflows/ci.yml`: job name, `working-directory`, and cache key references from `services/verify` → `services/verifier`
-- [ ] Run `cargo build` and `cargo test` in `services/verifier/` to verify clean build
-- [ ] Run CI lint (`cargo clippy`, `cargo fmt --check`) in `services/verifier/`
+- [x] Rename directory `services/verify/` → `services/verifier/`
+- [x] Update `services/verifier/Cargo.toml`: package name `aimx-verify` → `aimx-verifier`
+- [x] Update `services/verifier/Dockerfile`: all references to binary name `aimx-verify` → `aimx-verifier` (strip, COPY, ENTRYPOINT)
+- [x] Update `services/verifier/docker-compose.yml`: image `aimx-verify:local` → `aimx-verifier:local`, container name `aimx-verify` → `aimx-verifier`, comments
+- [x] Update `services/verifier/src/main.rs`: service identification strings (`"aimx-verify"` → `"aimx-verifier"` in health response, SMTP banner, log messages)
+- [x] Update `.github/workflows/ci.yml`: job name, `working-directory`, and cache key references from `services/verify` → `services/verifier`
+- [x] Run `cargo build` and `cargo test` in `services/verifier/` to verify clean build
+- [x] Run CI lint (`cargo clippy`, `cargo fmt --check`) in `services/verifier/`
 
 ### S17.2 — Update all documentation and project references
 
@@ -1551,18 +1551,18 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Update `README.md`: section heading "Verify service" → "Verifier service", path references `services/verify/` → `services/verifier/`, binary references `aimx-verify` → `aimx-verifier`
-- [ ] Update `CLAUDE.md`: path `services/verify/` → `services/verifier/`, crate name `aimx-verify` → `aimx-verifier`
-- [ ] Update `docs/guide/setup.md`: section heading, path references, binary name, systemd unit name `aimx-verify.service` → `aimx-verifier.service`, user name references
-- [ ] Update `docs/guide/configuration.md`: comment text referencing the verify service → verifier service (config field `verify_host` stays as-is)
-- [ ] Update `docs/manual-setup.md`: section heading, path references, binary name, systemd references, user name references
-- [ ] Update `services/verifier/README.md`: any self-references to old naming
-- [ ] Update `docs/prd.md`: section heading "6.8 Verify Service" → "6.8 Verifier Service", milestone M7 description
-- [ ] Update `docs/sprint.md`: header metadata description, Summary Table entries that reference the service name
+- [x] Update `README.md`: section heading "Verify service" → "Verifier service", path references `services/verify/` → `services/verifier/`, binary references `aimx-verify` → `aimx-verifier`
+- [x] Update `CLAUDE.md`: path `services/verify/` → `services/verifier/`, crate name `aimx-verify` → `aimx-verifier`
+- [x] Update `docs/guide/setup.md`: section heading, path references, binary name, systemd unit name `aimx-verify.service` → `aimx-verifier.service`, user name references
+- [x] Update `docs/guide/configuration.md`: comment text referencing the verify service → verifier service (config field `verify_host` stays as-is)
+- [x] Update `docs/manual-setup.md`: section heading, path references, binary name, systemd references, user name references
+- [x] Update `services/verifier/README.md`: any self-references to old naming
+- [x] Update `docs/prd.md`: section heading "6.8 Verify Service" → "6.8 Verifier Service", milestone M7 description
+- [x] Update `docs/sprint.md`: header metadata description, Summary Table entries that reference the service name
 
 ---
 
-## Sprint 18 — Guided Setup UX (Days 49–51.5) [NOT STARTED]
+## Sprint 18 — Guided Setup UX (Days 49–51.5) [IN PROGRESS]
 
 **Goal:** Make `aimx setup` fully interactive so new users don't need to know the CLI signature. Prompt for domain when omitted, confirm DNS access, and suppress OpenSMTPD's debconf screens by pre-seeding answers from the domain the user provides.
 
@@ -1661,8 +1661,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 14 | 37–39.5 | Request Logging for aimx-verifier | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
 | 15 | 40–42.5 | Dockerize aimx-verifier | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verifier README update | Done |
 | 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | Done |
-| 17 | 46–48.5 | Rename Verify Service to Verifier | Rename `services/verify/` → `services/verifier/`, `aimx-verify` → `aimx-verifier` across crate, Docker, CI, and all documentation | In Progress |
-| 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Not Started |
+| 17 | 46–48.5 | Rename Verify Service to Verifier | Rename `services/verify/` → `services/verifier/`, `aimx-verify` → `aimx-verifier` across crate, Docker, CI, and all documentation | Done |
+| 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | In Progress |
 
 ## Deferred to v2
 
