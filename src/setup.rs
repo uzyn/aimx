@@ -457,9 +457,12 @@ pub fn run_preflight_to<W: Write, E: Write>(
         PreflightResult::Warn(msg) => writeln!(out, "WARN: {msg}")?,
     }
 
-    // Preflight uses the plain-TCP `/reach` endpoint because it runs on fresh
-    // VPSes before OpenSMTPD is installed — nothing is listening on port 25
-    // yet, so a full EHLO handshake would fail for the wrong reason.
+    // Spin up a temporary TCP listener on port 25 so the verify service has
+    // something to connect to. If the port is already occupied (e.g. OpenSMTPD
+    // is running), the bind fails silently and the existing listener serves
+    // the same purpose.
+    let _temp_listener = std::net::TcpListener::bind("0.0.0.0:25").ok();
+
     write!(out, "  Inbound port 25... ")?;
     out.flush()?;
     match check_inbound_tcp(net) {
