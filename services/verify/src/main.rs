@@ -749,12 +749,7 @@ mod tests {
         drop(listener);
 
         let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let result = match tokio::time::timeout(
-            REACH_TCP_TIMEOUT,
-            TcpStream::connect(addr),
-        )
-        .await
-        {
+        let result = match tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr)).await {
             Ok(Ok(_)) => true,
             Ok(Err(e)) => e.kind() == std::io::ErrorKind::ConnectionRefused,
             Err(_) => false,
