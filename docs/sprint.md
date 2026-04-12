@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 16 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops + 1 deployment)
-**Timeline:** ~45.5 calendar days
+**Total sprints:** 17 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops + 1 deployment + 1 setup UX)
+**Timeline:** ~48 calendar days
 **v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verify service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verify service (request logging, Docker packaging).
 
 ---
@@ -1524,6 +1524,83 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
+## Sprint 17 — Guided Setup UX (Days 46–48.5) [NOT STARTED]
+
+**Goal:** Make `aimx setup` fully interactive so new users don't need to know the CLI signature. Prompt for domain when omitted, confirm DNS access, and suppress OpenSMTPD's debconf screens by pre-seeding answers from the domain the user provides.
+
+**Dependencies:** All prior sprints complete.
+
+### S17.1 — Interactive domain prompt when no argument given
+
+**Context:** Currently `aimx setup <domain>` requires the domain as a mandatory positional arg. Users discovering the tool shouldn't need to read help text to get started. When `domain` is omitted, the setup wizard should prompt for it, then ask the user to confirm they control the domain and have access to its DNS settings (MX, SPF, DKIM records will need updating). If the domain IS provided as an arg, skip the prompts and proceed as today — preserving scripting/backward compatibility.
+
+**Priority:** P1
+
+- [ ] Change `domain` from required `String` to `Option<String>` in the `Setup` clap variant
+- [ ] When `None`, prompt: "Enter the domain you want to use for email (e.g. agent.example.com):"
+- [ ] After domain entry, display confirmation: "You will need to add MX, SPF, and DKIM DNS records for this domain. Do you control this domain and have access to its DNS settings? (y/N)"
+- [ ] Exit gracefully if user declines
+- [ ] Existing `aimx setup example.com` invocation continues to work without prompts
+- [ ] Tests cover both paths (domain provided, domain prompted)
+
+### S17.2 — Automate OpenSMTPD debconf screens during install
+
+**Context:** `apt-get install -y opensmtpd` still pops two debconf screens (system mail name, root/postmaster recipient) because `DEBIAN_FRONTEND` isn't set. On a fresh VPS these block the automated flow and confuse users who don't know what to enter. Pre-seed the answers using `debconf-set-selections` before install: set the mail name to the user's domain, leave root recipient blank (aimx handles delivery via its own MDA, not system aliases). Set `DEBIAN_FRONTEND=noninteractive` on the apt-get command.
+
+**Priority:** P1
+
+- [ ] Before `apt-get install`, run `debconf-set-selections` to pre-seed: `opensmtpd opensmtpd/mailname string <domain>` and `opensmtpd opensmtpd/root_address string` (blank)
+- [ ] Set `DEBIAN_FRONTEND=noninteractive` env var on the `apt-get install` command
+- [ ] If `debconf-set-selections` is not available, fall back to just `DEBIAN_FRONTEND=noninteractive` (the defaults will apply)
+- [ ] Test: mock `install_package` path verifies debconf pre-seeding is called with correct domain before install
+
+### S17.3 — Restructure and colorize post-setup output
+
+**Context:** The current post-setup output dumps DNS records, MCP config, Gmail filter instructions, and PTR notes as an undifferentiated wall of text. Users need to scan it to find what's relevant to them. Restructure into three clearly labeled sections displayed in this order: **[DNS]** (MX, A, SPF, DKIM, DMARC records — exclude PTR), **[MCP]** (tool-agnostic configuration snippet mentioning Claude Code, OpenClaw, Codex, OpenCode, and other MCP-compatible AI agents), **[Deliverability Improvement (Optional)]** (PTR record guidance, Gmail filter/whitelist instructions). Add ANSI colors throughout setup output for status indicators (green PASS, red FAIL/MISSING, yellow WARN), section headers, and key values to improve scannability. No color library exists yet — add `colored` crate or similar.
+
+**Priority:** P1
+
+- [ ] Add a terminal color library (e.g. `colored` crate) to `Cargo.toml`
+- [ ] Restructure `finalize_setup()` and related display functions to output three labeled sections in order: `[DNS]`, `[MCP]`, `[Deliverability Improvement (Optional)]`
+- [ ] DNS section: MX, A, SPF, DKIM, DMARC records only — no PTR
+- [ ] MCP section: replace Claude Code-specific heading with tool-agnostic text listing Claude Code, OpenClaw, Codex, OpenCode as examples of MCP-compatible server-side AI agents
+- [ ] Deliverability section: PTR record guidance + Gmail filter/whitelist instructions, clearly marked optional
+- [ ] Apply colors to all setup output: green for PASS, red for FAIL/MISSING, yellow for WARN, bold for section headers
+- [ ] DNS verification results also use colored status indicators
+- [ ] Colors degrade gracefully (no ANSI when stdout is not a TTY)
+- [ ] Remove PTR check from `run_preflight_to()` — preflight only checks outbound and inbound port 25
+- [ ] PTR check remains in the setup flow but displays under [Deliverability Improvement (Optional)], not as a preflight gate
+- [ ] Update existing preflight tests to remove PTR expectations
+- [ ] `aimx preflight` output shows only port 25 results (no PTR line)
+
+### S17.4 — Re-entrant setup and DNS retry flow
+
+**Context:** Currently `aimx setup` always runs the full install+configure flow, and after displaying DNS records it offers a single Enter-to-verify prompt. Two improvements: (1) When the user runs `sudo aimx setup <domain>` on an already-configured domain (OpenSMTPD running, TLS cert exists, DKIM key exists), skip the install/configure steps and go straight to checking DNS, MCP, and deliverability — making re-runs a quick verification pass. (2) At the DNS verification step, let the user hit Enter to retry the check (for when they've just updated DNS in another tab), or display a clear message advising them to update DNS and resume with `sudo aimx setup` again later. This replaces the current one-shot "press Enter to verify... sorry, not yet" flow.
+
+**Priority:** P1
+
+- [ ] Detect already-configured state: OpenSMTPD running, TLS cert present, DKIM key present, smtpd.conf already configured for this domain
+- [ ] When already configured, skip install/configure steps — proceed directly to section checks (DNS verification, MCP display, deliverability tips)
+- [ ] At DNS verification prompt: allow user to press Enter to re-check, or display guidance: "Update your DNS records and run `sudo aimx setup <domain>` again to verify"
+- [ ] DNS retry loop: re-run verification on each Enter press, exit loop when all pass or user chooses to defer
+- [ ] All preflight checks (port 25 outbound/inbound) also run on re-entrant invocations
+- [ ] Existing fresh-install flow unchanged for first-time setup
+
+### S17.5 — Update and relocate user guide
+
+**Context:** The user guide in `docs/guide/` (8 files: index, getting-started, setup, configuration, mailboxes, channels, mcp, troubleshooting) needs updating to reflect Sprint 17 changes: the new sectioned setup output ([DNS]/[MCP]/[Deliverability]), re-entrant `aimx setup` behavior, PTR removal from preflight, and MCP tool-agnostic language. Additionally, move the guide from `docs/guide/` to `book/` at the project root for a cleaner separation between internal planning docs (`docs/`) and user-facing documentation (`book/`).
+
+**Priority:** P1
+
+- [ ] Move `docs/guide/` to `book/` — update any cross-references between guide files if needed
+- [ ] Update `book/setup.md` to reflect the new three-section output format ([DNS], [MCP], [Deliverability Improvement (Optional)]) and the re-entrant setup flow (re-running `aimx setup` skips install, goes straight to verification)
+- [ ] Update `book/setup.md` to reflect that preflight only checks port 25 (no PTR)
+- [ ] Update `book/mcp.md` to use tool-agnostic language — mention Claude Code, OpenClaw, Codex, OpenCode as examples of compatible MCP clients
+- [ ] Update `book/getting-started.md` and `book/troubleshooting.md` for consistency with the new setup flow
+- [ ] Update `book/index.md` if it references the old directory structure or outdated setup behavior
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -1546,6 +1623,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Done |
 | 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | Done |
+| 17 | 46–48.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Not Started |
 
 ## Deferred to v2
 
