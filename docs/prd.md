@@ -118,8 +118,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-36: Support optional `trusted_senders` allowlist per mailbox (glob patterns). Allowlisted senders always trigger, skip verification.
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
 
-### 6.8 Verify Service
-- FR-38: Hosted verify service at `check.aimx.email` exposing two complementary HTTP endpoints that both identify the caller via a Caddy-injected `X-AIMX-Client-IP` header and target the caller's own IP on port 25: `/reach` performs a plain TCP connect (used by `aimx preflight` to confirm reachability on a fresh VPS before OpenSMTPD is installed — any listening socket satisfies this check), and `/probe` performs a full SMTP EHLO handshake (used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after install). Both endpoints apply a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy.
+### 6.8 Verifier Service
+- FR-38: Hosted verifier service at `check.aimx.email` exposing two complementary HTTP endpoints that both identify the caller via a Caddy-injected `X-AIMX-Client-IP` header and target the caller's own IP on port 25: `/reach` performs a plain TCP connect (used by `aimx preflight` to confirm reachability on a fresh VPS before OpenSMTPD is installed — any listening socket satisfies this check), and `/probe` performs a full SMTP EHLO handshake (used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after install). Both endpoints apply a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy.
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
 - FR-39b: Port 25 listener on the verify service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
 - FR-40: Verify service is open source and self-hostable. No MTA required on the verify server.
@@ -215,7 +215,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | M4: Channel Manager | Trigger actions on incoming mail | `cmd` triggers, match filters, config.toml rules |
 | M5: Inbound Trust | Gate triggers on sender verification | DKIM/SPF verification during ingest, per-mailbox trust policy, trusted_senders allowlist |
 | M6: Setup Wizard | One-command setup | `aimx setup`, preflight checks, OpenSMTPD config, DNS guidance, verification |
-| M7: Verify Service | Hosted verification endpoint | `check.aimx.email` probe, `verify@aimx.email` endpoint, self-hostable |
+| M7: Verifier Service | Hosted verification endpoint | `check.aimx.email` probe, `verify@aimx.email` endpoint, self-hostable |
 | M8: Polish | CLI completeness and docs | `aimx status`, `aimx preflight`, `aimx verify`, README, usage docs |
 
 ## 10. Risks and Mitigations

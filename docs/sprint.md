@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 17 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops + 1 deployment + 1 setup UX)
-**Timeline:** ~48 calendar days
-**v1 Scope:** Full PRD scope including verify service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verify service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verify service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verify service (request logging, Docker packaging).
+**Total sprints:** 18 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verify/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verify ops + 1 deployment + 1 service rename + 1 setup UX)
+**Timeline:** ~51.5 calendar days
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation.
 
 ---
 
@@ -1524,13 +1524,51 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 17 — Guided Setup UX (Days 46–48.5) [NOT STARTED]
+## Sprint 17 — Rename Verify Service to Verifier (Days 46–48.5) [NOT STARTED]
+
+**Goal:** Rename the hosted verification service from "verify" / "aimx-verify" to "verifier" / "aimx-verifier" across all code, Docker, CI, and documentation. The service is the verifier; the `aimx verify` CLI command is the client that checks against it — the naming should reflect this distinction. Landing this before the documentation overhaul in Sprint 18 avoids writing docs with the old name.
+
+**Dependencies:** All prior sprints complete.
+
+### S17.1 — Rename service crate, Docker, and CI
+
+**Context:** The hosted verification service currently lives at `services/verify/` with package name `aimx-verify` and binary `aimx-verify`. Rename the service to "verifier" for clarity — it is the verifier service, while `aimx verify` is the client-side CLI command that checks against it. This story covers all functional artifacts: the crate directory, package name, binary name, source code service-identification strings, Dockerfile, docker-compose, and CI workflow. Does NOT touch the `aimx verify` CLI command, `src/verify.rs` module, `verify_host` config field, or `check.aimx.email` domain.
+
+**Priority:** P1
+
+- [ ] Rename directory `services/verify/` → `services/verifier/`
+- [ ] Update `services/verifier/Cargo.toml`: package name `aimx-verify` → `aimx-verifier`
+- [ ] Update `services/verifier/Dockerfile`: all references to binary name `aimx-verify` → `aimx-verifier` (strip, COPY, ENTRYPOINT)
+- [ ] Update `services/verifier/docker-compose.yml`: image `aimx-verify:local` → `aimx-verifier:local`, container name `aimx-verify` → `aimx-verifier`, comments
+- [ ] Update `services/verifier/src/main.rs`: service identification strings (`"aimx-verify"` → `"aimx-verifier"` in health response, SMTP banner, log messages)
+- [ ] Update `.github/workflows/ci.yml`: job name, `working-directory`, and cache key references from `services/verify` → `services/verifier`
+- [ ] Run `cargo build` and `cargo test` in `services/verifier/` to verify clean build
+- [ ] Run CI lint (`cargo clippy`, `cargo fmt --check`) in `services/verifier/`
+
+### S17.2 — Update all documentation and project references
+
+**Context:** With the service crate renamed in S17.1, all documentation must reflect the new "verifier" / "aimx-verifier" naming. This covers README, CLAUDE.md, the user guide (`docs/guide/`), manual setup doc, the verifier service's own README, PRD section heading, and historical sprint plan references. The `aimx verify` CLI command name and `verify_host` config field are unchanged — only references to the service/crate/binary name are updated.
+
+**Priority:** P1
+
+- [ ] Update `README.md`: section heading "Verify service" → "Verifier service", path references `services/verify/` → `services/verifier/`, binary references `aimx-verify` → `aimx-verifier`
+- [ ] Update `CLAUDE.md`: path `services/verify/` → `services/verifier/`, crate name `aimx-verify` → `aimx-verifier`
+- [ ] Update `docs/guide/setup.md`: section heading, path references, binary name, systemd unit name `aimx-verify.service` → `aimx-verifier.service`, user name references
+- [ ] Update `docs/guide/configuration.md`: comment text referencing the verify service → verifier service (config field `verify_host` stays as-is)
+- [ ] Update `docs/manual-setup.md`: section heading, path references, binary name, systemd references, user name references
+- [ ] Update `services/verifier/README.md`: any self-references to old naming
+- [ ] Update `docs/prd.md`: section heading "6.8 Verify Service" → "6.8 Verifier Service", milestone M7 description
+- [ ] Update `docs/sprint.md`: header metadata description, Summary Table entries that reference the service name
+
+---
+
+## Sprint 18 — Guided Setup UX (Days 49–51.5) [NOT STARTED]
 
 **Goal:** Make `aimx setup` fully interactive so new users don't need to know the CLI signature. Prompt for domain when omitted, confirm DNS access, and suppress OpenSMTPD's debconf screens by pre-seeding answers from the domain the user provides.
 
 **Dependencies:** All prior sprints complete.
 
-### S17.1 — Interactive domain prompt when no argument given
+### S18.1 — Interactive domain prompt when no argument given
 
 **Context:** Currently `aimx setup <domain>` requires the domain as a mandatory positional arg. Users discovering the tool shouldn't need to read help text to get started. When `domain` is omitted, the setup wizard should prompt for it, then ask the user to confirm they control the domain and have access to its DNS settings (MX, SPF, DKIM records will need updating). If the domain IS provided as an arg, skip the prompts and proceed as today — preserving scripting/backward compatibility.
 
@@ -1543,7 +1581,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 - [ ] Existing `aimx setup example.com` invocation continues to work without prompts
 - [ ] Tests cover both paths (domain provided, domain prompted)
 
-### S17.2 — Automate OpenSMTPD debconf screens during install
+### S18.2 — Automate OpenSMTPD debconf screens during install
 
 **Context:** `apt-get install -y opensmtpd` still pops two debconf screens (system mail name, root/postmaster recipient) because `DEBIAN_FRONTEND` isn't set. On a fresh VPS these block the automated flow and confuse users who don't know what to enter. Pre-seed the answers using `debconf-set-selections` before install: set the mail name to the user's domain, leave root recipient blank (aimx handles delivery via its own MDA, not system aliases). Set `DEBIAN_FRONTEND=noninteractive` on the apt-get command.
 
@@ -1554,7 +1592,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 - [ ] If `debconf-set-selections` is not available, fall back to just `DEBIAN_FRONTEND=noninteractive` (the defaults will apply)
 - [ ] Test: mock `install_package` path verifies debconf pre-seeding is called with correct domain before install
 
-### S17.3 — Restructure and colorize post-setup output
+### S18.3 — Restructure and colorize post-setup output
 
 **Context:** The current post-setup output dumps DNS records, MCP config, Gmail filter instructions, and PTR notes as an undifferentiated wall of text. Users need to scan it to find what's relevant to them. Restructure into three clearly labeled sections displayed in this order: **[DNS]** (MX, A, SPF, DKIM, DMARC records — exclude PTR), **[MCP]** (tool-agnostic configuration snippet mentioning Claude Code, OpenClaw, Codex, OpenCode, and other MCP-compatible AI agents), **[Deliverability Improvement (Optional)]** (PTR record guidance, Gmail filter/whitelist instructions). Add ANSI colors throughout setup output for status indicators (green PASS, red FAIL/MISSING, yellow WARN), section headers, and key values to improve scannability. No color library exists yet — add `colored` crate or similar.
 
@@ -1573,7 +1611,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 - [ ] Update existing preflight tests to remove PTR expectations
 - [ ] `aimx preflight` output shows only port 25 results (no PTR line)
 
-### S17.4 — Re-entrant setup and DNS retry flow
+### S18.4 — Re-entrant setup and DNS retry flow
 
 **Context:** Currently `aimx setup` always runs the full install+configure flow, and after displaying DNS records it offers a single Enter-to-verify prompt. Two improvements: (1) When the user runs `sudo aimx setup <domain>` on an already-configured domain (OpenSMTPD running, TLS cert exists, DKIM key exists), skip the install/configure steps and go straight to checking DNS, MCP, and deliverability — making re-runs a quick verification pass. (2) At the DNS verification step, let the user hit Enter to retry the check (for when they've just updated DNS in another tab), or display a clear message advising them to update DNS and resume with `sudo aimx setup` again later. This replaces the current one-shot "press Enter to verify... sorry, not yet" flow.
 
@@ -1586,9 +1624,9 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 - [ ] All preflight checks (port 25 outbound/inbound) also run on re-entrant invocations
 - [ ] Existing fresh-install flow unchanged for first-time setup
 
-### S17.5 — Update and relocate user guide
+### S18.5 — Update and relocate user guide
 
-**Context:** The user guide in `docs/guide/` (8 files: index, getting-started, setup, configuration, mailboxes, channels, mcp, troubleshooting) needs updating to reflect Sprint 17 changes: the new sectioned setup output ([DNS]/[MCP]/[Deliverability]), re-entrant `aimx setup` behavior, PTR removal from preflight, and MCP tool-agnostic language. Additionally, move the guide from `docs/guide/` to `book/` at the project root for a cleaner separation between internal planning docs (`docs/`) and user-facing documentation (`book/`).
+**Context:** The user guide in `docs/guide/` (8 files: index, getting-started, setup, configuration, mailboxes, channels, mcp, troubleshooting) needs updating to reflect Sprint 18 changes: the new sectioned setup output ([DNS]/[MCP]/[Deliverability]), re-entrant `aimx setup` behavior, PTR removal from preflight, and MCP tool-agnostic language. Additionally, move the guide from `docs/guide/` to `book/` at the project root for a cleaner separation between internal planning docs (`docs/`) and user-facing documentation (`book/`).
 
 **Priority:** P1
 
@@ -1623,7 +1661,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 14 | 37–39.5 | Request Logging for aimx-verify | Per-request logging for `/probe`, `/reach`, `/health`, and SMTP listener — caller IP, status, elapsed ms | Done |
 | 15 | 40–42.5 | Dockerize aimx-verify | Multi-stage Dockerfile, `docker-compose.yml` with `network_mode: host`, `.dockerignore`, verify README update | Done |
 | 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | Done |
-| 17 | 46–48.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Not Started |
+| 17 | 46–48.5 | Rename Verify Service to Verifier | Rename `services/verify/` → `services/verifier/`, `aimx-verify` → `aimx-verifier` across crate, Docker, CI, and all documentation | Not Started |
+| 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Not Started |
 
 ## Deferred to v2
 
