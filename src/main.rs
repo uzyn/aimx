@@ -55,7 +55,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             if unsafe { libc::geteuid() != 0 } {
                 return Err(
                     "aimx preflight requires root to bind port 25 for the inbound \
-                     connectivity check. Ports below 1024 are restricted to root on Linux.\n\n\
+                     connectivity check.\n\
                      Run with: sudo aimx preflight"
                         .into(),
                 );
