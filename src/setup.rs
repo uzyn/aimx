@@ -39,7 +39,7 @@ pub trait NetworkOps {
     /// Used by `aimx setup` (post-install) and `aimx verify`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     /// Plain-TCP reachability check via `{verify_host}/reach`.
-    /// Used by `aimx preflight` on a fresh VPS before OpenSMTPD is installed.
+    /// Used by `aimx verify` on a fresh VPS before OpenSMTPD is installed.
     fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>>;
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>>;
     fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>>;
@@ -266,7 +266,7 @@ impl RealNetworkOps {
 
     /// Shared curl invocation for `/probe` and `/reach` verify-service paths.
     /// Both endpoints return `{"reachable": bool, ...}`; any curl failure or
-    /// non-success exit maps to `Ok(false)` so preflight displays a FAIL
+    /// non-success exit maps to `Ok(false)` so the caller displays a FAIL
     /// advisory rather than an error backtrace.
     fn curl_reachable(&self, path: &str) -> Result<bool, Box<dyn std::error::Error>> {
         let url = format!("{}{path}", self.verify_host);
@@ -452,7 +452,7 @@ pub fn check_inbound(net: &dyn NetworkOps) -> PreflightResult {
     inbound_result(net.check_inbound_port25())
 }
 
-/// Plain-TCP reachability check via `/reach`. Used by `aimx preflight` on a
+/// Plain-TCP reachability check via `/reach`. Used by `aimx verify` on a
 /// fresh VPS before OpenSMTPD is installed — any listening socket (or the
 /// verify service's TCP connect succeeding) satisfies this check.
 pub fn check_inbound_tcp(net: &dyn NetworkOps) -> PreflightResult {
@@ -469,72 +469,6 @@ pub fn check_ptr(net: &dyn NetworkOps) -> PreflightResult {
         ),
         Err(e) => PreflightResult::Warn(format!("PTR record check failed: {e}")),
     }
-}
-
-pub fn run_preflight(net: &dyn NetworkOps) -> Result<bool, Box<dyn std::error::Error>> {
-    let stdout = io::stdout();
-    let stderr = io::stderr();
-    run_preflight_to(net, &mut stdout.lock(), &mut stderr.lock())
-}
-
-/// Testable variant of `run_preflight` that writes check progress to `out`
-/// and failure advisories to `err`. Tests supply separate buffers so they can
-/// assert on stdout ordering independently of the error-advisory stream.
-pub fn run_preflight_to<W: Write, E: Write>(
-    net: &dyn NetworkOps,
-    out: &mut W,
-    err: &mut E,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    writeln!(out, "Running preflight checks...\n")?;
-
-    let mut all_pass = true;
-
-    write!(out, "  Outbound port 25... ")?;
-    out.flush()?;
-    match check_outbound(net) {
-        PreflightResult::Pass(_) => writeln!(out, "PASS")?,
-        PreflightResult::Fail(msg) => {
-            writeln!(out, "FAIL")?;
-            writeln!(err, "\n  {msg}")?;
-            writeln!(err, "\n  Compatible VPS providers with port 25 open:")?;
-            for p in COMPATIBLE_PROVIDERS {
-                writeln!(err, "    - {p}")?;
-            }
-            all_pass = false;
-        }
-        PreflightResult::Warn(msg) => writeln!(out, "WARN: {msg}")?,
-    }
-
-    // Spin up a temporary TCP listener on port 25 so the verify service has
-    // something to connect to. If the port is already occupied (e.g. OpenSMTPD
-    // is running), the bind fails silently and the existing listener serves
-    // the same purpose.
-    let _temp_listener = std::net::TcpListener::bind("0.0.0.0:25").ok();
-
-    write!(out, "  Inbound port 25... ")?;
-    out.flush()?;
-    match check_inbound_tcp(net) {
-        PreflightResult::Pass(_) => writeln!(out, "PASS")?,
-        PreflightResult::Fail(msg) => {
-            writeln!(out, "FAIL")?;
-            writeln!(err, "\n  {msg}")?;
-            all_pass = false;
-        }
-        PreflightResult::Warn(msg) => writeln!(out, "WARN: {msg}")?,
-    }
-
-    writeln!(out)?;
-
-    if !all_pass {
-        writeln!(
-            err,
-            "Preflight checks failed. Please resolve the issues above before proceeding."
-        )?;
-    } else {
-        writeln!(out, "All preflight checks passed.")?;
-    }
-
-    Ok(all_pass)
 }
 
 pub fn generate_smtpd_conf(domain: &str, aimx_binary: &str, data_dir: Option<&Path>) -> String {
@@ -1318,14 +1252,6 @@ pub fn run_setup(
     Ok(())
 }
 
-pub fn run_preflight_command(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
-    let passed = run_preflight(net)?;
-    if !passed {
-        return Err("Preflight checks failed. Fix the issues above and try again.".into());
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1590,53 +1516,6 @@ mod tests {
             PreflightResult::Warn(msg) => assert!(msg.contains("PTR")),
             other => panic!("Expected Warn, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn preflight_all_pass() {
-        let net = MockNetworkOps::default();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(result);
-    }
-
-    #[test]
-    fn preflight_fails_on_outbound_blocked() {
-        let net = MockNetworkOps {
-            outbound_port25: false,
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(!result);
-    }
-
-    #[test]
-    fn preflight_fails_on_inbound_blocked() {
-        // Preflight uses the /reach path (check_inbound_reachable), so we
-        // block that one to simulate a fresh VPS with port 25 firewalled.
-        let net = MockNetworkOps {
-            inbound_reachable: false,
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(!result);
-    }
-
-    #[test]
-    fn preflight_passes_with_ptr_warning() {
-        let net = MockNetworkOps {
-            ptr_record: None,
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(result);
     }
 
     #[test]
@@ -2192,23 +2071,6 @@ mod tests {
         assert!(validate_domain("example-.com").is_err());
     }
 
-    #[test]
-    fn preflight_command_returns_err_on_failure() {
-        let net = MockNetworkOps {
-            outbound_port25: false,
-            ..Default::default()
-        };
-        let result = run_preflight_command(&net);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn preflight_command_returns_ok_on_success() {
-        let net = MockNetworkOps::default();
-        let result = run_preflight_command(&net);
-        assert!(result.is_ok());
-    }
-
     // S11.1 — Root Check + MTA Conflict Detection tests
 
     #[test]
@@ -2375,7 +2237,7 @@ mod tests {
         let _ = &net as &dyn NetworkOps;
     }
 
-    // S13.1 — Route Preflight Inbound at /reach tests
+    // S13.1 — Inbound check endpoint routing tests
 
     /// Mock that distinguishes the two inbound check variants and records
     /// which one was called, so we can pin each caller to the right endpoint.
@@ -2451,42 +2313,6 @@ mod tests {
         }
     }
 
-    /// Fresh-VPS scenario: nothing on port 25 to speak EHLO, but the TCP
-    /// reachability check via `/reach` can still pass. Preflight should PASS.
-    #[test]
-    fn preflight_passes_when_reach_ok_even_if_ehlo_would_fail() {
-        let net = TrackingNetworkOps {
-            inbound_port25: false,   // EHLO would fail — no SMTP server yet
-            inbound_reachable: true, // but the TCP-level reach check passes
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(result, "preflight should pass on fresh VPS via /reach");
-        assert!(
-            net.reach_called.get(),
-            "preflight must call check_inbound_reachable (/reach)"
-        );
-        assert!(
-            !net.port25_called.get(),
-            "preflight must not call check_inbound_port25 (/probe)"
-        );
-    }
-
-    #[test]
-    fn preflight_fails_when_reach_fails() {
-        let net = TrackingNetworkOps {
-            inbound_reachable: false,
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(!result);
-        assert!(net.reach_called.get());
-    }
-
     /// `aimx setup` runs its inbound check AFTER OpenSMTPD is installed, so
     /// it must use the full EHLO path via `/probe`, not the plain TCP `/reach`.
     /// We verify this by constructing a tracking net where the EHLO result
@@ -2524,23 +2350,6 @@ mod tests {
         assert_eq!(
             check_ptr(&net),
             PreflightResult::Pass(Some("vps-198f7320.vps.ovh.net.".into()))
-        );
-    }
-
-    #[test]
-    fn preflight_no_ptr_output() {
-        let net = MockNetworkOps {
-            ptr_record: Some("vps-198f7320.vps.ovh.net.".into()),
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(result);
-        let stdout = String::from_utf8(out).unwrap();
-        assert!(
-            !stdout.contains("PTR"),
-            "preflight should not include PTR check, got stdout:\n{stdout}"
         );
     }
 

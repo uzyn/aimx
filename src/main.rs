@@ -51,18 +51,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
         }
         Command::Status => status::run(cli.data_dir.as_deref()),
-        Command::Preflight { verify_host } => {
-            if unsafe { libc::geteuid() != 0 } {
-                return Err(
-                    "aimx preflight requires root to bind port 25 for the inbound \
-                     connectivity check.\n\
-                     Run with: sudo aimx preflight"
-                        .into(),
-                );
-            }
-            let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
-            setup::run_preflight_command(&net)
-        }
         Command::Verify { verify_host } => {
             verify::run(cli.data_dir.as_deref(), verify_host.as_deref())
         }

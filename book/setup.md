@@ -49,24 +49,23 @@ sudo cp target/release/aimx /usr/local/bin/
 aimx --version
 ```
 
-## Preflight checks
+## Pre-setup verification
 
-Before running setup, you can run preflight checks independently:
+Before running setup, you can verify port 25 connectivity:
 
 ```bash
-sudo aimx preflight
+sudo aimx verify
 ```
 
-This checks port 25 connectivity without installing anything:
+When no SMTP server is running yet (fresh VPS), `aimx verify` automatically uses a plain TCP reachability check and requires root to bind a temporary listener on port 25. After setup, it detects OpenSMTPD and performs a full SMTP EHLO handshake instead (no root needed). If port 25 is occupied by another MTA (e.g. Postfix, Exim), verify will fail and tell you to uninstall it.
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
 | Outbound port 25 | Connects to `check.aimx.email` on port 25 to test outbound SMTP | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls `check.aimx.email/reach` to connect back to your IP on port 25 (plain TCP) | Open firewall, ask VPS provider to unblock inbound SMTP |
+| Inbound port 25 | Calls the verify service to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
+| SMTP handshake | Verifies OpenSMTPD responds to EHLO (post-setup only) | Check OpenSMTPD status and logs |
 
-Both checks should show PASS before proceeding with setup.
-
-> **Preflight vs Verify:** `aimx preflight` runs *before* OpenSMTPD is installed -- it uses a plain TCP reachability check (`/reach`). `aimx verify` runs *after* setup -- it performs a full SMTP EHLO handshake (`/probe`) to confirm your mail server responds correctly. Use `preflight` to validate your VPS, and `verify` to validate your running setup.
+All checks should show PASS before proceeding with setup.
 
 ## Setup wizard
 
@@ -177,7 +176,7 @@ Run the automated verification:
 aimx verify
 ```
 
-This tests outbound port 25 connectivity, inbound SMTP reachability via EHLO probe, and PTR record resolution.
+This tests outbound port 25 connectivity and inbound SMTP reachability. When OpenSMTPD is running, it also performs an EHLO handshake check. On a fresh VPS without a mail server, it uses a plain TCP reach check instead (requires root).
 
 Check server status at any time:
 
