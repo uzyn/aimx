@@ -126,12 +126,13 @@ sudo chmod 600 /var/lib/aimx/dkim/private.key
 
 ## How verify works
 
-`aimx verify` auto-detects whether an SMTP server is already running on port 25 and adapts its check method:
+`aimx verify` auto-detects what is listening on port 25 and adapts its checks:
 
-| Scenario | Inbound check | Root required? |
-|----------|--------------|----------------|
-| **After setup** (OpenSMTPD running) | Full SMTP EHLO handshake via `/probe` | No |
-| **Before setup** (fresh VPS) | Plain TCP reachability via `/reach` + temporary listener | Yes (`sudo aimx verify`) |
+| Scenario | What happens | Root required? |
+|----------|-------------|----------------|
+| **OpenSMTPD running** | Outbound + inbound port check + EHLO handshake | No |
+| **Other MTA** (Postfix, Exim, etc.) | Fails immediately — aimx only supports OpenSMTPD | No |
+| **Nothing on port 25** (fresh VPS) | Outbound + inbound TCP reachability via temporary listener | Yes (`sudo aimx verify`) |
 
 If verify fails with EHLO probe after setup, the issue is likely in your OpenSMTPD configuration rather than firewall/port access. Run `sudo systemctl status opensmtpd` to check.
 
