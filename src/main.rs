@@ -48,7 +48,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         } => {
             let sys = setup::RealSystemOps;
             let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
-            setup::run_setup(&domain, cli.data_dir.as_deref(), &sys, &net)
+            setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
         }
         Command::Status => status::run(cli.data_dir.as_deref()),
         Command::Preflight { verify_host } => {

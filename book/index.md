@@ -24,9 +24,9 @@ Outbound:
 
 ## Key capabilities
 
-- **[Setup wizard](setup.md)** -- preflight checks, OpenSMTPD configuration, DKIM key generation, DNS guidance, end-to-end verification
+- **[Setup wizard](setup.md)** -- interactive setup, OpenSMTPD configuration, DKIM key generation, colorized DNS/MCP/deliverability output, re-entrant verification
 - **[Markdown email](mailboxes.md)** -- incoming email parsed to Markdown with TOML frontmatter, attachment extraction, per-mailbox routing
-- **[MCP server](mcp.md)** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
+- **[MCP server](mcp.md)** -- stdio transport for Claude Code, OpenClaw, Codex, OpenCode, and any MCP-compatible agent: list, read, send, reply, manage mailboxes
 - **[Channel rules](channels.md)** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
 - **[DKIM signing](setup.md#dkim-key-management)** -- native RSA-SHA256 signing for outbound mail
 - **[Inbound trust](channels.md#trust-policies)** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists

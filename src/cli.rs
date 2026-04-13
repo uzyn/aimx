@@ -40,7 +40,7 @@ pub enum Command {
     /// Run interactive setup wizard
     Setup {
         /// Domain to configure (e.g. agent.example.com)
-        domain: String,
+        domain: Option<String>,
 
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]
@@ -50,7 +50,7 @@ pub enum Command {
     /// Show server status, mailbox counts, and configuration
     Status,
 
-    /// Run preflight checks (port 25, PTR) without installing anything
+    /// Run preflight checks (port 25) without installing anything
     Preflight {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]

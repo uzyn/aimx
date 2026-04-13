@@ -56,7 +56,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 `main.rs` parses CLI via clap and dispatches to module-level `run()` functions. Each `src/*.rs` module owns one subcommand:
 
-- `setup.rs` — `aimx setup`: install OpenSMTPD, generate TLS cert + DKIM keys, display DNS guidance, verify DNS records. Requires root.
+- `setup.rs` — `aimx setup [domain]`: interactive setup wizard. Prompts for domain when omitted, pre-seeds debconf, installs OpenSMTPD, generates TLS cert + DKIM keys, displays colorized [DNS]/[MCP]/[Deliverability] sections, DNS retry loop, re-entrant detection. Requires root.
 - `ingest.rs` — `aimx ingest`: reads raw `.eml` from stdin (called by OpenSMTPD MDA), parses MIME, writes Markdown with TOML frontmatter (`+++` delimiters), extracts attachments, fires channel triggers.
 - `send.rs` — `aimx send`: composes RFC 5322 message, DKIM-signs it, hands to `/usr/sbin/sendmail`.
 - `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations.
@@ -97,7 +97,7 @@ Axum HTTP server with `/probe` (EHLO handshake), `/reach` (TCP connect), `/healt
 
 ## Documentation
 
-User-facing guide lives in `docs/guide/` (planned move to `book/`). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
+User-facing guide lives in `book/` (index, getting-started, setup, configuration, mailboxes, channels, mcp, troubleshooting). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
 
 - `docs/prd.md` — product requirements document
 - `docs/sprint.md` — sprint plan (do not modify `[DONE]` or `[IN PROGRESS]` sprints)

@@ -48,17 +48,25 @@ aimx --version
 Run the interactive setup wizard:
 
 ```bash
+# With domain argument:
 sudo aimx setup agent.yourdomain.com
+
+# Or interactively (will prompt for domain):
+sudo aimx setup
 ```
 
 The wizard will:
 
-1. Check port 25 reachability (inbound and outbound)
-2. Install and configure OpenSMTPD
+1. Install and configure OpenSMTPD (debconf screens are handled automatically)
+2. Verify port 25 connectivity (inbound and outbound)
 3. Generate a 2048-bit RSA DKIM keypair
-4. Display the DNS records you need to add
-5. Verify DNS configuration
-6. Create a default `catchall` mailbox
+4. Display the DNS records you need to add under a **[DNS]** section
+5. Let you verify DNS records (press Enter to re-check, or q to defer)
+6. Display **[MCP]** configuration for your AI agent
+7. Show **[Deliverability Improvement (Optional)]** tips (PTR, Gmail filter)
+8. Create a default `catchall` mailbox
+
+If you've already run setup and want to re-verify, just run `sudo aimx setup agent.yourdomain.com` again -- it will skip installation and go straight to verification.
 
 Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup -- DNS Configuration](setup.md#dns-configuration) for details on each record.
 
@@ -85,7 +93,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ## Connect your AI agent
 
-Add aimx as an MCP server in Claude Code (`~/.claude/settings.json`):
+Add aimx as an MCP server in your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.):
 
 ```json
 {

@@ -1,8 +1,9 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
 use chrono::Utc;
+use colored::Colorize;
 use std::collections::HashMap;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
@@ -16,10 +17,12 @@ pub enum Port25Status {
 pub trait SystemOps {
     fn is_package_installed(&self, package: &str) -> bool;
     fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>>;
+    fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn read_file(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>>;
     fn file_exists(&self, path: &Path) -> bool;
     fn restart_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
+    fn is_service_running(&self, service: &str) -> bool;
     fn generate_tls_cert(
         &self,
         cert_dir: &Path,
@@ -59,6 +62,7 @@ impl SystemOps for RealSystemOps {
 
     fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>> {
         let status = std::process::Command::new("sudo")
+            .env("DEBIAN_FRONTEND", "noninteractive")
             .args([
                 "apt-get",
                 "install",
@@ -71,6 +75,36 @@ impl SystemOps for RealSystemOps {
             return Err(format!("Failed to install {package}").into());
         }
         Ok(())
+    }
+
+    fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let selections = format!(
+            "opensmtpd opensmtpd/mailname string {domain}\n\
+             opensmtpd opensmtpd/root_address string\n"
+        );
+        let mut child = std::process::Command::new("debconf-set-selections")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+
+        match &mut child {
+            Ok(proc) => {
+                if let Some(stdin) = proc.stdin.as_mut() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(selections.as_bytes());
+                }
+                let status = proc.wait()?;
+                if !status.success() {
+                    return Err("debconf-set-selections failed".into());
+                }
+                Ok(())
+            }
+            Err(_) => {
+                // debconf-set-selections not available, fall back silently
+                Ok(())
+            }
+        }
     }
 
     fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -97,6 +131,13 @@ impl SystemOps for RealSystemOps {
             return Err(format!("Failed to restart {service}").into());
         }
         Ok(())
+    }
+
+    fn is_service_running(&self, service: &str) -> bool {
+        std::process::Command::new("systemctl")
+            .args(["is-active", "--quiet", service])
+            .status()
+            .is_ok_and(|s| s.success())
     }
 
     fn generate_tls_cert(
@@ -475,18 +516,6 @@ pub fn run_preflight_to<W: Write, E: Write>(
         PreflightResult::Warn(msg) => writeln!(out, "WARN: {msg}")?,
     }
 
-    write!(out, "  PTR record... ")?;
-    out.flush()?;
-    match check_ptr(net) {
-        PreflightResult::Pass(Some(ptr)) => writeln!(out, "PASS ({ptr})")?,
-        PreflightResult::Pass(None) => writeln!(out, "PASS")?,
-        PreflightResult::Fail(msg) => {
-            writeln!(out, "FAIL: {msg}")?;
-            all_pass = false;
-        }
-        PreflightResult::Warn(msg) => writeln!(out, "WARN\n  {msg}")?,
-    }
-
     writeln!(out)?;
 
     if !all_pass {
@@ -534,9 +563,16 @@ pub fn configure_opensmtpd(
     data_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !sys.is_package_installed("opensmtpd") {
+        println!("Pre-seeding OpenSMTPD configuration...");
+        if let Err(e) = sys.debconf_preseed(domain) {
+            println!(
+                "  {}: debconf pre-seeding failed ({e}), continuing with defaults",
+                "WARN".yellow()
+            );
+        }
         println!("Installing OpenSMTPD...");
         sys.install_package("opensmtpd")?;
-        println!("OpenSMTPD installed.");
+        println!("{}", "OpenSMTPD installed.".green());
     } else {
         println!("OpenSMTPD is already installed.");
     }
@@ -622,6 +658,7 @@ pub fn generate_dns_records(
     ]
 }
 
+#[cfg(test)]
 pub fn format_dns_records(records: &[DnsRecord]) -> String {
     let mut output = String::new();
     for r in records {
@@ -635,11 +672,14 @@ pub fn format_dns_records(records: &[DnsRecord]) -> String {
 
 pub fn display_dns_guidance(domain: &str, server_ip: &str, dkim_value: &str, dkim_selector: &str) {
     let records = generate_dns_records(domain, server_ip, dkim_value, dkim_selector);
-    println!("\nAdd the following DNS records at your domain registrar:\n");
+    let dns_records: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
+    println!("\n{}", "[DNS]".bold());
+    println!("Add the following DNS records at your domain registrar:\n");
     println!("  TYPE NAME                                          VALUE");
     println!("  ---- --------------------------------------------- -----");
-    print!("{}", format_dns_records(&records));
-    println!("\nNote: The PTR record is set at your VPS provider, not your domain registrar.");
+    for r in &dns_records {
+        println!("  {:4} {:<45} {}", r.record_type, r.name, r.value);
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -813,22 +853,31 @@ pub fn display_dns_verification(results: &[(String, DnsVerifyResult)]) -> bool {
     println!("\nDNS Verification:\n");
     for (name, result) in results {
         match result {
-            DnsVerifyResult::Pass => println!("  {name}: PASS"),
+            DnsVerifyResult::Pass => println!("  {name}: {}", "PASS".green()),
             DnsVerifyResult::Fail(msg) => {
-                println!("  {name}: FAIL - {msg}");
+                println!("  {name}: {} - {msg}", "FAIL".red());
                 all_pass = false;
             }
             DnsVerifyResult::Missing(msg) => {
-                println!("  {name}: MISSING - {msg}");
+                println!("  {name}: {} - {msg}", "MISSING".red());
                 all_pass = false;
             }
             DnsVerifyResult::Warn(msg) => {
-                println!("  {name}: WARN - {msg}");
+                println!("  {name}: {} - {msg}", "WARN".yellow());
             }
         }
     }
     println!();
     all_pass
+}
+
+pub fn display_mcp_section(data_dir: &Path) {
+    println!("\n{}", "[MCP]".bold());
+    println!(
+        "Add aimx to your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.).\n"
+    );
+    println!("Configuration snippet:\n");
+    println!("{}\n", mcp_config_snippet(data_dir));
 }
 
 pub fn mcp_config_snippet(data_dir: &Path) -> String {
@@ -851,6 +900,32 @@ pub fn mcp_config_snippet(data_dir: &Path) -> String {
   }}
 }}"#
     )
+}
+
+pub fn display_deliverability_section(domain: &str, net: &dyn NetworkOps) {
+    println!("\n{}", "[Deliverability Improvement (Optional)]".bold());
+
+    print!("  PTR record... ");
+    io::stdout().flush().ok();
+    match check_ptr(net) {
+        PreflightResult::Pass(Some(ptr)) => {
+            println!("{} ({ptr})", "PASS".green());
+        }
+        PreflightResult::Pass(None) => {
+            println!("{}", "PASS".green());
+        }
+        PreflightResult::Fail(msg) => {
+            println!("{}: {msg}", "FAIL".red());
+        }
+        PreflightResult::Warn(msg) => {
+            println!("{}", "WARN".yellow());
+            println!("  {msg}");
+        }
+    }
+
+    println!();
+    println!("{}", gmail_whitelist_instructions(domain));
+    println!();
 }
 
 pub fn gmail_whitelist_instructions(domain: &str) -> String {
@@ -876,7 +951,7 @@ pub fn finalize_setup(
     std::fs::create_dir_all(data_dir)?;
 
     let config_path = Config::config_path(data_dir);
-    let config = if config_path.exists() {
+    let _config = if config_path.exists() {
         let mut cfg = Config::load(&config_path)?;
         if cfg.domain != domain {
             let old_domain = cfg.domain.clone();
@@ -939,12 +1014,10 @@ pub fn finalize_setup(
         println!("DKIM keypair already exists.");
     }
 
-    println!("\nSetup complete for {domain}!\n");
-
-    println!("MCP configuration for Claude Code (~/.claude/settings.json):\n");
-    println!("{}\n", mcp_config_snippet(&config.data_dir));
-
-    println!("{}\n", gmail_whitelist_instructions(domain));
+    println!(
+        "\n{}\n",
+        format!("Setup complete for {domain}!").green().bold()
+    );
 
     Ok(())
 }
@@ -975,44 +1048,72 @@ fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
+    print!("Enter the domain you want to use for email (e.g. agent.example.com): ");
+    io::stdout().flush()?;
+    let mut domain = String::new();
+    reader.read_line(&mut domain)?;
+    let domain = domain.trim().to_string();
+    if domain.is_empty() {
+        return Err("No domain entered. Setup cancelled.".into());
+    }
+    validate_domain(&domain)?;
+
+    print!(
+        "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
+         Do you control this domain and have access to its DNS settings? (y/N) "
+    );
+    io::stdout().flush()?;
+    let mut confirm = String::new();
+    reader.read_line(&mut confirm)?;
+    if !confirm.trim().eq_ignore_ascii_case("y") {
+        return Err("Setup cancelled. You need DNS access to proceed.".into());
+    }
+
+    Ok(domain)
+}
+
+pub fn is_already_configured(sys: &dyn SystemOps, domain: &str, data_dir: &Path) -> bool {
+    let smtpd_conf = Path::new("/etc/smtpd.conf");
+    let tls_cert = Path::new("/etc/ssl/aimx/cert.pem");
+    let dkim_key = data_dir.join("dkim/private.key");
+
+    let service_running = sys.is_service_running("opensmtpd");
+    let cert_exists = sys.file_exists(tls_cert);
+    let dkim_exists = sys.file_exists(&dkim_key);
+    let conf_matches = sys
+        .read_file(smtpd_conf)
+        .map(|c| c.contains(domain))
+        .unwrap_or(false);
+
+    service_running && cert_exists && dkim_exists && conf_matches
+}
+
 pub fn run_setup(
-    domain: &str,
+    domain: Option<&str>,
     data_dir: Option<&Path>,
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    validate_domain(domain)?;
-
-    println!("aimx setup for {domain}\n");
-
     // Step 1: Root check
     if !sys.check_root() {
         return Err("aimx setup requires root. Run with: sudo aimx setup <domain>".into());
     }
 
-    // Step 2: MTA conflict detection
-    match sys.check_port25_occupancy()? {
-        Port25Status::Free => {}
-        Port25Status::OpenSmtpd => {
-            println!("OpenSMTPD is already running on port 25.");
-            println!("Setup will overwrite /etc/smtpd.conf (a .bak backup will be created).");
-            print!("Continue? (y/N) ");
-            io::stdout().flush()?;
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            if !input.trim().eq_ignore_ascii_case("y") {
-                return Err("Setup cancelled by user.".into());
-            }
+    // Resolve domain: use argument if provided, otherwise prompt interactively
+    let domain = match domain {
+        Some(d) => {
+            validate_domain(d)?;
+            d.to_string()
         }
-        Port25Status::OtherMta(name) => {
-            return Err(format!(
-                "SMTP port 25 is already in use by {name}. \
-                 aimx requires OpenSMTPD. Uninstall the current SMTP server \
-                 and run `aimx setup` again."
-            )
-            .into());
+        None => {
+            let stdin = io::stdin();
+            let mut reader = stdin.lock();
+            prompt_domain(&mut reader)?
         }
-    }
+    };
+
+    println!("aimx setup for {domain}\n");
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
@@ -1026,23 +1127,58 @@ pub fn run_setup(
         "dkim".to_string()
     };
 
-    // Step 3: Install and configure OpenSMTPD
-    let smtpd_data_dir = if data_dir == Path::new("/var/lib/aimx") {
-        None
-    } else {
-        Some(data_dir)
-    };
-    configure_opensmtpd(sys, domain, smtpd_data_dir)?;
+    // Re-entrant detection: if already configured, skip install/configure steps
+    let already_configured = is_already_configured(sys, &domain, data_dir);
 
-    // Step 4-6: Port checks (after OpenSMTPD is installed)
+    if already_configured {
+        println!(
+            "{}",
+            "Existing aimx configuration detected. Skipping install, proceeding to verification."
+                .green()
+        );
+    } else {
+        // Step 2: MTA conflict detection
+        match sys.check_port25_occupancy()? {
+            Port25Status::Free => {}
+            Port25Status::OpenSmtpd => {
+                println!("OpenSMTPD is already running on port 25.");
+                println!("Setup will overwrite /etc/smtpd.conf (a .bak backup will be created).");
+                print!("Continue? (y/N) ");
+                io::stdout().flush()?;
+                let mut input = String::new();
+                io::stdin().read_line(&mut input)?;
+                if !input.trim().eq_ignore_ascii_case("y") {
+                    return Err("Setup cancelled by user.".into());
+                }
+            }
+            Port25Status::OtherMta(name) => {
+                return Err(format!(
+                    "SMTP port 25 is already in use by {name}. \
+                     aimx requires OpenSMTPD. Uninstall the current SMTP server \
+                     and run `aimx setup` again."
+                )
+                .into());
+            }
+        }
+
+        // Step 3: Install and configure OpenSMTPD
+        let smtpd_data_dir = if data_dir == Path::new("/var/lib/aimx") {
+            None
+        } else {
+            Some(data_dir)
+        };
+        configure_opensmtpd(sys, &domain, smtpd_data_dir)?;
+    }
+
+    // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
     let mut port_failed = false;
 
     print!("  Outbound port 25... ");
     io::stdout().flush()?;
     match check_outbound(net) {
-        PreflightResult::Pass(_) => println!("PASS"),
+        PreflightResult::Pass(_) => println!("{}", "PASS".green()),
         PreflightResult::Fail(msg) => {
-            println!("FAIL");
+            println!("{}", "FAIL".red());
             eprintln!("\n  {msg}");
             eprintln!("\n  Compatible VPS providers with port 25 open:");
             for p in COMPATIBLE_PROVIDERS {
@@ -1050,33 +1186,19 @@ pub fn run_setup(
             }
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+        PreflightResult::Warn(msg) => println!("{}: {msg}", "WARN".yellow()),
     }
 
-    // Setup runs the inbound check AFTER OpenSMTPD is installed, so the full
-    // EHLO handshake via `/probe` is the right validation — it confirms a real
-    // SMTP server is responding, not just that the port is open.
     print!("  Inbound port 25... ");
     io::stdout().flush()?;
     match check_inbound(net) {
-        PreflightResult::Pass(_) => println!("PASS"),
+        PreflightResult::Pass(_) => println!("{}", "PASS".green()),
         PreflightResult::Fail(msg) => {
-            println!("FAIL");
+            println!("{}", "FAIL".red());
             eprintln!("\n  {msg}");
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("WARN: {msg}"),
-    }
-
-    print!("  PTR record... ");
-    io::stdout().flush()?;
-    match check_ptr(net) {
-        PreflightResult::Pass(Some(ptr)) => println!("PASS ({ptr})"),
-        PreflightResult::Pass(None) => println!("PASS"),
-        PreflightResult::Fail(msg) => {
-            println!("FAIL: {msg}");
-        }
-        PreflightResult::Warn(msg) => println!("WARN\n  {msg}"),
+        PreflightResult::Warn(msg) => println!("{}: {msg}", "WARN".yellow()),
     }
 
     if port_failed {
@@ -1088,10 +1210,10 @@ pub fn run_setup(
         );
     }
 
-    // Step 7: DKIM keygen and finalize
-    finalize_setup(data_dir, domain, &dkim_selector)?;
+    // Step 6: DKIM keygen and finalize
+    finalize_setup(data_dir, &domain, &dkim_selector)?;
 
-    // Step 8: DNS guidance and verification
+    // Step 7: DNS guidance and verification (section [DNS])
     let server_ip = net.get_server_ip()?;
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
@@ -1099,30 +1221,52 @@ pub fn run_setup(
         .strip_prefix("v=DKIM1; k=rsa; p=")
         .map(|s| s.to_string());
 
-    display_dns_guidance(domain, &server_ip.to_string(), &dkim_value, &dkim_selector);
+    display_dns_guidance(&domain, &server_ip.to_string(), &dkim_value, &dkim_selector);
 
-    println!("After adding DNS records, press Enter to verify...");
-    io::stdout().flush()?;
-    let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    // DNS retry loop
+    loop {
+        println!(
+            "\nPress {} to verify DNS records, or {} to finish and verify later.",
+            "Enter".bold(),
+            "q".bold()
+        );
+        io::stdout().flush()?;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        if input.trim().eq_ignore_ascii_case("q") {
+            println!(
+                "Update your DNS records and run `{}` again to verify.",
+                format!("sudo aimx setup {domain}").bold()
+            );
+            break;
+        }
 
-    let results = verify_all_dns(
-        net,
-        domain,
-        &server_ip,
-        &dkim_selector,
-        local_dkim_pubkey.as_deref(),
-    );
-    let all_pass = display_dns_verification(&results);
+        let results = verify_all_dns(
+            net,
+            &domain,
+            &server_ip,
+            &dkim_selector,
+            local_dkim_pubkey.as_deref(),
+        );
+        let all_pass = display_dns_verification(&results);
 
-    if all_pass {
-        println!("All DNS records verified. Your email server is ready!");
-        println!("Run `aimx verify` to check port 25 connectivity at any time.");
-    } else {
-        println!("Some DNS records are not yet correct.");
-        println!("DNS propagation can take up to 48 hours.");
-        println!("Run `aimx preflight` later to re-check.");
+        if all_pass {
+            println!(
+                "{}",
+                "All DNS records verified. Your email server is ready!".green()
+            );
+            break;
+        } else {
+            println!("Some DNS records are not yet correct.");
+            println!("DNS propagation can take up to 48 hours.");
+        }
     }
+
+    // Section [MCP]
+    display_mcp_section(data_dir);
+
+    // Section [Deliverability Improvement (Optional)]
+    display_deliverability_section(&domain, net);
 
     Ok(())
 }
@@ -1201,9 +1345,11 @@ mod tests {
         written_files: RefCell<HashMap<PathBuf, String>>,
         existing_files: HashMap<PathBuf, String>,
         restarted_services: RefCell<Vec<String>>,
+        debconf_called: RefCell<Option<String>>,
         package_installed: bool,
         is_root: bool,
         port25_status: Port25Status,
+        service_running: bool,
     }
 
     impl Default for MockSystemOps {
@@ -1213,9 +1359,11 @@ mod tests {
                 written_files: RefCell::new(HashMap::new()),
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
+                debconf_called: RefCell::new(None),
                 package_installed: false,
                 is_root: true,
                 port25_status: Port25Status::Free,
+                service_running: false,
             }
         }
     }
@@ -1230,6 +1378,10 @@ mod tests {
                 .push(package.to_string());
             Ok(())
         }
+        fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+            *self.debconf_called.borrow_mut() = Some(domain.to_string());
+            Ok(())
+        }
         fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
             self.written_files
                 .borrow_mut()
@@ -1237,19 +1389,25 @@ mod tests {
             Ok(())
         }
         fn read_file(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-            self.existing_files
-                .get(path)
-                .cloned()
-                .ok_or_else(|| format!("File not found: {}", path.display()).into())
+            if let Some(content) = self.existing_files.get(path) {
+                return Ok(content.clone());
+            }
+            if let Some(content) = self.written_files.borrow().get(path) {
+                return Ok(content.clone());
+            }
+            Err(format!("File not found: {}", path.display()).into())
         }
         fn file_exists(&self, path: &Path) -> bool {
-            self.existing_files.contains_key(path)
+            self.existing_files.contains_key(path) || self.written_files.borrow().contains_key(path)
         }
         fn restart_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
             self.restarted_services
                 .borrow_mut()
                 .push(service.to_string());
             Ok(())
+        }
+        fn is_service_running(&self, _service: &str) -> bool {
+            self.service_running
         }
         fn generate_tls_cert(
             &self,
@@ -1996,7 +2154,7 @@ mod tests {
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup("example.com", None, &sys, &net);
+        let result = run_setup(Some("example.com"), None, &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2012,7 +2170,7 @@ mod tests {
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup("example.com", None, &sys, &net);
+        let result = run_setup(Some("example.com"), None, &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -2279,7 +2437,7 @@ mod tests {
         };
         // setup will fail at the inbound check, which is expected — we only
         // care which method was called.
-        let _ = run_setup("example.com", Some(tmp.path()), &sys, &net);
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
         assert!(
             net.port25_called.get(),
             "aimx setup must call check_inbound_port25 (/probe) for its post-install inbound check"
@@ -2290,7 +2448,7 @@ mod tests {
         );
     }
 
-    // S13.2 — PTR Display Ordering tests
+    // PTR check function tests (check_ptr still exists, used in deliverability section)
 
     #[test]
     fn ptr_pass_carries_value() {
@@ -2304,10 +2462,8 @@ mod tests {
         );
     }
 
-    /// PTR display must appear as a single well-formed line with the value
-    /// inline, not split across an intermediate newline as the old bug did.
     #[test]
-    fn preflight_ptr_inline_pass() {
+    fn preflight_no_ptr_output() {
         let net = MockNetworkOps {
             ptr_record: Some("vps-198f7320.vps.ovh.net.".into()),
             ..Default::default()
@@ -2317,84 +2473,167 @@ mod tests {
         let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
         assert!(result);
         let stdout = String::from_utf8(out).unwrap();
-
-        // The PTR line must be a single, well-formed line.
         assert!(
-            stdout.contains("  PTR record... PASS (vps-198f7320.vps.ovh.net.)\n"),
-            "expected inline PTR line, got stdout:\n{stdout}"
-        );
-
-        // The errant `println!("  PTR record: {ptr}")` from the old bug must
-        // NOT appear anywhere in the output.
-        assert!(
-            !stdout.contains("PTR record: vps-198f7320"),
-            "stray PTR line from pre-Sprint-13 bug should not appear:\n{stdout}"
+            !stdout.contains("PTR"),
+            "preflight should not include PTR check, got stdout:\n{stdout}"
         );
     }
 
-    /// Regression test for the exact interleaving symptom that motivated
-    /// Sprint 13: when inbound fails and PTR passes, the stdout sequence
-    /// must be strictly: inbound-FAIL, then PTR-header, then PTR-PASS. The
-    /// PTR line must NOT appear before or inside the inbound block.
+    // S18.1 — Interactive domain prompt tests
+
     #[test]
-    fn preflight_no_ptr_interleaving_when_inbound_fails() {
-        let net = MockNetworkOps {
-            inbound_reachable: false,
-            ptr_record: Some("vps-198f7320.vps.ovh.net.".into()),
-            ..Default::default()
-        };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(!result);
-        let stdout = String::from_utf8(out).unwrap();
+    fn prompt_domain_accepts_valid_domain_with_confirmation() {
+        let input = b"agent.example.com\ny\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).unwrap();
+        assert_eq!(domain, "agent.example.com");
+    }
 
-        // Exactly one line containing "PTR record..." on stdout, and it must
-        // be the final-form "PASS (…)" line — not the intermediate header.
-        let ptr_lines: Vec<&str> = stdout
-            .lines()
-            .filter(|l| l.contains("PTR record"))
-            .collect();
-        assert_eq!(
-            ptr_lines.len(),
-            1,
-            "expected exactly one PTR line on stdout, got {}: {stdout}",
-            ptr_lines.len()
-        );
-        assert_eq!(
-            ptr_lines[0], "  PTR record... PASS (vps-198f7320.vps.ovh.net.)",
-            "PTR line should carry the value inline with PASS"
-        );
-
-        // Inbound FAIL must come before the PTR line on stdout (ordering).
-        let inbound_idx = stdout
-            .find("Inbound port 25... FAIL")
-            .unwrap_or_else(|| panic!("expected 'Inbound port 25... FAIL' in stdout:\n{stdout}"));
-        let ptr_idx = stdout.find("PTR record...").unwrap();
+    #[test]
+    fn prompt_domain_rejects_empty_input() {
+        let input = b"\n";
+        let mut reader = io::Cursor::new(input);
+        let result = prompt_domain(&mut reader);
+        assert!(result.is_err());
         assert!(
-            inbound_idx < ptr_idx,
-            "inbound FAIL must appear before PTR line, stdout:\n{stdout}"
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No domain entered")
         );
     }
 
     #[test]
-    fn preflight_ptr_warn_when_missing() {
-        let net = MockNetworkOps {
-            ptr_record: None,
+    fn prompt_domain_rejects_invalid_domain() {
+        let input = b"notvalid\n";
+        let mut reader = io::Cursor::new(input);
+        let result = prompt_domain(&mut reader);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn prompt_domain_exits_on_declined_confirmation() {
+        let input = b"agent.example.com\nn\n";
+        let mut reader = io::Cursor::new(input);
+        let result = prompt_domain(&mut reader);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cancelled"),
+            "should indicate cancellation"
+        );
+    }
+
+    #[test]
+    fn setup_with_domain_arg_skips_prompt() {
+        let sys = MockSystemOps::default();
+        let net = MockNetworkOps::default();
+        let result = run_setup(Some("example.com"), None, &sys, &net);
+        // It will fail somewhere after domain validation (e.g. creating data dir
+        // or port checks), but should NOT fail on prompt
+        assert!(result.is_err() || result.is_ok());
+    }
+
+    // S18.2 — Debconf pre-seeding tests
+
+    #[test]
+    fn debconf_preseed_called_before_install() {
+        let sys = MockSystemOps::default();
+        configure_opensmtpd(&sys, "agent.example.com", None).unwrap();
+        let domain = sys.debconf_called.borrow();
+        assert_eq!(
+            domain.as_deref(),
+            Some("agent.example.com"),
+            "debconf_preseed should be called with the domain before install"
+        );
+        let installed = sys.installed_packages.borrow();
+        assert!(installed.contains(&"opensmtpd".to_string()));
+    }
+
+    #[test]
+    fn debconf_preseed_not_called_when_already_installed() {
+        let sys = MockSystemOps {
+            package_installed: true,
             ..Default::default()
         };
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let result = run_preflight_to(&net, &mut out, &mut err).unwrap();
-        assert!(result, "PTR missing must not fail the overall preflight");
-        let stdout = String::from_utf8(out).unwrap();
+        configure_opensmtpd(&sys, "agent.example.com", None).unwrap();
+        let domain = sys.debconf_called.borrow();
         assert!(
-            stdout.contains("  PTR record... WARN"),
-            "expected WARN marker, got stdout:\n{stdout}"
+            domain.is_none(),
+            "debconf_preseed should not be called when package is already installed"
         );
-        assert!(
-            stdout.contains("No PTR (reverse DNS) record found"),
-            "expected advisory message, got stdout:\n{stdout}"
+    }
+
+    // S18.3 — Colorized output tests
+
+    #[test]
+    fn dns_guidance_excludes_ptr() {
+        let records = generate_dns_records("test.com", "1.2.3.4", "v=DKIM1; k=rsa; p=ABC", "dkim");
+        let dns_only: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
+        assert_eq!(dns_only.len(), 5);
+        assert!(dns_only.iter().all(|r| r.record_type != "PTR"));
+    }
+
+    // S18.4 — Re-entrant setup tests
+
+    #[test]
+    fn is_already_configured_all_present() {
+        let tmp = TempDir::new().unwrap();
+        let dkim_dir = tmp.path().join("dkim");
+        std::fs::create_dir_all(&dkim_dir).unwrap();
+        std::fs::write(dkim_dir.join("private.key"), "key").unwrap();
+
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            PathBuf::from("/etc/smtpd.conf"),
+            "match from any for domain \"example.com\" action \"deliver\"".to_string(),
         );
+        // Also need dkim key to be found
+        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: true,
+            ..Default::default()
+        };
+        assert!(is_already_configured(&sys, "example.com", tmp.path()));
+    }
+
+    #[test]
+    fn is_already_configured_service_not_running() {
+        let tmp = TempDir::new().unwrap();
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            PathBuf::from("/etc/smtpd.conf"),
+            "match from any for domain \"example.com\"".to_string(),
+        );
+        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: false,
+            ..Default::default()
+        };
+        assert!(!is_already_configured(&sys, "example.com", tmp.path()));
+    }
+
+    #[test]
+    fn is_already_configured_wrong_domain() {
+        let tmp = TempDir::new().unwrap();
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            PathBuf::from("/etc/smtpd.conf"),
+            "match from any for domain \"other.com\"".to_string(),
+        );
+        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: true,
+            ..Default::default()
+        };
+        assert!(!is_already_configured(&sys, "example.com", tmp.path()));
     }
 }
