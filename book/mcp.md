@@ -129,7 +129,7 @@ Compose and send an email with DKIM signing.
 | `body` | string | yes | Email body text |
 | `attachments` | array of strings | no | File paths to attach |
 
-The email is composed as RFC 5322, DKIM-signed, and handed to OpenSMTPD for delivery.
+The email is composed as RFC 5322, DKIM-signed, and delivered directly to the recipient's MX server via SMTP.
 
 ---
 

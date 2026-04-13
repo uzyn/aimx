@@ -167,7 +167,7 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 1. aimx composes an RFC 5322 compliant message
 2. Signs the message with DKIM (RSA-SHA256) using your domain's private key
-3. Hands the signed message to OpenSMTPD via `sendmail -t` for delivery
+3. Delivers the signed message directly to the recipient's MX server via SMTP
 
 ### Reply threading
 
