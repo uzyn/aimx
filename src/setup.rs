@@ -52,12 +52,19 @@ pub struct RealSystemOps;
 
 impl SystemOps for RealSystemOps {
     fn is_package_installed(&self, package: &str) -> bool {
-        std::process::Command::new("dpkg")
+        let output = std::process::Command::new("dpkg")
             .args(["-s", package])
-            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+            .output();
+        match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout
+                    .lines()
+                    .any(|line| line == "Status: install ok installed")
+            }
+            _ => false,
+        }
     }
 
     fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>> {
