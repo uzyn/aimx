@@ -50,14 +50,7 @@ pub enum Command {
     /// Show server status, mailbox counts, and configuration
     Status,
 
-    /// Run preflight checks (port 25) without installing anything
-    Preflight {
-        /// Override the verify service host (e.g. https://verify.example.com)
-        #[arg(long)]
-        verify_host: Option<String>,
-    },
-
-    /// Check port 25 connectivity (outbound, inbound EHLO, PTR)
+    /// Check port 25 connectivity (outbound, inbound, PTR)
     Verify {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]

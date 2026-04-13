@@ -30,7 +30,7 @@ The `--data-dir` flag takes precedence over the environment variable.
 | `domain` | string | *(required)* | The email domain (e.g. `agent.yourdomain.com`) |
 | `data_dir` | string | `/var/lib/aimx` | Directory for storing config, keys, and mailboxes |
 | `dkim_selector` | string | `dkim` | DKIM selector name used in DNS records |
-| `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx verify`, `setup`, and `preflight`. Can be overridden per-invocation with the `--verify-host` flag. |
+| `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx verify` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 
 ### Mailbox settings
 
