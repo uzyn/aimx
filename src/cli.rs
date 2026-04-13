@@ -21,7 +21,7 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Ingest an email from stdin (called by OpenSMTPD MDA)
+    /// Ingest an email from stdin (called by aimx serve or via stdin)
     Ingest {
         /// Recipient address (e.g. user@domain.com)
         rcpt: String,

@@ -97,7 +97,6 @@ fn can_read_tls(cert: &std::path::Path, key: &std::path::Path) -> bool {
     std::fs::metadata(cert).is_ok_and(|m| m.is_file()) && std::fs::File::open(key).is_ok()
 }
 
-#[allow(dead_code)]
 pub mod service {
     pub fn generate_systemd_unit(aimx_path: &str, data_dir: &str) -> String {
         format!(
