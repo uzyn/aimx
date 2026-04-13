@@ -126,14 +126,27 @@ If permissions are wrong:
 sudo chmod 600 /var/lib/aimx/dkim/private.key
 ```
 
+## Preflight vs Verify
+
+Both commands check port 25 connectivity, but they serve different purposes:
+
+| Command | When to use | What it checks |
+|---------|-------------|----------------|
+| `sudo aimx preflight` | **Before setup** on a fresh VPS | Plain TCP reachability via `/reach` -- does not require a running mail server. Requires root to bind port 25. |
+| `aimx verify` | **After setup** with a running mail server | Full SMTP EHLO handshake via `/probe` -- confirms OpenSMTPD responds correctly. Does not require root. |
+
+If `aimx verify` fails but `aimx preflight` passed earlier, the issue is likely in your OpenSMTPD configuration rather than firewall/port access.
+
 ## Useful commands reference
 
 | Command | Purpose |
 |---------|---------|
-| `sudo aimx preflight` | Check port 25 connectivity |
+| `sudo aimx preflight` | Check port 25 connectivity (pre-setup) |
 | `aimx status` | Show config, mailboxes, and message counts |
-| `aimx verify` | Full connectivity verification |
+| `aimx verify` | Full connectivity verification (post-setup) |
 | `aimx mailbox list` | List all mailboxes |
+| `aimx dkim-keygen` | Generate DKIM keypair |
+| `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |
 | `aimx --data-dir /path status` | Use a custom data directory |
 | `sudo systemctl status opensmtpd` | Check OpenSMTPD service |
 | `journalctl -u opensmtpd -e` | View OpenSMTPD logs |
