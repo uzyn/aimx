@@ -403,7 +403,7 @@ impl NetworkOps for RealNetworkOps {
         let records: Vec<String> = stdout
             .lines()
             .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().trim_matches('"').to_string())
+            .map(|l| l.trim().replace("\" \"", "").trim_matches('"').to_string())
             .collect();
         Ok(records)
     }
@@ -1866,6 +1866,23 @@ mod tests {
             }
             other => panic!("Expected Fail, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn verify_dkim_pass_with_long_key() {
+        // Simulate a realistic 2048-bit DKIM key that would be split across
+        // multiple TXT record strings by DNS. After resolve_txt concatenation,
+        // the mock provides the joined value.
+        let long_key = "MIIBCgKCAQEA011La5tkO7DUxlLEduWsIbrPcK0NAS9SpcW9rftGU2Kx6F0YSPy/54QjZ13AZk6eGM0zJgF3JF9ibX/GiRDVefqCJPhi7lj1kq6xErWxO0ZR7/YslRcoSoAHR/PnO8chRr1DVHEY+5e0cY54z5SLR+lq/xn69zuiHq5AZBpevcfn/ESA3KujF3rXjDT4DM+ydqu92bdLB4MpLMezVoOjNq75RsSQW/ItokH37V4g6OtrV41yYEGvhAawG24j2Kj6RT96cXdOrvRqUb1/IH/a81Is0WH/PoXSLpwarF0Ie1u/+RfUWLj57osAuIsScbzVmzo5Pil+GgAU45UXj91pDwIDAQAB";
+        let mut net = MockNetworkOps::default();
+        net.txt_records.insert(
+            "dkim._domainkey.example.com".into(),
+            vec![format!("v=DKIM1; k=rsa; p={long_key}")],
+        );
+        assert_eq!(
+            verify_dkim(&net, "example.com", "dkim", Some(long_key)),
+            DnsVerifyResult::Pass,
+        );
     }
 
     #[test]
