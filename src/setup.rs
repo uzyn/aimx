@@ -1,6 +1,5 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
-use chrono::Utc;
 use colored::Colorize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -10,16 +9,12 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, PartialEq)]
 pub enum Port25Status {
     Free,
-    OpenSmtpd,
-    OtherMta(String),
+    Aimx,
+    OtherProcess(String),
 }
 
 pub trait SystemOps {
-    fn is_package_installed(&self, package: &str) -> bool;
-    fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>>;
-    fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>>;
-    fn read_file(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>>;
     fn file_exists(&self, path: &Path) -> bool;
     fn restart_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn is_service_running(&self, service: &str) -> bool;
@@ -31,6 +26,7 @@ pub trait SystemOps {
     fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>>;
     fn check_root(&self) -> bool;
     fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
+    fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 pub trait NetworkOps {
@@ -38,9 +34,6 @@ pub trait NetworkOps {
     /// Full SMTP EHLO handshake via `{verify_host}/probe`.
     /// Used by `aimx setup` (post-install) and `aimx verify`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
-    /// Plain-TCP reachability check via `{verify_host}/reach`.
-    /// Used by `aimx verify` on a fresh VPS before OpenSMTPD is installed.
-    fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>>;
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>>;
     fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>>;
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
@@ -51,79 +44,12 @@ pub trait NetworkOps {
 pub struct RealSystemOps;
 
 impl SystemOps for RealSystemOps {
-    fn is_package_installed(&self, package: &str) -> bool {
-        let output = std::process::Command::new("dpkg")
-            .args(["-s", package])
-            .stderr(std::process::Stdio::null())
-            .output();
-        match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                stdout
-                    .lines()
-                    .any(|line| line == "Status: install ok installed")
-            }
-            _ => false,
-        }
-    }
-
-    fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let status = std::process::Command::new("sudo")
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .args([
-                "apt-get",
-                "install",
-                "-y",
-                "--no-install-recommends",
-                package,
-            ])
-            .status()?;
-        if !status.success() {
-            return Err(format!("Failed to install {package}").into());
-        }
-        Ok(())
-    }
-
-    fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let selections = format!(
-            "opensmtpd opensmtpd/mailname string {domain}\n\
-             opensmtpd opensmtpd/root_address string\n"
-        );
-        let mut child = std::process::Command::new("debconf-set-selections")
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-
-        match &mut child {
-            Ok(proc) => {
-                if let Some(stdin) = proc.stdin.as_mut() {
-                    use std::io::Write;
-                    let _ = stdin.write_all(selections.as_bytes());
-                }
-                let status = proc.wait()?;
-                if !status.success() {
-                    return Err("debconf-set-selections failed".into());
-                }
-                Ok(())
-            }
-            Err(_) => {
-                // debconf-set-selections not available, fall back silently
-                Ok(())
-            }
-        }
-    }
-
     fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         std::fs::write(path, content)?;
         Ok(())
-    }
-
-    fn read_file(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-        Ok(std::fs::read_to_string(path)?)
     }
 
     fn file_exists(&self, path: &Path) -> bool {
@@ -197,11 +123,55 @@ impl SystemOps for RealSystemOps {
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_port25_status(&stdout)
     }
+
+    fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::serve::service::{
+            InitSystem, detect_init_system, generate_openrc_script, generate_systemd_unit,
+        };
+
+        let aimx_path = self
+            .get_aimx_binary_path()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/usr/local/bin/aimx".to_string());
+        let data_dir_str = data_dir.to_string_lossy().to_string();
+
+        match detect_init_system() {
+            InitSystem::Systemd => {
+                let unit = generate_systemd_unit(&aimx_path, &data_dir_str);
+                let unit_path = Path::new("/etc/systemd/system/aimx.service");
+                self.write_file(unit_path, &unit)?;
+                let _ = std::process::Command::new("systemctl")
+                    .args(["daemon-reload"])
+                    .status();
+                let _ = std::process::Command::new("systemctl")
+                    .args(["enable", "aimx"])
+                    .status();
+                self.restart_service("aimx")?;
+            }
+            InitSystem::OpenRC => {
+                let script = generate_openrc_script(&aimx_path, &data_dir_str);
+                let script_path = Path::new("/etc/init.d/aimx");
+                self.write_file(script_path, &script)?;
+                let _ = std::process::Command::new("chmod")
+                    .args(["+x", "/etc/init.d/aimx"])
+                    .status();
+                let _ = std::process::Command::new("rc-update")
+                    .args(["add", "aimx", "default"])
+                    .status();
+                self.restart_service("aimx")?;
+            }
+            InitSystem::Unknown => {
+                return Err("Could not detect init system (systemd or OpenRC). \
+                     Start aimx serve manually."
+                    .into());
+            }
+        }
+        Ok(())
+    }
 }
 
 pub fn parse_port25_status(ss_output: &str) -> Result<Port25Status, Box<dyn std::error::Error>> {
     let lines: Vec<&str> = ss_output.lines().collect();
-    // First line is header, skip it. If only header or empty, port is free.
     let data_lines: Vec<&str> = lines
         .iter()
         .skip(1)
@@ -213,25 +183,22 @@ pub fn parse_port25_status(ss_output: &str) -> Result<Port25Status, Box<dyn std:
         return Ok(Port25Status::Free);
     }
 
-    // Look for process info in the ss output (the "users:" column)
-    let combined = data_lines.join("\n");
-    if combined.contains("smtpd") {
-        return Ok(Port25Status::OpenSmtpd);
-    }
-
     // Try to extract process name from users:(("name",...)) pattern
     for line in &data_lines {
         if let Some(start) = line.find("users:((\"") {
             let rest = &line[start + 9..];
             if let Some(end) = rest.find('"') {
                 let process_name = &rest[..end];
-                return Ok(Port25Status::OtherMta(process_name.to_string()));
+                if process_name == "aimx" {
+                    return Ok(Port25Status::Aimx);
+                }
+                return Ok(Port25Status::OtherProcess(process_name.to_string()));
             }
         }
     }
 
     // Something is on port 25 but we can't identify it
-    Ok(Port25Status::OtherMta("unknown".to_string()))
+    Ok(Port25Status::OtherProcess("unknown".to_string()))
 }
 
 pub const DEFAULT_VERIFY_HOST: &str = "https://check.aimx.email";
@@ -343,10 +310,6 @@ impl NetworkOps for RealNetworkOps {
         self.curl_reachable("/probe")
     }
 
-    fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        self.curl_reachable("/reach")
-    }
-
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
         let ip = self.get_server_ip()?;
         let output = std::process::Command::new("dig")
@@ -446,17 +409,9 @@ fn inbound_result(res: Result<bool, Box<dyn std::error::Error>>) -> PreflightRes
     }
 }
 
-/// Full SMTP EHLO handshake via `/probe`. Used by `aimx setup` (post-install)
-/// and `aimx verify` — both run after OpenSMTPD is listening on port 25.
+/// Full SMTP EHLO handshake via `/probe`.
 pub fn check_inbound(net: &dyn NetworkOps) -> PreflightResult {
     inbound_result(net.check_inbound_port25())
-}
-
-/// Plain-TCP reachability check via `/reach`. Used by `aimx verify` on a
-/// fresh VPS before OpenSMTPD is installed — any listening socket (or the
-/// verify service's TCP connect succeeding) satisfies this check.
-pub fn check_inbound_tcp(net: &dyn NetworkOps) -> PreflightResult {
-    inbound_result(net.check_inbound_reachable())
 }
 
 pub fn check_ptr(net: &dyn NetworkOps) -> PreflightResult {
@@ -469,87 +424,6 @@ pub fn check_ptr(net: &dyn NetworkOps) -> PreflightResult {
         ),
         Err(e) => PreflightResult::Warn(format!("PTR record check failed: {e}")),
     }
-}
-
-pub fn generate_smtpd_conf(domain: &str, aimx_binary: &str, data_dir: Option<&Path>) -> String {
-    let data_dir_flag = match data_dir {
-        Some(dir) if dir != Path::new("/var/lib/aimx") => {
-            format!(" --data-dir {}", dir.display())
-        }
-        _ => String::new(),
-    };
-
-    format!(
-        r#"# Generated by aimx setup for {domain}
-# Backed up original config before overwriting
-
-pki {domain} cert "/etc/ssl/aimx/cert.pem"
-pki {domain} key "/etc/ssl/aimx/key.pem"
-
-listen on 0.0.0.0 tls pki {domain}
-listen on :: tls pki {domain}
-
-action "deliver" mda "{aimx_binary} ingest{data_dir_flag} %{{rcpt}}"
-action "relay" relay
-
-match from any for domain "{domain}" action "deliver"
-match for any action "relay"
-"#
-    )
-}
-
-pub fn configure_opensmtpd(
-    sys: &dyn SystemOps,
-    domain: &str,
-    data_dir: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !sys.is_package_installed("opensmtpd") {
-        println!("Pre-seeding OpenSMTPD configuration...");
-        if let Err(e) = sys.debconf_preseed(domain) {
-            println!(
-                "  {}: debconf pre-seeding failed ({e}), continuing with defaults",
-                "WARN".yellow()
-            );
-        }
-        println!("Installing OpenSMTPD...");
-        sys.install_package("opensmtpd")?;
-        println!("{}", "OpenSMTPD installed.".green());
-    } else {
-        println!("OpenSMTPD is already installed.");
-    }
-
-    let cert_dir = Path::new("/etc/ssl/aimx");
-    if !sys.file_exists(&cert_dir.join("cert.pem")) {
-        println!("Generating self-signed TLS certificate...");
-        sys.generate_tls_cert(cert_dir, domain)?;
-        println!("TLS certificate generated in /etc/ssl/aimx/");
-    } else {
-        println!("TLS certificate already exists.");
-    }
-
-    let smtpd_conf = Path::new("/etc/smtpd.conf");
-    if sys.file_exists(smtpd_conf) {
-        let timestamp = Utc::now().format("%Y%m%d%H%M%S");
-        let backup = PathBuf::from(format!("/etc/smtpd.conf.bak.{timestamp}"));
-        let existing = sys.read_file(smtpd_conf)?;
-        sys.write_file(&backup, &existing)?;
-        println!("Backed up existing smtpd.conf to {}", backup.display());
-    }
-
-    let aimx_binary = sys
-        .get_aimx_binary_path()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| "/usr/local/bin/aimx".to_string());
-
-    let conf = generate_smtpd_conf(domain, &aimx_binary, data_dir);
-    sys.write_file(smtpd_conf, &conf)?;
-    println!("Wrote smtpd.conf for {domain}");
-
-    println!("Restarting OpenSMTPD...");
-    sys.restart_service("opensmtpd")?;
-    println!("OpenSMTPD restarted.");
-
-    Ok(())
 }
 
 #[derive(Debug)]
@@ -1052,20 +926,15 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
     Ok(domain)
 }
 
-pub fn is_already_configured(sys: &dyn SystemOps, domain: &str, data_dir: &Path) -> bool {
-    let smtpd_conf = Path::new("/etc/smtpd.conf");
+pub fn is_already_configured(sys: &dyn SystemOps, _domain: &str, data_dir: &Path) -> bool {
     let tls_cert = Path::new("/etc/ssl/aimx/cert.pem");
     let dkim_key = data_dir.join("dkim/private.key");
 
-    let service_running = sys.is_service_running("opensmtpd");
+    let service_running = sys.is_service_running("aimx");
     let cert_exists = sys.file_exists(tls_cert);
     let dkim_exists = sys.file_exists(&dkim_key);
-    let conf_matches = sys
-        .read_file(smtpd_conf)
-        .map(|c| c.contains(domain))
-        .unwrap_or(false);
 
-    service_running && cert_exists && dkim_exists && conf_matches
+    service_running && cert_exists && dkim_exists
 }
 
 pub fn run_setup(
@@ -1116,37 +985,34 @@ pub fn run_setup(
                 .green()
         );
     } else {
-        // Step 2: MTA conflict detection
+        // Step 2: Port 25 conflict detection
         match sys.check_port25_occupancy()? {
             Port25Status::Free => {}
-            Port25Status::OpenSmtpd => {
-                println!("OpenSMTPD is already running on port 25.");
-                println!("Setup will overwrite /etc/smtpd.conf (a .bak backup will be created).");
-                print!("Continue? (y/N) ");
-                io::stdout().flush()?;
-                let mut input = String::new();
-                io::stdin().read_line(&mut input)?;
-                if !input.trim().eq_ignore_ascii_case("y") {
-                    return Err("Setup cancelled by user.".into());
-                }
+            Port25Status::Aimx => {
+                println!("aimx is already running on port 25. Proceeding with setup.");
             }
-            Port25Status::OtherMta(name) => {
+            Port25Status::OtherProcess(name) => {
                 return Err(format!(
-                    "SMTP port 25 is already in use by {name}. \
-                     aimx requires OpenSMTPD. Uninstall the current SMTP server \
-                     and run `aimx setup` again."
+                    "Port 25 is occupied by {name}. \
+                     Stop the process and run `aimx setup` again."
                 )
                 .into());
             }
         }
 
-        // Step 3: Install and configure OpenSMTPD
-        let smtpd_data_dir = if data_dir == Path::new("/var/lib/aimx") {
-            None
+        // Step 3: Generate TLS cert and install service file
+        let cert_dir = Path::new("/etc/ssl/aimx");
+        if !sys.file_exists(&cert_dir.join("cert.pem")) {
+            println!("Generating self-signed TLS certificate...");
+            sys.generate_tls_cert(cert_dir, &domain)?;
+            println!("TLS certificate generated in /etc/ssl/aimx/");
         } else {
-            Some(data_dir)
-        };
-        configure_opensmtpd(sys, &domain, smtpd_data_dir)?;
+            println!("TLS certificate already exists.");
+        }
+
+        println!("Installing aimx service...");
+        sys.install_service_file(data_dir)?;
+        println!("{}", "aimx serve started.".green());
     }
 
     // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
@@ -1183,7 +1049,7 @@ pub fn run_setup(
     if port_failed {
         return Err(
             "Port 25 checks failed. Your VPS provider may block SMTP traffic.\n\
-             OpenSMTPD has been installed but port 25 is not reachable.\n\
+             aimx serve started but port 25 is not reachable.\n\
              Fix the issues above and run `aimx setup` again."
                 .into(),
         );
@@ -1263,7 +1129,6 @@ mod tests {
     struct MockNetworkOps {
         outbound_port25: bool,
         inbound_port25: bool,
-        inbound_reachable: bool,
         ptr_record: Option<String>,
         server_ip: IpAddr,
         mx_records: HashMap<String, Vec<String>>,
@@ -1276,7 +1141,6 @@ mod tests {
             Self {
                 outbound_port25: true,
                 inbound_port25: true,
-                inbound_reachable: true,
                 ptr_record: Some("mail.example.com.".into()),
                 server_ip: "1.2.3.4".parse().unwrap(),
                 mx_records: HashMap::new(),
@@ -1292,9 +1156,6 @@ mod tests {
         }
         fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
             Ok(self.inbound_port25)
-        }
-        fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>> {
-            Ok(self.inbound_reachable)
         }
         fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
             Ok(self.ptr_record.clone())
@@ -1314,12 +1175,10 @@ mod tests {
     }
 
     struct MockSystemOps {
-        installed_packages: RefCell<Vec<String>>,
         written_files: RefCell<HashMap<PathBuf, String>>,
         existing_files: HashMap<PathBuf, String>,
         restarted_services: RefCell<Vec<String>>,
-        debconf_called: RefCell<Option<String>>,
-        package_installed: bool,
+        service_file_installed: RefCell<bool>,
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
@@ -1328,12 +1187,10 @@ mod tests {
     impl Default for MockSystemOps {
         fn default() -> Self {
             Self {
-                installed_packages: RefCell::new(vec![]),
                 written_files: RefCell::new(HashMap::new()),
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
-                debconf_called: RefCell::new(None),
-                package_installed: false,
+                service_file_installed: RefCell::new(false),
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
@@ -1342,33 +1199,11 @@ mod tests {
     }
 
     impl SystemOps for MockSystemOps {
-        fn is_package_installed(&self, _package: &str) -> bool {
-            self.package_installed
-        }
-        fn install_package(&self, package: &str) -> Result<(), Box<dyn std::error::Error>> {
-            self.installed_packages
-                .borrow_mut()
-                .push(package.to_string());
-            Ok(())
-        }
-        fn debconf_preseed(&self, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
-            *self.debconf_called.borrow_mut() = Some(domain.to_string());
-            Ok(())
-        }
         fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>> {
             self.written_files
                 .borrow_mut()
                 .insert(path.to_path_buf(), content.to_string());
             Ok(())
-        }
-        fn read_file(&self, path: &Path) -> Result<String, Box<dyn std::error::Error>> {
-            if let Some(content) = self.existing_files.get(path) {
-                return Ok(content.clone());
-            }
-            if let Some(content) = self.written_files.borrow().get(path) {
-                return Ok(content.clone());
-            }
-            Err(format!("File not found: {}", path.display()).into())
         }
         fn file_exists(&self, path: &Path) -> bool {
             self.existing_files.contains_key(path) || self.written_files.borrow().contains_key(path)
@@ -1398,9 +1233,13 @@ mod tests {
         fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
             match &self.port25_status {
                 Port25Status::Free => Ok(Port25Status::Free),
-                Port25Status::OpenSmtpd => Ok(Port25Status::OpenSmtpd),
-                Port25Status::OtherMta(name) => Ok(Port25Status::OtherMta(name.clone())),
+                Port25Status::Aimx => Ok(Port25Status::Aimx),
+                Port25Status::OtherProcess(name) => Ok(Port25Status::OtherProcess(name.clone())),
             }
+        }
+        fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            *self.service_file_installed.borrow_mut() = true;
+            Ok(())
         }
     }
 
@@ -1516,98 +1355,6 @@ mod tests {
             PreflightResult::Warn(msg) => assert!(msg.contains("PTR")),
             other => panic!("Expected Warn, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn smtpd_conf_generation() {
-        let conf = generate_smtpd_conf("agent.example.com", "/usr/local/bin/aimx", None);
-        assert!(conf.contains("pki agent.example.com cert"));
-        assert!(conf.contains("pki agent.example.com key"));
-        assert!(conf.contains("listen on 0.0.0.0 tls pki agent.example.com"));
-        assert!(conf.contains("listen on :: tls pki agent.example.com"));
-        assert!(conf.contains(r#"action "deliver" mda "/usr/local/bin/aimx ingest %{rcpt}""#));
-        assert!(conf.contains(r#"action "relay" relay"#));
-        assert!(conf.contains(r#"match from any for domain "agent.example.com" action "deliver""#));
-        assert!(conf.contains(r#"match for any action "relay""#));
-    }
-
-    #[test]
-    fn smtpd_conf_uses_correct_domain() {
-        let conf = generate_smtpd_conf("mail.custom.org", "/usr/local/bin/aimx", None);
-        assert!(conf.contains("mail.custom.org"));
-        assert!(!conf.contains("agent.example.com"));
-    }
-
-    #[test]
-    fn smtpd_conf_custom_data_dir_includes_flag() {
-        let conf = generate_smtpd_conf(
-            "example.com",
-            "/usr/local/bin/aimx",
-            Some(Path::new("/opt/aimx")),
-        );
-        assert!(conf.contains("--data-dir /opt/aimx"));
-        assert!(conf.contains(
-            r#"action "deliver" mda "/usr/local/bin/aimx ingest --data-dir /opt/aimx %{rcpt}""#
-        ));
-    }
-
-    #[test]
-    fn smtpd_conf_default_data_dir_omits_flag() {
-        let conf = generate_smtpd_conf(
-            "example.com",
-            "/usr/local/bin/aimx",
-            Some(Path::new("/var/lib/aimx")),
-        );
-        assert!(!conf.contains("--data-dir"));
-    }
-
-    #[test]
-    fn opensmtpd_installs_when_missing() {
-        let sys = MockSystemOps::default();
-        configure_opensmtpd(&sys, "example.com", None).unwrap();
-        let installed = sys.installed_packages.borrow();
-        assert!(installed.contains(&"opensmtpd".to_string()));
-    }
-
-    #[test]
-    fn opensmtpd_skips_install_when_present() {
-        let sys = MockSystemOps {
-            package_installed: true,
-            ..Default::default()
-        };
-        configure_opensmtpd(&sys, "example.com", None).unwrap();
-        let installed = sys.installed_packages.borrow();
-        assert!(!installed.contains(&"opensmtpd".to_string()));
-    }
-
-    #[test]
-    fn opensmtpd_backs_up_existing_config_with_timestamp() {
-        let mut existing = HashMap::new();
-        existing.insert(PathBuf::from("/etc/smtpd.conf"), "old config".to_string());
-        let sys = MockSystemOps {
-            existing_files: existing,
-            ..Default::default()
-        };
-        configure_opensmtpd(&sys, "example.com", None).unwrap();
-        let written = sys.written_files.borrow();
-        let backup_entry = written
-            .iter()
-            .find(|(k, _)| k.to_string_lossy().starts_with("/etc/smtpd.conf.bak."));
-        assert!(backup_entry.is_some(), "timestamped backup should exist");
-        let (path, content) = backup_entry.unwrap();
-        assert_eq!(content, "old config");
-        let filename = path.to_string_lossy();
-        let timestamp = filename.strip_prefix("/etc/smtpd.conf.bak.").unwrap();
-        assert_eq!(timestamp.len(), 14, "timestamp should be YYYYMMDDHHmmSS");
-        assert!(timestamp.chars().all(|c| c.is_ascii_digit()));
-    }
-
-    #[test]
-    fn opensmtpd_restarts_service() {
-        let sys = MockSystemOps::default();
-        configure_opensmtpd(&sys, "example.com", None).unwrap();
-        let restarted = sys.restarted_services.borrow();
-        assert!(restarted.contains(&"opensmtpd".to_string()));
     }
 
     #[test]
@@ -2090,10 +1837,10 @@ mod tests {
     }
 
     #[test]
-    fn postfix_detected_exits_with_error() {
+    fn other_process_detected_exits_with_error() {
         let tmp = TempDir::new().unwrap();
         let sys = MockSystemOps {
-            port25_status: Port25Status::OtherMta("postfix".to_string()),
+            port25_status: Port25Status::OtherProcess("postfix".to_string()),
             ..Default::default()
         };
         let net = MockNetworkOps::default();
@@ -2105,8 +1852,8 @@ mod tests {
             "Expected postfix in error, got: {err}"
         );
         assert!(
-            err.contains("port 25 is already in use"),
-            "Expected port 25 in use message, got: {err}"
+            err.contains("Port 25 is occupied"),
+            "Expected port 25 occupied message, got: {err}"
         );
     }
 
@@ -2134,12 +1881,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_port25_status_opensmtpd() {
+    fn parse_port25_status_aimx() {
+        let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process\n\
+                       LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"aimx\",pid=1234,fd=6))";
+        assert_eq!(parse_port25_status(output).unwrap(), Port25Status::Aimx);
+    }
+
+    #[test]
+    fn parse_port25_status_other_smtpd() {
         let output = "State  Recv-Q  Send-Q  Local Address:Port  Peer Address:Port  Process\n\
                        LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"smtpd\",pid=1234,fd=6))";
         assert_eq!(
             parse_port25_status(output).unwrap(),
-            Port25Status::OpenSmtpd
+            Port25Status::OtherProcess("smtpd".to_string())
         );
     }
 
@@ -2149,7 +1903,7 @@ mod tests {
                        LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"master\",pid=5678,fd=13))";
         assert_eq!(
             parse_port25_status(output).unwrap(),
-            Port25Status::OtherMta("master".to_string())
+            Port25Status::OtherProcess("master".to_string())
         );
     }
 
@@ -2159,7 +1913,7 @@ mod tests {
                        LISTEN 0      128     0.0.0.0:25         0.0.0.0:*          users:((\"exim4\",pid=999,fd=3))";
         assert_eq!(
             parse_port25_status(output).unwrap(),
-            Port25Status::OtherMta("exim4".to_string())
+            Port25Status::OtherProcess("exim4".to_string())
         );
     }
 
@@ -2237,108 +1991,6 @@ mod tests {
         let _ = &net as &dyn NetworkOps;
     }
 
-    // S13.1 — Inbound check endpoint routing tests
-
-    /// Mock that distinguishes the two inbound check variants and records
-    /// which one was called, so we can pin each caller to the right endpoint.
-    struct TrackingNetworkOps {
-        outbound_port25: bool,
-        inbound_port25: bool,
-        inbound_reachable: bool,
-        ptr_record: Option<String>,
-        port25_called: std::cell::Cell<bool>,
-        reach_called: std::cell::Cell<bool>,
-    }
-
-    impl Default for TrackingNetworkOps {
-        fn default() -> Self {
-            Self {
-                outbound_port25: true,
-                inbound_port25: true,
-                inbound_reachable: true,
-                ptr_record: Some("mail.example.com.".into()),
-                port25_called: std::cell::Cell::new(false),
-                reach_called: std::cell::Cell::new(false),
-            }
-        }
-    }
-
-    impl NetworkOps for TrackingNetworkOps {
-        fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
-            Ok(self.outbound_port25)
-        }
-        fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
-            self.port25_called.set(true);
-            Ok(self.inbound_port25)
-        }
-        fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>> {
-            self.reach_called.set(true);
-            Ok(self.inbound_reachable)
-        }
-        fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-            Ok(self.ptr_record.clone())
-        }
-        fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
-            Ok("1.2.3.4".parse().unwrap())
-        }
-        fn resolve_mx(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-            Ok(vec![])
-        }
-        fn resolve_a(&self, _domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
-            Ok(vec![])
-        }
-        fn resolve_txt(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-            Ok(vec![])
-        }
-    }
-
-    #[test]
-    fn check_inbound_tcp_pass() {
-        let net = MockNetworkOps {
-            inbound_reachable: true,
-            ..Default::default()
-        };
-        assert_eq!(check_inbound_tcp(&net), PreflightResult::Pass(None));
-    }
-
-    #[test]
-    fn check_inbound_tcp_fail() {
-        let net = MockNetworkOps {
-            inbound_reachable: false,
-            ..Default::default()
-        };
-        match check_inbound_tcp(&net) {
-            PreflightResult::Fail(msg) => assert!(msg.contains("not reachable")),
-            other => panic!("Expected Fail, got {:?}", other),
-        }
-    }
-
-    /// `aimx setup` runs its inbound check AFTER OpenSMTPD is installed, so
-    /// it must use the full EHLO path via `/probe`, not the plain TCP `/reach`.
-    /// We verify this by constructing a tracking net where the EHLO result
-    /// wins and the reach result is never read.
-    #[test]
-    fn setup_uses_ehlo_not_reach() {
-        let tmp = TempDir::new().unwrap();
-        let sys = MockSystemOps::default();
-        let net = TrackingNetworkOps {
-            inbound_port25: false,
-            inbound_reachable: true,
-            ..Default::default()
-        };
-        // setup will fail at the inbound check, which is expected — we only
-        // care which method was called.
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
-        assert!(
-            net.port25_called.get(),
-            "aimx setup must call check_inbound_port25 (/probe) for its post-install inbound check"
-        );
-        assert!(
-            !net.reach_called.get(),
-            "aimx setup must not call check_inbound_reachable (/reach)"
-        );
-    }
-
     // PTR check function tests (check_ptr still exists, used in deliverability section)
 
     #[test]
@@ -2407,36 +2059,6 @@ mod tests {
         assert!(result.is_err() || result.is_ok());
     }
 
-    // S18.2 — Debconf pre-seeding tests
-
-    #[test]
-    fn debconf_preseed_called_before_install() {
-        let sys = MockSystemOps::default();
-        configure_opensmtpd(&sys, "agent.example.com", None).unwrap();
-        let domain = sys.debconf_called.borrow();
-        assert_eq!(
-            domain.as_deref(),
-            Some("agent.example.com"),
-            "debconf_preseed should be called with the domain before install"
-        );
-        let installed = sys.installed_packages.borrow();
-        assert!(installed.contains(&"opensmtpd".to_string()));
-    }
-
-    #[test]
-    fn debconf_preseed_not_called_when_already_installed() {
-        let sys = MockSystemOps {
-            package_installed: true,
-            ..Default::default()
-        };
-        configure_opensmtpd(&sys, "agent.example.com", None).unwrap();
-        let domain = sys.debconf_called.borrow();
-        assert!(
-            domain.is_none(),
-            "debconf_preseed should not be called when package is already installed"
-        );
-    }
-
     // S18.3 — Colorized output tests
 
     #[test]
@@ -2452,17 +2074,9 @@ mod tests {
     #[test]
     fn is_already_configured_all_present() {
         let tmp = TempDir::new().unwrap();
-        let dkim_dir = tmp.path().join("dkim");
-        std::fs::create_dir_all(&dkim_dir).unwrap();
-        std::fs::write(dkim_dir.join("private.key"), "key").unwrap();
 
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
-        existing.insert(
-            PathBuf::from("/etc/smtpd.conf"),
-            "match from any for domain \"example.com\" action \"deliver\"".to_string(),
-        );
-        // Also need dkim key to be found
         existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
 
         let sys = MockSystemOps {
@@ -2478,10 +2092,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
-        existing.insert(
-            PathBuf::from("/etc/smtpd.conf"),
-            "match from any for domain \"example.com\"".to_string(),
-        );
         existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
 
         let sys = MockSystemOps {
@@ -2493,15 +2103,10 @@ mod tests {
     }
 
     #[test]
-    fn is_already_configured_wrong_domain() {
+    fn is_already_configured_missing_dkim() {
         let tmp = TempDir::new().unwrap();
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
-        existing.insert(
-            PathBuf::from("/etc/smtpd.conf"),
-            "match from any for domain \"other.com\"".to_string(),
-        );
-        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
 
         let sys = MockSystemOps {
             existing_files: existing,
