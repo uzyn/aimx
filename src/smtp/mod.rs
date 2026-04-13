@@ -50,22 +50,26 @@ impl SmtpServer {
         Ok(self)
     }
 
+    #[cfg(test)]
     pub fn with_max_message_size(mut self, size: usize) -> Self {
         self.max_message_size = size;
         self
     }
 
+    #[cfg(test)]
     pub fn with_max_connections(mut self, max: usize) -> Self {
         self.max_connections = max;
         self
     }
 
+    #[cfg(test)]
     pub fn with_timeouts(mut self, idle: Duration, total: Duration) -> Self {
         self.idle_timeout = idle;
         self.total_timeout = total;
         self
     }
 
+    #[cfg(test)]
     pub fn with_max_commands_before_data(mut self, max: usize) -> Self {
         self.max_commands_before_data = max;
         self
@@ -132,10 +136,15 @@ impl SmtpServer {
 
         drop(listener);
 
+        let in_flight = self.max_connections - semaphore.available_permits();
+        eprintln!("aimx SMTP listener shutting down ({in_flight} connections in-flight)");
+
         let grace_start = tokio::time::Instant::now();
         let grace_period = Duration::from_secs(30);
         while semaphore.available_permits() < self.max_connections {
             if grace_start.elapsed() >= grace_period {
+                let remaining = self.max_connections - semaphore.available_permits();
+                eprintln!("Grace period expired, forcefully closing {remaining} connections");
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;

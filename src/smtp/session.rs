@@ -544,7 +544,7 @@ impl SmtpSession {
 }
 
 enum ReadLineResult {
-    Ok(usize),
+    Ok(()),
     TooLong,
     Eof,
     Err(String),
@@ -570,7 +570,7 @@ async fn bounded_read_line<R: AsyncBufReadExt + Unpin>(
             let chunk = &available[..newline_pos + 1];
             buf.push_str(&String::from_utf8_lossy(chunk));
             reader.consume(newline_pos + 1);
-            return ReadLineResult::Ok(line_len);
+            return ReadLineResult::Ok(());
         }
         // No newline in the buffer yet
         if buf.len() + available.len() > max_len {

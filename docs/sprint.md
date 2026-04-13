@@ -1702,7 +1702,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 20 — Direct Outbound Delivery (Days 55–57.5) [IN PROGRESS]
+## Sprint 20 — Direct Outbound Delivery (Days 55–57.5) [DONE]
 
 **Goal:** Replace `/usr/sbin/sendmail` with direct SMTP delivery using `lettre` + `hickory-resolver` for MX resolution. Synchronous delivery with clear error feedback — no background queue.
 
@@ -1714,12 +1714,12 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] Add `hickory-resolver` to Cargo.toml (verify MIT/Apache-2.0 license per NFR-3)
-- [ ] `resolve_mx(domain: &str) -> Result<Vec<String>>` returns MX hostnames sorted by priority (lowest preference value first)
-- [ ] Fall back to A record if no MX records exist (RFC 5321 §5.1)
-- [ ] Handle NXDOMAIN / no records with clear error: "No mail server found for domain X"
-- [ ] Unit tests: valid MX, no MX with A fallback, NXDOMAIN error
-- [ ] Integration test with real DNS resolution against a known domain (e.g., `gmail.com` has MX records)
+- [x] Add `hickory-resolver` to Cargo.toml (verify MIT/Apache-2.0 license per NFR-3)
+- [x] `resolve_mx(domain: &str) -> Result<Vec<String>>` returns MX hostnames sorted by priority (lowest preference value first)
+- [x] Fall back to A record if no MX records exist (RFC 5321 §5.1)
+- [x] Handle NXDOMAIN / no records with clear error: "No mail server found for domain X"
+- [x] Unit tests: valid MX, no MX with A fallback, NXDOMAIN error
+- [x] Integration test with real DNS resolution against a known domain (e.g., `gmail.com` has MX records)
 
 ### S20.2 — Lettre SMTP Transport
 
@@ -1727,14 +1727,14 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] Add `lettre` to Cargo.toml (verify MIT/Apache-2.0 license per NFR-3)
-- [ ] `LettreTransport` implements `MailTransport` trait
-- [ ] Connects to MX servers in priority order — falls back to next on connection failure
-- [ ] STARTTLS negotiated opportunistically (try TLS, fall back to plain if server doesn't support it)
-- [ ] Delivery timeout: 60 seconds per MX attempt
-- [ ] Error messages are specific and actionable: "Connection refused by mx1.example.com", "Recipient rejected by mx2.example.com: 550 User unknown", "All MX servers for example.com unreachable"
-- [ ] Unit tests using `MailTransport` trait mock (existing pattern)
-- [ ] Integration test: deliver to a local test SMTP server (can reuse Sprint 19's listener)
+- [x] Add `lettre` to Cargo.toml (verify MIT/Apache-2.0 license per NFR-3)
+- [x] `LettreTransport` implements `MailTransport` trait
+- [x] Connects to MX servers in priority order — falls back to next on connection failure
+- [x] STARTTLS negotiated opportunistically (try TLS, fall back to plain if server doesn't support it)
+- [x] Delivery timeout: 60 seconds per MX attempt
+- [x] Error messages are specific and actionable: "Connection refused by mx1.example.com", "Recipient rejected by mx2.example.com: 550 User unknown", "All MX servers for example.com unreachable"
+- [x] Unit tests using `MailTransport` trait mock (existing pattern)
+- [ ] Integration test: deliver to a local test SMTP server (can reuse Sprint 19's listener) <!-- Deferred: reviewer accepted deferral to Sprint 21 where aimx serve provides the test listener -->
 
 ### S20.3 — Error Feedback for Agents
 
@@ -1742,11 +1742,11 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `aimx send` CLI: print specific delivery error to stderr, exit code 1 on failure
-- [ ] `email_send` MCP tool: return error with delivery failure details in MCP error response
-- [ ] `email_reply` MCP tool: same error handling as `email_send`
-- [ ] Success responses include confirmation: "Delivered to mx1.example.com for recipient@example.com"
-- [ ] Unit tests: verify error propagation from transport through CLI/MCP
+- [x] `aimx send` CLI: print specific delivery error to stderr, exit code 1 on failure
+- [x] `email_send` MCP tool: return error with delivery failure details in MCP error response
+- [x] `email_reply` MCP tool: same error handling as `email_send`
+- [x] Success responses include confirmation: "Delivered to mx1.example.com for recipient@example.com"
+- [x] Unit tests: verify error propagation from transport through CLI/MCP
 
 ### S20.4 — Remove Sendmail Dependency
 
@@ -1754,15 +1754,15 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Remove `SendmailTransport` struct and implementation from `send.rs`
-- [ ] `send::run()` uses `LettreTransport` by default
-- [ ] Remove any `/usr/sbin/sendmail` path references across the codebase
-- [ ] All existing send tests pass with `LettreTransport` (via mock trait)
-- [ ] `cargo clippy` clean — no dead code warnings from removed sendmail code
+- [x] Remove `SendmailTransport` struct and implementation from `send.rs`
+- [x] `send::run()` uses `LettreTransport` by default
+- [x] Remove any `/usr/sbin/sendmail` path references across the codebase
+- [x] All existing send tests pass with `LettreTransport` (via mock trait)
+- [x] `cargo clippy` clean — no dead code warnings from removed sendmail code
 
 ---
 
-## Sprint 21 — `aimx serve` Daemon + CLI Wiring (Days 58–60.5) [NOT STARTED]
+## Sprint 21 — `aimx serve` Daemon + CLI Wiring (Days 58–60.5) [IN PROGRESS]
 
 **Goal:** Wire the SMTP listener and outbound transport into `aimx serve`, making it a runnable daemon with systemd integration and graceful shutdown.
 
@@ -1974,8 +1974,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 17 | 46–48.5 | Rename Verify Service to Verifier | Rename `services/verify/` → `services/verifier/`, `aimx-verify` → `aimx-verifier` across crate, Docker, CI, and all documentation | Done |
 | 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Done |
 | 19 | 52–54.5 | Embedded SMTP Receiver | Hand-rolled tokio SMTP listener, STARTTLS, ingest integration, connection hardening | Done |
-| 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | In Progress |
-| 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Not Started |
+| 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | Done |
+| 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | In Progress |
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Not Started |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Not Started |
 
@@ -2038,3 +2038,5 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 18)** `setup_with_domain_arg_skips_prompt` test passes `None` as `data_dir` and has a tautological assertion (`is_err() || is_ok()`), making it vacuous in non-root CI — use `TempDir` and assert meaningful behavior
 - [ ] **(Sprint 18)** `is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf domain detection — could theoretically match substring (e.g., "a.com" matching "ba.com"). Use `c.contains(&format!("\"{domain}\""))` for exact quoted match
 - [ ] **(Sprint 19)** `deliver_message()` clones DATA payload per recipient (`data.clone()`) — for messages near 25MB with many recipients this could spike memory. Use `Arc<Vec<u8>>` to share the buffer. Low priority: typical case is 1-2 recipients
+- [ ] **(Sprint 20)** `LettreTransport` `last_error` only retains the final MX failure — when all MX servers fail, only the last server's error is reported. Consider collecting all errors for better debugging
+- [ ] **(Sprint 20)** `extract_domain` handles `"Display Name <user@domain>"` format, but lettre's `Address::parse` used for the envelope may not — two divergent parsing paths. Not a practical issue since current call sites always pass bare addresses
