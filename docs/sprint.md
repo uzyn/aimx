@@ -1639,7 +1639,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 19 — Embedded SMTP Receiver (Days 52–54.5) [NOT STARTED]
+## Sprint 19 — Embedded SMTP Receiver (Days 52–54.5) [IN PROGRESS]
 
 **Goal:** Build a hand-rolled tokio-based SMTP listener that accepts inbound email and calls `ingest_email()` in-process. No CLI wiring yet — this sprint produces the library code that `aimx serve` will use.
 
