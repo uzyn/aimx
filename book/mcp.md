@@ -16,9 +16,9 @@ aimx mcp
 
 The server runs in stdio mode -- it reads from stdin and writes to stdout. It is launched on-demand by MCP clients, not run as a background service.
 
-## Claude Code integration
+## Agent integration
 
-Add aimx to Claude Code's MCP servers in `~/.claude/settings.json`:
+Add aimx to any MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.). The configuration snippet is the same for all agents that support MCP stdio transport:
 
 ```json
 {
@@ -30,6 +30,8 @@ Add aimx to Claude Code's MCP servers in `~/.claude/settings.json`:
   }
 }
 ```
+
+For Claude Code, add this to `~/.claude/settings.json`. Other agents may use different config file locations -- check your agent's MCP documentation.
 
 ### Custom data directory
 

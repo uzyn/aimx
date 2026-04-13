@@ -5,8 +5,8 @@ Diagnostic commands and solutions for common issues.
 ## Diagnostic commands
 
 ```bash
-# Run preflight checks (port 25, PTR record)
-aimx preflight
+# Run preflight checks (port 25)
+sudo aimx preflight
 
 # Show server status, configuration, and mailbox counts
 aimx status
@@ -130,7 +130,7 @@ sudo chmod 600 /var/lib/aimx/dkim/private.key
 
 | Command | Purpose |
 |---------|---------|
-| `aimx preflight` | Check port 25 and PTR record |
+| `sudo aimx preflight` | Check port 25 connectivity |
 | `aimx status` | Show config, mailboxes, and message counts |
 | `aimx verify` | Full connectivity verification |
 | `aimx mailbox list` | List all mailboxes |

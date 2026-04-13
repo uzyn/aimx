@@ -54,39 +54,67 @@ aimx --version
 Before running setup, you can run preflight checks independently:
 
 ```bash
-aimx preflight
+sudo aimx preflight
 ```
 
-This checks three things without installing anything:
+This checks port 25 connectivity without installing anything:
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
 | Outbound port 25 | Connects to a well-known MX server on port 25 | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls `check.aimx.email/probe` to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
-| PTR record | Reverse DNS lookup on your IP | Set PTR at your VPS provider's control panel |
+| Inbound port 25 | Calls `check.aimx.email/reach` to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
 
-All three should show PASS. PTR may show WARN, which is acceptable but should be fixed for deliverability.
+Both checks should show PASS before proceeding with setup.
 
 ## Setup wizard
+
+The setup wizard can be run with or without a domain argument:
+
+```bash
+# With domain argument (scripting-friendly, no prompts):
+sudo aimx setup agent.yourdomain.com
+
+# Without argument (interactive, prompts for domain):
+sudo aimx setup
+```
+
+When run without a domain argument, setup will prompt you to enter the domain and confirm you have DNS access.
+
+### First-time setup flow
+
+1. **Root check** -- exits if not running as root
+2. **Domain prompt** -- asks for domain if not provided as argument
+3. **Port 25 conflict detection** -- checks for existing MTA on port 25
+4. **OpenSMTPD installation** -- pre-seeds debconf answers (mail name, root address) and installs via `apt-get install opensmtpd`
+5. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
+6. **OpenSMTPD configuration** -- writes `/etc/smtpd.conf` (backs up any existing config)
+7. **Service restart** -- restarts OpenSMTPD with the new configuration
+8. **Port 25 checks** -- verifies outbound and inbound port 25 connectivity
+9. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/var/lib/aimx/dkim/`
+10. **Config creation** -- writes `/var/lib/aimx/config.toml` with a catchall mailbox
+
+After initial setup, the wizard displays three clearly labeled sections:
+
+- **[DNS]** -- the records you need to add (MX, A, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
+- **[MCP]** -- configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
+- **[Deliverability Improvement (Optional)]** -- PTR record guidance and Gmail filter/whitelist instructions
+
+### Re-running setup
+
+If you've already completed setup and want to re-verify, simply run `aimx setup` again:
 
 ```bash
 sudo aimx setup agent.yourdomain.com
 ```
 
-The setup wizard performs these steps automatically:
+When aimx detects an existing configuration (OpenSMTPD running, TLS cert present, DKIM key present, smtpd.conf matches domain), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
 
-1. **Root check** -- exits if not running as root
-2. **Port 25 conflict detection** -- checks for existing MTA on port 25
-3. **Preflight checks** -- outbound/inbound port 25 and PTR record
-4. **OpenSMTPD installation** -- installs via `apt-get install opensmtpd`
-5. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
-6. **OpenSMTPD configuration** -- writes `/etc/smtpd.conf` (backs up any existing config)
-7. **Service restart** -- restarts OpenSMTPD with the new configuration
-8. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/var/lib/aimx/dkim/`
-9. **Config creation** -- writes `/var/lib/aimx/config.toml` with a catchall mailbox
-10. **DNS record display** -- shows the records you need to add
-11. **DNS verification** -- waits for you to add records, then verifies them
-12. **MCP config snippet** -- displays the Claude Code integration config
+### DNS retry loop
+
+At the DNS verification step, you can:
+
+- Press **Enter** to re-check DNS records (useful when you've just updated DNS in another tab)
+- Press **q** to finish and verify later with `sudo aimx setup <domain>`
 
 ## DNS configuration
 
@@ -269,9 +297,10 @@ If you prefer not to use the public instance:
 The verifier service provides:
 - `GET /health` -- health check
 - `GET /probe` -- connects back to caller's IP on port 25, performs EHLO handshake
+- `GET /reach` -- plain TCP connectivity check on port 25
 - Port 25 listener -- accepts TCP connections for outbound port 25 testing
 
-See the [verifier service README](../../services/verifier/README.md) for full details.
+See the [verifier service README](../services/verifier/README.md) for full details.
 
 ---
 
