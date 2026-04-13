@@ -2165,12 +2165,13 @@ mod tests {
 
     #[test]
     fn postfix_detected_exits_with_error() {
+        let tmp = TempDir::new().unwrap();
         let sys = MockSystemOps {
             port25_status: Port25Status::OtherMta("postfix".to_string()),
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), None, &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
