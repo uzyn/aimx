@@ -5,6 +5,7 @@ mod dkim;
 mod ingest;
 mod mailbox;
 mod mcp;
+mod mx;
 mod send;
 mod setup;
 #[allow(dead_code)]

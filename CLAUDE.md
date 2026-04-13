@@ -58,7 +58,8 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 - `setup.rs` — `aimx setup [domain]`: interactive setup wizard. Prompts for domain when omitted, pre-seeds debconf, installs OpenSMTPD, generates TLS cert + DKIM keys, displays colorized [DNS]/[MCP]/[Deliverability] sections, DNS retry loop, re-entrant detection. Requires root.
 - `ingest.rs` — `aimx ingest`: reads raw `.eml` from stdin (called by OpenSMTPD MDA), parses MIME, writes Markdown with TOML frontmatter (`+++` delimiters), extracts attachments, fires channel triggers.
-- `send.rs` — `aimx send`: composes RFC 5322 message, DKIM-signs it, hands to `/usr/sbin/sendmail`.
+- `send.rs` — `aimx send`: composes RFC 5322 message, DKIM-signs it, delivers via direct SMTP to recipient's MX.
+- `mx.rs` — MX resolution: resolves recipient domain to MX hostnames via `hickory-resolver`, falls back to A record per RFC 5321.
 - `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations.
 - `channel.rs` — channel manager: match filters + shell command triggers on ingest.
 - `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
