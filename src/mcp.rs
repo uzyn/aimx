@@ -15,6 +15,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone)]
 pub struct AimxMcpServer {
     data_dir: PathBuf,
+    #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
 
