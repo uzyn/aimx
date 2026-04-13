@@ -1881,7 +1881,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 23 — Documentation + PRD Update (Days 64–66.5) [IN PROGRESS]
+## Sprint 23 — Documentation + PRD Update (Days 64–66.5) [DONE]
 
 **Goal:** Update all documentation to reflect the embedded SMTP architecture. Update the PRD to formalize the NFR and FR changes. Clean up obsolete backlog items.
 
@@ -1893,18 +1893,18 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] NFR-1: "No runtime dependencies beyond OpenSMTPD" → "No runtime dependencies. Single self-contained binary"
-- [ ] NFR-2: "No daemon" → "`aimx serve` is the SMTP daemon. All other commands remain short-lived"
-- [ ] NFR-4: "Linux only. Target Debian/Ubuntu" → "Any Unix where Rust compiles and port 25 is available. CI tests Ubuntu, Alpine, Fedora"
-- [ ] FR-1b: Remove OpenSMTPD conflict detection — replace with generic port 25 conflict check
-- [ ] FR-2: "Install and configure OpenSMTPD" → "Start embedded SMTP listener via systemd/OpenRC service"
-- [ ] FR-11: "Accept raw .eml from OpenSMTPD via stdin" → "Accept raw email from embedded SMTP listener (or stdin for manual use)"
-- [ ] FR-19: "Hand signed message to OpenSMTPD" → "Deliver via direct SMTP to recipient's MX server"
-- [ ] FR-41b: Remove debconf pre-seeding — replace with service file installation
-- [ ] FR-43: "called by OpenSMTPD" → "called by aimx serve or via stdin"
-- [ ] §8 Architecture: replace OpenSMTPD references with `aimx serve` and direct SMTP delivery
-- [ ] §10 Risks: replace "OpenSMTPD configuration complexity" with embedded SMTP risks
-- [ ] §9 Scope: update "In Scope" to reflect new architecture
+- [x] NFR-1: "No runtime dependencies beyond OpenSMTPD" → "No runtime dependencies. Single self-contained binary"
+- [x] NFR-2: "No daemon" → "`aimx serve` is the SMTP daemon. All other commands remain short-lived"
+- [x] NFR-4: "Linux only. Target Debian/Ubuntu" → "Any Unix where Rust compiles and port 25 is available. CI tests Ubuntu, Alpine, Fedora"
+- [x] FR-1b: Remove OpenSMTPD conflict detection — replace with generic port 25 conflict check
+- [x] FR-2: "Install and configure OpenSMTPD" → "Start embedded SMTP listener via systemd/OpenRC service"
+- [x] FR-11: "Accept raw .eml from OpenSMTPD via stdin" → "Accept raw email from embedded SMTP listener (or stdin for manual use)"
+- [x] FR-19: "Hand signed message to OpenSMTPD" → "Deliver via direct SMTP to recipient's MX server"
+- [x] FR-41b: Remove debconf pre-seeding — replace with service file installation
+- [x] FR-43: "called by OpenSMTPD" → "called by aimx serve or via stdin"
+- [x] §8 Architecture: replace OpenSMTPD references with `aimx serve` and direct SMTP delivery
+- [x] §10 Risks: replace "OpenSMTPD configuration complexity" with embedded SMTP risks
+- [x] §9 Scope: update "In Scope" to reflect new architecture
 
 ### S23.2 — Update CLAUDE.md + README
 
@@ -1912,13 +1912,13 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] CLAUDE.md line 7: "OpenSMTPD handles SMTP" → "Built-in SMTP server handles inbound; direct SMTP delivery for outbound"
-- [ ] CLAUDE.md setup.rs description: remove debconf/OpenSMTPD, add service file generation
-- [ ] CLAUDE.md ingest.rs: "called by OpenSMTPD MDA" → "called by aimx serve or via stdin"
-- [ ] CLAUDE.md send.rs: "hands to `/usr/sbin/sendmail`" → "delivers via direct SMTP to recipient's MX"
-- [ ] CLAUDE.md conventions: "No aimx daemon" → "`aimx serve` is the SMTP daemon"
-- [ ] CLAUDE.md: add `serve.rs` and `smtp.rs` module descriptions
-- [ ] README.md: update architecture, requirements, setup instructions
+- [x] CLAUDE.md line 7: "OpenSMTPD handles SMTP" → "Built-in SMTP server handles inbound; direct SMTP delivery for outbound"
+- [x] CLAUDE.md setup.rs description: remove debconf/OpenSMTPD, add service file generation
+- [x] CLAUDE.md ingest.rs: "called by OpenSMTPD MDA" → "called by aimx serve or via stdin"
+- [x] CLAUDE.md send.rs: "hands to `/usr/sbin/sendmail`" → "delivers via direct SMTP to recipient's MX"
+- [x] CLAUDE.md conventions: "No aimx daemon" → "`aimx serve` is the SMTP daemon"
+- [x] CLAUDE.md: add `serve.rs` and `smtp.rs` module descriptions
+- [x] README.md: update architecture, requirements, setup instructions
 
 ### S23.3 — Update book/
 
@@ -1926,12 +1926,12 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `book/setup.md`: remove apt/OpenSMTPD install steps, describe `aimx setup` generating service file and starting `aimx serve`
-- [ ] `book/getting-started.md`: remove OpenSMTPD from prerequisites, simplify to "download aimx binary, run setup"
-- [ ] `book/troubleshooting.md`: `journalctl -u opensmtpd` → `journalctl -u aimx`, update common issues
-- [ ] `book/index.md`: update architecture overview
-- [ ] `book/configuration.md`: add `aimx serve` config options (bind address, TLS paths) if applicable
-- [ ] Grep for "opensmtpd", "smtpd", "sendmail" across all `book/*.md` — ensure none remain
+- [x] `book/setup.md`: remove apt/OpenSMTPD install steps, describe `aimx setup` generating service file and starting `aimx serve`
+- [x] `book/getting-started.md`: remove OpenSMTPD from prerequisites, simplify to "download aimx binary, run setup"
+- [x] `book/troubleshooting.md`: `journalctl -u opensmtpd` → `journalctl -u aimx`, update common issues
+- [x] `book/index.md`: update architecture overview
+- [x] `book/configuration.md`: add `aimx serve` config options (bind address, TLS paths) if applicable
+- [x] Grep for "opensmtpd", "smtpd", "sendmail" across all `book/*.md` — ensure none remain
 
 ### S23.4 — Clean Up Backlog + Summary Table
 
@@ -1939,13 +1939,13 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Mark backlog item "Quote data dir path in `generate_smtpd_conf`" (Sprint 8) as obsolete — function removed
-- [ ] Mark backlog item "`parse_port25_status` uses `smtpd` substring match" (Sprint 11) as obsolete — logic replaced
-- [ ] Mark backlog item "`is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf" (Sprint 18) as obsolete — smtpd.conf no longer generated
-- [ ] Update "Deferred to v2" entry for rate limiting: "Rely on OpenSMTPD defaults + DMARC" → "Rely on DMARC policy for v1"
-- [ ] Update "Deferred to v2": remove "Non-Linux platforms" row (now supported via NFR-4 update)
-- [ ] Update Summary Table with Sprints 19–23
-- [ ] Update sprint file header: total sprints, timeline, scope description
+- [x] Mark backlog item "Quote data dir path in `generate_smtpd_conf`" (Sprint 8) as obsolete — function removed
+- [x] Mark backlog item "`parse_port25_status` uses `smtpd` substring match" (Sprint 11) as obsolete — logic replaced
+- [x] Mark backlog item "`is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf" (Sprint 18) as obsolete — smtpd.conf no longer generated
+- [x] Update "Deferred to v2" entry for rate limiting: "Rely on OpenSMTPD defaults + DMARC" → "Rely on DMARC policy for v1"
+- [x] Update "Deferred to v2": remove "Non-Linux platforms" row (now supported via NFR-4 update)
+- [x] Update Summary Table with Sprints 19–23
+- [x] Update sprint file header: total sprints, timeline, scope description
 
 ---
 
@@ -1977,7 +1977,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | Done |
 | 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Done |
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
-| 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | In Progress |
+| 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
 
 ## Deferred to v2
 
