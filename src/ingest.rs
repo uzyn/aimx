@@ -147,9 +147,9 @@ pub fn ingest_email(
     Ok(())
 }
 
-fn create_resolver() -> Option<mail_auth::Resolver> {
-    mail_auth::Resolver::new_system_conf()
-        .or_else(|_| mail_auth::Resolver::new_cloudflare())
+fn create_resolver() -> Option<mail_auth::MessageAuthenticator> {
+    mail_auth::MessageAuthenticator::new_system_conf()
+        .or_else(|_| mail_auth::MessageAuthenticator::new_cloudflare())
         .ok()
 }
 
@@ -171,7 +171,7 @@ fn verify_auth(raw: &[u8], rcpt: &str) -> (String, String) {
     })
 }
 
-async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::Resolver) -> String {
+async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
     let auth_msg = match mail_auth::AuthenticatedMessage::parse(raw) {
         Some(msg) => msg,
         None => return "none".to_string(),
@@ -205,7 +205,11 @@ pub fn spf_domain(mail_from: &str) -> Option<&str> {
     }
 }
 
-async fn verify_spf_async(raw: &[u8], _rcpt: &str, resolver: &mail_auth::Resolver) -> String {
+async fn verify_spf_async(
+    raw: &[u8],
+    _rcpt: &str,
+    resolver: &mail_auth::MessageAuthenticator,
+) -> String {
     let ip = match extract_received_ip(raw) {
         Some(ip) => ip,
         None => return "none".to_string(),
@@ -219,7 +223,12 @@ async fn verify_spf_async(raw: &[u8], _rcpt: &str, resolver: &mail_auth::Resolve
     };
 
     let spf_output = resolver
-        .verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)
+        .verify_spf(mail_auth::spf::verify::SpfParameters::verify_mail_from(
+            ip,
+            helo_domain,
+            helo_domain,
+            &mail_from,
+        ))
         .await;
 
     match spf_output.result() {
