@@ -855,7 +855,27 @@ pub fn verify_all_dns(
     ]
 }
 
-pub fn display_dns_verification(results: &[(String, DnsVerifyResult)]) -> bool {
+fn dns_record_for_check<'a>(check: &str, records: &'a [DnsRecord]) -> Option<&'a DnsRecord> {
+    match check {
+        "A" => records.iter().find(|r| r.record_type == "A"),
+        "MX" => records.iter().find(|r| r.record_type == "MX"),
+        "SPF" => records
+            .iter()
+            .find(|r| r.record_type == "TXT" && r.value.starts_with("v=spf1")),
+        "DKIM" => records
+            .iter()
+            .find(|r| r.record_type == "TXT" && r.name.contains("._domainkey.")),
+        "DMARC" => records
+            .iter()
+            .find(|r| r.record_type == "TXT" && r.name.starts_with("_dmarc.")),
+        _ => None,
+    }
+}
+
+pub fn display_dns_verification(
+    results: &[(String, DnsVerifyResult)],
+    dns_records: &[DnsRecord],
+) -> bool {
     let mut all_pass = true;
     println!("\nDNS Verification:\n");
     for (name, result) in results {
@@ -863,10 +883,28 @@ pub fn display_dns_verification(results: &[(String, DnsVerifyResult)]) -> bool {
             DnsVerifyResult::Pass => println!("  {name}: {}", "PASS".green()),
             DnsVerifyResult::Fail(msg) => {
                 println!("  {name}: {} - {msg}", "FAIL".red());
+                if let Some(rec) = dns_record_for_check(name, dns_records) {
+                    println!(
+                        "         {} {}  {}  {}",
+                        "→ Add:".dimmed(),
+                        rec.record_type,
+                        rec.name,
+                        rec.value
+                    );
+                }
                 all_pass = false;
             }
             DnsVerifyResult::Missing(msg) => {
                 println!("  {name}: {} - {msg}", "MISSING".red());
+                if let Some(rec) = dns_record_for_check(name, dns_records) {
+                    println!(
+                        "         {} {}  {}  {}",
+                        "→ Add:".dimmed(),
+                        rec.record_type,
+                        rec.name,
+                        rec.value
+                    );
+                }
                 all_pass = false;
             }
             DnsVerifyResult::Warn(msg) => {
@@ -1228,7 +1266,9 @@ pub fn run_setup(
         .strip_prefix("v=DKIM1; k=rsa; p=")
         .map(|s| s.to_string());
 
-    display_dns_guidance(&domain, &server_ip.to_string(), &dkim_value, &dkim_selector);
+    let server_ip_str = server_ip.to_string();
+    display_dns_guidance(&domain, &server_ip_str, &dkim_value, &dkim_selector);
+    let dns_records = generate_dns_records(&domain, &server_ip_str, &dkim_value, &dkim_selector);
 
     // DNS retry loop
     loop {
@@ -1255,7 +1295,7 @@ pub fn run_setup(
             &dkim_selector,
             local_dkim_pubkey.as_deref(),
         );
-        let all_pass = display_dns_verification(&results);
+        let all_pass = display_dns_verification(&results, &dns_records);
 
         if all_pass {
             println!(
@@ -1994,7 +2034,7 @@ mod tests {
             ("MX".into(), DnsVerifyResult::Pass),
             ("A".into(), DnsVerifyResult::Pass),
         ];
-        assert!(display_dns_verification(&results));
+        assert!(display_dns_verification(&results, &[]));
     }
 
     #[test]
@@ -2003,7 +2043,7 @@ mod tests {
             ("MX".into(), DnsVerifyResult::Pass),
             ("A".into(), DnsVerifyResult::Fail("wrong IP".into())),
         ];
-        assert!(!display_dns_verification(&results));
+        assert!(!display_dns_verification(&results, &[]));
     }
 
     #[test]
@@ -2012,7 +2052,7 @@ mod tests {
             ("MX".into(), DnsVerifyResult::Pass),
             ("SPF".into(), DnsVerifyResult::Missing("No SPF".into())),
         ];
-        assert!(!display_dns_verification(&results));
+        assert!(!display_dns_verification(&results, &[]));
     }
 
     #[test]
