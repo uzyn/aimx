@@ -7,37 +7,107 @@ use std::path::Path;
 use uuid::Uuid;
 
 pub trait MailTransport {
-    fn send(&self, message: &[u8]) -> Result<(), Box<dyn std::error::Error>>;
+    fn send(&self, recipient: &str, message: &[u8]) -> Result<String, Box<dyn std::error::Error>>;
 }
 
-pub struct SendmailTransport;
+pub struct LettreTransport;
 
-impl MailTransport for SendmailTransport {
-    fn send(&self, message: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
-        use std::io::Write;
-        use std::process::{Command, Stdio};
+impl LettreTransport {
+    fn extract_domain(recipient: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let addr = recipient
+            .rsplit('<')
+            .next()
+            .unwrap_or(recipient)
+            .trim_end_matches('>');
+        addr.split('@')
+            .nth(1)
+            .map(|d| d.to_string())
+            .ok_or_else(|| format!("Invalid recipient address: {recipient}").into())
+    }
+}
 
-        let mut child = Command::new("/usr/sbin/sendmail")
-            .arg("-t")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| format!("Failed to launch sendmail: {e}"))?;
+impl MailTransport for LettreTransport {
+    fn send(&self, recipient: &str, message: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+        let domain = Self::extract_domain(recipient)?;
+        let rt = tokio::runtime::Handle::try_current();
 
-        child
-            .stdin
-            .as_mut()
-            .ok_or("Failed to open sendmail stdin")?
-            .write_all(message)?;
+        let mx_hosts = match rt {
+            Ok(handle) => {
+                // We're inside an async context, use block_in_place
+                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_mx(&domain)))?
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
+                rt.block_on(crate::mx::resolve_mx(&domain))?
+            }
+        };
 
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("sendmail failed: {stderr}").into());
+        let envelope = lettre::address::Envelope::new(
+            None,
+            vec![
+                recipient
+                    .parse()
+                    .map_err(|e| format!("Invalid recipient address '{recipient}': {e}"))?,
+            ],
+        )
+        .map_err(|e| format!("Failed to create envelope: {e}"))?;
+
+        let mut last_error: Option<String> = None;
+
+        for host in &mx_hosts {
+            match self.try_deliver(host, &envelope, message) {
+                Ok(server) => return Ok(server),
+                Err(e) => {
+                    last_error = Some(format!("{host}: {e}"));
+                }
+            }
         }
 
-        Ok(())
+        Err(format!(
+            "All MX servers for {domain} unreachable: {}",
+            last_error.unwrap_or_default()
+        )
+        .into())
+    }
+}
+
+impl LettreTransport {
+    fn try_deliver(
+        &self,
+        host: &str,
+        envelope: &lettre::address::Envelope,
+        message: &[u8],
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        use lettre::Transport;
+
+        let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
+            .dangerous_accept_invalid_certs(true)
+            .build_rustls()
+            .map_err(|e| format!("TLS configuration error: {e}"))?;
+
+        let transport = lettre::SmtpTransport::builder_dangerous(host)
+            .port(25)
+            .tls(lettre::transport::smtp::client::Tls::Opportunistic(
+                tls_params,
+            ))
+            .timeout(Some(std::time::Duration::from_secs(60)))
+            .build();
+
+        transport
+            .send_raw(envelope, message)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                let msg = e.to_string();
+                if msg.contains("Connection refused") {
+                    format!("Connection refused by {host}").into()
+                } else if msg.contains("timed out") || msg.contains("Timeout") {
+                    format!("Connection timed out to {host}").into()
+                } else {
+                    format!("Rejected by {host}: {msg}").into()
+                }
+            })?;
+
+        Ok(host.to_string())
     }
 }
 
@@ -210,7 +280,7 @@ pub fn send_with_transport(
     args: &SendArgs,
     transport: &dyn MailTransport,
     dkim_key: Option<(&rsa::RsaPrivateKey, &str, &str)>,
-) -> Result<String, Box<dyn std::error::Error>> {
+) -> Result<(String, String), Box<dyn std::error::Error>> {
     let composed = compose_message(args)?;
 
     let final_message = if let Some((key, domain, selector)) = dkim_key {
@@ -219,15 +289,15 @@ pub fn send_with_transport(
         composed.message
     };
 
-    transport.send(&final_message)?;
-    Ok(composed.message_id)
+    let server = transport.send(&args.to, &final_message)?;
+    Ok((composed.message_id, server))
 }
 
 pub fn run(
     args: SendArgs,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let transport = SendmailTransport;
+    let transport = LettreTransport;
 
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir)
@@ -244,8 +314,11 @@ pub fn run(
         config.dkim_selector.as_str(),
     ));
 
-    let message_id = send_with_transport(&args, &transport, dkim_info)?;
-    println!("Email sent successfully. Message-ID: {message_id}");
+    let (message_id, server) = send_with_transport(&args, &transport, dkim_info)?;
+    eprintln!(
+        "Delivered to {server} for {}. Message-ID: {message_id}",
+        args.to
+    );
     Ok(())
 }
 
@@ -260,12 +333,16 @@ mod tests {
     }
 
     impl MailTransport for MockTransport {
-        fn send(&self, message: &[u8]) -> Result<(), Box<dyn std::error::Error>> {
+        fn send(
+            &self,
+            _recipient: &str,
+            message: &[u8],
+        ) -> Result<String, Box<dyn std::error::Error>> {
             if self.should_fail {
                 return Err("Mock transport failure".into());
             }
             self.sent.lock().unwrap().push(message.to_vec());
-            Ok(())
+            Ok("mock-mx.example.com".to_string())
         }
     }
 
@@ -325,8 +402,10 @@ mod tests {
         };
 
         let args = test_args();
-        send_with_transport(&args, &transport, None).unwrap();
+        let (message_id, server) = send_with_transport(&args, &transport, None).unwrap();
 
+        assert!(!message_id.is_empty());
+        assert_eq!(server, "mock-mx.example.com");
         let messages = sent.lock().unwrap();
         assert_eq!(messages.len(), 1);
         let text = String::from_utf8(messages[0].clone()).unwrap();
@@ -350,6 +429,22 @@ mod tests {
                 .to_string()
                 .contains("Mock transport failure")
         );
+    }
+
+    #[test]
+    fn send_with_transport_returns_delivery_info() {
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let transport = MockTransport {
+            sent,
+            should_fail: false,
+        };
+
+        let args = test_args();
+        let (message_id, server) = send_with_transport(&args, &transport, None).unwrap();
+
+        assert!(message_id.starts_with('<'));
+        assert!(message_id.ends_with('>'));
+        assert_eq!(server, "mock-mx.example.com");
     }
 
     #[test]
@@ -729,8 +824,6 @@ mod tests {
                 "CRLF injection in In-Reply-To created a Bcc header"
             );
         }
-        // After sanitization, CRLF is stripped; normalize may re-wrap but
-        // the key property is no header injection occurs.
         assert!(text.contains("In-Reply-To:"));
         let in_reply_line = text
             .split("\r\n")
@@ -804,7 +897,6 @@ mod tests {
     #[test]
     fn run_with_missing_dkim_key_returns_error() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Create a valid config but no DKIM key
         let mut mailboxes = std::collections::HashMap::new();
         mailboxes.insert(
             "catchall".to_string(),
@@ -839,7 +931,6 @@ mod tests {
     #[test]
     fn run_with_missing_config_returns_error() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // No config file exists
 
         let args = test_args();
         let result = run(args, Some(tmp.path()));
@@ -849,5 +940,18 @@ mod tests {
             err.contains("config") || err.contains("DKIM"),
             "Error should mention config loading: {err}"
         );
+    }
+
+    #[test]
+    fn lettre_transport_extract_domain() {
+        assert_eq!(
+            LettreTransport::extract_domain("user@gmail.com").unwrap(),
+            "gmail.com"
+        );
+        assert_eq!(
+            LettreTransport::extract_domain("User <user@gmail.com>").unwrap(),
+            "gmail.com"
+        );
+        assert!(LettreTransport::extract_domain("nodomain").is_err());
     }
 }

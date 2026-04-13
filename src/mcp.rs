@@ -265,17 +265,20 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::SendmailTransport;
+        let transport = send::LettreTransport;
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
             config.dkim_selector.as_str(),
         ));
 
-        let message_id =
+        let (message_id, server) =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
 
-        Ok(format!("Email sent. Message-ID: {message_id}"))
+        Ok(format!(
+            "Delivered to {server} for {}. Message-ID: {message_id}",
+            args.to
+        ))
     }
 
     #[tool(
@@ -351,17 +354,20 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::SendmailTransport;
+        let transport = send::LettreTransport;
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
             config.dkim_selector.as_str(),
         ));
 
-        let message_id =
+        let (message_id, server) =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
 
-        Ok(format!("Reply sent. Message-ID: {message_id}"))
+        Ok(format!(
+            "Delivered to {server} for {}. Message-ID: {message_id}",
+            args.to
+        ))
     }
 }
 
