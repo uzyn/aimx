@@ -46,6 +46,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with `cargo test -- --ignored`
     fn resolve_mx_valid_domain() {
         let rt = rt();
         let hosts = rt.block_on(resolve_mx("gmail.com")).unwrap();
@@ -59,6 +60,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with `cargo test -- --ignored`
     fn resolve_mx_sorted_by_priority() {
         let rt = rt();
         let hosts = rt.block_on(resolve_mx("gmail.com")).unwrap();
@@ -81,6 +83,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // Requires network access; run with `cargo test -- --ignored`
     fn resolve_mx_no_mx_with_a_fallback() {
         let rt = rt();
         let result = rt.block_on(resolve_mx("example.com"));

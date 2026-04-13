@@ -7,7 +7,12 @@ use std::path::Path;
 use uuid::Uuid;
 
 pub trait MailTransport {
-    fn send(&self, recipient: &str, message: &[u8]) -> Result<String, Box<dyn std::error::Error>>;
+    fn send(
+        &self,
+        sender: &str,
+        recipient: &str,
+        message: &[u8],
+    ) -> Result<String, Box<dyn std::error::Error>>;
 }
 
 pub struct LettreTransport;
@@ -27,13 +32,17 @@ impl LettreTransport {
 }
 
 impl MailTransport for LettreTransport {
-    fn send(&self, recipient: &str, message: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    fn send(
+        &self,
+        sender: &str,
+        recipient: &str,
+        message: &[u8],
+    ) -> Result<String, Box<dyn std::error::Error>> {
         let domain = Self::extract_domain(recipient)?;
         let rt = tokio::runtime::Handle::try_current();
 
         let mx_hosts = match rt {
             Ok(handle) => {
-                // We're inside an async context, use block_in_place
                 tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_mx(&domain)))?
             }
             Err(_) => {
@@ -43,8 +52,18 @@ impl MailTransport for LettreTransport {
             }
         };
 
+        let sender_addr: lettre::Address = Self::extract_domain(sender).and_then(|_| {
+            let bare = sender
+                .rsplit('<')
+                .next()
+                .unwrap_or(sender)
+                .trim_end_matches('>');
+            bare.parse()
+                .map_err(|e| format!("Invalid sender address '{sender}': {e}").into())
+        })?;
+
         let envelope = lettre::address::Envelope::new(
-            None,
+            Some(sender_addr),
             vec![
                 recipient
                     .parse()
@@ -289,7 +308,7 @@ pub fn send_with_transport(
         composed.message
     };
 
-    let server = transport.send(&args.to, &final_message)?;
+    let server = transport.send(&args.from, &args.to, &final_message)?;
     Ok((composed.message_id, server))
 }
 
@@ -335,6 +354,7 @@ mod tests {
     impl MailTransport for MockTransport {
         fn send(
             &self,
+            _sender: &str,
             _recipient: &str,
             message: &[u8],
         ) -> Result<String, Box<dyn std::error::Error>> {

@@ -952,4 +952,41 @@ mod tests {
         let result = load_dkim_key(&config);
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn send_error_propagates_through_mcp_mapping() {
+        use crate::cli::SendArgs;
+
+        struct FailTransport;
+        impl send::MailTransport for FailTransport {
+            fn send(
+                &self,
+                _sender: &str,
+                _recipient: &str,
+                _message: &[u8],
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                Err("Connection refused by mx.example.com".into())
+            }
+        }
+
+        let args = SendArgs {
+            from: "alice@test.com".to_string(),
+            to: "bob@example.com".to_string(),
+            subject: "Test".to_string(),
+            body: "Body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result =
+            send::send_with_transport(&args, &FailTransport, None).map_err(|e| e.to_string());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Connection refused"),
+            "MCP-style error mapping should preserve delivery failure details: {err}"
+        );
+    }
 }
