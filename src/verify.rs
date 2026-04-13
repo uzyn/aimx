@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps};
+use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status};
 use std::path::Path;
 
 pub fn run(
@@ -14,8 +14,8 @@ pub fn run(
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
     let net = setup::RealNetworkOps::from_verify_host(host)?;
 
-    let smtp_up = is_smtp_listening();
-    run_with_net(&net, smtp_up)
+    let port25 = detect_port25();
+    run_with_net(&net, &port25)
 }
 
 pub(crate) fn resolve_verify_host(
@@ -31,17 +31,10 @@ pub(crate) fn resolve_verify_host(
         .unwrap_or_else(|| default.to_string())
 }
 
-/// Check whether an SMTP server is already listening on localhost port 25.
-fn is_smtp_listening() -> bool {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    if let Ok(mut addrs) = "127.0.0.1:25".to_socket_addrs()
-        && let Some(addr) = addrs.next()
-    {
-        return TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok();
-    }
-    false
+/// Detect what (if anything) is listening on port 25.
+fn detect_port25() -> Port25Status {
+    let sys = setup::RealSystemOps;
+    setup::SystemOps::check_port25_occupancy(&sys).unwrap_or(Port25Status::Free)
 }
 
 /// Returns true if the current process is running as root.
@@ -49,11 +42,15 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-pub fn run_with_net(net: &dyn NetworkOps, smtp_up: bool) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_net(
+    net: &dyn NetworkOps,
+    port25: &Port25Status,
+) -> Result<(), Box<dyn std::error::Error>> {
     println!("aimx verify - Port 25 connectivity check\n");
 
     let mut all_pass = true;
 
+    // Check 1: Outbound port 25
     print!("  Outbound port 25... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_outbound(net) {
@@ -66,64 +63,84 @@ pub fn run_with_net(net: &dyn NetworkOps, smtp_up: bool) -> Result<(), Box<dyn s
         setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
     }
 
-    if smtp_up {
-        // OpenSMTPD (or another SMTP server) is running — full EHLO handshake.
-        print!("  Inbound port 25 (EHLO probe)... ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        match setup::check_inbound(net) {
-            setup::PreflightResult::Pass(_) => println!("PASS"),
-            setup::PreflightResult::Fail(msg) => {
-                println!("FAIL");
-                eprintln!("  {msg}");
-                all_pass = false;
+    match port25 {
+        Port25Status::OpenSmtpd => {
+            // Check 2: Inbound port 25 reachability
+            print!("  Inbound port 25... ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            match setup::check_inbound(net) {
+                setup::PreflightResult::Pass(_) => println!("PASS"),
+                setup::PreflightResult::Fail(msg) => {
+                    println!("FAIL");
+                    eprintln!("  {msg}");
+                    all_pass = false;
+                }
+                setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
             }
-            setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
-        }
-    } else {
-        // No SMTP server yet — bind a temporary listener and do a plain TCP
-        // reachability check. Requires root to bind port 25.
-        if !is_root() {
-            return Err(
-                "No SMTP server detected on port 25. Root is required to bind a \
-                 temporary listener for the inbound check.\n\
-                 Run with: sudo aimx verify"
-                    .into(),
-            );
-        }
-        let _temp_listener = std::net::TcpListener::bind("0.0.0.0:25").ok();
 
-        print!("  Inbound port 25 (TCP reach)... ");
-        std::io::Write::flush(&mut std::io::stdout())?;
-        match setup::check_inbound_tcp(net) {
-            setup::PreflightResult::Pass(_) => println!("PASS"),
-            setup::PreflightResult::Fail(msg) => {
-                println!("FAIL");
-                eprintln!("  {msg}");
-                all_pass = false;
+            // Check 3: EHLO handshake (OpenSMTPD-specific)
+            print!("  OpenSMTPD detected. Inbound SMTP handshake check... ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            match setup::check_inbound(net) {
+                setup::PreflightResult::Pass(_) => println!("PASS"),
+                setup::PreflightResult::Fail(msg) => {
+                    println!("FAIL");
+                    eprintln!("  {msg}");
+                    all_pass = false;
+                }
+                setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
             }
-            setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+
+            println!();
+            if all_pass {
+                println!("All checks passed. Port 25 is reachable. OpenSMTPD is up.");
+                Ok(())
+            } else {
+                Err("Some checks failed. See details above.".into())
+            }
         }
-    }
 
-    print!("  PTR record... ");
-    std::io::Write::flush(&mut std::io::stdout())?;
-    match setup::check_ptr(net) {
-        setup::PreflightResult::Pass(Some(ptr)) => println!("PASS ({ptr})"),
-        setup::PreflightResult::Pass(None) => println!("PASS"),
-        setup::PreflightResult::Fail(msg) => {
-            println!("FAIL: {msg}");
-            all_pass = false;
+        Port25Status::OtherMta(name) => Err(format!(
+            "Port 25 is occupied by `{name}`, which is not OpenSMTPD.\n\
+             aimx only supports OpenSMTPD as the mail transfer agent.\n\
+             Uninstall `{name}` to proceed, then run `sudo aimx setup`."
+        )
+        .into()),
+
+        Port25Status::Free => {
+            // Fresh VPS — bind a temporary listener and do a plain TCP
+            // reachability check. Requires root to bind port 25.
+            if !is_root() {
+                return Err(
+                    "No SMTP server detected on port 25. Root is required to bind a \
+                     temporary listener for the inbound check.\n\
+                     Run with: sudo aimx verify"
+                        .into(),
+                );
+            }
+            let _temp_listener = std::net::TcpListener::bind("0.0.0.0:25").ok();
+
+            print!("  Inbound port 25 (TCP reach)... ");
+            std::io::Write::flush(&mut std::io::stdout())?;
+            match setup::check_inbound_tcp(net) {
+                setup::PreflightResult::Pass(_) => println!("PASS"),
+                setup::PreflightResult::Fail(msg) => {
+                    println!("FAIL");
+                    eprintln!("  {msg}");
+                    all_pass = false;
+                }
+                setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+            }
+
+            println!();
+            if all_pass {
+                println!("All checks passed. Port 25 is reachable.");
+                println!("To set up aimx, run `sudo aimx setup`.");
+                Ok(())
+            } else {
+                Err("Some checks failed. See details above.".into())
+            }
         }
-        setup::PreflightResult::Warn(msg) => println!("WARN\n  {msg}"),
-    }
-
-    println!();
-
-    if all_pass {
-        println!("All checks passed. Port 25 is reachable.");
-        Ok(())
-    } else {
-        Err("Some checks failed. See details above.".into())
     }
 }
 
@@ -139,7 +156,6 @@ mod tests {
         inbound: bool,
         /// Result for `check_inbound_reachable` (plain TCP via `/reach`).
         inbound_reachable: bool,
-        ptr: Option<String>,
         /// Track whether `check_inbound_port25` was called.
         ehlo_called: std::cell::Cell<bool>,
         /// Track whether `check_inbound_reachable` was called.
@@ -152,7 +168,6 @@ mod tests {
                 outbound: true,
                 inbound: true,
                 inbound_reachable: true,
-                ptr: Some("mail.example.com.".into()),
                 ehlo_called: std::cell::Cell::new(false),
                 reach_called: std::cell::Cell::new(false),
             }
@@ -172,7 +187,7 @@ mod tests {
             Ok(self.inbound_reachable)
         }
         fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-            Ok(self.ptr.clone())
+            Ok(None)
         }
         fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
             Ok("1.2.3.4".parse().unwrap())
@@ -188,102 +203,106 @@ mod tests {
         }
     }
 
-    // --- smtp_up=true (post-install) tests ---
+    // --- OpenSMTPD running tests ---
 
     #[test]
-    fn verify_all_pass_smtp_up() {
+    fn verify_opensmtpd_all_pass() {
         let net = MockNetworkOps::default();
-        assert!(run_with_net(&net, true).is_ok());
-        assert!(net.ehlo_called.get(), "should use EHLO probe when smtp_up");
+        assert!(run_with_net(&net, &Port25Status::OpenSmtpd).is_ok());
+        assert!(
+            net.ehlo_called.get(),
+            "should use EHLO probe when OpenSMTPD running"
+        );
         assert!(
             !net.reach_called.get(),
-            "should not use TCP reach when smtp_up"
+            "should not use TCP reach when OpenSMTPD running"
         );
     }
 
     #[test]
-    fn verify_outbound_fail() {
+    fn verify_opensmtpd_outbound_fail() {
         let net = MockNetworkOps {
             outbound: false,
             ..Default::default()
         };
-        assert!(run_with_net(&net, true).is_err());
+        assert!(run_with_net(&net, &Port25Status::OpenSmtpd).is_err());
     }
 
     #[test]
-    fn verify_inbound_ehlo_fail() {
+    fn verify_opensmtpd_inbound_ehlo_fail() {
         let net = MockNetworkOps {
             inbound: false,
             ..Default::default()
         };
-        assert!(run_with_net(&net, true).is_err());
+        assert!(run_with_net(&net, &Port25Status::OpenSmtpd).is_err());
     }
 
     #[test]
-    fn verify_ptr_warn_still_passes() {
-        let net = MockNetworkOps {
-            ptr: None,
-            ..Default::default()
-        };
-        assert!(run_with_net(&net, true).is_ok());
-    }
-
-    #[test]
-    fn verify_all_fail() {
-        let net = MockNetworkOps {
-            outbound: false,
-            inbound: false,
-            ptr: None,
-            ..Default::default()
-        };
-        assert!(run_with_net(&net, true).is_err());
-    }
-
-    /// When smtp_up=true, verify must use the EHLO `/probe` path, not `/reach`.
-    #[test]
-    fn verify_smtp_up_uses_ehlo_not_reach() {
+    fn verify_opensmtpd_uses_ehlo_not_reach() {
         let net = MockNetworkOps {
             inbound: false,
             inbound_reachable: true,
             ..Default::default()
         };
-        assert!(run_with_net(&net, true).is_err());
+        assert!(run_with_net(&net, &Port25Status::OpenSmtpd).is_err());
         assert!(
             !net.reach_called.get(),
-            "aimx verify with smtp_up must not call check_inbound_reachable (/reach)"
+            "OpenSMTPD mode must not call check_inbound_reachable (/reach)"
         );
     }
 
-    // --- smtp_up=false (pre-install / preflight) tests ---
+    // --- OtherMta tests ---
 
     #[test]
-    fn verify_preflight_all_pass() {
+    fn verify_other_mta_fails_with_process_name() {
         let net = MockNetworkOps::default();
-        // smtp_up=false path requires root to bind port 25; in tests we may or
-        // may not be root. We can't reliably test the root-gated path in CI, so
-        // only test if running as root.
+        let err = run_with_net(&net, &Port25Status::OtherMta("postfix".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("postfix"), "error should name the process");
+        assert!(
+            err.contains("not OpenSMTPD"),
+            "error should explain aimx requires OpenSMTPD"
+        );
+    }
+
+    #[test]
+    fn verify_other_mta_unknown_process() {
+        let net = MockNetworkOps::default();
+        let err = run_with_net(&net, &Port25Status::OtherMta("unknown".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown"));
+    }
+
+    // --- Fresh VPS (Port25Status::Free) tests ---
+
+    #[test]
+    fn verify_free_requires_root() {
+        let net = MockNetworkOps::default();
         if !is_root() {
-            // Non-root should get a clear error.
-            let err = run_with_net(&net, false).unwrap_err();
+            let err = run_with_net(&net, &Port25Status::Free)
+                .unwrap_err()
+                .to_string();
             assert!(
-                err.to_string().contains("sudo aimx verify"),
+                err.contains("sudo aimx verify"),
                 "should advise running with sudo"
             );
             return;
         }
-        assert!(run_with_net(&net, false).is_ok());
+        assert!(run_with_net(&net, &Port25Status::Free).is_ok());
         assert!(
             net.reach_called.get(),
-            "should use TCP reach when smtp not up"
+            "should use TCP reach when port 25 is free"
         );
         assert!(
             !net.ehlo_called.get(),
-            "should not use EHLO probe when smtp not up"
+            "should not use EHLO probe when port 25 is free"
         );
     }
 
     #[test]
-    fn verify_preflight_uses_reach_not_ehlo() {
+    fn verify_free_uses_reach_not_ehlo() {
         if !is_root() {
             return; // Can't test this path without root
         }
@@ -292,14 +311,14 @@ mod tests {
             inbound: true,
             ..Default::default()
         };
-        assert!(run_with_net(&net, false).is_err());
+        assert!(run_with_net(&net, &Port25Status::Free).is_err());
         assert!(
             net.reach_called.get(),
-            "preflight mode must call check_inbound_reachable (/reach)"
+            "free mode must call check_inbound_reachable (/reach)"
         );
         assert!(
             !net.ehlo_called.get(),
-            "preflight mode must not call check_inbound_port25 (/probe)"
+            "free mode must not call check_inbound_port25 (/probe)"
         );
     }
 
