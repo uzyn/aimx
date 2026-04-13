@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
 use tempfile::TempDir;
+use wait_timeout::ChildExt;
 
 fn setup_test_env(tmp: &Path) -> String {
     let config_content = format!(
@@ -53,6 +54,7 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("mcp"))
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("verify"))
         .stdout(predicate::str::contains("dkim-keygen"));
 }
@@ -1026,4 +1028,236 @@ fn verify_help_works() {
         .assert()
         .success()
         .stdout(predicate::str::contains("verify"));
+}
+
+#[test]
+fn serve_help_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("serve"))
+        .stdout(predicate::str::contains("--bind"))
+        .stdout(predicate::str::contains("--tls-cert"))
+        .stdout(predicate::str::contains("--tls-key"));
+}
+
+fn find_free_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
+}
+
+fn smtp_send_email(port: u16, from: &str, rcpts: &[&str], data: &str) {
+    use std::io::{BufRead as _, Write as _};
+    let stream = std::net::TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+    let mut writer = stream;
+
+    let mut buf = String::new();
+    reader.read_line(&mut buf).unwrap();
+    assert!(buf.starts_with("220"), "Expected banner, got: {buf}");
+
+    buf.clear();
+    write!(writer, "EHLO test.local\r\n").unwrap();
+    loop {
+        reader.read_line(&mut buf).unwrap();
+        if buf.contains("250 ") {
+            break;
+        }
+    }
+
+    buf.clear();
+    write!(writer, "MAIL FROM:<{from}>\r\n").unwrap();
+    reader.read_line(&mut buf).unwrap();
+    assert!(buf.starts_with("250"), "MAIL FROM failed: {buf}");
+
+    for rcpt in rcpts {
+        buf.clear();
+        write!(writer, "RCPT TO:<{rcpt}>\r\n").unwrap();
+        reader.read_line(&mut buf).unwrap();
+        assert!(buf.starts_with("250"), "RCPT TO failed: {buf}");
+    }
+
+    buf.clear();
+    write!(writer, "DATA\r\n").unwrap();
+    reader.read_line(&mut buf).unwrap();
+    assert!(buf.starts_with("354"), "DATA failed: {buf}");
+
+    write!(writer, "{data}\r\n.\r\n").unwrap();
+    buf.clear();
+    reader.read_line(&mut buf).unwrap();
+    assert!(buf.starts_with("250"), "DATA end failed: {buf}");
+
+    write!(writer, "QUIT\r\n").unwrap();
+    buf.clear();
+    let _ = reader.read_line(&mut buf);
+}
+
+#[test]
+fn serve_e2e_receive_email_and_shutdown() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mut child = StdCommand::new(aimx_binary_path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    // Wait for server to be ready
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let email_data = "From: sender@example.com\r\nTo: alice@agent.example.com\r\nSubject: E2E Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <e2e-test@example.com>\r\n\r\nHello from the e2e test";
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com"],
+        email_data,
+    );
+
+    // Allow ingest to complete
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_dir = tmp.path().join("alice");
+    let md_files = find_md_files(&alice_dir);
+    assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
+
+    let content = std::fs::read_to_string(&md_files[0]).unwrap();
+    assert!(content.contains("subject = \"E2E Test\""));
+    assert!(content.contains("Hello from the e2e test"));
+
+    // Send SIGTERM
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+
+    let status = child
+        .wait_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert!(
+        status.is_some(),
+        "aimx serve should exit within 10s of SIGTERM"
+    );
+    let status = status.unwrap();
+    assert!(status.success(), "aimx serve should exit cleanly: {status}");
+}
+
+#[test]
+fn serve_e2e_multi_recipient() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mut child = StdCommand::new(aimx_binary_path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let email_data = "From: sender@example.com\r\nTo: alice@agent.example.com, catchall@agent.example.com\r\nSubject: Multi RCPT\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <multi-rcpt@example.com>\r\n\r\nMulti recipient test";
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com", "catchall@agent.example.com"],
+        email_data,
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_files = find_md_files(&tmp.path().join("alice"));
+    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
+    assert_eq!(
+        catchall_files.len(),
+        1,
+        "Expected 1 email in catchall mailbox"
+    );
+
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = child.wait_timeout(std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn serve_e2e_connection_refused_after_shutdown() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mut child = StdCommand::new(aimx_binary_path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    // Send SIGTERM and wait for exit
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let status = child
+        .wait_timeout(std::time::Duration::from_secs(10))
+        .unwrap();
+    assert!(status.is_some(), "aimx serve should exit within 10s");
+
+    // Connection should be refused after shutdown
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let result = std::net::TcpStream::connect(format!("127.0.0.1:{port}"));
+    assert!(
+        result.is_err(),
+        "Connection should be refused after shutdown"
+    );
 }
