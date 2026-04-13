@@ -7,8 +7,8 @@ mod mailbox;
 mod mcp;
 mod mx;
 mod send;
+mod serve;
 mod setup;
-#[allow(dead_code)]
 mod smtp;
 mod status;
 mod verify;
@@ -53,6 +53,16 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
             setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
         }
+        Command::Serve {
+            bind,
+            tls_cert,
+            tls_key,
+        } => serve::run(
+            Some(bind.as_str()),
+            tls_cert.as_deref(),
+            tls_key.as_deref(),
+            cli.data_dir.as_deref(),
+        ),
         Command::Status => status::run(cli.data_dir.as_deref()),
         Command::Verify { verify_host } => {
             verify::run(cli.data_dir.as_deref(), verify_host.as_deref())

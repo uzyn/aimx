@@ -50,6 +50,21 @@ pub enum Command {
     /// Show server status, mailbox counts, and configuration
     Status,
 
+    /// Start the embedded SMTP listener daemon
+    Serve {
+        /// Bind address (default: 0.0.0.0:25)
+        #[arg(long, default_value = "0.0.0.0:25")]
+        bind: String,
+
+        /// Path to TLS certificate PEM file
+        #[arg(long)]
+        tls_cert: Option<String>,
+
+        /// Path to TLS private key PEM file
+        #[arg(long)]
+        tls_key: Option<String>,
+    },
+
     /// Check port 25 connectivity (outbound, inbound, PTR)
     Verify {
         /// Override the verify service host (e.g. https://verify.example.com)
