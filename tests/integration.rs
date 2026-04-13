@@ -53,7 +53,6 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("mcp"))
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("status"))
-        .stdout(predicate::str::contains("preflight"))
         .stdout(predicate::str::contains("verify"))
         .stdout(predicate::str::contains("dkim-keygen"));
 }
@@ -968,16 +967,6 @@ fn setup_help_shows_domain_arg() {
         .assert()
         .success()
         .stdout(predicate::str::contains("DOMAIN"));
-}
-
-#[test]
-fn preflight_help_works() {
-    Command::cargo_bin("aimx")
-        .unwrap()
-        .args(["preflight", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("preflight"));
 }
 
 #[test]

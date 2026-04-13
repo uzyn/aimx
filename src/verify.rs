@@ -14,7 +14,8 @@ pub fn run(
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
     let net = setup::RealNetworkOps::from_verify_host(host)?;
 
-    run_with_net(&net)
+    let smtp_up = is_smtp_listening();
+    run_with_net(&net, smtp_up)
 }
 
 pub(crate) fn resolve_verify_host(
@@ -30,7 +31,25 @@ pub(crate) fn resolve_verify_host(
         .unwrap_or_else(|| default.to_string())
 }
 
-pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
+/// Check whether an SMTP server is already listening on localhost port 25.
+fn is_smtp_listening() -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    use std::time::Duration;
+
+    if let Ok(mut addrs) = "127.0.0.1:25".to_socket_addrs()
+        && let Some(addr) = addrs.next()
+    {
+        return TcpStream::connect_timeout(&addr, Duration::from_secs(1)).is_ok();
+    }
+    false
+}
+
+/// Returns true if the current process is running as root.
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+pub fn run_with_net(net: &dyn NetworkOps, smtp_up: bool) -> Result<(), Box<dyn std::error::Error>> {
     println!("aimx verify - Port 25 connectivity check\n");
 
     let mut all_pass = true;
@@ -47,19 +66,43 @@ pub fn run_with_net(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Erro
         setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
     }
 
-    // `aimx verify` is a post-setup sanity check — the user already has a
-    // working mail server, so the full EHLO handshake via `/probe` is the
-    // correct validation.
-    print!("  Inbound port 25 (EHLO probe)... ");
-    std::io::Write::flush(&mut std::io::stdout())?;
-    match setup::check_inbound(net) {
-        setup::PreflightResult::Pass(_) => println!("PASS"),
-        setup::PreflightResult::Fail(msg) => {
-            println!("FAIL");
-            eprintln!("  {msg}");
-            all_pass = false;
+    if smtp_up {
+        // OpenSMTPD (or another SMTP server) is running — full EHLO handshake.
+        print!("  Inbound port 25 (EHLO probe)... ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        match setup::check_inbound(net) {
+            setup::PreflightResult::Pass(_) => println!("PASS"),
+            setup::PreflightResult::Fail(msg) => {
+                println!("FAIL");
+                eprintln!("  {msg}");
+                all_pass = false;
+            }
+            setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
         }
-        setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+    } else {
+        // No SMTP server yet — bind a temporary listener and do a plain TCP
+        // reachability check. Requires root to bind port 25.
+        if !is_root() {
+            return Err(
+                "No SMTP server detected on port 25. Root is required to bind a \
+                 temporary listener for the inbound check.\n\
+                 Run with: sudo aimx verify"
+                    .into(),
+            );
+        }
+        let _temp_listener = std::net::TcpListener::bind("0.0.0.0:25").ok();
+
+        print!("  Inbound port 25 (TCP reach)... ");
+        std::io::Write::flush(&mut std::io::stdout())?;
+        match setup::check_inbound_tcp(net) {
+            setup::PreflightResult::Pass(_) => println!("PASS"),
+            setup::PreflightResult::Fail(msg) => {
+                println!("FAIL");
+                eprintln!("  {msg}");
+                all_pass = false;
+            }
+            setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+        }
     }
 
     print!("  PTR record... ");
@@ -92,16 +135,14 @@ mod tests {
 
     struct MockNetworkOps {
         outbound: bool,
-        /// Result for `check_inbound_port25` (EHLO via `/probe`). This is the
-        /// variant `aimx verify` should be using.
+        /// Result for `check_inbound_port25` (EHLO via `/probe`).
         inbound: bool,
         /// Result for `check_inbound_reachable` (plain TCP via `/reach`).
-        /// `aimx verify` must NOT call this; set to the opposite of `inbound`
-        /// in tests that verify `aimx verify` uses the EHLO variant.
         inbound_reachable: bool,
         ptr: Option<String>,
-        /// Track whether `check_inbound_reachable` was called during the test
-        /// — used to assert `aimx verify` never touches the `/reach` path.
+        /// Track whether `check_inbound_port25` was called.
+        ehlo_called: std::cell::Cell<bool>,
+        /// Track whether `check_inbound_reachable` was called.
         reach_called: std::cell::Cell<bool>,
     }
 
@@ -112,6 +153,7 @@ mod tests {
                 inbound: true,
                 inbound_reachable: true,
                 ptr: Some("mail.example.com.".into()),
+                ehlo_called: std::cell::Cell::new(false),
                 reach_called: std::cell::Cell::new(false),
             }
         }
@@ -122,6 +164,7 @@ mod tests {
             Ok(self.outbound)
         }
         fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            self.ehlo_called.set(true);
             Ok(self.inbound)
         }
         fn check_inbound_reachable(&self) -> Result<bool, Box<dyn std::error::Error>> {
@@ -145,10 +188,17 @@ mod tests {
         }
     }
 
+    // --- smtp_up=true (post-install) tests ---
+
     #[test]
-    fn verify_all_pass() {
+    fn verify_all_pass_smtp_up() {
         let net = MockNetworkOps::default();
-        assert!(run_with_net(&net).is_ok());
+        assert!(run_with_net(&net, true).is_ok());
+        assert!(net.ehlo_called.get(), "should use EHLO probe when smtp_up");
+        assert!(
+            !net.reach_called.get(),
+            "should not use TCP reach when smtp_up"
+        );
     }
 
     #[test]
@@ -157,16 +207,16 @@ mod tests {
             outbound: false,
             ..Default::default()
         };
-        assert!(run_with_net(&net).is_err());
+        assert!(run_with_net(&net, true).is_err());
     }
 
     #[test]
-    fn verify_inbound_fail() {
+    fn verify_inbound_ehlo_fail() {
         let net = MockNetworkOps {
             inbound: false,
             ..Default::default()
         };
-        assert!(run_with_net(&net).is_err());
+        assert!(run_with_net(&net, true).is_err());
     }
 
     #[test]
@@ -175,7 +225,7 @@ mod tests {
             ptr: None,
             ..Default::default()
         };
-        assert!(run_with_net(&net).is_ok());
+        assert!(run_with_net(&net, true).is_ok());
     }
 
     #[test]
@@ -186,26 +236,74 @@ mod tests {
             ptr: None,
             ..Default::default()
         };
-        assert!(run_with_net(&net).is_err());
+        assert!(run_with_net(&net, true).is_err());
     }
 
-    /// Regression test for S13.1: `aimx verify` must continue to use the
-    /// EHLO-based `/probe` path (not the plain-TCP `/reach` path). If the
-    /// EHLO path says `inbound: false` but the reach path says
-    /// `inbound_reachable: true`, `aimx verify` should still fail.
+    /// When smtp_up=true, verify must use the EHLO `/probe` path, not `/reach`.
     #[test]
-    fn verify_uses_ehlo_not_reach() {
+    fn verify_smtp_up_uses_ehlo_not_reach() {
         let net = MockNetworkOps {
             inbound: false,
             inbound_reachable: true,
             ..Default::default()
         };
-        assert!(run_with_net(&net).is_err());
+        assert!(run_with_net(&net, true).is_err());
         assert!(
             !net.reach_called.get(),
-            "aimx verify must not call check_inbound_reachable (the /reach endpoint)"
+            "aimx verify with smtp_up must not call check_inbound_reachable (/reach)"
         );
     }
+
+    // --- smtp_up=false (pre-install / preflight) tests ---
+
+    #[test]
+    fn verify_preflight_all_pass() {
+        let net = MockNetworkOps::default();
+        // smtp_up=false path requires root to bind port 25; in tests we may or
+        // may not be root. We can't reliably test the root-gated path in CI, so
+        // only test if running as root.
+        if !is_root() {
+            // Non-root should get a clear error.
+            let err = run_with_net(&net, false).unwrap_err();
+            assert!(
+                err.to_string().contains("sudo aimx verify"),
+                "should advise running with sudo"
+            );
+            return;
+        }
+        assert!(run_with_net(&net, false).is_ok());
+        assert!(
+            net.reach_called.get(),
+            "should use TCP reach when smtp not up"
+        );
+        assert!(
+            !net.ehlo_called.get(),
+            "should not use EHLO probe when smtp not up"
+        );
+    }
+
+    #[test]
+    fn verify_preflight_uses_reach_not_ehlo() {
+        if !is_root() {
+            return; // Can't test this path without root
+        }
+        let net = MockNetworkOps {
+            inbound_reachable: false,
+            inbound: true,
+            ..Default::default()
+        };
+        assert!(run_with_net(&net, false).is_err());
+        assert!(
+            net.reach_called.get(),
+            "preflight mode must call check_inbound_reachable (/reach)"
+        );
+        assert!(
+            !net.ehlo_called.get(),
+            "preflight mode must not call check_inbound_port25 (/probe)"
+        );
+    }
+
+    // --- verify_host resolution tests ---
 
     #[test]
     fn config_without_verify_address_parses() {
@@ -216,8 +314,6 @@ mod tests {
 
     #[test]
     fn config_with_legacy_verify_address_parses() {
-        // serde should ignore unknown fields (verify_address was removed)
-        // This works because Config does NOT have #[serde(deny_unknown_fields)]
         let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.domain, "test.com");
