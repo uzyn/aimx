@@ -7,7 +7,7 @@ pub struct StatusInfo {
     pub data_dir: String,
     pub dkim_selector: String,
     pub dkim_key_present: bool,
-    pub opensmtpd_running: bool,
+    pub smtp_running: bool,
     pub mailboxes: Vec<MailboxStatus>,
     pub recent_activity: Vec<RecentEmail>,
 }
@@ -29,7 +29,7 @@ pub struct RecentEmail {
 
 pub fn gather_status(config: &Config) -> StatusInfo {
     let dkim_key_present = config.data_dir.join("dkim/private.key").exists();
-    let opensmtpd_running = check_opensmtpd_running();
+    let smtp_running = check_smtp_running();
 
     let mut mailboxes: Vec<MailboxStatus> = config
         .mailboxes
@@ -55,7 +55,7 @@ pub fn gather_status(config: &Config) -> StatusInfo {
         data_dir: config.data_dir.to_string_lossy().to_string(),
         dkim_selector: config.dkim_selector.clone(),
         dkim_key_present,
-        opensmtpd_running,
+        smtp_running,
         mailboxes,
         recent_activity,
     }
@@ -110,9 +110,9 @@ fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
     all
 }
 
-fn check_opensmtpd_running() -> bool {
+fn check_smtp_running() -> bool {
     std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "opensmtpd"])
+        .args(["is-active", "--quiet", "aimx"])
         .status()
         .is_ok_and(|s| s.success())
 }
@@ -182,8 +182,8 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     ));
     out.push_str(&format!(
-        "OpenSMTPD:        {}\n",
-        if info.opensmtpd_running {
+        "SMTP server:      {}\n",
+        if info.smtp_running {
             "running"
         } else {
             "not running"
@@ -249,7 +249,7 @@ mod tests {
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "dkim".to_string(),
             dkim_key_present: true,
-            opensmtpd_running: true,
+            smtp_running: true,
             mailboxes: vec![],
             recent_activity: vec![],
         };
@@ -267,7 +267,7 @@ mod tests {
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "dkim".to_string(),
             dkim_key_present: true,
-            opensmtpd_running: false,
+            smtp_running: false,
             mailboxes: vec![
                 MailboxStatus {
                     name: "catchall".to_string(),
@@ -302,7 +302,7 @@ mod tests {
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "dkim".to_string(),
             dkim_key_present: false,
-            opensmtpd_running: false,
+            smtp_running: false,
             mailboxes: vec![],
             recent_activity: vec![],
         };
@@ -422,7 +422,7 @@ mod tests {
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "dkim".to_string(),
             dkim_key_present: true,
-            opensmtpd_running: true,
+            smtp_running: true,
             mailboxes: vec![],
             recent_activity: vec![
                 RecentEmail {
@@ -461,7 +461,7 @@ mod tests {
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "dkim".to_string(),
             dkim_key_present: true,
-            opensmtpd_running: true,
+            smtp_running: true,
             mailboxes: vec![],
             recent_activity: vec![],
         };

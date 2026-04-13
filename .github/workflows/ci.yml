@@ -30,6 +30,55 @@ jobs:
       - name: Run tests
         run: cargo test
 
+  check-alpine:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: rust:alpine
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf perl make
+
+      - name: Install clippy and rustfmt
+        run: rustup component add clippy rustfmt
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
+  check-fedora:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: dnf install -y rust cargo clippy rustfmt openssl-devel perl-FindBin perl-File-Compare gcc
+
+      - name: Check formatting
+        run: cargo fmt -- --check
+
+      - name: Build
+        run: cargo build
+
+      - name: Run tests
+        run: cargo test
+
+      - name: Clippy
+        run: cargo clippy -- -D warnings
+
   check-verifier-service:
     runs-on: ubuntu-latest
     defaults:
