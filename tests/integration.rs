@@ -981,13 +981,13 @@ fn preflight_help_works() {
 }
 
 #[test]
-fn setup_requires_domain_arg() {
+fn setup_without_domain_proceeds_to_root_check() {
     Command::cargo_bin("aimx")
         .unwrap()
         .arg("setup")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("DOMAIN"));
+        .stderr(predicate::str::contains("requires root"));
 }
 
 #[test]
