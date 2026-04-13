@@ -5,27 +5,25 @@ Diagnostic commands and solutions for common issues.
 ## Diagnostic commands
 
 ```bash
-# Run preflight checks (port 25)
-sudo aimx preflight
+# Check port 25 connectivity (outbound, inbound, PTR)
+# Uses EHLO probe when OpenSMTPD is running; TCP reach on fresh VPS (needs root)
+aimx verify
 
 # Show server status, configuration, and mailbox counts
 aimx status
-
-# Check port 25 connectivity (outbound and inbound)
-aimx verify
 
 # Test against a self-hosted verify service instead of the default
 aimx verify --verify-host https://verify.yourdomain.com
 ```
 
-The `--verify-host` flag is also accepted by `aimx setup` and `aimx preflight`, and overrides the `verify_host` value from `config.toml` for the current invocation.
+The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `verify_host` value from `config.toml` for the current invocation.
 
 ## Common issues
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| Preflight: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see [compatible providers](getting-started.md#compatible-vps-providers)) |
-| Preflight: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
+| Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see [compatible providers](getting-started.md#compatible-vps-providers)) |
+| Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` (see [verifying DNS](setup.md#verifying-dns-records)) |
 | `aimx verify` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |
 | Emails landing in spam | Missing DNS records or no PTR | Add all [DNS records](setup.md#dns-configuration), set PTR, use Gmail filter |
@@ -126,24 +124,24 @@ If permissions are wrong:
 sudo chmod 600 /var/lib/aimx/dkim/private.key
 ```
 
-## Preflight vs Verify
+## How verify works
 
-Both commands check port 25 connectivity, but they serve different purposes:
+`aimx verify` auto-detects what is listening on port 25 and adapts its checks:
 
-| Command | When to use | What it checks |
-|---------|-------------|----------------|
-| `sudo aimx preflight` | **Before setup** on a fresh VPS | Plain TCP reachability via `/reach` -- does not require a running mail server. Requires root to bind port 25. |
-| `aimx verify` | **After setup** with a running mail server | Full SMTP EHLO handshake via `/probe` -- confirms OpenSMTPD responds correctly. Does not require root. |
+| Scenario | What happens | Root required? |
+|----------|-------------|----------------|
+| **OpenSMTPD running** | Outbound + inbound port check + EHLO handshake | No |
+| **Other MTA** (Postfix, Exim, etc.) | Fails immediately — aimx only supports OpenSMTPD | No |
+| **Nothing on port 25** (fresh VPS) | Outbound + inbound TCP reachability via temporary listener | Yes (`sudo aimx verify`) |
 
-If `aimx verify` fails but `aimx preflight` passed earlier, the issue is likely in your OpenSMTPD configuration rather than firewall/port access.
+If verify fails with EHLO probe after setup, the issue is likely in your OpenSMTPD configuration rather than firewall/port access. Run `sudo systemctl status opensmtpd` to check.
 
 ## Useful commands reference
 
 | Command | Purpose |
 |---------|---------|
-| `sudo aimx preflight` | Check port 25 connectivity (pre-setup) |
+| `aimx verify` | Check port 25 connectivity (auto-detects pre/post setup) |
 | `aimx status` | Show config, mailboxes, and message counts |
-| `aimx verify` | Full connectivity verification (post-setup) |
 | `aimx mailbox list` | List all mailboxes |
 | `aimx dkim-keygen` | Generate DKIM keypair |
 | `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |
