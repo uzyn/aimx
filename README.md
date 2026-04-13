@@ -16,21 +16,21 @@ Done. Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed. MCP is 
 
 ```
 Inbound:
-  Sender -> port 25 -> OpenSMTPD -> aimx ingest -> .md file
-                                                 -> channel manager (triggers agent)
+  Sender -> port 25 -> aimx serve -> ingest -> .md file
+                                             -> channel manager (triggers agent)
 
 Outbound:
-  MCP tool call -> aimx send -> DKIM sign -> OpenSMTPD -> remote MX
+  MCP tool call -> aimx send -> DKIM sign -> direct SMTP to recipient MX
 ```
 
-- **No daemon.** OpenSMTPD is the only long-running process. `aimx` commands are short-lived.
+- **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.
+- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound. All other commands are short-lived.
 - **No IMAP/POP3.** Agents read `.md` files via MCP or filesystem.
 - **Markdown-first.** Emails stored as Markdown with TOML frontmatter -- agents can `cat` and understand immediately.
-- **Single binary.** Written in Rust. No runtime dependencies beyond OpenSMTPD.
 
 ## Features
 
-- **Setup wizard** -- preflight checks, OpenSMTPD config, DKIM keygen, DNS guidance, verification
+- **Setup wizard** -- preflight checks, service file generation, DKIM keygen, DNS guidance, verification
 - **Email delivery** -- EML to Markdown with TOML frontmatter, attachment extraction, mailbox routing
 - **Email sending** -- RFC 5322 composition, DKIM signing (RSA-SHA256), threading support, attachments
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
@@ -40,7 +40,7 @@ Outbound:
 
 ## Requirements
 
-- Linux (Debian/Ubuntu)
+- Any Unix where Rust compiles and port 25 is available (CI tests Ubuntu, Alpine, Fedora)
 - A VPS with port 25 open (inbound and outbound)
 - A domain you control
 - Rust toolchain (for building from source)
@@ -62,7 +62,7 @@ Outbound:
 cargo install --path .
 sudo cp target/release/aimx /usr/local/bin/
 
-# 2. Run setup (handles everything: preflight, OpenSMTPD, DKIM, DNS)
+# 2. Run setup (generates service file, DKIM keys, DNS guidance)
 sudo aimx setup agent.yourdomain.com
 
 # 3. Follow the interactive prompts to add DNS records
@@ -87,11 +87,8 @@ sudo cp target/release/aimx /usr/local/bin/
 ### Setup
 
 ```bash
-# Full interactive setup (installs OpenSMTPD, generates DKIM keys, guides DNS)
+# Full interactive setup (generates service file, DKIM keys, guides DNS)
 sudo aimx setup agent.yourdomain.com
-
-# Run preflight checks only (port 25, PTR record)
-aimx preflight
 
 # Check server status
 aimx status

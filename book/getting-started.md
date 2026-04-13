@@ -4,7 +4,7 @@ This guide walks you through installing aimx and setting up your first agent ema
 
 ## Requirements
 
-- **OS:** Linux (Debian/Ubuntu)
+- **OS:** Any Unix where Rust compiles (CI tests Ubuntu, Alpine, Fedora)
 - **Server:** A VPS with port 25 open (inbound and outbound)
 - **Domain:** A domain you control with access to DNS management
 - **Build tools:** Rust toolchain (`rustup`)
@@ -57,9 +57,9 @@ sudo aimx setup
 
 The wizard will:
 
-1. Install and configure OpenSMTPD (debconf screens are handled automatically)
-2. Verify port 25 connectivity (inbound and outbound)
-3. Generate a 2048-bit RSA DKIM keypair
+1. Generate a self-signed TLS certificate and 2048-bit RSA DKIM keypair
+2. Install a systemd (or OpenRC) service file for `aimx serve`
+3. Start the embedded SMTP listener and verify port 25 connectivity (inbound and outbound)
 4. Display the DNS records you need to add under a **[DNS]** section
 5. Let you verify DNS records (press Enter to re-check, or q to defer)
 6. Display **[MCP]** configuration for your AI agent
