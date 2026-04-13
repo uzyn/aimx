@@ -7,7 +7,8 @@ mod mailbox;
 mod mcp;
 mod send;
 mod setup;
-pub mod smtp;
+#[allow(dead_code)]
+mod smtp;
 mod status;
 mod verify;
 

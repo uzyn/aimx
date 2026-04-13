@@ -7,6 +7,8 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::config::Config;
 
+const MAX_COMMAND_LINE_LENGTH: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum State {
     Connected,
@@ -14,6 +16,12 @@ enum State {
     MailFrom,
     RcptTo,
     Data,
+}
+
+enum CommandLoopExit {
+    Done,
+    StarttlsUpgrade,
+    Err(Box<dyn std::error::Error + Send + Sync>),
 }
 
 pub struct SessionParams {
@@ -38,6 +46,8 @@ struct SessionState {
     tls_active: bool,
     ehlo_hostname: String,
     command_count: usize,
+    total_bytes: usize,
+    message_count: usize,
 }
 
 impl SessionState {
@@ -49,6 +59,8 @@ impl SessionState {
             tls_active: false,
             ehlo_hostname: String::new(),
             command_count: 0,
+            total_bytes: 0,
+            message_count: 0,
         }
     }
 
@@ -83,33 +95,35 @@ impl SmtpSession {
         .await;
 
         let duration = connection_start.elapsed();
-        let rcpt_count = session_state.forward_paths.len();
         match &result {
             Ok(Ok(_)) => {
                 eprintln!(
-                    "[{}] Connection closed ehlo={} rcpts={} duration={:.1}s result=ok",
+                    "[{}] Connection closed ehlo={} messages={} bytes={} duration={:.1}s result=ok",
                     self.params.peer_addr,
                     session_state.ehlo_hostname,
-                    rcpt_count,
+                    session_state.message_count,
+                    session_state.total_bytes,
                     duration.as_secs_f64()
                 );
             }
             Ok(Err(e)) => {
                 eprintln!(
-                    "[{}] Connection error ehlo={} rcpts={} duration={:.1}s result=error: {}",
+                    "[{}] Connection error ehlo={} messages={} bytes={} duration={:.1}s result=error: {}",
                     self.params.peer_addr,
                     session_state.ehlo_hostname,
-                    rcpt_count,
+                    session_state.message_count,
+                    session_state.total_bytes,
                     duration.as_secs_f64(),
                     e
                 );
             }
             Err(_) => {
                 eprintln!(
-                    "[{}] Connection timeout ehlo={} rcpts={} duration={:.1}s result=timeout",
+                    "[{}] Connection timeout ehlo={} messages={} bytes={} duration={:.1}s result=timeout",
                     self.params.peer_addr,
                     session_state.ehlo_hostname,
-                    rcpt_count,
+                    session_state.message_count,
+                    session_state.total_bytes,
                     duration.as_secs_f64()
                 );
             }
@@ -129,20 +143,18 @@ impl SmtpSession {
         let mut reader = BufReader::new(reader);
         writer.write_all(banner.as_bytes()).await?;
 
-        let result = self
+        match self
             .command_loop(&mut reader, &mut writer, session_state, total_deadline)
-            .await;
-
-        if let Err(ref e) = result
-            && e.to_string() == "STARTTLS_UPGRADE"
+            .await
         {
-            let inner = reader.into_inner().unsplit(writer);
-            return self
-                .handle_tls_upgrade(inner, session_state, total_deadline)
-                .await;
+            CommandLoopExit::StarttlsUpgrade => {
+                let inner = reader.into_inner().unsplit(writer);
+                self.handle_tls_upgrade(inner, session_state, total_deadline)
+                    .await
+            }
+            CommandLoopExit::Done => Ok(()),
+            CommandLoopExit::Err(e) => Err(e),
         }
-
-        result
     }
 
     async fn handle_tls_upgrade(
@@ -151,7 +163,11 @@ impl SmtpSession {
         session_state: &mut SessionState,
         total_deadline: tokio::time::Instant,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let acceptor = self.params.tls_acceptor.as_ref().unwrap();
+        let acceptor = self
+            .params
+            .tls_acceptor
+            .as_ref()
+            .expect("TLS acceptor must exist during STARTTLS upgrade");
         let tls_stream = match acceptor.accept(stream).await {
             Ok(s) => s,
             Err(e) => {
@@ -166,8 +182,13 @@ impl SmtpSession {
         let (reader, mut writer) = tokio::io::split(tls_stream);
         let mut reader = BufReader::new(reader);
 
-        self.command_loop(&mut reader, &mut writer, session_state, total_deadline)
+        match self
+            .command_loop(&mut reader, &mut writer, session_state, total_deadline)
             .await
+        {
+            CommandLoopExit::Done | CommandLoopExit::StarttlsUpgrade => Ok(()),
+            CommandLoopExit::Err(e) => Err(e),
+        }
     }
 
     async fn command_loop<R, W>(
@@ -176,7 +197,7 @@ impl SmtpSession {
         writer: &mut W,
         session_state: &mut SessionState,
         total_deadline: tokio::time::Instant,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+    ) -> CommandLoopExit
     where
         R: AsyncRead + Unpin,
         W: AsyncWrite + Unpin,
@@ -185,25 +206,38 @@ impl SmtpSession {
         loop {
             line_buf.clear();
             let read_result = tokio::time::timeout(self.params.idle_timeout, async {
-                tokio::time::timeout_at(total_deadline, reader.read_line(&mut line_buf)).await
+                tokio::time::timeout_at(
+                    total_deadline,
+                    bounded_read_line(reader, &mut line_buf, MAX_COMMAND_LINE_LENGTH),
+                )
+                .await
             })
             .await;
 
-            let bytes_read = match read_result {
-                Ok(Ok(Ok(n))) => n,
-                Ok(Ok(Err(e))) => return Err(format!("Read error: {e}").into()),
+            let line_result = match read_result {
+                Ok(Ok(r)) => r,
                 Ok(Err(_)) => {
                     let _ = writer.write_all(b"421 Connection timed out\r\n").await;
-                    return Ok(());
+                    return CommandLoopExit::Done;
                 }
                 Err(_) => {
                     let _ = writer.write_all(b"421 Idle timeout exceeded\r\n").await;
-                    return Ok(());
+                    return CommandLoopExit::Done;
                 }
             };
 
-            if bytes_read == 0 {
-                return Ok(());
+            match line_result {
+                ReadLineResult::TooLong => {
+                    if writer.write_all(b"500 Line too long\r\n").await.is_err() {
+                        return CommandLoopExit::Done;
+                    }
+                    continue;
+                }
+                ReadLineResult::Eof => return CommandLoopExit::Done,
+                ReadLineResult::Err(e) => {
+                    return CommandLoopExit::Err(format!("Read error: {e}").into());
+                }
+                ReadLineResult::Ok(_) => {}
             }
 
             let line = line_buf.trim_end();
@@ -215,8 +249,8 @@ impl SmtpSession {
             if session_state.state != State::Data
                 && session_state.command_count > self.params.max_commands_before_data
             {
-                writer.write_all(b"421 Too many commands\r\n").await?;
-                return Ok(());
+                let _ = writer.write_all(b"421 Too many commands\r\n").await;
+                return CommandLoopExit::Done;
             }
 
             let (cmd, args) = parse_command(line);
@@ -229,13 +263,21 @@ impl SmtpSession {
                     if let Some(resp) = self.handle_data_precheck(session_state) {
                         resp
                     } else {
-                        writer
+                        if writer
                             .write_all(b"354 Start mail input; end with <CRLF>.<CRLF>\r\n")
-                            .await?;
+                            .await
+                            .is_err()
+                        {
+                            return CommandLoopExit::Done;
+                        }
                         session_state.state = State::Data;
-                        let result = self
+                        let result = match self
                             .receive_data(reader, session_state, total_deadline)
-                            .await?;
+                            .await
+                        {
+                            Ok(r) => r,
+                            Err(e) => return CommandLoopExit::Err(e),
+                        };
                         session_state.reset_transaction();
                         result
                     }
@@ -243,8 +285,8 @@ impl SmtpSession {
                 "RSET" => self.handle_rset(session_state),
                 "NOOP" => "250 OK\r\n".to_string(),
                 "QUIT" => {
-                    writer.write_all(b"221 Bye\r\n").await?;
-                    return Ok(());
+                    let _ = writer.write_all(b"221 Bye\r\n").await;
+                    return CommandLoopExit::Done;
                 }
                 "STARTTLS" => {
                     if self.params.tls_acceptor.is_none() {
@@ -252,14 +294,16 @@ impl SmtpSession {
                     } else if session_state.tls_active {
                         "503 TLS already active\r\n".to_string()
                     } else {
-                        writer.write_all(b"220 Ready to start TLS\r\n").await?;
-                        return Err("STARTTLS_UPGRADE".into());
+                        let _ = writer.write_all(b"220 Ready to start TLS\r\n").await;
+                        return CommandLoopExit::StarttlsUpgrade;
                     }
                 }
                 _ => "500 Unrecognized command\r\n".to_string(),
             };
 
-            writer.write_all(response.as_bytes()).await?;
+            if writer.write_all(response.as_bytes()).await.is_err() {
+                return CommandLoopExit::Done;
+            }
         }
     }
 
@@ -349,24 +393,51 @@ impl SmtpSession {
     {
         let mut data = Vec::new();
         let mut line_buf = String::new();
+        let data_line_limit = self.params.max_message_size + 1024;
 
         loop {
             line_buf.clear();
             let read_result = tokio::time::timeout(self.params.idle_timeout, async {
-                tokio::time::timeout_at(total_deadline, reader.read_line(&mut line_buf)).await
+                tokio::time::timeout_at(
+                    total_deadline,
+                    bounded_read_line(reader, &mut line_buf, data_line_limit),
+                )
+                .await
             })
             .await;
 
-            let bytes_read = match read_result {
-                Ok(Ok(Ok(n))) => n,
-                Ok(Ok(Err(e))) => return Err(format!("Read error during DATA: {e}").into()),
+            let line_result = match read_result {
+                Ok(Ok(r)) => r,
                 Ok(Err(_)) | Err(_) => {
                     return Ok("421 Timeout during DATA\r\n".to_string());
                 }
             };
 
-            if bytes_read == 0 {
-                return Ok("451 Client disconnected during DATA\r\n".to_string());
+            match line_result {
+                ReadLineResult::TooLong => {
+                    // Drain remaining DATA lines
+                    loop {
+                        line_buf.clear();
+                        match tokio::time::timeout(
+                            self.params.idle_timeout,
+                            bounded_read_line(reader, &mut line_buf, data_line_limit),
+                        )
+                        .await
+                        {
+                            Ok(ReadLineResult::Ok(_)) if line_buf.trim_end() == "." => break,
+                            Ok(ReadLineResult::Eof) | Err(_) => break,
+                            _ => continue,
+                        }
+                    }
+                    return Ok("552 Message exceeds maximum size\r\n".to_string());
+                }
+                ReadLineResult::Eof => {
+                    return Ok("451 Client disconnected during DATA\r\n".to_string());
+                }
+                ReadLineResult::Err(e) => {
+                    return Err(format!("Read error during DATA: {e}").into());
+                }
+                ReadLineResult::Ok(_) => {}
             }
 
             // RFC 5321: reject bare LF (lines must end with CRLF)
@@ -386,21 +457,17 @@ impl SmtpSession {
             }
 
             if data.len() > self.params.max_message_size {
-                // Consume remaining DATA to avoid desync
                 loop {
                     line_buf.clear();
                     match tokio::time::timeout(
                         self.params.idle_timeout,
-                        reader.read_line(&mut line_buf),
+                        bounded_read_line(reader, &mut line_buf, data_line_limit),
                     )
                     .await
                     {
-                        Ok(Ok(n)) if n > 0 => {
-                            if line_buf.trim_end() == "." {
-                                break;
-                            }
-                        }
-                        _ => break,
+                        Ok(ReadLineResult::Ok(_)) if line_buf.trim_end() == "." => break,
+                        Ok(ReadLineResult::Eof) | Err(_) => break,
+                        _ => continue,
                     }
                 }
                 return Ok("552 Message exceeds maximum size\r\n".to_string());
@@ -413,11 +480,12 @@ impl SmtpSession {
     async fn deliver_message(
         &self,
         data: &[u8],
-        session_state: &SessionState,
+        session_state: &mut SessionState,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let mut all_ok = true;
         let config = Arc::clone(&self.params.config);
         let data = data.to_vec();
+        let mut succeeded = 0usize;
+        let mut failed = 0usize;
 
         for rcpt in &session_state.forward_paths {
             let config = Arc::clone(&config);
@@ -425,37 +493,108 @@ impl SmtpSession {
             let rcpt_owned = rcpt.clone();
             let peer = self.params.peer_addr;
 
-            // Run ingest in a blocking thread since it creates its own
-            // tokio runtime for DKIM/SPF verification.
             let result = tokio::task::spawn_blocking(move || {
                 crate::ingest::ingest_email(&config, &rcpt_owned, &data).map_err(|e| e.to_string())
             })
             .await;
 
             match result {
-                Ok(Ok(())) => {}
+                Ok(Ok(())) => succeeded += 1,
                 Ok(Err(e)) => {
                     eprintln!("[{peer}] Ingest failed for {rcpt}: {e}");
-                    all_ok = false;
+                    failed += 1;
                 }
                 Err(e) => {
                     eprintln!("[{peer}] Ingest task panicked for {rcpt}: {e}");
-                    all_ok = false;
+                    failed += 1;
                 }
             }
         }
 
-        if all_ok {
-            let size = data.len();
-            let rcpt_count = session_state.forward_paths.len();
-            eprintln!(
-                "[{}] Message accepted from={} rcpts={} size={}",
-                self.params.peer_addr, session_state.reverse_path, rcpt_count, size
-            );
+        let size = data.len();
+        let rcpt_count = session_state.forward_paths.len();
+        if succeeded > 0 {
+            session_state.message_count += 1;
+            session_state.total_bytes += size;
+            if failed > 0 {
+                eprintln!(
+                    "[{}] Message partially accepted from={} rcpts={} succeeded={} failed={} size={}",
+                    self.params.peer_addr,
+                    session_state.reverse_path,
+                    rcpt_count,
+                    succeeded,
+                    failed,
+                    size
+                );
+            } else {
+                eprintln!(
+                    "[{}] Message accepted from={} rcpts={} size={}",
+                    self.params.peer_addr, session_state.reverse_path, rcpt_count, size
+                );
+            }
             Ok("250 OK message accepted\r\n".to_string())
         } else {
+            eprintln!(
+                "[{}] Message rejected from={} rcpts={} all_failed size={}",
+                self.params.peer_addr, session_state.reverse_path, rcpt_count, size
+            );
             Ok("451 Temporary failure, please retry\r\n".to_string())
         }
+    }
+}
+
+enum ReadLineResult {
+    Ok(usize),
+    TooLong,
+    Eof,
+    Err(String),
+}
+
+async fn bounded_read_line<R: AsyncBufReadExt + Unpin>(
+    reader: &mut R,
+    buf: &mut String,
+    max_len: usize,
+) -> ReadLineResult {
+    loop {
+        let available = match reader.fill_buf().await {
+            Ok([]) => return ReadLineResult::Eof,
+            Ok(b) => b,
+            Err(e) => return ReadLineResult::Err(e.to_string()),
+        };
+        if let Some(newline_pos) = available.iter().position(|&b| b == b'\n') {
+            let line_len = buf.len() + newline_pos + 1;
+            if line_len > max_len {
+                reader.consume(newline_pos + 1);
+                return ReadLineResult::TooLong;
+            }
+            let chunk = &available[..newline_pos + 1];
+            buf.push_str(&String::from_utf8_lossy(chunk));
+            reader.consume(newline_pos + 1);
+            return ReadLineResult::Ok(line_len);
+        }
+        // No newline in the buffer yet
+        if buf.len() + available.len() > max_len {
+            let n = available.len();
+            reader.consume(n);
+            // Drain until newline or EOF
+            loop {
+                let rest = match reader.fill_buf().await {
+                    Ok([]) => return ReadLineResult::TooLong,
+                    Ok(b) => b,
+                    Err(_) => return ReadLineResult::TooLong,
+                };
+                if let Some(pos) = rest.iter().position(|&b| b == b'\n') {
+                    reader.consume(pos + 1);
+                    return ReadLineResult::TooLong;
+                }
+                let rn = rest.len();
+                reader.consume(rn);
+            }
+        }
+        let chunk = String::from_utf8_lossy(available).to_string();
+        let n = available.len();
+        buf.push_str(&chunk);
+        reader.consume(n);
     }
 }
 
