@@ -16,7 +16,7 @@ pub fn generate_keypair(data_dir: &Path, force: bool) -> Result<(), Box<dyn std:
 
     std::fs::create_dir_all(&dkim_dir)?;
 
-    let mut rng = rand::thread_rng();
+    let mut rng = rsa::rand_core::OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, DKIM_KEY_BITS)?;
 
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
@@ -66,10 +66,13 @@ pub fn sign_message(
     use mail_auth::common::crypto::{RsaKey, Sha256};
     use mail_auth::common::headers::HeaderWriter;
     use mail_auth::dkim::DkimSigner;
+    use rustls_pki_types::{PrivateKeyDer, pem::PemObject};
 
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
     let pem_str: &str = &private_pem;
-    let rsa_key = RsaKey::<Sha256>::from_rsa_pem(pem_str)
+    let key_der = PrivateKeyDer::from_pem_slice(pem_str.as_bytes())
+        .map_err(|e| format!("Failed to parse PEM: {e}"))?;
+    let rsa_key = RsaKey::<Sha256>::from_key_der(key_der)
         .map_err(|e| format!("Failed to load RSA key for DKIM signing: {e}"))?;
 
     let signer = DkimSigner::from_key(rsa_key)
