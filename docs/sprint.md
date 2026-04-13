@@ -4,7 +4,7 @@
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
 **Total sprints:** 23 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP)
 **Timeline:** ~66.5 calendar days
-**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound), making aimx a true single-binary solution with no external runtime dependencies.
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support.
 
 ---
 
@@ -1762,7 +1762,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 21 — `aimx serve` Daemon + CLI Wiring (Days 58–60.5) [IN PROGRESS]
+## Sprint 21 — `aimx serve` Daemon + CLI Wiring (Days 58–60.5) [DONE]
 
 **Goal:** Wire the SMTP listener and outbound transport into `aimx serve`, making it a runnable daemon with systemd integration and graceful shutdown.
 
@@ -1820,7 +1820,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 22 — Remove OpenSMTPD + Cross-Platform CI (Days 61–63.5) [NOT STARTED]
+## Sprint 22 — Remove OpenSMTPD + Cross-Platform CI (Days 61–63.5) [DONE]
 
 **Goal:** Strip all OpenSMTPD-specific code from setup, status, and verify. Add Alpine and Fedora to CI matrix.
 
@@ -1832,18 +1832,18 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] Remove: `install_package()`, `debconf_preseed()`, `generate_smtpd_conf()`, `configure_opensmtpd()`
-- [ ] Remove: `Port25Status::OpenSmtpd` and `Port25Status::OtherMta` — replace with `Port25Status::Aimx` and `Port25Status::OtherProcess(String)`
-- [ ] Remove `is_package_installed` from `SystemOps` trait
-- [ ] Add `install_service_file` to `SystemOps` trait — writes systemd unit or OpenRC script and enables/starts the service
-- [ ] Setup flow: generate TLS cert → generate DKIM keys → install service file → start `aimx serve` → verify port 25 → display DNS
-- [ ] Port 25 checks in setup: update error message from "OpenSMTPD has been installed but port 25 is not reachable" to "aimx serve started but port 25 is not reachable"
-- [ ] MTA conflict in setup: replace OpenSMTPD-specific prompt ("Setup will overwrite /etc/smtpd.conf") with generic "Port 25 is occupied by {name}" error
-- [ ] Re-entrant detection: check if aimx service is already running (instead of OpenSMTPD + smtpd.conf + debconf)
-- [ ] Remove `NetworkOps` docstrings referencing OpenSMTPD: "Used by `aimx verify` on a fresh VPS before OpenSMTPD is installed" (line 42-43)
-- [ ] Update `MockSystemOps`: remove package/debconf mocks, add service file mock
-- [ ] Remove all OpenSMTPD-related tests (~20 tests); add tests for new service file flow
-- [ ] `cargo test` passes with no dead code or unused import warnings
+- [x] Remove: `install_package()`, `debconf_preseed()`, `generate_smtpd_conf()`, `configure_opensmtpd()`
+- [x] Remove: `Port25Status::OpenSmtpd` and `Port25Status::OtherMta` — replace with `Port25Status::Aimx` and `Port25Status::OtherProcess(String)`
+- [x] Remove `is_package_installed` from `SystemOps` trait
+- [x] Add `install_service_file` to `SystemOps` trait — writes systemd unit or OpenRC script and enables/starts the service
+- [x] Setup flow: generate TLS cert → generate DKIM keys → install service file → start `aimx serve` → verify port 25 → display DNS
+- [x] Port 25 checks in setup: update error message from "OpenSMTPD has been installed but port 25 is not reachable" to "aimx serve started but port 25 is not reachable"
+- [x] MTA conflict in setup: replace OpenSMTPD-specific prompt ("Setup will overwrite /etc/smtpd.conf") with generic "Port 25 is occupied by {name}" error
+- [x] Re-entrant detection: check if aimx service is already running (instead of OpenSMTPD + smtpd.conf + debconf)
+- [x] Remove `NetworkOps` docstrings referencing OpenSMTPD: "Used by `aimx verify` on a fresh VPS before OpenSMTPD is installed" (line 42-43)
+- [x] Update `MockSystemOps`: remove package/debconf mocks, add service file mock
+- [x] Remove all OpenSMTPD-related tests (~20 tests); add tests for new service file flow
+- [x] `cargo test` passes with no dead code or unused import warnings
 
 ### S22.2 — Update status.rs + verify.rs
 
@@ -1855,17 +1855,17 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `status.rs`: rename `opensmtpd_running` field → `smtp_running`
-- [ ] `status.rs`: check `systemctl is-active --quiet aimx` (or port 25 bound by aimx process)
-- [ ] `status.rs`: display "SMTP server: running" instead of "OpenSMTPD: running"
-- [ ] `verify.rs`: collapse three-way branch into: `Aimx` (outbound + single EHLO probe), `OtherProcess` (error), `Free` (advise to start aimx serve)
-- [ ] `verify.rs`: remove duplicate inbound check — currently `check_inbound` is called twice in the OpenSMTPD path; the new `Aimx` path does it once
-- [ ] `verify.rs`: remove temporary `TcpListener` hack (line 121) and root requirement — `aimx verify` no longer needs root
-- [ ] `verify.rs`: remove `is_root()` function — no longer needed
-- [ ] `verify.rs`: update all user-facing messages: remove "OpenSMTPD" references, use "aimx serve" / "SMTP server"
-- [ ] Update all test fixtures that reference `opensmtpd_running`
-- [ ] Update verify tests: remove `verify_opensmtpd_*` tests, add `verify_aimx_*` equivalents; remove `verify_free_requires_root` test; add test for `Free` path showing advisory message
-- [ ] All status/verify tests pass with updated field names and simplified flow
+- [x] `status.rs`: rename `opensmtpd_running` field → `smtp_running`
+- [x] `status.rs`: check `systemctl is-active --quiet aimx` (or port 25 bound by aimx process)
+- [x] `status.rs`: display "SMTP server: running" instead of "OpenSMTPD: running"
+- [x] `verify.rs`: collapse three-way branch into: `Aimx` (outbound + single EHLO probe), `OtherProcess` (error), `Free` (advise to start aimx serve)
+- [x] `verify.rs`: remove duplicate inbound check — currently `check_inbound` is called twice in the OpenSMTPD path; the new `Aimx` path does it once
+- [x] `verify.rs`: remove temporary `TcpListener` hack (line 121) and root requirement — `aimx verify` no longer needs root
+- [x] `verify.rs`: remove `is_root()` function — no longer needed
+- [x] `verify.rs`: update all user-facing messages: remove "OpenSMTPD" references, use "aimx serve" / "SMTP server"
+- [x] Update all test fixtures that reference `opensmtpd_running`
+- [x] Update verify tests: remove `verify_opensmtpd_*` tests, add `verify_aimx_*` equivalents; remove `verify_free_requires_root` test; add test for `Free` path showing advisory message
+- [x] All status/verify tests pass with updated field names and simplified flow
 
 ### S22.3 — Cross-Platform CI
 
@@ -1873,15 +1873,15 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Add Alpine Linux CI job: `rust:alpine` Docker image, install build deps (musl-dev, openssl-dev or use rustls), run `cargo build && cargo test && cargo clippy -- -D warnings`
-- [ ] Add Fedora CI job: `fedora:latest` Docker image, install `rust cargo clippy rustfmt`, run same checks
-- [ ] CI matrix in `.github/workflows/ci.yml` includes: Ubuntu (existing), Alpine (new), Fedora (new)
-- [ ] Both new targets are `continue-on-error: true` initially (informational, not blocking)
-- [ ] Fix any compilation issues discovered on Alpine/Fedora (if any — likely musl-related)
+- [x] Add Alpine Linux CI job: `rust:alpine` Docker image, install build deps (musl-dev, openssl-dev or use rustls), run `cargo build && cargo test && cargo clippy -- -D warnings`
+- [x] Add Fedora CI job: `fedora:latest` Docker image, install `rust cargo clippy rustfmt`, run same checks
+- [x] CI matrix in `.github/workflows/ci.yml` includes: Ubuntu (existing), Alpine (new), Fedora (new)
+- [x] Both new targets are `continue-on-error: true` initially (informational, not blocking)
+- [x] Fix any compilation issues discovered on Alpine/Fedora (if any — likely musl-related)
 
 ---
 
-## Sprint 23 — Documentation + PRD Update (Days 64–66.5) [NOT STARTED]
+## Sprint 23 — Documentation + PRD Update (Days 64–66.5) [IN PROGRESS]
 
 **Goal:** Update all documentation to reflect the embedded SMTP architecture. Update the PRD to formalize the NFR and FR changes. Clean up obsolete backlog items.
 
@@ -1975,9 +1975,9 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Done |
 | 19 | 52–54.5 | Embedded SMTP Receiver | Hand-rolled tokio SMTP listener, STARTTLS, ingest integration, connection hardening | Done |
 | 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | Done |
-| 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | In Progress |
-| 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Not Started |
-| 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Not Started |
+| 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Done |
+| 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
+| 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | In Progress |
 
 ## Deferred to v2
 
@@ -1986,10 +1986,9 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | Package manager distribution (apt/brew/nix) | v1 ships as `cargo install`; packaging is post-launch polish |
 | `webhook` trigger type | `cmd` covers all use cases via curl; native webhook is convenience |
 | Web dashboard | Agents don't need a UI; operators use CLI or MCP |
-| Non-Linux platforms | Target audience runs on Linux VPS; macOS/Windows adds complexity with no demand signal |
 | IMAP/POP3/JMAP | Agents access via MCP/filesystem; traditional mail clients are not the use case |
 | Email encryption (PGP/S/MIME) | Adds significant complexity; defer until there's demand |
-| Rate limiting / spam filtering | Rely on OpenSMTPD defaults + DMARC for v1 |
+| Rate limiting / spam filtering | Rely on DMARC policy for v1 |
 | Multi-tenant hosted offering | Architecture supports it; business decision for later |
 
 ## Non-blocking Review Backlog
@@ -2030,13 +2029,16 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance) — _Obsolete: echo removed in Sprint 10 (S10.1)_
 - [x] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify` — _Triaged into Sprint 7 (S7.4)_
 - [ ] **(Sprint 8)** Add `ip6:` mechanism support to `spf_contains_ip()` for IPv6 server addresses
-- [ ] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces
-- [ ] **(Sprint 11)** `parse_port25_status` uses `smtpd` substring match which could misidentify non-OpenSMTPD processes — low practical risk but could use stricter matching
+- [x] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces — _Obsolete: `generate_smtpd_conf` removed in Sprint 22_
+- [x] **(Sprint 11)** `parse_port25_status` uses `smtpd` substring match which could misidentify non-OpenSMTPD processes — _Obsolete: OpenSMTPD-specific port parsing removed in Sprint 22_
 - [ ] **(Sprint 11)** Dead `Fail` branch for PTR in `verify.rs` — `check_ptr()` never returns `Fail`, so the match arm is unreachable
 - [ ] **(Sprint 12)** `run_smtp_listener` spawns per-accept with no concurrency bound — deferred from Sprint 12 with an inline comment at `services/verifier/src/main.rs` pointing at Sprint 14. Per-connection bounds are already tight (30s wall, 10s per-line, 1 KiB per-line), so this is defense-in-depth DoS hardening. Add a bounded semaphore or `tower::limit::ConcurrencyLimit`-style gate around accept loop
 - [ ] **(Sprint 12)** Cosmetic: in `smtp_session`, fold `let mut writer = writer;` into the destructuring pattern as `let (reader, mut writer) = tokio::io::split(stream);` — zero behavioral change, post-merge cleanup suggestion from reviewer
 - [ ] **(Sprint 18)** `setup_with_domain_arg_skips_prompt` test passes `None` as `data_dir` and has a tautological assertion (`is_err() || is_ok()`), making it vacuous in non-root CI — use `TempDir` and assert meaningful behavior
-- [ ] **(Sprint 18)** `is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf domain detection — could theoretically match substring (e.g., "a.com" matching "ba.com"). Use `c.contains(&format!("\"{domain}\""))` for exact quoted match
+- [x] **(Sprint 18)** `is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf domain detection — _Obsolete: smtpd.conf detection removed in Sprint 22; `is_already_configured` now checks aimx service status_
 - [ ] **(Sprint 19)** `deliver_message()` clones DATA payload per recipient (`data.clone()`) — for messages near 25MB with many recipients this could spike memory. Use `Arc<Vec<u8>>` to share the buffer. Low priority: typical case is 1-2 recipients
 - [ ] **(Sprint 20)** `LettreTransport` `last_error` only retains the final MX failure — when all MX servers fail, only the last server's error is reported. Consider collecting all errors for better debugging
 - [ ] **(Sprint 20)** `extract_domain` handles `"Display Name <user@domain>"` format, but lettre's `Address::parse` used for the envelope may not — two divergent parsing paths. Not a practical issue since current call sites always pass bare addresses
+- [ ] **(Sprint 21)** Inconsistent TLS file check in `can_read_tls` in `serve.rs` — cert uses `metadata().is_file()`, key uses `File::open()`. Use the same approach for both for consistency
+- [ ] **(Sprint 22)** `restart_service()` and `is_service_running()` hardcode `systemctl` — on OpenRC systems, `install_service_file` writes the init script correctly but service management still calls systemctl. Pre-existing issue, not a regression
+- [ ] **(Sprint 22)** `_domain` parameter in `is_already_configured` is now unused since smtpd.conf domain matching was removed — consider removing the parameter in a future cleanup

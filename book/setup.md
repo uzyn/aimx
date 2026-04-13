@@ -8,17 +8,9 @@ For a shorter walkthrough, see [Getting Started](getting-started.md).
 
 ### Server
 
-- Linux VPS (Debian/Ubuntu) with port 25 open inbound **and** outbound
+- Any Unix VPS with port 25 open inbound **and** outbound (CI tests Ubuntu, Alpine, Fedora)
 - A domain you control with access to DNS management
-- Root access (required for OpenSMTPD installation)
-
-### System tools
-
-Install required system tools:
-
-```bash
-sudo apt-get update && sudo apt-get install -y dnsutils openssl curl
-```
+- Root access (required for service installation and binding port 25)
 
 ### Firewall
 
@@ -54,16 +46,16 @@ aimx --version
 Before running setup, you can verify port 25 connectivity:
 
 ```bash
-sudo aimx verify
+aimx verify
 ```
 
-When no SMTP server is running yet (fresh VPS), `aimx verify` automatically uses a plain TCP reachability check and requires root to bind a temporary listener on port 25. After setup, it detects OpenSMTPD and performs a full SMTP EHLO handshake instead (no root needed). If port 25 is occupied by another MTA (e.g. Postfix, Exim), verify will fail and tell you to uninstall it.
+When `aimx serve` is running, `aimx verify` performs an outbound port 25 check plus an inbound EHLO handshake probe (no root needed). When nothing is on port 25 (fresh VPS), it tests TCP reachability via a temporary listener (requires root). If port 25 is occupied by another process, verify tells you to stop it before setup.
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
 | Outbound port 25 | Connects to `check.aimx.email` on port 25 to test outbound SMTP | Ask VPS provider to unblock outbound SMTP |
 | Inbound port 25 | Calls the verify service to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
-| SMTP handshake | Verifies OpenSMTPD responds to EHLO (post-setup only) | Check OpenSMTPD status and logs |
+| SMTP handshake | Verifies `aimx serve` responds to EHLO (post-setup only) | Check `aimx serve` status and logs |
 
 All checks should show PASS before proceeding with setup.
 
@@ -85,14 +77,12 @@ When run without a domain argument, setup will prompt you to enter the domain an
 
 1. **Root check** -- exits if not running as root
 2. **Domain prompt** -- asks for domain if not provided as argument
-3. **Port 25 conflict detection** -- checks for existing MTA on port 25
-4. **OpenSMTPD installation** -- pre-seeds debconf answers (mail name, root address) and installs via `apt-get install opensmtpd`
-5. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
-6. **OpenSMTPD configuration** -- writes `/etc/smtpd.conf` (backs up any existing config)
-7. **Service restart** -- restarts OpenSMTPD with the new configuration
+3. **Port 25 conflict detection** -- checks for another process on port 25
+4. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
+5. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/var/lib/aimx/dkim/`
+6. **Config creation** -- writes `/var/lib/aimx/config.toml` with a catchall mailbox
+7. **Service installation** -- generates a systemd unit file (or OpenRC init script on Alpine) and starts `aimx serve`
 8. **Port 25 checks** -- verifies outbound and inbound port 25 connectivity
-9. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/var/lib/aimx/dkim/`
-10. **Config creation** -- writes `/var/lib/aimx/config.toml` with a catchall mailbox
 
 After initial setup, the wizard displays three clearly labeled sections:
 
@@ -108,7 +98,7 @@ If you've already completed setup and want to re-verify, simply run `aimx setup`
 sudo aimx setup agent.yourdomain.com
 ```
 
-When aimx detects an existing configuration (OpenSMTPD running, TLS cert present, DKIM key present, smtpd.conf matches domain), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
+When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
 
 ### DNS retry loop
 
@@ -176,7 +166,7 @@ Run the automated verification:
 aimx verify
 ```
 
-This tests outbound port 25 connectivity and inbound SMTP reachability. When OpenSMTPD is running, it also performs an EHLO handshake check. On a fresh VPS without a mail server, it uses a plain TCP reach check instead (requires root).
+This tests outbound port 25 connectivity and inbound SMTP reachability. When `aimx serve` is running, it also performs an EHLO handshake check. On a fresh VPS without `aimx serve`, it uses a plain TCP reach check instead (requires root).
 
 Check server status at any time:
 
@@ -248,7 +238,7 @@ ls -la /var/lib/aimx/dkim/private.key
 
 ### Backups
 
-Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailboxes and emails. Additionally, back up `/etc/smtpd.conf` if you've customized it.
+Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailboxes and emails.
 
 ## Verifier service
 

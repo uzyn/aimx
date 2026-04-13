@@ -10,21 +10,21 @@ aimx is a self-hosted email system for AI agents. One command gives your agents 
 
 ```
 Inbound:
-  Sender -> port 25 -> OpenSMTPD -> aimx ingest -> .md file
-                                                 -> channel manager (triggers agent)
+  Sender -> port 25 -> aimx serve -> ingest -> .md file
+                                             -> channel manager (triggers agent)
 
 Outbound:
-  MCP tool call -> aimx send -> DKIM sign -> OpenSMTPD -> remote MX
+  MCP tool call -> aimx send -> DKIM sign -> direct SMTP to recipient MX
 ```
 
-- **No daemon.** OpenSMTPD is the only long-running process. `aimx` commands are short-lived.
+- **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.
+- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound. All other commands are short-lived.
 - **No IMAP/POP3.** Agents read `.md` files via MCP or the filesystem.
 - **Markdown-first.** Emails are stored as Markdown with TOML frontmatter -- agents can `cat` and understand immediately.
-- **Single binary.** Written in Rust. No runtime dependencies beyond OpenSMTPD.
 
 ## Key capabilities
 
-- **[Setup wizard](setup.md)** -- interactive setup, OpenSMTPD configuration, DKIM key generation, colorized DNS/MCP/deliverability output, re-entrant verification
+- **[Setup wizard](setup.md)** -- interactive setup, service file generation, DKIM key generation, colorized DNS/MCP/deliverability output, re-entrant verification
 - **[Markdown email](mailboxes.md)** -- incoming email parsed to Markdown with TOML frontmatter, attachment extraction, per-mailbox routing
 - **[MCP Server](mcp.md)** -- stdio transport for Claude Code, OpenClaw, Codex, OpenCode, and any MCP-compatible agent: list, read, send, reply, manage mailboxes
 - **[Channel rules](channels.md)** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
@@ -39,7 +39,7 @@ git clone https://github.com/uzyn/aimx.git && cd aimx
 cargo build --release
 sudo cp target/release/aimx /usr/local/bin/
 
-# 2. Run setup (handles OpenSMTPD, DKIM, DNS guidance)
+# 2. Run setup (generates service file, DKIM keys, DNS guidance)
 sudo aimx setup agent.yourdomain.com
 
 # 3. Verify
