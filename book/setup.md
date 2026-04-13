@@ -61,10 +61,12 @@ This checks port 25 connectivity without installing anything:
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
-| Outbound port 25 | Connects to a well-known MX server on port 25 | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls `check.aimx.email/reach` to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
+| Outbound port 25 | Connects to `check.aimx.email` on port 25 to test outbound SMTP | Ask VPS provider to unblock outbound SMTP |
+| Inbound port 25 | Calls `check.aimx.email/reach` to connect back to your IP on port 25 (plain TCP) | Open firewall, ask VPS provider to unblock inbound SMTP |
 
 Both checks should show PASS before proceeding with setup.
+
+> **Preflight vs Verify:** `aimx preflight` runs *before* OpenSMTPD is installed -- it uses a plain TCP reachability check (`/reach`). `aimx verify` runs *after* setup -- it performs a full SMTP EHLO handshake (`/probe`) to confirm your mail server responds correctly. Use `preflight` to validate your VPS, and `verify` to validate your running setup.
 
 ## Setup wizard
 

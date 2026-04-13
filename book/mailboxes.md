@@ -8,6 +8,15 @@ Mailboxes are the core organizational unit in aimx. Each mailbox maps an email a
 - **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain.
 - **No restart required.** Mailbox changes take effect immediately -- `aimx ingest` reads the config on each invocation.
 
+### Routing logic
+
+When an email arrives, aimx matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
+
+For example, with mailboxes `support` and `catchall` configured:
+- `support@agent.yourdomain.com` -> delivered to the `support` mailbox
+- `billing@agent.yourdomain.com` -> delivered to the `catchall` mailbox (no `billing` mailbox exists)
+- `anything@agent.yourdomain.com` -> delivered to the `catchall` mailbox
+
 ## Managing mailboxes
 
 ### Create a mailbox
