@@ -1639,7 +1639,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 19 — Embedded SMTP Receiver (Days 52–54.5) [IN PROGRESS]
+## Sprint 19 — Embedded SMTP Receiver (Days 52–54.5) [DONE]
 
 **Goal:** Build a hand-rolled tokio-based SMTP listener that accepts inbound email and calls `ingest_email()` in-process. No CLI wiring yet — this sprint produces the library code that `aimx serve` will use.
 
@@ -1651,14 +1651,14 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] SMTP state machine handles: EHLO/HELO → 250, MAIL FROM → 250, RCPT TO → 250, DATA → 354/250, QUIT → 221, RSET → 250, NOOP → 250
-- [ ] Proper error responses: 500 for unrecognized commands, 503 for out-of-sequence commands, 552 for oversized messages
-- [ ] Per-connection timeout: 5 min idle between commands, 10 min total connection time
-- [ ] Message size limit: 25 MB default (configurable via config.toml)
-- [ ] Multi-recipient support: multiple RCPT TO per message, all collected and passed downstream
-- [ ] Graceful connection teardown on timeout or client disconnect
-- [ ] Unit tests for every SMTP command (valid and invalid sequences)
-- [ ] Unit tests for timeout behavior and size limit enforcement
+- [x] SMTP state machine handles: EHLO/HELO → 250, MAIL FROM → 250, RCPT TO → 250, DATA → 354/250, QUIT → 221, RSET → 250, NOOP → 250
+- [x] Proper error responses: 500 for unrecognized commands, 503 for out-of-sequence commands, 552 for oversized messages
+- [x] Per-connection timeout: 5 min idle between commands, 10 min total connection time
+- [x] Message size limit: 25 MB default (configurable via config.toml)
+- [x] Multi-recipient support: multiple RCPT TO per message, all collected and passed downstream
+- [x] Graceful connection teardown on timeout or client disconnect
+- [x] Unit tests for every SMTP command (valid and invalid sequences)
+- [x] Unit tests for timeout behavior and size limit enforcement
 
 ### S19.2 — STARTTLS Support
 
@@ -1666,13 +1666,13 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] STARTTLS advertised in EHLO capabilities list
-- [ ] STARTTLS command upgrades the connection to TLS using `tokio-rustls`
-- [ ] TLS certs loaded from paths in config.toml (default: `/etc/ssl/aimx/cert.pem`, `/etc/ssl/aimx/key.pem`)
-- [ ] Plain (non-TLS) connections still accepted and fully functional
-- [ ] Invalid/missing cert paths produce clear startup error, not a panic
-- [ ] Unit test: STARTTLS upgrade with test certificates
-- [ ] Unit test: plain connection works without STARTTLS
+- [x] STARTTLS advertised in EHLO capabilities list
+- [x] STARTTLS command upgrades the connection to TLS using `tokio-rustls`
+- [x] TLS certs loaded from paths in config.toml (default: `/etc/ssl/aimx/cert.pem`, `/etc/ssl/aimx/key.pem`)
+- [x] Plain (non-TLS) connections still accepted and fully functional
+- [x] Invalid/missing cert paths produce clear startup error, not a panic
+- [x] Unit test: STARTTLS upgrade with test certificates
+- [x] Unit test: plain connection works without STARTTLS
 
 ### S19.3 — Ingest Pipeline Integration
 
@@ -1680,12 +1680,12 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] On DATA completion, call `ingest_email(&config, &rcpt, &raw_bytes)` for each recipient
-- [ ] Successful ingest returns 250 to the sending MTA
-- [ ] Failed ingest returns 451 (temporary failure) — sending MTA will retry
-- [ ] Ingest failure is logged with error details but does not crash the listener
-- [ ] Config is loaded once at startup and shared across connections (Arc)
-- [ ] Integration test: start listener on a random port, connect with a test SMTP client, send a fixture `.eml`, verify `.md` file is created in the correct mailbox
+- [x] On DATA completion, call `ingest_email(&config, &rcpt, &raw_bytes)` for each recipient
+- [x] Successful ingest returns 250 to the sending MTA
+- [x] Failed ingest returns 451 (temporary failure) — sending MTA will retry
+- [x] Ingest failure is logged with error details but does not crash the listener
+- [x] Config is loaded once at startup and shared across connections (Arc)
+- [x] Integration test: start listener on a random port, connect with a test SMTP client, send a fixture `.eml`, verify `.md` file is created in the correct mailbox
 
 ### S19.4 — Connection Hardening
 
@@ -1693,16 +1693,16 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Concurrent connection limit (default: 100) — new connections get 421 when limit is reached
-- [ ] Per-connection command limit (50 commands before DATA) — prevents command flooding
-- [ ] Reject bare LF in DATA (require CRLF line endings per RFC 5321)
-- [ ] Log each connection: peer IP, EHLO hostname, recipient count, message size, duration, result (accepted/rejected/timeout)
-- [ ] Unit test: connection limit enforcement
-- [ ] Unit test: command flood triggers limit
+- [x] Concurrent connection limit (default: 100) — new connections get 421 when limit is reached
+- [x] Per-connection command limit (50 commands before DATA) — prevents command flooding
+- [x] Reject bare LF in DATA (require CRLF line endings per RFC 5321)
+- [x] Log each connection: peer IP, EHLO hostname, recipient count, message size, duration, result (accepted/rejected/timeout)
+- [x] Unit test: connection limit enforcement
+- [x] Unit test: command flood triggers limit
 
 ---
 
-## Sprint 20 — Direct Outbound Delivery (Days 55–57.5) [NOT STARTED]
+## Sprint 20 — Direct Outbound Delivery (Days 55–57.5) [IN PROGRESS]
 
 **Goal:** Replace `/usr/sbin/sendmail` with direct SMTP delivery using `lettre` + `hickory-resolver` for MX resolution. Synchronous delivery with clear error feedback — no background queue.
 
@@ -1973,8 +1973,8 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 16 | 43–45.5 | Add Caddy to docker-compose | Caddy sibling service in compose (both `network_mode: host`), `DOMAIN` env var, cert volumes, README update | Done |
 | 17 | 46–48.5 | Rename Verify Service to Verifier | Rename `services/verify/` → `services/verifier/`, `aimx-verify` → `aimx-verifier` across crate, Docker, CI, and all documentation | Done |
 | 18 | 49–51.5 | Guided Setup UX | Interactive domain prompt, debconf pre-seeding, colorized sectioned output ([DNS]/[MCP]/[Deliverability]), re-entrant setup, DNS retry loop, preflight PTR removal, guide update + move to `book/` | Done |
-| 19 | 52–54.5 | Embedded SMTP Receiver | Hand-rolled tokio SMTP listener, STARTTLS, ingest integration, connection hardening | Not Started |
-| 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | Not Started |
+| 19 | 52–54.5 | Embedded SMTP Receiver | Hand-rolled tokio SMTP listener, STARTTLS, ingest integration, connection hardening | Done |
+| 20 | 55–57.5 | Direct Outbound Delivery | lettre + hickory-resolver MX resolution, `LettreTransport`, error feedback, remove sendmail | In Progress |
 | 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Not Started |
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Not Started |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Not Started |
@@ -2037,3 +2037,4 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 12)** Cosmetic: in `smtp_session`, fold `let mut writer = writer;` into the destructuring pattern as `let (reader, mut writer) = tokio::io::split(stream);` — zero behavioral change, post-merge cleanup suggestion from reviewer
 - [ ] **(Sprint 18)** `setup_with_domain_arg_skips_prompt` test passes `None` as `data_dir` and has a tautological assertion (`is_err() || is_ok()`), making it vacuous in non-root CI — use `TempDir` and assert meaningful behavior
 - [ ] **(Sprint 18)** `is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf domain detection — could theoretically match substring (e.g., "a.com" matching "ba.com"). Use `c.contains(&format!("\"{domain}\""))` for exact quoted match
+- [ ] **(Sprint 19)** `deliver_message()` clones DATA payload per recipient (`data.clone()`) — for messages near 25MB with many recipients this could spike memory. Use `Arc<Vec<u8>>` to share the buffer. Low priority: typical case is 1-2 recipients

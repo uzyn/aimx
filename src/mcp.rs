@@ -265,17 +265,20 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::SendmailTransport;
+        let transport = send::LettreTransport;
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
             config.dkim_selector.as_str(),
         ));
 
-        let message_id =
+        let (message_id, server) =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
 
-        Ok(format!("Email sent. Message-ID: {message_id}"))
+        Ok(format!(
+            "Delivered to {server} for {}. Message-ID: {message_id}",
+            args.to
+        ))
     }
 
     #[tool(
@@ -351,17 +354,20 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::SendmailTransport;
+        let transport = send::LettreTransport;
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
             config.dkim_selector.as_str(),
         ));
 
-        let message_id =
+        let (message_id, server) =
             send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
 
-        Ok(format!("Reply sent. Message-ID: {message_id}"))
+        Ok(format!(
+            "Delivered to {server} for {}. Message-ID: {message_id}",
+            args.to
+        ))
     }
 }
 
@@ -945,5 +951,42 @@ mod tests {
         crate::dkim::generate_keypair(tmp.path(), false).unwrap();
         let result = load_dkim_key(&config);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn send_error_propagates_through_mcp_mapping() {
+        use crate::cli::SendArgs;
+
+        struct FailTransport;
+        impl send::MailTransport for FailTransport {
+            fn send(
+                &self,
+                _sender: &str,
+                _recipient: &str,
+                _message: &[u8],
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                Err("Connection refused by mx.example.com".into())
+            }
+        }
+
+        let args = SendArgs {
+            from: "alice@test.com".to_string(),
+            to: "bob@example.com".to_string(),
+            subject: "Test".to_string(),
+            body: "Body".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result =
+            send::send_with_transport(&args, &FailTransport, None).map_err(|e| e.to_string());
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            err.contains("Connection refused"),
+            "MCP-style error mapping should preserve delivery failure details: {err}"
+        );
     }
 }
