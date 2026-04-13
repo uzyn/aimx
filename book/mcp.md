@@ -176,7 +176,8 @@ Updates `read = false` in the email's frontmatter.
 | Framework | Integration method |
 |-----------|-------------------|
 | Claude Code | MCP stdio mode via `~/.claude/settings.json` |
-| OpenClaw | MCP integration or [channel rules](channels.md) via shell |
+| OpenClaw | MCP stdio mode or [channel rules](channels.md) via shell |
+| OpenCode | MCP stdio mode |
 | Codex | [Channel rules](channels.md) via shell command |
 | Any MCP client | Standard MCP stdio transport |
 
