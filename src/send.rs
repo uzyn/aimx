@@ -198,13 +198,14 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
     let domain = sanitized_from.split('@').nth(1).unwrap_or("localhost");
     let message_id = format!("<{}@{domain}>", Uuid::new_v4());
     let date = Utc::now().to_rfc2822();
+    let normalized_body = normalize_crlf(&args.body);
 
     if args.attachments.is_empty() {
         let mut msg = String::new();
         write_common_headers(&mut msg, args, &date, &message_id)?;
         msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
         msg.push_str("\r\n");
-        msg.push_str(&args.body);
+        msg.push_str(&normalized_body);
         msg.push_str("\r\n");
 
         return Ok(ComposeResult {
@@ -224,7 +225,7 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
     msg.push_str(&format!("--{boundary}\r\n"));
     msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
     msg.push_str("\r\n");
-    msg.push_str(&args.body);
+    msg.push_str(&normalized_body);
     msg.push_str("\r\n");
 
     for path_str in &args.attachments {
@@ -262,6 +263,25 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
         message: msg.into_bytes(),
         message_id,
     })
+}
+
+fn normalize_crlf(text: &str) -> String {
+    let mut result = String::with_capacity(text.len());
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            result.push_str("\r\n");
+            i += 2;
+        } else if bytes[i] == b'\r' || bytes[i] == b'\n' {
+            result.push_str("\r\n");
+            i += 1;
+        } else {
+            result.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    result
 }
 
 fn normalize_message_id(id: &str) -> String {
@@ -973,5 +993,75 @@ mod tests {
             "gmail.com"
         );
         assert!(LettreTransport::extract_domain("nodomain").is_err());
+    }
+
+    #[test]
+    fn normalize_crlf_bare_lf() {
+        let result = super::normalize_crlf("Hello\nWorld\n");
+        assert_eq!(result, "Hello\r\nWorld\r\n");
+    }
+
+    #[test]
+    fn normalize_crlf_bare_cr() {
+        let result = super::normalize_crlf("Hello\rWorld\r");
+        assert_eq!(result, "Hello\r\nWorld\r\n");
+    }
+
+    #[test]
+    fn normalize_crlf_already_normalized() {
+        let result = super::normalize_crlf("Hello\r\nWorld\r\n");
+        assert_eq!(result, "Hello\r\nWorld\r\n");
+    }
+
+    #[test]
+    fn normalize_crlf_mixed() {
+        let result = super::normalize_crlf("Line1\nLine2\r\nLine3\rLine4");
+        assert_eq!(result, "Line1\r\nLine2\r\nLine3\r\nLine4");
+    }
+
+    #[test]
+    fn normalize_crlf_no_newlines() {
+        let result = super::normalize_crlf("Hello world");
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn compose_normalizes_bare_lf_in_body() {
+        let args = SendArgs {
+            from: "agent@example.com".to_string(),
+            to: "user@gmail.com".to_string(),
+            subject: "Test".to_string(),
+            body: "Line1\nLine2\nLine3".to_string(),
+            reply_to: None,
+            references: None,
+            attachments: vec![],
+        };
+
+        let result = compose_message(&args).unwrap();
+        let text = String::from_utf8(result.message).unwrap();
+
+        assert!(
+            !text.contains("Line1\nLine2"),
+            "Body should not contain bare LF"
+        );
+        assert!(
+            text.contains("Line1\r\nLine2\r\nLine3"),
+            "Body should have CRLF line endings"
+        );
+    }
+
+    #[test]
+    fn compose_message_all_crlf() {
+        let args = test_args();
+        let result = compose_message(&args).unwrap();
+        let raw = result.message;
+
+        for (i, byte) in raw.iter().enumerate() {
+            if *byte == b'\n' && (i == 0 || raw[i - 1] != b'\r') {
+                let context_start = if i > 20 { i - 20 } else { 0 };
+                let context = String::from_utf8_lossy(&raw[context_start..=i]);
+                panic!("Found bare LF at byte offset {i}: ...{context}");
+            }
+        }
     }
 }
