@@ -607,6 +607,82 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 32 — Non-blocking Cleanup (Days 91.5–94) [NOT STARTED]
+
+**Goal:** Address accumulated non-blocking improvements from sprint reviews (Sprints 12, 19, 20, 21, 22, 26, 27). Grouped by theme; each story is self-contained with enough context for implementation without consulting the original review threads.
+
+**Dependencies:** Sprint 31.
+
+### S32-1: Verifier SMTP listener concurrency bound
+
+**Context:** `services/verifier/src/main.rs` — `run_smtp_listener` spawns a new task per accepted connection with no upper bound. Per-connection hardening is already tight (30s wall clock, 10s per-line, 1 KiB per-line), so this is defense-in-depth DoS hardening, not a correctness bug. Flagged during Sprint 12 review with an inline TODO pointing at Sprint 14; never landed. Add a bounded semaphore or `tower::limit::ConcurrencyLimit`-style gate around the accept loop and remove the inline comment.
+
+**Priority:** P2
+
+- [ ] Bounded concurrent-connection gate added to `run_smtp_listener` accept loop (default cap documented in code comment; tunable via env var or config if trivial, otherwise hardcoded sensible default like 128)
+- [ ] When the gate is saturated, newly accepted connections either wait with a short timeout or are dropped cleanly (do NOT block indefinitely on accept — it stalls the listener)
+- [ ] Unit or integration test confirms the gate's upper bound is honored (N+1 concurrent connections see the last one blocked/dropped)
+- [ ] Inline "deferred to Sprint 14" comment removed from `services/verifier/src/main.rs`
+- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean in `services/verifier/`
+
+### S32-2: Outbound delivery — share DATA buffer across recipients + collect all MX errors
+
+**Context:** Two related outbound-delivery improvements flagged in Sprint 19/20 reviews. (a) `deliver_message()` clones the raw DATA payload per recipient (`data.clone()`) — for 25MB messages with many recipients this spikes memory; switch to `Arc<Vec<u8>>` (or `bytes::Bytes`) to share a single buffer. (b) `LettreTransport` `last_error` only retains the final MX failure when all MX servers fail, which makes debugging multi-MX failures painful — collect every per-MX error and surface them together.
+
+**Priority:** P2
+
+- [ ] `deliver_message()` no longer clones DATA per recipient; uses `Arc<Vec<u8>>` (or equivalent shared buffer) so one allocation serves all recipients
+- [ ] When all MX servers fail, `LettreTransport` returns (or logs) every per-MX error, not just the last one — either as a joined string, a structured error variant holding `Vec<(mx_host, error)>`, or a multi-line error message
+- [ ] Unit test covers the multi-MX all-fail path and asserts all errors appear in the returned error
+- [ ] Existing send integration tests still pass
+- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+
+### S32-3: TLS file check + service management consistency
+
+**Context:** Two cross-platform consistency cleanups. (a) `can_read_tls` in `src/serve.rs` checks the cert with `metadata().is_file()` but checks the key with `File::open()` — flagged Sprint 21 review; pick one approach and apply to both. (b) `restart_service()` / `is_service_running()` in `src/setup.rs` hardcode `systemctl` even when `install_service_file()` writes an OpenRC init script; pre-existing (Sprint 22 review), not a regression. Route through the same OS detection already used in `install_service_file()` so service management matches the init system chosen at install time. (c) Remove unused `_domain` parameter from `is_already_configured` (Sprint 22 review) — smtpd.conf domain matching was removed and the param has been dead code since.
+
+**Priority:** P2
+
+- [ ] `can_read_tls` uses the same approach (either `metadata().is_file()` or `File::open()`) for both cert and key
+- [ ] `restart_service()` and `is_service_running()` dispatch to `systemctl` on systemd systems and `rc-service` on OpenRC systems, reusing the existing OS-detection helper already consumed by `install_service_file()`
+- [ ] OpenRC service-management code path covered by a unit test (mock the OS ops trait, assert the right command is invoked)
+- [ ] `is_already_configured` signature no longer takes `_domain`; all call sites updated
+- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+
+### S32-4: Network ops dedup — single `hostname -I` call
+
+**Context:** Sprint 26 review: `get_server_ip()` and `get_server_ipv6()` each shell out to `hostname -I` separately. Not a correctness issue, but duplicate work and duplicate failure modes. Consolidate into one trait method (e.g., `get_server_ips(&self) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>)>`) — this is a breaking change to `NetworkOps`, which is fine since the trait is internal. Update `RealNetworkOps` and `MockNetworkOps` accordingly.
+
+**Priority:** P3
+
+- [ ] `NetworkOps` exposes a single call that returns both the IPv4 and IPv6 addresses (whichever are present)
+- [ ] `RealNetworkOps` implementation invokes `hostname -I` once and parses both families
+- [ ] `MockNetworkOps` accepts both values for tests
+- [ ] Existing Sprint 26 IPv4/IPv6 call sites and tests updated — no behavior change from the outside
+- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+
+### S32-5: CI clippy `--all-targets` adoption + fix pre-existing test lints
+
+**Context:** Sprint 27 review: `cargo clippy --all-targets -- -D warnings` surfaces ~4 pre-existing lint errors in the `test` target (`str::replace` chaining, `manual arithmetic check`, `field_reassign_with_default`). The current CI gate runs `cargo clippy -- -D warnings` which excludes tests, so these never fail CI. Fix the lints and flip the CI invocation to `--all-targets` so regressions in test code get caught going forward.
+
+**Priority:** P2
+
+- [ ] All test-target clippy errors surfaced by `cargo clippy --all-targets -- -D warnings` on `main` (pre-Sprint 32) are fixed — verified by running locally before and after
+- [ ] `.github/workflows/ci.yml` updated so every clippy invocation uses `--all-targets -- -D warnings` (check the Ubuntu, Alpine, and Fedora jobs, plus `services/verifier/`'s clippy call)
+- [ ] `cargo clippy --all-targets -- -D warnings` is clean on both `aimx` and `aimx-verifier` crates
+
+### S32-6: Post-merge cosmetic cleanups
+
+**Context:** Two tiny post-merge cleanups that reviewers flagged as zero-behavior-change niceties. Kept small so they don't bloat the cleanup sprint: (a) in the verifier `smtp_session`, fold `let mut writer = writer;` into the destructuring as `let (reader, mut writer) = tokio::io::split(stream);` (Sprint 12 review); (b) audit the sprint file's Non-blocking Review Backlog, mark these Sprint 32 items as `[x]` with `_Triaged into Sprint 32_` once implemented.
+
+**Priority:** P3
+
+- [ ] `smtp_session` writer destructuring folded
+- [ ] `docs/sprint.md` Non-blocking Review Backlog: each Sprint 32-consumed item marked `[x] — _Triaged into Sprint 32 (SN-M)_`
+- [ ] `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -646,6 +722,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 29 | 83–85.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Not Started |
 | 30 | 86–88.5 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
 | 31 | 89–91.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
+| 32 | 91.5–94 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
 
 ## Deferred to v2
 
@@ -700,18 +777,18 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces — _Obsolete: `generate_smtpd_conf` removed in Sprint 22_
 - [x] **(Sprint 11)** `parse_port25_status` uses `smtpd` substring match which could misidentify non-OpenSMTPD processes — _Obsolete: OpenSMTPD-specific port parsing removed in Sprint 22_
 - [x] **(Sprint 11)** Dead `Fail` branch for PTR in `verify.rs` — _Obsolete: `check_ptr()` is no longer called from `verify.rs`; moved to `setup.rs` where the `Fail` arm is a defensive match on the `PreflightResult` enum_
-- [ ] **(Sprint 12)** `run_smtp_listener` spawns per-accept with no concurrency bound — deferred from Sprint 12 with an inline comment at `services/verifier/src/main.rs` pointing at Sprint 14. Per-connection bounds are already tight (30s wall, 10s per-line, 1 KiB per-line), so this is defense-in-depth DoS hardening. Add a bounded semaphore or `tower::limit::ConcurrencyLimit`-style gate around accept loop
-- [ ] **(Sprint 12)** Cosmetic: in `smtp_session`, fold `let mut writer = writer;` into the destructuring pattern as `let (reader, mut writer) = tokio::io::split(stream);` — zero behavioral change, post-merge cleanup suggestion from reviewer
+- [x] **(Sprint 12)** `run_smtp_listener` spawns per-accept with no concurrency bound — _Triaged into Sprint 32 (S32-1)_
+- [x] **(Sprint 12)** Cosmetic: `smtp_session` writer destructuring — _Triaged into Sprint 32 (S32-6)_
 - [x] **(Sprint 18)** `setup_with_domain_arg_skips_prompt` test passes `None` as `data_dir` and has a tautological assertion — _Fixed: test now uses `TempDir` and asserts meaningful port 25 failure_
 - [x] **(Sprint 18)** `is_already_configured` uses `c.contains(domain)` substring match for smtpd.conf domain detection — _Obsolete: smtpd.conf detection removed in Sprint 22; `is_already_configured` now checks aimx service status_
-- [ ] **(Sprint 19)** `deliver_message()` clones DATA payload per recipient (`data.clone()`) — for messages near 25MB with many recipients this could spike memory. Use `Arc<Vec<u8>>` to share the buffer. Low priority: typical case is 1-2 recipients
-- [ ] **(Sprint 20)** `LettreTransport` `last_error` only retains the final MX failure — when all MX servers fail, only the last server's error is reported. Consider collecting all errors for better debugging
+- [x] **(Sprint 19)** `deliver_message()` clones DATA payload per recipient — _Triaged into Sprint 32 (S32-2)_
+- [x] **(Sprint 20)** `LettreTransport` `last_error` only retains final MX failure — _Triaged into Sprint 32 (S32-2)_
 - [x] **(Sprint 20)** `extract_domain` handles `"Display Name <user@domain>"` format divergence with `lettre::Address::parse` — _Obsolete: `send.rs` now manually strips `<>` before parsing, mitigating the divergence; all call sites pass bare addresses_
-- [ ] **(Sprint 21)** Inconsistent TLS file check in `can_read_tls` in `serve.rs` — cert uses `metadata().is_file()`, key uses `File::open()`. Use the same approach for both for consistency
-- [ ] **(Sprint 22)** `restart_service()` and `is_service_running()` hardcode `systemctl` — on OpenRC systems, `install_service_file` writes the init script correctly but service management still calls systemctl. Pre-existing issue, not a regression
-- [ ] **(Sprint 22)** `_domain` parameter in `is_already_configured` is now unused since smtpd.conf domain matching was removed — consider removing the parameter in a future cleanup
+- [x] **(Sprint 21)** Inconsistent TLS file check in `can_read_tls` — _Triaged into Sprint 32 (S32-3)_
+- [x] **(Sprint 22)** `restart_service()` / `is_service_running()` hardcode `systemctl` — _Triaged into Sprint 32 (S32-3)_
+- [x] **(Sprint 22)** `_domain` parameter in `is_already_configured` is unused — _Triaged into Sprint 32 (S32-3)_
 - [x] **(Sprint 24)** `CLAUDE.md` line 68 still says `setup.rs also contains run_preflight for aimx preflight` but `run_preflight` no longer exists — _Fixed: updated to reference `run_setup` and `display_deliverability_section`_
 - [x] **(Sprint 24)** `docs/manual-setup.md` line 14: "provides two functions, all exposed" — _Fixed: "all" → "both"_
 - [x] **(Sprint 24)** `docs/prd.md` NFR-5: "aimx ingest" in prose without backticks — _Fixed: added backticks_
-- [ ] **(Sprint 26)** `get_server_ip()` and `get_server_ipv6()` each invoke `hostname -I` separately — could share a single call, but would require breaking the `NetworkOps` trait interface or adding caching. Not a correctness issue
-- [ ] **(Sprint 27)** Pre-existing `cargo clippy --all-targets -- -D warnings` lints in the test target (`str::replace` chaining, `manual arithmetic check`, `field_reassign_with_default`, ~4 occurrences). The current CI clippy gate (`cargo clippy -- -D warnings`) excludes test targets so these don't fail CI. Fix the lints and adopt `--all-targets` as the canonical CI clippy invocation so test-code regressions are caught going forward. Pre-existing on `main` before Sprint 27 — not a Sprint 27 regression.
+- [x] **(Sprint 26)** `get_server_ip()` and `get_server_ipv6()` each invoke `hostname -I` separately — _Triaged into Sprint 32 (S32-4)_
+- [x] **(Sprint 27)** `cargo clippy --all-targets -- -D warnings` pre-existing test-target lints + adopt `--all-targets` in CI — _Triaged into Sprint 32 (S32-5)_
