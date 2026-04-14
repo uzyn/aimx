@@ -210,6 +210,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - CLI for all operations
 - Cross-platform Unix (CI: Ubuntu, Alpine, Fedora)
 - Build from source (cargo install)
+- Prebuilt binary tarballs (Linux x86_64/aarch64, glibc + musl) attached to GitHub Releases on tag push; workflow-artifact builds on every main merge
 
 ### Out of Scope (future consideration)
 - Package manager distribution (apt/brew/nix)
