@@ -65,7 +65,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 - `serve.rs` — `aimx serve`: starts the embedded SMTP daemon. Loads config, initializes TLS, runs the SMTP listener via tokio. Options: `--bind`, `--tls-cert`, `--tls-key`. Handles SIGTERM/SIGINT for graceful shutdown.
 - `smtp/` — embedded SMTP server module: `mod.rs` (listener accept loop), `session.rs` (per-connection SMTP state machine: EHLO, MAIL FROM, RCPT TO, DATA, STARTTLS, QUIT, RSET, NOOP), `tls.rs` (STARTTLS upgrade via tokio-rustls), `tests.rs` (unit tests).
 - `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
-- `setup.rs` also contains `run_preflight` for `aimx preflight`.
+- `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` for optional PTR/deliverability checks.
 
 ### Trait-based testing pattern
 

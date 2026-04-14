@@ -11,7 +11,7 @@ The verifier service must be running before any mail server can complete setup, 
 
 ## Part A: Deploy the aimx-verifier Service
 
-The aimx-verifier service provides two functions, all exposed from a single binary:
+The aimx-verifier service provides two functions, both exposed from a single binary:
 
 1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
 2. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by `aimx` clients to test that their outbound port 25 is not blocked by their VPS provider via EHLO handshake. This is a plain tokio listener built into the `aimx-verifier` binary — **no MTA is required on the verifier server**.

@@ -142,7 +142,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - **NFR-2: `aimx serve` is the daemon.** `aimx serve` runs as a long-lived SMTP listener process, managed by systemd or OpenRC. All other commands (`ingest`, `send`, `mcp`, `setup`, etc.) remain short-lived.
 - **NFR-3: Permissive licensing.** All AIMX code and dependencies must use MIT, Apache-2.0, ISC, or BSD licenses. No GPL/AGPL.
 - **NFR-4: Cross-platform Unix.** Any Unix where Rust compiles and port 25 is available. CI tests Ubuntu, Alpine Linux (musl), and Fedora.
-- **NFR-5: Minimal resource usage.** aimx ingest must complete in < 1 second for typical emails (< 10MB).
+- **NFR-5: Minimal resource usage.** `aimx ingest` must complete in < 1 second for typical emails (< 10MB).
 - **NFR-6: Secure defaults.** Self-signed TLS cert for STARTTLS (generated during setup, no Let's Encrypt needed), DKIM signing on all outbound, DMARC reject policy, SPF strict.
 - **NFR-7: Filesystem-based storage.** No database. Mailboxes are directories. Configuration is TOML.
 
