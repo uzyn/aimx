@@ -15,7 +15,103 @@ pub fn run(
     let net = setup::RealNetworkOps::from_verify_host(host)?;
 
     let port25 = detect_port25();
+
+    if matches!(port25, Port25Status::Free) {
+        return run_with_temp_server(&net);
+    }
+
     run_with_net(&net, &port25)
+}
+
+fn run_with_temp_server(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
+    let rt =
+        tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
+
+    let listener = match rt.block_on(tokio::net::TcpListener::bind("0.0.0.0:25")) {
+        Ok(l) => l,
+        Err(e) => {
+            return Err(format!(
+                "Cannot bind port 25 for verification: {e}\n\
+                 Run with sudo or ensure port 25 is available."
+            )
+            .into());
+        }
+    };
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let _guard = rt.enter();
+    let handle = rt.spawn(run_temp_smtp_listener(listener, shutdown_rx));
+
+    let result = run_with_net(net, &Port25Status::Free);
+
+    let _ = shutdown_tx.send(true);
+    rt.block_on(async {
+        let _ = handle.await;
+    });
+
+    result
+}
+
+async fn run_temp_smtp_listener(
+    listener: tokio::net::TcpListener,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            result = listener.accept() => {
+                if let Ok((stream, _)) = result {
+                    tokio::spawn(handle_temp_smtp_connection(stream));
+                }
+            }
+            _ = shutdown.changed() => break,
+        }
+    }
+}
+
+async fn handle_temp_smtp_connection(stream: tokio::net::TcpStream) {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut reader = BufReader::new(reader);
+
+    if writer
+        .write_all(b"220 localhost ESMTP aimx\r\n")
+        .await
+        .is_err()
+    {
+        return;
+    }
+    if writer.flush().await.is_err() {
+        return;
+    }
+
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            reader.read_line(&mut line),
+        )
+        .await
+        {
+            Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+            Ok(Ok(_)) => {}
+        }
+
+        let upper = line.trim().to_ascii_uppercase();
+        let resp: &[u8] = if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+            b"250 localhost\r\n"
+        } else if upper.starts_with("QUIT") {
+            let _ = writer.write_all(b"221 Bye\r\n").await;
+            break;
+        } else {
+            b"502 Not implemented\r\n"
+        };
+        if writer.write_all(resp).await.is_err() {
+            break;
+        }
+        let _ = writer.flush().await;
+    }
 }
 
 pub(crate) fn resolve_verify_host(
@@ -58,7 +154,7 @@ pub fn run_with_net(
     }
 
     match port25 {
-        Port25Status::Aimx => {
+        Port25Status::Aimx | Port25Status::Free => {
             print!("  Inbound port 25 (EHLO probe)... ");
             std::io::Write::flush(&mut std::io::stdout())?;
             match setup::check_inbound(net) {
@@ -73,7 +169,7 @@ pub fn run_with_net(
 
             println!();
             if all_pass {
-                println!("All checks passed. Port 25 is reachable. SMTP server is up.");
+                println!("All checks passed. Port 25 is reachable.");
                 Ok(())
             } else {
                 Err("Some checks failed. See details above.".into())
@@ -85,20 +181,6 @@ pub fn run_with_net(
              Stop the process and run `sudo aimx setup` to configure aimx."
         )
         .into()),
-
-        Port25Status::Free => {
-            println!();
-            println!(
-                "aimx serve is not running. Start it with:\n\
-                 \n\
-                 \tsudo aimx setup\n\
-                 \n\
-                 or if already set up:\n\
-                 \n\
-                 \tsudo systemctl start aimx"
-            );
-            Ok(())
-        }
     }
 }
 
@@ -194,13 +276,25 @@ mod tests {
         );
     }
 
-    // --- Free (aimx not running) tests ---
+    // --- Free (temp server) tests ---
 
     #[test]
-    fn verify_free_advises_start() {
+    fn verify_free_all_pass() {
         let net = MockNetworkOps::default();
-        let result = run_with_net(&net, &Port25Status::Free);
-        assert!(result.is_ok());
+        assert!(run_with_net(&net, &Port25Status::Free).is_ok());
+        assert!(
+            net.ehlo_called.get(),
+            "should use EHLO probe when temp server is running"
+        );
+    }
+
+    #[test]
+    fn verify_free_inbound_fail() {
+        let net = MockNetworkOps {
+            inbound: false,
+            ..Default::default()
+        };
+        assert!(run_with_net(&net, &Port25Status::Free).is_err());
     }
 
     // --- verify_host resolution tests ---
