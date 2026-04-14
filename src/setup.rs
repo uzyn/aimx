@@ -36,8 +36,10 @@ pub trait NetworkOps {
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>>;
     fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>>;
+    fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>>;
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
+    fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
     fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
 }
 
@@ -362,6 +364,19 @@ impl NetworkOps for RealNetworkOps {
         Ok(ip_str.parse()?)
     }
 
+    fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new("hostname").arg("-I").output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for token in stdout.split_whitespace() {
+            if let Ok(ip) = token.parse::<IpAddr>()
+                && ip.is_ipv6()
+            {
+                return Ok(Some(ip));
+            }
+        }
+        Ok(None)
+    }
+
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
             .args(["+short", "MX", domain])
@@ -378,6 +393,18 @@ impl NetworkOps for RealNetworkOps {
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
             .args(["+short", "A", domain])
+            .output()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let addrs: Vec<IpAddr> = stdout
+            .lines()
+            .filter_map(|l| l.trim().parse().ok())
+            .collect();
+        Ok(addrs)
+    }
+
+    fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+        let output = std::process::Command::new("dig")
+            .args(["+short", "AAAA", domain])
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let addrs: Vec<IpAddr> = stdout
@@ -465,15 +492,30 @@ pub struct DnsRecord {
 pub fn generate_dns_records(
     domain: &str,
     server_ip: &str,
+    server_ipv6: Option<&str>,
     dkim_value: &str,
     dkim_selector: &str,
 ) -> Vec<DnsRecord> {
-    vec![
-        DnsRecord {
-            record_type: "A".into(),
+    let spf_value = match server_ipv6 {
+        Some(ipv6) => format!("v=spf1 ip4:{server_ip} ip6:{ipv6} -all"),
+        None => format!("v=spf1 ip4:{server_ip} -all"),
+    };
+
+    let mut records = vec![DnsRecord {
+        record_type: "A".into(),
+        name: domain.into(),
+        value: server_ip.into(),
+    }];
+
+    if let Some(ipv6) = server_ipv6 {
+        records.push(DnsRecord {
+            record_type: "AAAA".into(),
             name: domain.into(),
-            value: server_ip.into(),
-        },
+            value: ipv6.into(),
+        });
+    }
+
+    records.extend([
         DnsRecord {
             record_type: "MX".into(),
             name: domain.into(),
@@ -482,7 +524,7 @@ pub fn generate_dns_records(
         DnsRecord {
             record_type: "TXT".into(),
             name: domain.into(),
-            value: format!("v=spf1 ip4:{server_ip} -all"),
+            value: spf_value,
         },
         DnsRecord {
             record_type: "TXT".into(),
@@ -499,7 +541,9 @@ pub fn generate_dns_records(
             name: server_ip.into(),
             value: format!("{domain}."),
         },
-    ]
+    ]);
+
+    records
 }
 
 #[cfg(test)]
@@ -514,8 +558,14 @@ pub fn format_dns_records(records: &[DnsRecord]) -> String {
     output
 }
 
-pub fn display_dns_guidance(domain: &str, server_ip: &str, dkim_value: &str, dkim_selector: &str) {
-    let records = generate_dns_records(domain, server_ip, dkim_value, dkim_selector);
+pub fn display_dns_guidance(
+    domain: &str,
+    server_ip: &str,
+    server_ipv6: Option<&str>,
+    dkim_value: &str,
+    dkim_selector: &str,
+) {
+    let records = generate_dns_records(domain, server_ip, server_ipv6, dkim_value, dkim_selector);
     let dns_records: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
     println!("\n{}", "[DNS]".bold());
     println!("Add the following DNS records at your domain registrar:\n");
@@ -566,11 +616,25 @@ pub fn verify_a(net: &dyn NetworkOps, domain: &str, expected_ip: &IpAddr) -> Dns
     }
 }
 
+pub fn verify_aaaa(net: &dyn NetworkOps, domain: &str, expected_ip: &IpAddr) -> DnsVerifyResult {
+    match net.resolve_aaaa(domain) {
+        Ok(addrs) if addrs.contains(expected_ip) => DnsVerifyResult::Pass,
+        Ok(addrs) if !addrs.is_empty() => DnsVerifyResult::Fail(format!(
+            "AAAA record points to {:?}, expected {expected_ip}",
+            addrs
+        )),
+        Ok(_) => DnsVerifyResult::Missing("No AAAA record found".into()),
+        Err(e) => DnsVerifyResult::Fail(format!("AAAA record lookup failed: {e}")),
+    }
+}
+
 fn spf_contains_ip(record: &str, expected_ip: &str) -> bool {
     for token in record.split_whitespace() {
         if let Some(mechanism) = token
             .strip_prefix("ip4:")
             .or_else(|| token.strip_prefix("+ip4:"))
+            .or_else(|| token.strip_prefix("ip6:"))
+            .or_else(|| token.strip_prefix("+ip6:"))
         {
             let ip_part = mechanism.split('/').next().unwrap_or(mechanism);
             if ip_part == expected_ip {
@@ -676,27 +740,44 @@ pub fn verify_all_dns(
     net: &dyn NetworkOps,
     domain: &str,
     server_ip: &IpAddr,
+    server_ipv6: Option<&IpAddr>,
     dkim_selector: &str,
     local_dkim_pubkey: Option<&str>,
 ) -> Vec<(String, DnsVerifyResult)> {
     let ip_str = server_ip.to_string();
-    vec![
+    let mut results = vec![
         ("MX".into(), verify_mx(net, domain)),
         ("A".into(), verify_a(net, domain, server_ip)),
-        ("SPF".into(), verify_spf(net, domain, &ip_str)),
+    ];
+
+    if let Some(ipv6) = server_ipv6 {
+        results.push(("AAAA".into(), verify_aaaa(net, domain, ipv6)));
+    }
+
+    results.push(("SPF".into(), verify_spf(net, domain, &ip_str)));
+
+    if let Some(ipv6) = server_ipv6 {
+        let ipv6_str = ipv6.to_string();
+        results.push(("SPF (IPv6)".into(), verify_spf(net, domain, &ipv6_str)));
+    }
+
+    results.extend([
         (
             "DKIM".into(),
             verify_dkim(net, domain, dkim_selector, local_dkim_pubkey),
         ),
         ("DMARC".into(), verify_dmarc(net, domain)),
-    ]
+    ]);
+
+    results
 }
 
 fn dns_record_for_check<'a>(check: &str, records: &'a [DnsRecord]) -> Option<&'a DnsRecord> {
     match check {
         "A" => records.iter().find(|r| r.record_type == "A"),
+        "AAAA" => records.iter().find(|r| r.record_type == "AAAA"),
         "MX" => records.iter().find(|r| r.record_type == "MX"),
-        "SPF" => records
+        "SPF" | "SPF (IPv6)" => records
             .iter()
             .find(|r| r.record_type == "TXT" && r.value.starts_with("v=spf1")),
         "DKIM" => records
@@ -1089,6 +1170,7 @@ pub fn run_setup(
 
     // Step 7: DNS guidance and verification (section [DNS])
     let server_ip = net.get_server_ip()?;
+    let server_ipv6 = net.get_server_ipv6()?;
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
     let local_dkim_pubkey = dkim_value
@@ -1096,8 +1178,21 @@ pub fn run_setup(
         .map(|s| s.to_string());
 
     let server_ip_str = server_ip.to_string();
-    display_dns_guidance(&domain, &server_ip_str, &dkim_value, &dkim_selector);
-    let dns_records = generate_dns_records(&domain, &server_ip_str, &dkim_value, &dkim_selector);
+    let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
+    display_dns_guidance(
+        &domain,
+        &server_ip_str,
+        server_ipv6_str.as_deref(),
+        &dkim_value,
+        &dkim_selector,
+    );
+    let dns_records = generate_dns_records(
+        &domain,
+        &server_ip_str,
+        server_ipv6_str.as_deref(),
+        &dkim_value,
+        &dkim_selector,
+    );
 
     // DNS retry loop
     loop {
@@ -1121,6 +1216,7 @@ pub fn run_setup(
             net,
             &domain,
             &server_ip,
+            server_ipv6.as_ref(),
             &dkim_selector,
             local_dkim_pubkey.as_deref(),
         );
@@ -1160,8 +1256,10 @@ mod tests {
         inbound_port25: bool,
         ptr_record: Option<String>,
         server_ip: IpAddr,
+        server_ipv6: Option<IpAddr>,
         mx_records: HashMap<String, Vec<String>>,
         a_records: HashMap<String, Vec<IpAddr>>,
+        aaaa_records: HashMap<String, Vec<IpAddr>>,
         txt_records: HashMap<String, Vec<String>>,
     }
 
@@ -1172,8 +1270,10 @@ mod tests {
                 inbound_port25: true,
                 ptr_record: Some("mail.example.com.".into()),
                 server_ip: "1.2.3.4".parse().unwrap(),
+                server_ipv6: None,
                 mx_records: HashMap::new(),
                 a_records: HashMap::new(),
+                aaaa_records: HashMap::new(),
                 txt_records: HashMap::new(),
             }
         }
@@ -1192,11 +1292,17 @@ mod tests {
         fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
             Ok(self.server_ip)
         }
+        fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(self.server_ipv6)
+        }
         fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(self.mx_records.get(domain).cloned().unwrap_or_default())
         }
         fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
             Ok(self.a_records.get(domain).cloned().unwrap_or_default())
+        }
+        fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(self.aaaa_records.get(domain).cloned().unwrap_or_default())
         }
         fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(self.txt_records.get(domain).cloned().unwrap_or_default())
@@ -1391,6 +1497,7 @@ mod tests {
         let records = generate_dns_records(
             "agent.example.com",
             "1.2.3.4",
+            None,
             "v=DKIM1; k=rsa; p=ABC123",
             "dkim",
         );
@@ -1405,7 +1512,8 @@ mod tests {
 
         assert_eq!(records[2].record_type, "TXT");
         assert!(records[2].value.contains("v=spf1"));
-        assert!(records[2].value.contains("1.2.3.4"));
+        assert!(records[2].value.contains("ip4:1.2.3.4"));
+        assert!(!records[2].value.contains("ip6:"));
 
         assert_eq!(records[3].record_type, "TXT");
         assert_eq!(records[3].name, "dkim._domainkey.agent.example.com");
@@ -1423,7 +1531,8 @@ mod tests {
 
     #[test]
     fn dns_record_formatting() {
-        let records = generate_dns_records("test.com", "5.6.7.8", "v=DKIM1; k=rsa; p=XYZ", "dkim");
+        let records =
+            generate_dns_records("test.com", "5.6.7.8", None, "v=DKIM1; k=rsa; p=XYZ", "dkim");
         let formatted = format_dns_records(&records);
         assert!(formatted.contains("A"));
         assert!(formatted.contains("MX"));
@@ -1680,7 +1789,7 @@ mod tests {
             vec!["v=DMARC1; p=reject".into()],
         );
 
-        let results = verify_all_dns(&net, "example.com", &ip, "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
         assert!(results.iter().all(|(_, r)| *r == DnsVerifyResult::Pass));
     }
 
@@ -1692,7 +1801,7 @@ mod tests {
             .insert("example.com".into(), vec!["10 example.com.".into()]);
         // A record missing, SPF missing, etc.
 
-        let results = verify_all_dns(&net, "example.com", &ip, "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
         let pass_count = results
             .iter()
             .filter(|(_, r)| *r == DnsVerifyResult::Pass)
@@ -2099,7 +2208,8 @@ mod tests {
 
     #[test]
     fn dns_guidance_excludes_ptr() {
-        let records = generate_dns_records("test.com", "1.2.3.4", "v=DKIM1; k=rsa; p=ABC", "dkim");
+        let records =
+            generate_dns_records("test.com", "1.2.3.4", None, "v=DKIM1; k=rsa; p=ABC", "dkim");
         let dns_only: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
         assert_eq!(dns_only.len(), 5);
         assert!(dns_only.iter().all(|r| r.record_type != "PTR"));
@@ -2150,5 +2260,223 @@ mod tests {
             ..Default::default()
         };
         assert!(!is_already_configured(&sys, "example.com", tmp.path()));
+    }
+
+    // S26-2 — IPv6 DNS record generation tests
+
+    #[test]
+    fn dns_record_generation_with_ipv6() {
+        let records = generate_dns_records(
+            "agent.example.com",
+            "1.2.3.4",
+            Some("2001:db8::1"),
+            "v=DKIM1; k=rsa; p=ABC123",
+            "dkim",
+        );
+        assert_eq!(records.len(), 7);
+
+        assert_eq!(records[0].record_type, "A");
+        assert_eq!(records[0].value, "1.2.3.4");
+
+        assert_eq!(records[1].record_type, "AAAA");
+        assert_eq!(records[1].name, "agent.example.com");
+        assert_eq!(records[1].value, "2001:db8::1");
+
+        assert_eq!(records[2].record_type, "MX");
+
+        assert_eq!(records[3].record_type, "TXT");
+        assert_eq!(records[3].value, "v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all");
+    }
+
+    #[test]
+    fn dns_record_generation_without_ipv6() {
+        let records = generate_dns_records(
+            "example.com",
+            "1.2.3.4",
+            None,
+            "v=DKIM1; k=rsa; p=ABC",
+            "dkim",
+        );
+        assert!(!records.iter().any(|r| r.record_type == "AAAA"));
+        let spf = records
+            .iter()
+            .find(|r| r.value.starts_with("v=spf1"))
+            .unwrap();
+        assert_eq!(spf.value, "v=spf1 ip4:1.2.3.4 -all");
+        assert!(!spf.value.contains("ip6:"));
+    }
+
+    #[test]
+    fn dns_guidance_includes_aaaa_with_ipv6() {
+        let records = generate_dns_records(
+            "test.com",
+            "1.2.3.4",
+            Some("2001:db8::1"),
+            "v=DKIM1; k=rsa; p=ABC",
+            "dkim",
+        );
+        let dns_only: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
+        assert_eq!(dns_only.len(), 6);
+        assert!(dns_only.iter().any(|r| r.record_type == "AAAA"));
+    }
+
+    // S26-3 — ip6: SPF verification tests
+
+    #[test]
+    fn spf_contains_ip_ipv6_pass() {
+        assert!(spf_contains_ip(
+            "v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all",
+            "2001:db8::1"
+        ));
+    }
+
+    #[test]
+    fn spf_contains_ip_ipv6_with_plus_prefix() {
+        assert!(spf_contains_ip(
+            "v=spf1 +ip6:2001:db8::1 -all",
+            "2001:db8::1"
+        ));
+    }
+
+    #[test]
+    fn spf_contains_ip_ipv6_missing() {
+        assert!(!spf_contains_ip("v=spf1 ip4:1.2.3.4 -all", "2001:db8::1"));
+    }
+
+    #[test]
+    fn spf_contains_ip_ipv6_wrong_address() {
+        assert!(!spf_contains_ip(
+            "v=spf1 ip6:2001:db8::2 -all",
+            "2001:db8::1"
+        ));
+    }
+
+    #[test]
+    fn spf_contains_ip_ipv6_with_cidr() {
+        assert!(spf_contains_ip(
+            "v=spf1 ip6:2001:db8::1/128 -all",
+            "2001:db8::1"
+        ));
+    }
+
+    #[test]
+    fn spf_contains_ip_ipv4_still_works() {
+        assert!(spf_contains_ip("v=spf1 ip4:1.2.3.4 -all", "1.2.3.4"));
+    }
+
+    #[test]
+    fn spf_contains_ip_dual_stack_both_present() {
+        let record = "v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all";
+        assert!(spf_contains_ip(record, "1.2.3.4"));
+        assert!(spf_contains_ip(record, "2001:db8::1"));
+    }
+
+    #[test]
+    fn verify_spf_ipv6_pass() {
+        let mut net = MockNetworkOps::default();
+        net.txt_records.insert(
+            "example.com".into(),
+            vec!["v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all".into()],
+        );
+        assert_eq!(
+            verify_spf(&net, "example.com", "2001:db8::1"),
+            DnsVerifyResult::Pass
+        );
+    }
+
+    #[test]
+    fn verify_spf_ipv6_fail() {
+        let mut net = MockNetworkOps::default();
+        net.txt_records
+            .insert("example.com".into(), vec!["v=spf1 ip4:1.2.3.4 -all".into()]);
+        match verify_spf(&net, "example.com", "2001:db8::1") {
+            DnsVerifyResult::Fail(msg) => assert!(msg.contains("does not include")),
+            other => panic!("Expected Fail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn verify_aaaa_pass() {
+        let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        let mut net = MockNetworkOps::default();
+        net.aaaa_records.insert("example.com".into(), vec![ipv6]);
+        assert_eq!(
+            verify_aaaa(&net, "example.com", &ipv6),
+            DnsVerifyResult::Pass
+        );
+    }
+
+    #[test]
+    fn verify_aaaa_missing() {
+        let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        let net = MockNetworkOps::default();
+        match verify_aaaa(&net, "example.com", &ipv6) {
+            DnsVerifyResult::Missing(msg) => assert!(msg.contains("No AAAA")),
+            other => panic!("Expected Missing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn verify_aaaa_wrong_ip() {
+        let expected: IpAddr = "2001:db8::1".parse().unwrap();
+        let actual: IpAddr = "2001:db8::2".parse().unwrap();
+        let mut net = MockNetworkOps::default();
+        net.aaaa_records.insert("example.com".into(), vec![actual]);
+        match verify_aaaa(&net, "example.com", &expected) {
+            DnsVerifyResult::Fail(msg) => assert!(msg.contains("AAAA record points to")),
+            other => panic!("Expected Fail, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn verify_all_dns_with_ipv6() {
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        let mut net = MockNetworkOps::default();
+        net.server_ipv6 = Some(ipv6);
+        net.mx_records
+            .insert("example.com".into(), vec!["10 example.com.".into()]);
+        net.a_records.insert("example.com".into(), vec![ip]);
+        net.aaaa_records.insert("example.com".into(), vec![ipv6]);
+        net.txt_records.insert(
+            "example.com".into(),
+            vec!["v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all".into()],
+        );
+        net.txt_records.insert(
+            "dkim._domainkey.example.com".into(),
+            vec!["v=DKIM1; k=rsa; p=ABC".into()],
+        );
+        net.txt_records.insert(
+            "_dmarc.example.com".into(),
+            vec!["v=DMARC1; p=reject".into()],
+        );
+
+        let results = verify_all_dns(&net, "example.com", &ip, Some(&ipv6), "dkim", None);
+        assert!(results.iter().all(|(_, r)| *r == DnsVerifyResult::Pass));
+        assert!(results.iter().any(|(name, _)| name == "AAAA"));
+        assert!(results.iter().any(|(name, _)| name == "SPF (IPv6)"));
+    }
+
+    #[test]
+    fn verify_all_dns_without_ipv6_has_no_aaaa() {
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let mut net = MockNetworkOps::default();
+        net.mx_records
+            .insert("example.com".into(), vec!["10 example.com.".into()]);
+        net.a_records.insert("example.com".into(), vec![ip]);
+        net.txt_records
+            .insert("example.com".into(), vec!["v=spf1 ip4:1.2.3.4 -all".into()]);
+        net.txt_records.insert(
+            "dkim._domainkey.example.com".into(),
+            vec!["v=DKIM1; k=rsa; p=ABC".into()],
+        );
+        net.txt_records.insert(
+            "_dmarc.example.com".into(),
+            vec!["v=DMARC1; p=reject".into()],
+        );
+
+        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
+        assert!(!results.iter().any(|(name, _)| name == "AAAA"));
+        assert!(!results.iter().any(|(name, _)| name == "SPF (IPv6)"));
     }
 }

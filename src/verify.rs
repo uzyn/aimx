@@ -233,10 +233,16 @@ mod tests {
         fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
             Ok("1.2.3.4".parse().unwrap())
         }
+        fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(None)
+        }
         fn resolve_mx(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(vec![])
         }
         fn resolve_a(&self, _domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+            Ok(vec![])
+        }
+        fn resolve_aaaa(&self, _domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
             Ok(vec![])
         }
         fn resolve_txt(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
