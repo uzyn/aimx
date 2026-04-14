@@ -39,39 +39,16 @@ pub fn build_tls_acceptor(
 pub fn generate_test_certs(
     dir: &Path,
 ) -> Result<(std::path::PathBuf, std::path::PathBuf), Box<dyn std::error::Error>> {
-    use std::io::Write;
-    use std::process::Command;
-
     let cert_path = dir.join("cert.pem");
     let key_path = dir.join("key.pem");
 
-    // Generate with proper end-entity extensions (no CA:TRUE) so rustls accepts it
-    let output = Command::new("openssl")
-        .args([
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-keyout",
-            key_path.to_str().unwrap(),
-            "-out",
-            cert_path.to_str().unwrap(),
-            "-days",
-            "1",
-            "-nodes",
-            "-subj",
-            "/CN=localhost",
-            "-addext",
-            "basicConstraints=critical,CA:FALSE",
-            "-addext",
-            "subjectAltName=DNS:localhost",
-        ])
-        .output()?;
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])?;
+    params.is_ca = rcgen::IsCa::NoCa;
+    let key_pair = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
 
-    if !output.status.success() {
-        std::io::stderr().write_all(&output.stderr)?;
-        return Err("Failed to generate test certificates with openssl".into());
-    }
+    fs::write(&cert_path, cert.pem())?;
+    fs::write(&key_path, key_pair.serialize_pem())?;
 
     Ok((cert_path, key_path))
 }
