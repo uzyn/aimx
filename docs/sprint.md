@@ -2,9 +2,9 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 27 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening)
-**Timeline:** ~78.5 calendar days
-**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies.
+**Total sprints:** 31 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 3 agent integration + 1 channel-trigger cookbook)
+**Timeline:** ~90.5 calendar days
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
 
 ---
 
@@ -322,6 +322,220 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 28 — Agent Integration Framework + Claude Code (Days 79–81.5) [NOT STARTED]
+
+**Goal:** Stand up the `agents/` tree and the `aimx agent-setup <agent>` command, and ship the Claude Code integration end-to-end as the reference implementation. Establishes the pattern all subsequent agents plug into.
+
+**Dependencies:** Sprint 27.
+
+**Design notes (apply to all stories below):**
+- `aimx agent-setup` runs as the current user. It writes to `$HOME` / `$XDG_CONFIG_HOME`-based locations only — never `/etc` or `/var`, never requires root.
+- Plugin source trees live at `agents/<agent>/` in the repo and are embedded into the binary at compile time via `include_dir!` (MIT/Apache-2.0) so install works offline.
+- The installer never mutates the agent's own primary config file. On success it prints the exact activation command the user should run (or a "plugin auto-discovered on next launch" hint if the agent picks it up from a known dir).
+- `--force` overwrites existing destination files without prompting. `--print` writes all plugin contents to stdout and performs no disk writes (for dry-run and CI).
+- Tests use `TempDir` + `HOME` override; no real agent CLI required.
+
+#### S28-1: `agents/common/aimx-primer.md` — canonical agent-facing primer
+
+**Context:** Before authoring any per-agent skill/recipe, AIMX needs a single canonical document describing how an LLM should think about and interact with AIMX — written for the agent, not the human operator. Each per-agent package re-wraps this primer in its native format (`SKILL.md`, Goose recipe `prompt`, OpenClaw skill, etc.) via `include_str!` at compile time so there's no drift. Content must be concrete, concise, LLM-friendly (no marketing): the nine MCP tools (`mailbox_create/list/delete`, `email_list/read/send/reply`, `email_mark_read/unread`) with parameters, the storage layout (`/var/lib/aimx/<mailbox>/YYYY-MM-DD-NNN.md`, `attachments/`), the TOML-frontmatter fields (`id`, `message_id`, `from`, `to`, `subject`, `date`, `in_reply_to`, `references`, `attachments`, `mailbox`, `read`, `dkim`, `spf`), read/unread semantics, mailbox naming, and the trust model (DKIM/SPF verification results stored in frontmatter, not gating reads).
+
+**Priority:** P0
+
+- [ ] `agents/common/aimx-primer.md` created with sections: Tools, Storage layout, Frontmatter, Mailboxes, Read/unread, Trust model
+- [ ] Each MCP tool documented with its parameter names and types, matching `src/mcp.rs` exactly (no drift)
+- [ ] Frontmatter section lists every field and its semantics; matches `ingest.rs` output
+- [ ] No forward references to unimplemented features; grep for "TODO" / "FIXME" returns nothing
+- [ ] Length < 300 lines (LLM context budget); reviewed for tone (instructional, not promotional)
+
+#### S28-2: `agents/claude-code/` plugin package
+
+**Context:** Claude Code plugin format is a directory containing `.claude-plugin/plugin.json` (manifest with optional `mcpServers` block) and `skills/<name>/SKILL.md` (skill with YAML frontmatter). The plugin's MCP entry points at the installed `aimx` binary (default `/usr/local/bin/aimx` — match how `aimx setup` already hard-codes this path in `display_mcp_section`). The skill re-wraps `agents/common/aimx-primer.md` with Claude Code's required frontmatter (`name`, `description`). Before writing the manifest, verify the current Claude Code plugin schema against official docs — the research memo in this task may be stale.
+
+**Priority:** P0
+
+- [ ] `agents/claude-code/.claude-plugin/plugin.json` exists with `name: "aimx"`, `description`, `version` (tracks binary version), `author`, and `mcpServers.aimx` entry (`command: "/usr/local/bin/aimx"`, `args: ["mcp"]`; honor `--data-dir` override when setup used a non-default path by allowing the user to re-run `aimx agent-setup claude-code --data-dir <path>`)
+- [ ] `agents/claude-code/skills/aimx/SKILL.md` exists with valid frontmatter (`name: aimx`, `description`) and body = `agents/common/aimx-primer.md` content (assembled at build time, not duplicated on disk; choose one of: build script concatenation, `include_str!` inside binary, or a pre-commit hook — pick simplest)
+- [ ] `agents/claude-code/README.md` is a short human-facing README pointing at `aimx agent-setup claude-code`
+- [ ] Plugin loads cleanly in Claude Code on a real machine (manual validation); MCP tools appear; the skill is discoverable
+- [ ] Plugin schema verified against current Claude Code plugin docs (link the doc URL in the README)
+
+#### S28-3: `src/agent_setup.rs` + `aimx agent-setup` CLI command
+
+**Context:** New module + subcommand. The module owns: (a) an embedded assets bundle covering `agents/` via `include_dir!`, (b) an agent registry table keyed by short name (`claude-code`) mapping to (source subtree, destination path template, activation hint), (c) the install routine (resolve destination under `$HOME` / `$XDG_CONFIG_HOME`, walk embedded source, write files with `0o644` / dirs with `0o755`, handle overwrite prompts, print activation hint). CLI wires `aimx agent-setup <agent>` with `--list`, `--force`, `--print`, and `--data-dir` (inherited from global args — passes through to the MCP command path baked into the plugin when the user wants a non-default data dir). The `SystemOps`/trait pattern used elsewhere (see `setup.rs`) should be applied so tests use a mock HOME.
+
+**Priority:** P0
+
+- [ ] `src/agent_setup.rs` created; `Cargo.toml` adds `include_dir` (verify license is MIT or Apache-2.0 before adding)
+- [ ] `AgentSpec` struct captures `name`, `source_subdir`, `dest_template` (with `$HOME`/`$XDG_CONFIG_HOME` placeholders), `activation_hint` (templated string)
+- [ ] CLI subcommand `aimx agent-setup <agent>` with flags `--list`, `--force`, `--print`, plus the inherited global `--data-dir`
+- [ ] `--list` prints agent name + destination + activation hint for every registered agent
+- [ ] Install writes files with mode `0o644`, directories `0o755`; refuses to overwrite existing files unless `--force`; prompts interactively if stdin is a TTY and `--force` not set
+- [ ] Unknown agent name returns non-zero exit with a clear "unknown agent; run `aimx agent-setup --list`" message
+- [ ] `--print` writes the plugin tree to stdout in a diffable format (e.g., `=== path ===\n<contents>\n`); no disk writes
+- [ ] Unit tests cover: Claude Code install to temp HOME lays out expected files; `--force` overwrites; `--print` writes no files; unknown agent errors; `--list` output is stable
+- [ ] Never requires root; refuses root with a clear message ("agent-setup is a per-user operation — run without sudo")
+- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S28-4: Register Claude Code + simplify `aimx setup` MCP output
+
+**Context:** With framework + plugin in place, register `claude-code` in the agent registry: source `agents/claude-code/`, destination `~/.claude/plugins/aimx/` (verify the canonical location against current Claude Code docs at implementation time — may be `~/.claude/plugins/` at the parent dir instead), activation `Restart Claude Code — plugin auto-discovered.` (or `claude plugin install ~/.claude/plugins/aimx` if Claude Code requires an explicit install step for file-installed plugins). Then rework `display_mcp_section()` in `src/setup.rs` to replace the generic JSON snippet (currently lines ~852–881) with: a short intro, the list of supported agents from `agent_setup::registry()`, and the recommended command `aimx agent-setup <agent>`. The setup wizard output stays short; details live in `book/agent-integration.md` (S28-5).
+
+**Priority:** P0
+
+- [ ] `claude-code` registered in the `agent_setup.rs` registry with verified destination + activation hint
+- [ ] `display_mcp_section()` in `src/setup.rs` no longer emits a generic `{"mcpServers": ...}` JSON snippet
+- [ ] `display_mcp_section()` lists supported agents and recommends `aimx agent-setup <agent>` (the list is pulled from the registry, not duplicated by hand)
+- [ ] Existing `mcp_config_snippet(data_dir)` helper in `src/setup.rs` is removed (or marked internal and kept only for tests if something else depends on it — audit call sites first)
+- [ ] Tests for `setup.rs` MCP-section output updated to assert the new text
+- [ ] Manual validation: `sudo aimx setup <domain>` output shows the new MCP section; running the printed `aimx agent-setup claude-code` lays the plugin down
+
+#### S28-5: PRD update + `book/agent-integration.md`
+
+**Context:** The PRD gains a new §6.10 (Agent Integrations), a P0 user story, and scope edits — these were pre-staged with this sprint's planning and must be finalized as part of the sprint (the PRD edits are committed alongside code in this sprint). The book needs a new chapter `agent-integration.md` explaining the installer, listing supported agents with install commands (Sprint 28 only ships Claude Code; future sprints append to this page), and linking to each agent's `agents/<agent>/README.md`. `book/mcp.md` stays focused on the MCP server surface; `agent-integration.md` is the integration-onboarding chapter.
+
+**Priority:** P0
+
+- [ ] `docs/prd.md` §5 adds the "aimx agent-setup" P0 user story (already in place from planning; re-verify in this sprint)
+- [ ] `docs/prd.md` §6 gains §6.10 Agent Integrations with FR-49, FR-50, FR-51, FR-52 (already in place from planning; re-verify)
+- [ ] `docs/prd.md` §6.1 FR-10 narrowed to point at `aimx agent-setup` (already in place from planning; re-verify)
+- [ ] `docs/prd.md` §9 In Scope / Out of Scope updated (already in place from planning; re-verify)
+- [ ] `book/agent-integration.md` created with: what `aimx agent-setup` does, supported agents table (Claude Code only in this sprint), per-agent activation steps, troubleshooting
+- [ ] `book/SUMMARY.md` (or equivalent mdbook index) links `agent-integration.md`
+- [ ] `book/mcp.md` adds a one-line pointer "To install AIMX into your agent, see [Agent Integration](agent-integration.md)" near the top
+
+---
+
+## Sprint 29 — Codex CLI + OpenCode Integration (Days 82–84.5) [NOT STARTED]
+
+**Goal:** Add Codex CLI and OpenCode to the `aimx agent-setup` registry with full plugin/skill packages.
+
+**Dependencies:** Sprint 28 (framework + Claude Code reference).
+
+**Design note:** Before authoring each agent's package, verify the current plugin/skill format and canonical destination path against that agent's official docs. The Sprint 28 research memo is a starting point, not a source of truth — agent formats drift.
+
+#### S29-1: `agents/codex/` plugin + registry entry
+
+**Context:** Codex CLI uses TOML config at `~/.codex/config.toml` for MCP servers and has a plugin system with `.codex-plugin/plugin.json` manifests (mirrors Claude Code's structure per research memo; confirm at implementation time). Plugins bundle skills under `skills/<name>/SKILL.md`. The Codex plugin re-wraps the common primer. Destination on disk: `~/.codex/plugins/aimx/` (verify). Activation hint: the exact `codex plugin install ...` command if Codex requires explicit installation, or a "restart Codex" message otherwise.
+
+**Priority:** P0
+
+- [ ] `agents/codex/.codex-plugin/plugin.json` + `agents/codex/skills/aimx/SKILL.md` + `agents/codex/README.md` authored, re-using the common primer
+- [ ] `codex` registered in `agent_setup.rs` registry with verified destination + activation hint
+- [ ] Unit tests: `aimx agent-setup codex` against temp HOME lays out the expected tree; `--print` emits it to stdout
+- [ ] Plugin format and destination path verified against current Codex CLI docs (link in the README)
+- [ ] Manual validation on a machine with Codex CLI installed: plugin is picked up; MCP tools appear
+
+#### S29-2: `agents/opencode/` skill + registry entry
+
+**Context:** OpenCode (anomalyco) uses a skills system compatible with Claude Code's `SKILL.md` format, discovered from `.opencode/skills/` (project) or `~/.config/opencode/skills/` (user). Its MCP config is separate — in `opencode.json` / `opencode.jsonc` under the root key `mcp.<name>` with `command` as a single array combining binary + args. Two ways to handle MCP wiring: (a) write an `mcp.json` snippet file alongside the skill that the user pastes into `opencode.json`, or (b) just write the skill and have the activation hint print the exact JSONC block to paste. Prefer (b) — simpler, no extra file, matches the "print the activation command" pattern. Decide and document in `agents/opencode/README.md`.
+
+**Priority:** P0
+
+- [ ] `agents/opencode/skills/aimx/SKILL.md` authored, re-using the common primer
+- [ ] `agents/opencode/README.md` documents the MCP wiring step (printed JSONC snippet) and the skill install destination
+- [ ] `opencode` registered in `agent_setup.rs` registry; activation hint prints the JSONC snippet the user appends to `opencode.json`
+- [ ] Unit tests: install + `--print` behavior + activation-hint text stability
+- [ ] Canonical OpenCode skill destination verified against current OpenCode docs (link in README)
+
+#### S29-3: Update `book/agent-integration.md` + `--list` output
+
+**Context:** Extend the book chapter and the `aimx agent-setup --list` output to cover Codex and OpenCode. `--list` already reads from the registry so this comes for free once the two entries are registered; the book update is manual. Also update the README at repo root to mention all three supported agents (Claude Code, Codex, OpenCode) after this sprint.
+
+**Priority:** P1
+
+- [ ] `book/agent-integration.md` gains Codex and OpenCode sections (install command, activation step, troubleshooting quirks)
+- [ ] `aimx agent-setup --list` output snapshot updated; tests pass
+- [ ] Repo `README.md` lists all three agents in the agent-support section
+- [ ] Links between `book/agent-integration.md` and each agent's `agents/<agent>/README.md` resolve
+
+---
+
+## Sprint 30 — Goose + OpenClaw Integration (Days 85–87.5) [NOT STARTED]
+
+**Goal:** Add Goose (recipe-based) and OpenClaw (skill-based, JSON5 config) to `aimx agent-setup`, completing the v1 agent-integration roster.
+
+**Dependencies:** Sprint 29.
+
+**Design note:** Goose's integration shape differs from the others — Goose uses YAML "recipes" with `title` + `prompt` + `extensions` rather than plugins+skills. The recipe bundles both the MCP extension config AND the agent-facing instructions (the primer) in one file. OpenClaw uses skill directories similar to Claude Code but with a separate MCP config (JSON5 at `~/.openclaw/openclaw.json` under `mcp.servers`). Verify formats against current docs at implementation time.
+
+#### S30-1: `agents/goose/aimx-recipe.yaml` + registry entry
+
+**Context:** Goose recipes are YAML files with required `title` + `prompt` and optional `extensions` (list of MCP servers), `parameters`, etc. For AIMX, the recipe's `prompt` re-wraps the common primer, and `extensions` includes a stdio entry for `aimx mcp` so the recipe self-installs the MCP server when run. Destination: the user's local Goose recipes directory — when `GOOSE_RECIPE_GITHUB_REPO` is set, print guidance to commit the file there; otherwise write to `~/.config/goose/recipes/aimx.yaml` (verify canonical path). Activation hint prints `goose run --recipe aimx` (the form Goose uses to execute a recipe by name).
+
+**Priority:** P0
+
+- [ ] `agents/goose/aimx-recipe.yaml` authored: `title: "AIMX Email"`, `prompt: |` = common primer content, `extensions:` = stdio entry for `aimx mcp`
+- [ ] `goose` registered in `agent_setup.rs`; destination respects `GOOSE_RECIPE_GITHUB_REPO` env var (documented in activation hint); falls back to `~/.config/goose/recipes/aimx.yaml` when env var unset
+- [ ] Activation hint prints the correct invocation verb (`goose run --recipe aimx` or equivalent)
+- [ ] Unit tests cover: default path install, `GOOSE_RECIPE_GITHUB_REPO` set path, `--print` output
+- [ ] Recipe format verified against current Goose docs (link in `agents/goose/README.md`)
+
+#### S30-2: `agents/openclaw/` skill + registry entry
+
+**Context:** OpenClaw skills live in `~/.openclaw/skills/<name>/` with a `SKILL.md` carrying YAML frontmatter (`name`, `description`, optional `metadata` with `requires`, `emoji`, `os`, `install`). MCP wiring is separate — added to `~/.openclaw/openclaw.json` under `mcp.servers.aimx`, or via `openclaw mcp set aimx '{...}'`. Prefer the CLI: activation hint prints the `openclaw mcp set aimx '{"command":"aimx","args":["mcp"]}'` command so the user wires MCP with one pasted command (no config-file editing, no JSON5 parsing on our end).
+
+**Priority:** P0
+
+- [ ] `agents/openclaw/skills/aimx/SKILL.md` authored with valid OpenClaw frontmatter (`name: aimx`, `description`), body = common primer
+- [ ] `agents/openclaw/README.md` documents the two-step activation: copy skill via `aimx agent-setup openclaw`, then run the printed `openclaw mcp set` command
+- [ ] `openclaw` registered in `agent_setup.rs`; activation hint prints the exact `openclaw mcp set` command
+- [ ] Unit tests: install layout + activation-hint stability
+- [ ] OpenClaw skill and MCP command syntax verified against current OpenClaw docs (link in README)
+
+#### S30-3: Final docs pass + README overhaul
+
+**Context:** With all five v1 agents shipped, tidy the user-facing docs. `book/agent-integration.md` gets Goose and OpenClaw sections. The top-level `README.md` agent-integration section lists all five with one-line install commands and retires any lingering "copy this JSON snippet" prose. Spot-check `book/mcp.md` and `book/getting-started.md` for stale generic-snippet references.
+
+**Priority:** P1
+
+- [ ] `book/agent-integration.md` has sections for all five agents: Claude Code, Codex CLI, OpenCode, Goose, OpenClaw
+- [ ] Top-level `README.md` shows a five-row table of supported agents + install commands in the integration section
+- [ ] `grep -r "mcpServers" book/ docs/` returns only references inside `book/agent-integration.md` or the PRD (not stale "paste this snippet" prose elsewhere)
+- [ ] `aimx agent-setup --list` output (tested via snapshot) shows all five agents in a stable, sorted order
+
+---
+
+## Sprint 31 — Channel-Trigger Cookbook (Days 88–90.5) [NOT STARTED]
+
+**Goal:** Document email→agent channel-trigger recipes side-by-side for every supported agent. No new CLI surface — this is a docs + integration-test sprint leveraging the existing `cmd` trigger plumbing (`src/channel.rs`).
+
+**Dependencies:** Sprint 30.
+
+#### S31-1: `book/channel-recipes.md` — side-by-side agent invocation examples
+
+**Context:** Channel rules in AIMX already fire shell commands with template variables (`{filepath}`, `{from}`, `{subject}`, `{mailbox}`, `{id}`, etc.) — see `src/channel.rs` and FR-30/31. The missing piece is canonical, agent-specific documentation: which agent CLI flag maps to "take this email and act on it," what approval mode to use so the trigger runs non-interactively, where the agent's output goes (stderr/stdout/log file), and how to pass `{filepath}` safely. One chapter covers all five MCP-supported agents plus Aider (the no-MCP case). Each subsection includes a complete `config.toml` snippet the user can copy.
+
+**Priority:** P0
+
+- [ ] `book/channel-recipes.md` authored with subsections for Claude Code (`claude -p`), Codex CLI (`codex exec`), OpenCode (`opencode run`), Goose (`goose run -t`), OpenClaw (`openclaw run` or shell equivalent — verify; OpenClaw may not have a non-interactive mode suitable for triggers, in which case document the limitation), Aider (`aider --message`)
+- [ ] Each subsection contains: (1) a working `[[mailbox.catchall.channel]]` TOML snippet, (2) an explanation of the agent-specific flags (approval mode, output format, non-interactive), (3) notes on exit-code handling and where logs go
+- [ ] Chapter opens with a "what counts as a channel-trigger recipe" overview and a cross-reference to `book/channels.md` (the trigger mechanics)
+- [ ] Chapter closes with a summary table: agent · MCP-supported? · channel-trigger CLI · approval-mode flag · non-interactive flag
+- [ ] Flag references verified against each agent's current docs (CLI help output or official docs URL linked per agent)
+
+#### S31-2: Integration test for a representative channel recipe
+
+**Context:** Today `src/channel.rs` has unit tests for filter matching and template expansion, but no end-to-end test covering "email ingested → channel rule matches → shell command runs with templated args." Adding one test protects the channel pipeline from regressions that would silently break all recipe users. Use Claude Code's `claude --help` (or `/bin/echo` as an agent-agnostic baseline) as the command so the test stays fast and doesn't require a real agent. Assert that the command ran, received the expected `{filepath}` expansion, and did not block ingest delivery on failure.
+
+**Priority:** P1
+
+- [ ] New integration test under `tests/` (or `src/channel.rs` tests) drives the full ingest→trigger path end-to-end using a fixture `.eml` and an assert-able command (e.g., a shell one-liner that writes `{filepath}` to a temp marker)
+- [ ] Test asserts: the marker file was created, its contents contain the expected `filepath` and `subject` tokens, and ingest delivery completed even when the command exits non-zero
+- [ ] Runs in CI against Ubuntu, Alpine, Fedora (shares the existing CI matrix)
+
+#### S31-3: Cross-link and README update
+
+**Context:** The cookbook is worthless if users don't find it. Link it from (a) `book/channels.md` ("for agent-specific recipes, see Channel Recipes"), (b) `book/agent-integration.md` ("once your agent is installed, see Channel Recipes for email-triggered workflows"), (c) `README.md` top-level, and (d) each agent's `agents/<agent>/README.md`. Also add an entry to the AIMX-side summary table (MCP support vs channel-trigger support) at the top of the cookbook.
+
+**Priority:** P1
+
+- [ ] `book/channels.md`, `book/agent-integration.md`, top-level `README.md`, and each `agents/<agent>/README.md` link `book/channel-recipes.md`
+- [ ] `book/SUMMARY.md` (mdbook index) lists `channel-recipes.md`
+- [ ] All cross-links resolve in a local `mdbook build`
+- [ ] Top of `channel-recipes.md` has a summary table of all five v1 agents + Aider: MCP support · Channel-trigger pattern · Notes
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -355,6 +569,10 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 25 | 70–72.5 | Fix `aimx send` (Permissions + DKIM Signing) | DKIM key `0o644`, fix DKIM signature verification at Gmail — `aimx send` works end-to-end | Done |
 | 26 | 73–75.5 | IPv6 Support for Outbound SMTP | Remove IPv4-only workaround, dual-stack SPF records, `ip6:` verification | Done |
 | 27 | 76–78.5 | Systemd Unit Hardening | Restart rate-limit, resource limits, network-online deps in generated systemd unit | Not Started |
+| 28 | 79–81.5 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Not Started |
+| 29 | 82–84.5 | Codex CLI + OpenCode Integration | Codex plugin, OpenCode skill, book/ updates | Not Started |
+| 30 | 85–87.5 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
+| 31 | 88–90.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
 
 ## Deferred to v2
 

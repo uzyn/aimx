@@ -54,6 +54,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - As an agent operator, I want setup to verify port 25 reachability (inbound and outbound) before proceeding so that I don't waste time configuring a server that can't deliver mail.
 - As an agent operator, I want read/unread tracking so that agents can process only new emails.
 - As an agent operator, I want inbound DKIM/SPF verification so that channel triggers only fire on authenticated emails when I enable trust policies.
+- As an agent operator, I want to run `aimx agent-setup <agent>` so that my chosen agent is configured to use AIMX — including MCP wiring and agent-facing instructions — in one command, without hand-editing the agent's config file.
 
 ### P1 — Should Have
 - As an agent operator, I want to filter channel triggers by sender, subject, or attachment presence so that agents only act on relevant emails.
@@ -77,7 +78,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation. When `enable_ipv6 = true` is set in `config.toml`, also include the AAAA record and add `ip6:<server_ipv6>` to the SPF mechanism, and verify both alongside the IPv4 records. When the flag is unset or `false`, IPv6 records are neither advertised nor verified — existing AAAA records in DNS are left unchanged.
 - FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` mailbox.
-- FR-10: Display MCP configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.).
+- FR-10: Recommend `aimx agent-setup <agent>` for one-command per-agent integration. The wizard lists supported agents and their install commands rather than emitting a generic, copy-paste JSON snippet.
 
 ### 6.2 Email Delivery (`aimx ingest <rcpt>`)
 - FR-11: Accept raw email from the embedded SMTP listener (`aimx serve`) in-process, or from stdin for manual/pipe usage via `aimx ingest`.
@@ -124,6 +125,12 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing `aimx` clients to test outbound port 25 connectivity via EHLO handshake. _Note: outbound check now performs EHLO handshake directly from the client, not via `/reach`._
 - FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
 
+### 6.10 Agent Integrations (`aimx agent-setup <agent>`)
+- FR-49: `aimx agent-setup <agent>` installs the AIMX plugin/skill/recipe for the named agent into that agent's standard per-user location (under `$HOME` / `$XDG_CONFIG_HOME`). Runs as the current user. Never mutates the agent's own primary config file. On success, prints the exact activation command (e.g., `claude plugin install ...`, `openclaw mcp set ...`) the user should run next.
+- FR-50: Supported agents in v1: Claude Code, Codex CLI, OpenCode (anomalyco), Goose, OpenClaw. Each shipped package contains both the MCP wiring and an instructions payload (`SKILL.md`, recipe `prompt`, or equivalent) describing AIMX's MCP tools, storage layout, frontmatter fields, and read/unread semantics so the agent can interact with AIMX without further prompting.
+- FR-51: Plugin sources live under `agents/<agent>/` in the AIMX repo and are bundled into the binary at compile time (e.g., via `include_dir!`) so `aimx agent-setup` works offline and is version-locked to the installed binary.
+- FR-52: `aimx agent-setup --list` prints the registry of supported agents, their destination paths, and their activation commands. `--force` overwrites an existing destination without prompting; `--print` writes plugin contents to stdout instead of disk for dry-run / CI use.
+
 ### 6.9 CLI Commands
 - FR-41: `aimx setup [domain]` — interactive setup wizard. When domain is omitted, prompt interactively for domain and confirm DNS access.
 - FR-41b: ~~Pre-seed OpenSMTPD debconf answers.~~ _Removed: OpenSMTPD replaced by embedded SMTP server. Setup now generates a systemd/OpenRC service file for `aimx serve`._
@@ -135,6 +142,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-46: `aimx mailbox create|list|delete <name>` — mailbox management.
 - FR-47: `aimx status` — show server status, mailbox counts, recent activity.
 - FR-48: `aimx verify` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
+- FR-48b: `aimx agent-setup <agent> [--list] [--force] [--print]` — install per-agent plugin/skill/recipe (see §6.10). Runs as the current user.
 
 ## 7. Non-Functional Requirements
 
@@ -194,6 +202,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - Email delivery pipeline (EML→Markdown with attachments)
 - Email sending with DKIM signing
 - MCP server with full email/mailbox tool set
+- Per-agent plugin/skill/recipe packages (Claude Code, Codex CLI, OpenCode, Goose, OpenClaw) plus `aimx agent-setup <agent>` installer
+- Channel-trigger cookbook documenting email→agent invocation patterns per supported agent
 - Channel manager with `cmd` triggers and match filters
 - Inbound trust: DKIM/SPF verification, per-mailbox trust policy, trusted_senders allowlist
 - Verifier service (probe + reach endpoints)
@@ -210,6 +220,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - Email encryption (PGP/S/MIME)
 - Rate limiting / spam filtering (rely on DMARC policy for v1)
 - Outbound mail queue with retry (v1 uses synchronous delivery with immediate error feedback)
+- Auto-merging plugin/MCP entries into the agent's primary config file (AIMX writes plugin packages to standard per-user dirs and prints the activation command; the user runs it)
+- Runtime plugin marketplace / plugin hot-reload for agent integrations
+- Aider integration (no MCP support in Aider as of v1)
 
 ### Milestones
 
