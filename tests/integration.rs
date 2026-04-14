@@ -1261,3 +1261,433 @@ fn serve_e2e_connection_refused_after_shutdown() {
         "Connection should be refused after shutdown"
     );
 }
+
+fn setup_test_env_with_bob(tmp: &Path) -> String {
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\n",
+        tmp.display()
+    );
+    std::fs::create_dir_all(tmp.join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    let config_path = tmp.join("config.toml");
+    std::fs::write(&config_path, &config_content).unwrap();
+    config_path.to_string_lossy().to_string()
+}
+
+fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
+    let mut child = StdCommand::new(aimx_binary_path())
+        .arg("--data-dir")
+        .arg(tmp)
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    child
+}
+
+fn stop_serve(mut child: std::process::Child) {
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = child.wait_timeout(std::time::Duration::from_secs(10));
+}
+
+#[test]
+fn serve_e2e_single_attachment() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "Subject: Single Attachment\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <att-single@example.com>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"boundary1\"\r\n",
+        "\r\n",
+        "--boundary1\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "Please find attached.\r\n",
+        "--boundary1\r\n",
+        "Content-Type: text/plain; name=\"report.txt\"\r\n",
+        "Content-Disposition: attachment; filename=\"report.txt\"\r\n",
+        "\r\n",
+        "Quarterly results here.\r\n",
+        "--boundary1--",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com"],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_dir = tmp.path().join("alice");
+    let md_files = find_md_files(&alice_dir);
+    assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
+
+    let att_path = alice_dir.join("attachments").join("report.txt");
+    assert!(att_path.exists(), "Attachment file should exist on disk");
+    let att_content = std::fs::read_to_string(&att_path).unwrap();
+    assert!(
+        att_content.contains("Quarterly results"),
+        "Attachment content mismatch"
+    );
+
+    let fm = read_frontmatter(&md_files[0]);
+    let table = fm.as_table().unwrap();
+    let attachments = table.get("attachments").unwrap().as_array().unwrap();
+    assert_eq!(attachments.len(), 1, "Expected 1 attachment in frontmatter");
+    let att = attachments[0].as_table().unwrap();
+    assert_eq!(get_toml_str(att, "filename"), "report.txt");
+    assert_eq!(get_toml_str(att, "path"), "attachments/report.txt");
+    assert!(att.get("size").unwrap().as_integer().unwrap() > 0);
+
+    let content = std::fs::read_to_string(&md_files[0]).unwrap();
+    assert!(content.contains("Please find attached."));
+
+    stop_serve(child);
+}
+
+#[test]
+fn serve_e2e_multiple_attachments() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "Subject: Multiple Attachments\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <att-multi@example.com>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"boundary2\"\r\n",
+        "\r\n",
+        "--boundary2\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "Multiple files attached.\r\n",
+        "--boundary2\r\n",
+        "Content-Type: text/plain; name=\"notes.txt\"\r\n",
+        "Content-Disposition: attachment; filename=\"notes.txt\"\r\n",
+        "\r\n",
+        "Meeting notes from Monday.\r\n",
+        "--boundary2\r\n",
+        "Content-Type: text/csv; name=\"data.csv\"\r\n",
+        "Content-Disposition: attachment; filename=\"data.csv\"\r\n",
+        "\r\n",
+        "name,value\r\nalpha,1\r\nbeta,2\r\n",
+        "--boundary2\r\n",
+        "Content-Type: application/octet-stream; name=\"image.png\"\r\n",
+        "Content-Disposition: attachment; filename=\"image.png\"\r\n",
+        "\r\n",
+        "FAKE PNG CONTENT FOR TESTING\r\n",
+        "--boundary2--",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com"],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_dir = tmp.path().join("alice");
+    let md_files = find_md_files(&alice_dir);
+    assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
+
+    let att_dir = alice_dir.join("attachments");
+    assert!(
+        att_dir.join("notes.txt").exists(),
+        "notes.txt should exist on disk"
+    );
+    assert!(
+        att_dir.join("data.csv").exists(),
+        "data.csv should exist on disk"
+    );
+    assert!(
+        att_dir.join("image.png").exists(),
+        "image.png should exist on disk"
+    );
+
+    let notes = std::fs::read_to_string(att_dir.join("notes.txt")).unwrap();
+    assert!(notes.contains("Meeting notes"));
+
+    let csv = std::fs::read_to_string(att_dir.join("data.csv")).unwrap();
+    assert!(csv.contains("alpha,1"));
+
+    let fm = read_frontmatter(&md_files[0]);
+    let table = fm.as_table().unwrap();
+    let attachments = table.get("attachments").unwrap().as_array().unwrap();
+    assert_eq!(
+        attachments.len(),
+        3,
+        "Expected 3 attachments in frontmatter"
+    );
+
+    let filenames: Vec<&str> = attachments
+        .iter()
+        .map(|a| get_toml_str(a.as_table().unwrap(), "filename"))
+        .collect();
+    assert!(filenames.contains(&"notes.txt"));
+    assert!(filenames.contains(&"data.csv"));
+    assert!(filenames.contains(&"image.png"));
+
+    let content = std::fs::read_to_string(&md_files[0]).unwrap();
+    assert!(content.contains("Multiple files attached."));
+
+    stop_serve(child);
+}
+
+#[test]
+fn serve_e2e_attachment_multi_recipient() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com, catchall@agent.example.com\r\n",
+        "Subject: Shared Attachment\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <att-shared@example.com>\r\n",
+        "MIME-Version: 1.0\r\n",
+        "Content-Type: multipart/mixed; boundary=\"boundary3\"\r\n",
+        "\r\n",
+        "--boundary3\r\n",
+        "Content-Type: text/plain; charset=utf-8\r\n",
+        "\r\n",
+        "Shared attachment.\r\n",
+        "--boundary3\r\n",
+        "Content-Type: text/plain; name=\"shared.txt\"\r\n",
+        "Content-Disposition: attachment; filename=\"shared.txt\"\r\n",
+        "\r\n",
+        "This file goes to both.\r\n",
+        "--boundary3--",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com", "catchall@agent.example.com"],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_dir = tmp.path().join("alice");
+    let catchall_dir = tmp.path().join("catchall");
+    assert_eq!(find_md_files(&alice_dir).len(), 1);
+    assert_eq!(find_md_files(&catchall_dir).len(), 1);
+
+    let alice_att = alice_dir.join("attachments").join("shared.txt");
+    let catchall_att = catchall_dir.join("attachments").join("shared.txt");
+    assert!(alice_att.exists(), "alice should have attachment");
+    assert!(catchall_att.exists(), "catchall should have attachment");
+
+    let alice_content = std::fs::read_to_string(&alice_att).unwrap();
+    let catchall_content = std::fs::read_to_string(&catchall_att).unwrap();
+    assert!(alice_content.contains("This file goes to both."));
+    assert!(catchall_content.contains("This file goes to both."));
+
+    stop_serve(child);
+}
+
+#[test]
+fn serve_e2e_cc_recipients() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_bob(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "CC: bob@agent.example.com\r\n",
+        "Subject: CC Test\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <cc-test@example.com>\r\n",
+        "\r\n",
+        "Testing CC delivery",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com", "bob@agent.example.com"],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_files = find_md_files(&tmp.path().join("alice"));
+    let bob_files = find_md_files(&tmp.path().join("bob"));
+    assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
+    assert_eq!(bob_files.len(), 1, "Expected 1 email in bob mailbox");
+
+    let alice_fm = read_frontmatter(&alice_files[0]);
+    let bob_fm = read_frontmatter(&bob_files[0]);
+    let alice_table = alice_fm.as_table().unwrap();
+    let bob_table = bob_fm.as_table().unwrap();
+
+    assert_eq!(get_toml_str(alice_table, "subject"), "CC Test");
+    assert_eq!(get_toml_str(bob_table, "subject"), "CC Test");
+    assert_eq!(get_toml_str(alice_table, "mailbox"), "alice");
+    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob");
+
+    let alice_content = std::fs::read_to_string(&alice_files[0]).unwrap();
+    let bob_content = std::fs::read_to_string(&bob_files[0]).unwrap();
+    assert!(alice_content.contains("Testing CC delivery"));
+    assert!(bob_content.contains("Testing CC delivery"));
+
+    stop_serve(child);
+}
+
+#[test]
+fn serve_e2e_bcc_recipients() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_bob(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    // No BCC header — bob is BCC'd via envelope only
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "Subject: BCC Test\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <bcc-test@example.com>\r\n",
+        "\r\n",
+        "Testing BCC delivery",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com", "bob@agent.example.com"],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_files = find_md_files(&tmp.path().join("alice"));
+    let bob_files = find_md_files(&tmp.path().join("bob"));
+    assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
+    assert_eq!(bob_files.len(), 1, "Expected 1 email in bob (BCC) mailbox");
+
+    let alice_fm = read_frontmatter(&alice_files[0]);
+    let bob_fm = read_frontmatter(&bob_files[0]);
+    let alice_table = alice_fm.as_table().unwrap();
+    let bob_table = bob_fm.as_table().unwrap();
+
+    assert_eq!(get_toml_str(alice_table, "subject"), "BCC Test");
+    assert_eq!(get_toml_str(bob_table, "subject"), "BCC Test");
+    assert_eq!(get_toml_str(alice_table, "mailbox"), "alice");
+    assert_eq!(get_toml_str(bob_table, "mailbox"), "bob");
+
+    // BCC address should not appear as a header in the stored email
+    let bob_content = std::fs::read_to_string(&bob_files[0]).unwrap();
+    assert!(
+        !bob_content.contains("Bcc:")
+            && !bob_content.contains("bcc:")
+            && !bob_content.contains("BCC:"),
+        "BCC header line should not be in stored email"
+    );
+    assert!(
+        !bob_content.contains("bob@agent.example.com"),
+        "BCC recipient address should not appear in stored email"
+    );
+    assert_eq!(
+        get_toml_str(bob_table, "to"),
+        "alice@agent.example.com",
+        "To field should be the To header, not the envelope recipient"
+    );
+
+    stop_serve(child);
+}
+
+#[test]
+fn serve_e2e_to_cc_bcc_combined() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_bob(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    // To: alice, CC: bob, BCC: catchall (catchall not in headers)
+    let email_data = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "CC: bob@agent.example.com\r\n",
+        "Subject: All Recipients Test\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <all-rcpt@example.com>\r\n",
+        "\r\n",
+        "Testing all recipient types",
+    );
+
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &[
+            "alice@agent.example.com",
+            "bob@agent.example.com",
+            "catchall@agent.example.com",
+        ],
+        email_data,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let alice_files = find_md_files(&tmp.path().join("alice"));
+    let bob_files = find_md_files(&tmp.path().join("bob"));
+    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    assert_eq!(alice_files.len(), 1, "Expected 1 email in alice (To)");
+    assert_eq!(bob_files.len(), 1, "Expected 1 email in bob (CC)");
+    assert_eq!(
+        catchall_files.len(),
+        1,
+        "Expected 1 email in catchall (BCC)"
+    );
+
+    for (files, expected_mailbox) in [
+        (&alice_files, "alice"),
+        (&bob_files, "bob"),
+        (&catchall_files, "catchall"),
+    ] {
+        let fm = read_frontmatter(&files[0]);
+        let table = fm.as_table().unwrap();
+        assert_eq!(get_toml_str(table, "subject"), "All Recipients Test");
+        assert_eq!(get_toml_str(table, "mailbox"), expected_mailbox);
+        assert_eq!(
+            get_toml_str(table, "to"),
+            "alice@agent.example.com",
+            "To field should be from header, not envelope"
+        );
+
+        let content = std::fs::read_to_string(&files[0]).unwrap();
+        assert!(content.contains("Testing all recipient types"));
+    }
+
+    stop_serve(child);
+}
