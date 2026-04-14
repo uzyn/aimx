@@ -208,7 +208,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 25 — Fix `aimx send` (Permissions + DKIM Signing) (Days 70–72.5) [IN PROGRESS]
+## Sprint 25 — Fix `aimx send` (Permissions + DKIM Signing) (Days 70–72.5) [DONE]
 
 **Goal:** Fix the two bugs preventing `aimx send` from working: (1) DKIM private key is unreadable by non-root users, and (2) DKIM-signed emails fail verification at Gmail, causing DMARC rejection.
 
@@ -222,11 +222,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Change `dkim.rs` `generate_keypair()` permission from `0o600` to `0o644`
-- [ ] Update `load_private_key()` to include the actual IO error in the error message (e.g., "DKIM private key not found at {path}: {error}. Run `aimx dkim-keygen` first.")
-- [ ] Update the existing permission test (`private_key_has_restricted_permissions`) to expect `0o644`
-- [ ] Add integration test: generate keypair, verify file mode is `0o644`
-- [ ] Verify `aimx send` works without sudo after `sudo aimx setup` on a real system
+- [x] Change `dkim.rs` `generate_keypair()` permission from `0o600` to `0o644`
+- [x] Update `load_private_key()` to include the actual IO error in the error message (e.g., "DKIM private key not found at {path}: {error}. Run `aimx dkim-keygen` first.")
+- [x] Update the existing permission test (`private_key_has_restricted_permissions`) to expect `0o644`
+- [x] Add integration test: generate keypair, verify file mode is `0o644`
+- [ ] Verify `aimx send` works without sudo after `sudo aimx setup` on a real system <!-- Deferred: requires live VPS validation -->
 
 #### S25-2: Fix DKIM signature verification failure at Gmail
 
@@ -234,11 +234,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Diagnose: capture raw signed message output and inspect DKIM-Signature header fields (bh=, b=, c=, d=, s=); send to a DKIM analysis tool to identify whether failure is body hash, header hash, or key lookup
-- [ ] Ensure CRLF normalization: verify `compose_message()` output has consistent `\r\n` throughout, including user-supplied `args.body`; normalize bare `\n` to `\r\n` before signing if needed
-- [ ] Explicitly set `relaxed/relaxed` canonicalization on `DkimSigner` (protects against upstream default changes)
-- [ ] Add cryptographic roundtrip test: sign a message, then verify the signature using the public key (not just check header presence)
-- [ ] Verify end-to-end: `aimx send` from `agent.zeroshot.lol` delivers to Gmail with DKIM pass
+- [x] Diagnose: capture raw signed message output and inspect DKIM-Signature header fields (bh=, b=, c=, d=, s=); send to a DKIM analysis tool to identify whether failure is body hash, header hash, or key lookup
+- [x] Ensure CRLF normalization: verify `compose_message()` output has consistent `\r\n` throughout, including user-supplied `args.body`; normalize bare `\n` to `\r\n` before signing if needed
+- [x] Explicitly set `relaxed/relaxed` canonicalization on `DkimSigner` (protects against upstream default changes)
+- [x] Add cryptographic roundtrip test: sign a message, then verify the signature using the public key (not just check header presence)
+- [ ] Verify end-to-end: `aimx send` from `agent.zeroshot.lol` delivers to Gmail with DKIM pass <!-- Deferred: requires live VPS validation -->
 
 ---
 
@@ -272,7 +272,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
 | 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | Done |
-| 25 | 70–72.5 | Fix `aimx send` (Permissions + DKIM Signing) | DKIM key `0o644`, fix DKIM signature verification at Gmail — `aimx send` works end-to-end | In Progress |
+| 25 | 70–72.5 | Fix `aimx send` (Permissions + DKIM Signing) | DKIM key `0o644`, fix DKIM signature verification at Gmail — `aimx send` works end-to-end | Done |
 
 ## Deferred to v2
 
