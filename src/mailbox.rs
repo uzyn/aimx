@@ -123,9 +123,22 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("{:<20} MESSAGES", term::header("MAILBOX"));
+    let header_pad = 20usize.saturating_sub("MAILBOX".len());
+    println!(
+        "{}{:pad$} MESSAGES",
+        term::header("MAILBOX"),
+        "",
+        pad = header_pad,
+    );
     for (name, count) in mailboxes {
-        println!("{:<20} {}", term::highlight(&name), count);
+        let name_pad = 20usize.saturating_sub(name.chars().count());
+        println!(
+            "{}{:pad$} {}",
+            term::highlight(&name),
+            "",
+            count,
+            pad = name_pad,
+        );
     }
 
     Ok(())
