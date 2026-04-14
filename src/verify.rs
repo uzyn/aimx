@@ -32,7 +32,7 @@ fn run_with_temp_server(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
         Err(e) => {
             return Err(format!(
                 "Cannot bind port 25 for verification: {e}\n\
-                 Run with sudo or ensure port 25 is available."
+                 Run with sudo or ensure port 25 is available. `sudo aimx verify`"
             )
             .into());
         }
@@ -155,7 +155,7 @@ pub fn run_with_net(
 
     match port25 {
         Port25Status::Aimx | Port25Status::Free => {
-            print!("  Inbound port 25 (EHLO probe)... ");
+            print!("  Inbound port 25... ");
             std::io::Write::flush(&mut std::io::stdout())?;
             match setup::check_inbound(net) {
                 setup::PreflightResult::Pass(_) => println!("PASS"),
@@ -169,7 +169,7 @@ pub fn run_with_net(
 
             println!();
             if all_pass {
-                println!("All checks passed. Port 25 is reachable.");
+                println!("All checks passed. Port 25 is reachable. Your system is good for AIMX setup.\nRun `sudo aimx setup` to begin.");
                 Ok(())
             } else {
                 Err("Some checks failed. See details above.".into())
@@ -178,7 +178,7 @@ pub fn run_with_net(
 
         Port25Status::OtherProcess(name) => Err(format!(
             "Port 25 is occupied by `{name}`.\n\
-             Stop the process and run `sudo aimx setup` to configure aimx."
+             Stop or uninstall the process and run `sudo aimx verify` again to check."
         )
         .into()),
     }
