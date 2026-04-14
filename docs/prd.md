@@ -74,7 +74,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-4: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
 - FR-5: Check reverse DNS (PTR) and warn (non-blocking) if not set.
 - FR-6: Generate 2048-bit RSA DKIM keypair.
-- FR-7: Display required DNS records (MX, A, AAAA, SPF, DKIM, DMARC, PTR) and wait for user confirmation. When the server has a global IPv6 address, also show the AAAA record and `ip6:` SPF mechanism as optional reference — these are only needed if the user opts into IPv6 outbound via the `enable_ipv6` config flag.
+- FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation. When `enable_ipv6 = true` is set in `config.toml`, also include the AAAA record and add `ip6:<server_ipv6>` to the SPF mechanism, and verify both alongside the IPv4 records. When the flag is unset or `false`, IPv6 records are neither advertised nor verified — existing AAAA records in DNS are left unchanged.
 - FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` mailbox.
 - FR-10: Display MCP configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.).
