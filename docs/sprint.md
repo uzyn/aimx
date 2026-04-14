@@ -4,7 +4,7 @@
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
 **Total sprints:** 31 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 3 agent integration + 1 channel-trigger cookbook)
 **Timeline:** ~90.5 calendar days
-**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
 
 ---
 
@@ -405,9 +405,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 29 — Codex CLI + OpenCode Integration (Days 82–84.5) [NOT STARTED]
+## Sprint 29 — Codex CLI + OpenCode + Gemini CLI Integration (Days 82–84.5) [NOT STARTED]
 
-**Goal:** Add Codex CLI and OpenCode to the `aimx agent-setup` registry with full plugin/skill packages.
+**Goal:** Add Codex CLI, OpenCode, and Gemini CLI to the `aimx agent-setup` registry with full plugin/skill packages.
 
 **Dependencies:** Sprint 28 (framework + Claude Code reference).
 
@@ -437,15 +437,28 @@ Completed sprints 1–21 have been archived for context window efficiency.
 - [ ] Unit tests: install + `--print` behavior + activation-hint text stability
 - [ ] Canonical OpenCode skill destination verified against current OpenCode docs (link in README)
 
-#### S29-3: Update `book/agent-integration.md` + `--list` output
+#### S29-3: `agents/gemini/` skill + registry entry
 
-**Context:** Extend the book chapter and the `aimx agent-setup --list` output to cover Codex and OpenCode. `--list` already reads from the registry so this comes for free once the two entries are registered; the book update is manual. Also update the README at repo root to mention all three supported agents (Claude Code, Codex, OpenCode) after this sprint.
+**Context:** Gemini CLI is Google's developer-facing agent CLI with native MCP support. It picks up per-project context from a `GEMINI.md` file at the repo root and activates skills on demand via an `activate_skill` tool — so AIMX can ship as a Gemini skill that re-wraps the common primer. MCP servers are configured in Gemini's user-level settings file (commonly `~/.gemini/settings.json` — verify the canonical path and schema against current Gemini CLI docs at implementation time; the path and key names may have shifted). Destination for the skill itself depends on Gemini's current skills layout (project-local `.gemini/skills/` vs user-level `~/.gemini/skills/`); register at the user-level path to match how AIMX installs for other agents. MCP wiring: Gemini CLI uses a JSON object keyed by server name (similar to Claude Code's `mcpServers`). Prefer the "print the exact JSON snippet as the activation hint" pattern already used for OpenCode — AIMX writes the skill, prints the `settings.json` fragment the user merges, and stops. Do NOT mutate `settings.json` directly (consistent with FR-49).
+
+**Priority:** P0
+
+- [ ] `agents/gemini/skills/aimx/SKILL.md` authored, re-using `agents/common/aimx-primer.md` content with Gemini-required frontmatter (`name`, `description`, plus any Gemini-specific fields identified during implementation)
+- [ ] `agents/gemini/README.md` documents the two-step activation: run `aimx agent-setup gemini` to install the skill, then paste the printed MCP entry into `~/.gemini/settings.json`
+- [ ] `gemini` registered in `src/agent_setup.rs` registry with verified destination + activation hint (prints the exact `mcpServers.aimx` JSON block to merge)
+- [ ] Unit tests: install lays out expected files at the temp-HOME destination; `--print` emits both the skill tree and the MCP JSON snippet to stdout
+- [ ] Skill destination, settings file path, and MCP schema verified against current Gemini CLI docs; URL linked from `agents/gemini/README.md`
+- [ ] Manual validation on a machine with Gemini CLI installed: `aimx agent-setup gemini` → merge printed JSON → Gemini sees `aimx` MCP tools and the skill is discoverable
+
+#### S29-4: Update `book/agent-integration.md` + `--list` output
+
+**Context:** Extend the book chapter and the `aimx agent-setup --list` output to cover Codex, OpenCode, and Gemini. `--list` already reads from the registry so this comes for free once the three entries are registered; the book update is manual. Also update the README at repo root to mention all four supported agents (Claude Code, Codex, OpenCode, Gemini) after this sprint.
 
 **Priority:** P1
 
-- [ ] `book/agent-integration.md` gains Codex and OpenCode sections (install command, activation step, troubleshooting quirks)
+- [ ] `book/agent-integration.md` gains Codex, OpenCode, and Gemini sections (install command, activation step, troubleshooting quirks)
 - [ ] `aimx agent-setup --list` output snapshot updated; tests pass
-- [ ] Repo `README.md` lists all three agents in the agent-support section
+- [ ] Repo `README.md` lists all four agents in the agent-support section
 - [ ] Links between `book/agent-integration.md` and each agent's `agents/<agent>/README.md` resolve
 
 ---
@@ -507,10 +520,10 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `book/channel-recipes.md` authored with subsections for Claude Code (`claude -p`), Codex CLI (`codex exec`), OpenCode (`opencode run`), Goose (`goose run -t`), OpenClaw (`openclaw run` or shell equivalent — verify; OpenClaw may not have a non-interactive mode suitable for triggers, in which case document the limitation), Aider (`aider --message`)
+- [ ] `book/channel-recipes.md` authored with subsections for Claude Code (`claude -p`), Codex CLI (`codex exec`), OpenCode (`opencode run`), Gemini CLI (verify non-interactive flag; likely `gemini --prompt` or similar — confirm against current Gemini CLI docs), Goose (`goose run -t`), OpenClaw (`openclaw run` or shell equivalent — verify; OpenClaw may not have a non-interactive mode suitable for triggers, in which case document the limitation), Aider (`aider --message`)
 - [ ] Each subsection contains: (1) a working `[[mailbox.catchall.channel]]` TOML snippet, (2) an explanation of the agent-specific flags (approval mode, output format, non-interactive), (3) notes on exit-code handling and where logs go
 - [ ] Chapter opens with a "what counts as a channel-trigger recipe" overview and a cross-reference to `book/channels.md` (the trigger mechanics)
-- [ ] Chapter closes with a summary table: agent · MCP-supported? · channel-trigger CLI · approval-mode flag · non-interactive flag
+- [ ] Chapter closes with a summary table: agent · MCP-supported? · channel-trigger CLI · approval-mode flag · non-interactive flag — covers all six v1 agents (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus Aider
 - [ ] Flag references verified against each agent's current docs (CLI help output or official docs URL linked per agent)
 
 #### S31-2: Integration test for a representative channel recipe
@@ -570,7 +583,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 26 | 73–75.5 | IPv6 Support for Outbound SMTP | Remove IPv4-only workaround, dual-stack SPF records, `ip6:` verification | Done |
 | 27 | 76–78.5 | Systemd Unit Hardening | Restart rate-limit, resource limits, network-online deps in generated systemd unit | Not Started |
 | 28 | 79–81.5 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Not Started |
-| 29 | 82–84.5 | Codex CLI + OpenCode Integration | Codex plugin, OpenCode skill, book/ updates | Not Started |
+| 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Not Started |
 | 30 | 85–87.5 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
 | 31 | 88–90.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
 

@@ -127,7 +127,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ### 6.10 Agent Integrations (`aimx agent-setup <agent>`)
 - FR-49: `aimx agent-setup <agent>` installs the AIMX plugin/skill/recipe for the named agent into that agent's standard per-user location (under `$HOME` / `$XDG_CONFIG_HOME`). Runs as the current user. Never mutates the agent's own primary config file. On success, prints the exact activation command (e.g., `claude plugin install ...`, `openclaw mcp set ...`) the user should run next.
-- FR-50: Supported agents in v1: Claude Code, Codex CLI, OpenCode (anomalyco), Goose, OpenClaw. Each shipped package contains both the MCP wiring and an instructions payload (`SKILL.md`, recipe `prompt`, or equivalent) describing AIMX's MCP tools, storage layout, frontmatter fields, and read/unread semantics so the agent can interact with AIMX without further prompting.
+- FR-50: Supported agents in v1: Claude Code, Codex CLI, OpenCode (anomalyco), Gemini CLI, Goose, OpenClaw. Each shipped package contains both the MCP wiring and an instructions payload (`SKILL.md`, recipe `prompt`, or equivalent) describing AIMX's MCP tools, storage layout, frontmatter fields, and read/unread semantics so the agent can interact with AIMX without further prompting.
 - FR-51: Plugin sources live under `agents/<agent>/` in the AIMX repo and are bundled into the binary at compile time (e.g., via `include_dir!`) so `aimx agent-setup` works offline and is version-locked to the installed binary.
 - FR-52: `aimx agent-setup --list` prints the registry of supported agents, their destination paths, and their activation commands. `--force` overwrites an existing destination without prompting; `--print` writes plugin contents to stdout instead of disk for dry-run / CI use.
 
@@ -202,7 +202,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - Email delivery pipeline (EML→Markdown with attachments)
 - Email sending with DKIM signing
 - MCP server with full email/mailbox tool set
-- Per-agent plugin/skill/recipe packages (Claude Code, Codex CLI, OpenCode, Goose, OpenClaw) plus `aimx agent-setup <agent>` installer
+- Per-agent plugin/skill/recipe packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus `aimx agent-setup <agent>` installer
 - Channel-trigger cookbook documenting email→agent invocation patterns per supported agent
 - Channel manager with `cmd` triggers and match filters
 - Inbound trust: DKIM/SPF verification, per-mailbox trust policy, trusted_senders allowlist
