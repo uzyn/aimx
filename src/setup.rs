@@ -1063,6 +1063,24 @@ pub fn is_already_configured(sys: &dyn SystemOps, _domain: &str, data_dir: &Path
     service_running && cert_exists && dkim_exists
 }
 
+/// Detects the server's IPv6 address iff `enable_ipv6 = true`.
+///
+/// IPv6 outbound is opt-in via `enable_ipv6` in `config.toml`. When disabled,
+/// the call to `net.get_server_ipv6()` is skipped entirely — AAAA + `ip6:`
+/// SPF guidance/verification are omitted to match the IPv4-only default of
+/// `aimx send`. Extracted as a standalone helper so the gating can be tested
+/// without driving the whole setup flow.
+pub(crate) fn detect_server_ipv6(
+    enable_ipv6: bool,
+    net: &dyn NetworkOps,
+) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+    if enable_ipv6 {
+        net.get_server_ipv6()
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn run_setup(
     domain: Option<&str>,
     data_dir: Option<&Path>,
@@ -1187,14 +1205,7 @@ pub fn run_setup(
 
     // Step 7: DNS guidance and verification (section [DNS])
     let server_ip = net.get_server_ip()?;
-    // IPv6 outbound is opt-in via `enable_ipv6` in config.toml. When disabled,
-    // skip IPv6 detection entirely so AAAA and `ip6:` SPF guidance/verification
-    // are omitted — matching the IPv4-only default of `aimx send`.
-    let server_ipv6 = if enable_ipv6 {
-        net.get_server_ipv6()?
-    } else {
-        None
-    };
+    let server_ipv6 = detect_server_ipv6(enable_ipv6, net)?;
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
     let local_dkim_pubkey = dkim_value
@@ -1285,6 +1296,7 @@ mod tests {
         a_records: HashMap<String, Vec<IpAddr>>,
         aaaa_records: HashMap<String, Vec<IpAddr>>,
         txt_records: HashMap<String, Vec<String>>,
+        get_server_ipv6_calls: std::cell::Cell<u32>,
     }
 
     impl Default for MockNetworkOps {
@@ -1299,6 +1311,7 @@ mod tests {
                 a_records: HashMap::new(),
                 aaaa_records: HashMap::new(),
                 txt_records: HashMap::new(),
+                get_server_ipv6_calls: std::cell::Cell::new(0),
             }
         }
     }
@@ -1317,6 +1330,8 @@ mod tests {
             Ok(self.server_ip)
         }
         fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
+            self.get_server_ipv6_calls
+                .set(self.get_server_ipv6_calls.get() + 1);
             Ok(self.server_ipv6)
         }
         fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -2209,6 +2224,47 @@ mod tests {
             result.unwrap_err().to_string().contains("cancelled"),
             "should indicate cancellation"
         );
+    }
+
+    #[test]
+    fn detect_server_ipv6_false_does_not_query_net() {
+        let net = MockNetworkOps {
+            server_ipv6: Some("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+        let result = detect_server_ipv6(false, &net).unwrap();
+        assert!(result.is_none(), "ipv6 should be None when flag disabled");
+        assert_eq!(
+            net.get_server_ipv6_calls.get(),
+            0,
+            "get_server_ipv6 must NOT be called when enable_ipv6 = false"
+        );
+    }
+
+    #[test]
+    fn detect_server_ipv6_true_queries_net() {
+        let net = MockNetworkOps {
+            server_ipv6: Some("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+        let result = detect_server_ipv6(true, &net).unwrap();
+        assert_eq!(result, Some("2001:db8::1".parse().unwrap()));
+        assert_eq!(
+            net.get_server_ipv6_calls.get(),
+            1,
+            "get_server_ipv6 must be called exactly once when enable_ipv6 = true"
+        );
+    }
+
+    #[test]
+    fn detect_server_ipv6_true_returns_none_when_net_has_none() {
+        let net = MockNetworkOps {
+            server_ipv6: None,
+            ..Default::default()
+        };
+        let result = detect_server_ipv6(true, &net).unwrap();
+        assert!(result.is_none());
+        assert_eq!(net.get_server_ipv6_calls.get(), 1);
     }
 
     #[test]

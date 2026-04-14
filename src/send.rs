@@ -19,20 +19,64 @@ pub struct LettreTransport {
     enable_ipv6: bool,
 }
 
+/// Outcome of picking a connect target for outbound SMTP.
+///
+/// Exists so the `enable_ipv6 = false` path can be tested without real DNS.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ConnectTarget {
+    /// Connect over this literal (hostname when `enable_ipv6 = true`, or an
+    /// IPv4 string when `enable_ipv6 = false` and an A record was found).
+    Target(String),
+    /// IPv4-only was requested but the MX host has no A record. Caller should
+    /// skip this MX so the flag is not silently violated.
+    SkipNoIpv4,
+}
+
+/// Pure, testable connect-target selection.
+///
+/// - `enable_ipv6 = true` → always use the hostname; OS picks the family.
+/// - `enable_ipv6 = false` + at least one A record → use the first A.
+/// - `enable_ipv6 = false` + no A records → `SkipNoIpv4` so the caller can
+///   move on to the next MX instead of silently falling through to the
+///   hostname (which may resolve to IPv6 and violate the flag).
+pub(crate) fn select_connect_target(
+    host: &str,
+    enable_ipv6: bool,
+    ipv4_addrs: &[std::net::Ipv4Addr],
+) -> ConnectTarget {
+    if enable_ipv6 {
+        return ConnectTarget::Target(host.to_string());
+    }
+    match ipv4_addrs.first() {
+        Some(addr) => ConnectTarget::Target(addr.to_string()),
+        None => ConnectTarget::SkipNoIpv4,
+    }
+}
+
 impl LettreTransport {
     pub fn new(enable_ipv6: bool) -> Self {
         Self { enable_ipv6 }
     }
 
-    fn resolve_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
-        use std::net::ToSocketAddrs;
-        format!("{host}:25")
-            .to_socket_addrs()
-            .ok()?
-            .find_map(|addr| match addr {
-                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
-                _ => None,
-            })
+    /// Resolves an MX hostname's A records only (no AAAA).
+    ///
+    /// This helper has been added, removed, and re-added across Sprints 25, 26,
+    /// and this follow-up PR. It exists specifically to honour the opt-in
+    /// `enable_ipv6` flag: when the flag is false we pin the connect target to
+    /// an IPv4 literal so `lettre`/the OS cannot silently select an AAAA
+    /// record. Do not delete without re-auditing the flag semantics.
+    fn resolve_ipv4(host: &str) -> Result<Vec<std::net::Ipv4Addr>, Box<dyn std::error::Error>> {
+        let rt = tokio::runtime::Handle::try_current();
+        match rt {
+            Ok(handle) => {
+                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_a(host)))
+            }
+            Err(_) => {
+                let rt = tokio::runtime::Runtime::new()
+                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
+                rt.block_on(crate::mx::resolve_a(host))
+            }
+        }
     }
 
     fn extract_domain(recipient: &str) -> Result<String, Box<dyn std::error::Error>> {
@@ -117,17 +161,27 @@ impl LettreTransport {
     ) -> Result<String, Box<dyn std::error::Error>> {
         use lettre::Transport;
 
+        // Note: SNI uses `host` while the connect target may be a bare IPv4
+        // literal (IPv4-only mode). This is fine here because
+        // `dangerous_accept_invalid_certs(true)` is set — cert name mismatch
+        // is accepted. If that flag is ever flipped, SNI and the TLS peer
+        // identity would need to be reconciled.
         let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
             .dangerous_accept_invalid_certs(true)
             .build_rustls()
             .map_err(|e| format!("TLS configuration error: {e}"))?;
 
-        let connect_target = if self.enable_ipv6 {
-            host.to_string()
+        let ipv4_addrs = if self.enable_ipv6 {
+            Vec::new()
         } else {
-            Self::resolve_ipv4(host)
-                .map(|ip| ip.to_string())
-                .unwrap_or_else(|| host.to_string())
+            Self::resolve_ipv4(host).unwrap_or_default()
+        };
+
+        let connect_target = match select_connect_target(host, self.enable_ipv6, &ipv4_addrs) {
+            ConnectTarget::Target(t) => t,
+            ConnectTarget::SkipNoIpv4 => {
+                return Err(format!("{host}: no A record (enable_ipv6 = false); skipping").into());
+            }
         };
 
         let transport = lettre::SmtpTransport::builder_dangerous(&connect_target)
@@ -995,6 +1049,35 @@ mod tests {
             err.contains("config") || err.contains("DKIM"),
             "Error should mention config loading: {err}"
         );
+    }
+
+    #[test]
+    fn select_connect_target_ipv6_enabled_returns_hostname() {
+        let target = select_connect_target("mx.example.com", true, &[]);
+        assert_eq!(target, ConnectTarget::Target("mx.example.com".to_string()));
+    }
+
+    #[test]
+    fn select_connect_target_ipv6_enabled_ignores_ipv4_addrs() {
+        let addrs = vec!["1.2.3.4".parse().unwrap()];
+        let target = select_connect_target("mx.example.com", true, &addrs);
+        assert_eq!(target, ConnectTarget::Target("mx.example.com".to_string()));
+    }
+
+    #[test]
+    fn select_connect_target_ipv4_mode_uses_first_a_record() {
+        let addrs: Vec<std::net::Ipv4Addr> = vec![
+            "203.0.113.10".parse().unwrap(),
+            "203.0.113.11".parse().unwrap(),
+        ];
+        let target = select_connect_target("mx.example.com", false, &addrs);
+        assert_eq!(target, ConnectTarget::Target("203.0.113.10".to_string()));
+    }
+
+    #[test]
+    fn select_connect_target_ipv4_mode_without_a_record_skips() {
+        let target = select_connect_target("aaaa-only.example.com", false, &[]);
+        assert_eq!(target, ConnectTarget::SkipNoIpv4);
     }
 
     #[test]

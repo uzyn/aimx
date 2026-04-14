@@ -111,7 +111,7 @@ If your server has a global IPv6 address and you want outbound mail to use it:
 
 See the full DNS records table in [Setup](setup.md#dns-configuration) for formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
 
-**When `enable_ipv6` is unset or `false`:** `aimx setup` and `aimx verify` ignore IPv6 entirely — no AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (but their presence is harmless).
+**When `enable_ipv6` is unset or `false`:** `aimx setup` ignores IPv6 entirely — no AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (their presence is harmless). `aimx verify` only probes port 25 connectivity and is unaffected by this flag.
 
 Leave `enable_ipv6` unset (or `false`) if any of these apply:
 - Your server does not have a global IPv6 address
