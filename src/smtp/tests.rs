@@ -822,3 +822,258 @@ async fn test_multiple_transactions_per_connection() {
 }
 
 use std::sync::Arc;
+
+// --- Attachment integration tests ---
+
+#[tokio::test]
+async fn test_text_attachment_from_real_file() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+
+    let readme_bytes =
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let readme_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &readme_bytes);
+
+    let email = format!(
+        "From: sender@example.com\r\n\
+         To: alice@test.local\r\n\
+         Subject: Text attachment test\r\n\
+         Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+         Message-ID: <text-att@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"textbound\"\r\n\
+         \r\n\
+         --textbound\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         See the attached README.\r\n\
+         --textbound\r\n\
+         Content-Type: text/markdown; name=\"README.md\"\r\n\
+         Content-Disposition: attachment; filename=\"README.md\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {readme_b64}\r\n\
+         --textbound--\r\n"
+    );
+
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+    client.send_and_read("EHLO test.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    client.send_and_read("DATA").await;
+    client.send(&email).await;
+    let resp = client.send_and_read(".").await;
+    assert!(resp.starts_with("250"), "Expected 250: {resp}");
+    client.send_and_read("QUIT").await;
+
+    let attachment_path = tmp.path().join("alice/attachments/README.md");
+    assert!(attachment_path.exists(), "Attachment file should exist");
+    let received = std::fs::read(&attachment_path).unwrap();
+    assert_eq!(
+        received, readme_bytes,
+        "Attachment content must match the original README.md byte-for-byte"
+    );
+}
+
+#[tokio::test]
+async fn test_binary_attachment_roundtrip() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+
+    // Generate deterministic pseudo-random binary blob of 500 ± rand(0..50) bytes.
+    // Use a hash-based PRNG seeded from the port so it varies per run but is reproducible.
+    let mut hasher = DefaultHasher::new();
+    port.hash(&mut hasher);
+    let seed = hasher.finish();
+    let size = 500 + ((seed % 51) as usize); // 500..=550
+    let binary_data: Vec<u8> = (0..size)
+        .map(|i| {
+            let mut h = DefaultHasher::new();
+            (seed, i).hash(&mut h);
+            h.finish() as u8
+        })
+        .collect();
+
+    let binary_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &binary_data);
+
+    let email = format!(
+        "From: sender@example.com\r\n\
+         To: alice@test.local\r\n\
+         Subject: Binary attachment test\r\n\
+         Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+         Message-ID: <bin-att@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"binbound\"\r\n\
+         \r\n\
+         --binbound\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         Binary blob attached.\r\n\
+         --binbound\r\n\
+         Content-Type: application/octet-stream; name=\"random.bin\"\r\n\
+         Content-Disposition: attachment; filename=\"random.bin\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {binary_b64}\r\n\
+         --binbound--\r\n"
+    );
+
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+    client.send_and_read("EHLO test.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    client.send_and_read("DATA").await;
+    client.send(&email).await;
+    let resp = client.send_and_read(".").await;
+    assert!(resp.starts_with("250"), "Expected 250: {resp}");
+    client.send_and_read("QUIT").await;
+
+    let attachment_path = tmp.path().join("alice/attachments/random.bin");
+    assert!(
+        attachment_path.exists(),
+        "Binary attachment file should exist"
+    );
+    let received = std::fs::read(&attachment_path).unwrap();
+    assert_eq!(
+        received.len(),
+        binary_data.len(),
+        "Binary attachment size mismatch: expected {}, got {}",
+        binary_data.len(),
+        received.len()
+    );
+    assert_eq!(
+        received, binary_data,
+        "Binary attachment must be byte-identical to the original"
+    );
+}
+
+#[tokio::test]
+async fn test_mixed_text_and_binary_attachments_with_body() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+
+    // Text attachment: the real README.md
+    let readme_bytes =
+        std::fs::read(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("README.md")).unwrap();
+    let readme_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &readme_bytes);
+
+    // Binary attachment: deterministic pseudo-random blob
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    port.hash(&mut hasher);
+    let seed = hasher.finish();
+    let size = 500 + ((seed % 51) as usize);
+    let binary_data: Vec<u8> = (0..size)
+        .map(|i| {
+            let mut h = DefaultHasher::new();
+            (seed, i).hash(&mut h);
+            h.finish() as u8
+        })
+        .collect();
+    let binary_b64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &binary_data);
+
+    let body_text = "This email has both a text and binary attachment.\r\nPlease verify everything arrives intact.";
+
+    let email = format!(
+        "From: sender@example.com\r\n\
+         To: alice@test.local\r\n\
+         Subject: Mixed attachments test\r\n\
+         Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+         Message-ID: <mixed-att@example.com>\r\n\
+         MIME-Version: 1.0\r\n\
+         Content-Type: multipart/mixed; boundary=\"mixbound\"\r\n\
+         \r\n\
+         --mixbound\r\n\
+         Content-Type: text/plain; charset=utf-8\r\n\
+         \r\n\
+         {body_text}\r\n\
+         --mixbound\r\n\
+         Content-Type: text/markdown; name=\"README.md\"\r\n\
+         Content-Disposition: attachment; filename=\"README.md\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {readme_b64}\r\n\
+         --mixbound\r\n\
+         Content-Type: application/octet-stream; name=\"data.bin\"\r\n\
+         Content-Disposition: attachment; filename=\"data.bin\"\r\n\
+         Content-Transfer-Encoding: base64\r\n\
+         \r\n\
+         {binary_b64}\r\n\
+         --mixbound--\r\n"
+    );
+
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+    client.send_and_read("EHLO test.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    client.send_and_read("DATA").await;
+    client.send(&email).await;
+    let resp = client.send_and_read(".").await;
+    assert!(resp.starts_with("250"), "Expected 250: {resp}");
+    client.send_and_read("QUIT").await;
+
+    // Verify text attachment
+    let text_att_path = tmp.path().join("alice/attachments/README.md");
+    assert!(text_att_path.exists(), "Text attachment should exist");
+    let received_text = std::fs::read(&text_att_path).unwrap();
+    assert_eq!(
+        received_text, readme_bytes,
+        "Text attachment must match the original README.md"
+    );
+
+    // Verify binary attachment
+    let bin_att_path = tmp.path().join("alice/attachments/data.bin");
+    assert!(bin_att_path.exists(), "Binary attachment should exist");
+    let received_bin = std::fs::read(&bin_att_path).unwrap();
+    assert_eq!(
+        received_bin, binary_data,
+        "Binary attachment must be byte-identical to the original"
+    );
+
+    // Verify the email body is intact
+    let alice_dir = tmp.path().join("alice");
+    let md_files: Vec<_> = std::fs::read_dir(&alice_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+        .collect();
+    assert_eq!(md_files.len(), 1, "Should have exactly one email file");
+
+    let content = std::fs::read_to_string(md_files[0].path()).unwrap();
+    assert!(
+        content.contains("subject = \"Mixed attachments test\""),
+        "Frontmatter should contain the subject"
+    );
+    assert!(
+        content.contains("This email has both a text and binary attachment."),
+        "Body text should be preserved"
+    );
+    assert!(
+        content.contains("Please verify everything arrives intact."),
+        "Full body text should be preserved"
+    );
+
+    // Verify frontmatter lists both attachments
+    assert!(
+        content.contains("README.md"),
+        "Frontmatter should reference README.md attachment"
+    );
+    assert!(
+        content.contains("data.bin"),
+        "Frontmatter should reference data.bin attachment"
+    );
+}
