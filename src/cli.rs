@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "aimx",
     about = "SMTP for agents. No middleman.",
-    long_about = "aimx - Self-hosted email for AI agents.\n\n\
+    long_about = "AIMX - Self-hosted email for AI agents.\n\n\
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
                    MCP is built in. Channel rules trigger agent actions on incoming mail.",

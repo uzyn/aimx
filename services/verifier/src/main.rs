@@ -22,7 +22,6 @@ const SMTP_LINE_TIMEOUT: Duration = Duration::from_secs(10);
 /// DoS where a peer streams megabytes into a growing `String` buffer before
 /// the per-line timeout fires.
 const SMTP_MAX_LINE_BYTES: u64 = 1024;
-const REACH_TCP_TIMEOUT: Duration = Duration::from_secs(10);
 const PROBE_EHLO_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Serialize)]
@@ -89,9 +88,9 @@ fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr> {
 /// Layer 4: reject targets that should never be probed.
 ///
 /// This blocks loopback, unspecified, link-local, RFC 1918 (IPv4 private),
-/// RFC 4193 (IPv6 ULA), and similar ranges. Used by both `/probe` and
-/// `/reach` before any outbound connection is attempted, and also by
-/// `resolve_client_ip` to reject bogus `X-AIMX-Client-IP` values.
+/// RFC 4193 (IPv6 ULA), and similar ranges. Used by `/probe` before any
+/// outbound connection is attempted, and also by `resolve_client_ip` to
+/// reject bogus `X-AIMX-Client-IP` values.
 ///
 /// IPv4-mapped IPv6 addresses are canonicalized to their IPv4 form before
 /// the checks run, so `::ffff:127.0.0.1` and similar are blocked as if the
@@ -145,9 +144,9 @@ fn is_blocked_ipv6(ip: &Ipv6Addr) -> bool {
 }
 
 /// Extension handlers insert into their response so the logging middleware
-/// can include the probe/reach `reachable` outcome in the per-request log
-/// line. Keeping the middleware as the single source of truth for request
-/// logs avoids duplicated log lines per request.
+/// can include the probe `reachable` outcome in the per-request log line.
+/// Keeping the middleware as the single source of truth for request logs
+/// avoids duplicated log lines per request.
 #[derive(Clone, Copy)]
 struct ReachableOutcome(bool);
 
@@ -156,8 +155,8 @@ struct ReachableOutcome(bool);
 /// Emits exactly one `info!` line per HTTP request, containing the method,
 /// path, resolved caller IP (or `unknown` if the Layer 3 trust check
 /// rejected the request before the handler ran), response status, elapsed
-/// ms, and — for `/probe` and `/reach` — the reachable outcome recorded by
-/// the handler via `ReachableOutcome`.
+/// ms, and — for `/probe` — the reachable outcome recorded by the handler
+/// via `ReachableOutcome`.
 async fn log_request(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     req: Request,
@@ -226,29 +225,6 @@ async fn probe(
     }))
 }
 
-async fn reach(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Result<ProbeBody, StatusCode> {
-    let caller_ip = match resolve_client_ip(&addr, &headers) {
-        Some(ip) => ip,
-        None => return Err(StatusCode::BAD_REQUEST),
-    };
-
-    if is_blocked_target(&caller_ip) {
-        return Ok(ProbeBody(ProbeResponse {
-            reachable: false,
-            ip: caller_ip.to_string(),
-        }));
-    }
-
-    let reachable = check_port25_tcp(&caller_ip).await;
-    Ok(ProbeBody(ProbeResponse {
-        reachable,
-        ip: caller_ip.to_string(),
-    }))
-}
-
 /// Newtype wrapper that converts to a `Json` response and attaches a
 /// `ReachableOutcome` extension so the logging middleware can record the
 /// probe result alongside the standard request metadata.
@@ -263,14 +239,6 @@ impl axum::response::IntoResponse for ProbeBody {
             .insert(ReachableOutcome(reachable));
         response
     }
-}
-
-async fn check_port25_tcp(ip: &IpAddr) -> bool {
-    let addr = SocketAddr::new(*ip, 25);
-    matches!(
-        tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr)).await,
-        Ok(Ok(_))
-    )
 }
 
 async fn check_port25_ehlo(ip: &IpAddr) -> bool {
@@ -447,7 +415,6 @@ fn main() {
             .route("/", get(health))
             .route("/health", get(health))
             .route("/probe", get(probe))
-            .route("/reach", get(reach))
             .layer(middleware::from_fn(log_request));
 
         let bind_addr = std::env::var("BIND_ADDR").unwrap_or_else(|_| "127.0.0.1:3025".to_string());
@@ -677,13 +644,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reach_returns_400_on_loopback_without_header() {
-        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let result = reach(ConnectInfo(addr), empty_headers()).await;
-        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
-    }
-
-    #[tokio::test]
     async fn probe_returns_400_on_loopback_with_private_header() {
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let headers = headers_with_client_ip("10.0.0.1");
@@ -691,55 +651,8 @@ mod tests {
         assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
     }
 
-    #[tokio::test]
-    async fn reach_returns_400_on_loopback_with_private_header() {
-        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let headers = headers_with_client_ip("10.0.0.1");
-        let result = reach(ConnectInfo(addr), headers).await;
-        assert_eq!(result.err(), Some(StatusCode::BAD_REQUEST));
-    }
-
     // -----------------------------------------------------------------
-    // /reach semantics: TCP-only, no SMTP handshake
-    // -----------------------------------------------------------------
-
-    #[tokio::test]
-    async fn check_port25_tcp_unreachable_host() {
-        let ip: IpAddr = "192.0.2.1".parse().unwrap();
-        let result = check_port25_tcp(&ip).await;
-        assert!(!result);
-    }
-
-    #[tokio::test]
-    async fn check_port25_tcp_listening_socket_returns_true() {
-        // Spawn a dummy TCP listener on a random port. We can't bind port 25
-        // in tests, so we test the inner logic by connecting directly to the
-        // bound address (the helper function is reused).
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        // Keep it accepting so the connect succeeds.
-        tokio::spawn(async move {
-            loop {
-                let _ = listener.accept().await;
-            }
-        });
-
-        // Verify the plain TCP connect semantics: ANY listening TCP socket
-        // satisfies reachability. No banner or EHLO required.
-        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let ok = tokio::time::timeout(REACH_TCP_TIMEOUT, TcpStream::connect(addr))
-            .await
-            .unwrap()
-            .is_ok();
-        assert!(
-            ok,
-            "plain TCP connect to listening socket should succeed regardless of SMTP"
-        );
-    }
-
-    // -----------------------------------------------------------------
-    // handle_smtp_connection — new correct semantics
+    // handle_smtp_connection
     // -----------------------------------------------------------------
 
     async fn read_line(stream: &mut TcpStream) -> String {
@@ -997,33 +910,17 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Integration: /probe and /reach handlers resolve IP via header
+    // Integration: /probe handler resolves IP via header
     // -----------------------------------------------------------------
 
     #[tokio::test]
-    async fn reach_resolves_caller_ip_from_header_on_loopback() {
+    async fn probe_resolves_caller_ip_from_header_on_loopback() {
         // Peer is loopback (simulating behind-Caddy request), header carries
-        // a reserved-but-unreachable public-range IP (TEST-NET-1). /reach
-        // should resolve the caller IP from the header — not the peer —
-        // and attempt the TCP connect to that IP, which will fail (since
+        // a reserved-but-unreachable public-range IP (TEST-NET-1). /probe
+        // should resolve the caller IP from the header -- not the peer --
+        // and attempt the EHLO handshake to that IP, which will fail (since
         // 192.0.2.1 is unroutable), yielding reachable: false with the
         // correct ip field.
-        let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
-        let headers = headers_with_client_ip("192.0.2.1");
-        let result = reach(ConnectInfo(addr), headers).await.unwrap();
-        assert_eq!(result.0.ip, "192.0.2.1");
-        assert!(!result.0.reachable);
-    }
-
-    #[tokio::test]
-    async fn probe_resolves_caller_ip_from_header_on_loopback() {
-        // Same test, but against /probe — the spec explicitly asks for header
-        // resolution on /probe in addition to /reach. TEST-NET-1 is
-        // unroutable, so the EHLO handshake fails and we get reachable: false
-        // with the correct ip field. What we're actually asserting is that
-        // the handler resolved the target from the header, not from the
-        // (loopback) peer — if it used the peer the response ip would be
-        // "127.0.0.1".
         let addr: SocketAddr = "127.0.0.1:12345".parse().unwrap();
         let headers = headers_with_client_ip("192.0.2.1");
         let result = probe(ConnectInfo(addr), headers).await.unwrap();
@@ -1263,7 +1160,6 @@ mod tests {
             .route("/", get(health))
             .route("/health", get(health))
             .route("/probe", get(probe))
-            .route("/reach", get(reach))
             .layer(middleware::from_fn(log_request));
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1337,15 +1233,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn log_request_logs_reach_with_reachable_outcome() {
-        // /reach with a public IP in the trusted header — TEST-NET-1 is
+    async fn log_request_logs_probe_with_reachable_outcome() {
+        // /probe with a public IP in the trusted header -- TEST-NET-1 is
         // unroutable so reachable will be false, but the important thing
         // is that `reachable=false` appears in the log line alongside the
         // other fields.
-        let logs = run_http_request("/reach", Some("192.0.2.1")).await;
+        let logs = run_http_request("/probe", Some("192.0.2.1")).await;
         assert!(
-            logs.contains("path=/reach"),
-            "expected /reach path in logs, got: {logs}"
+            logs.contains("path=/probe"),
+            "expected /probe path in logs, got: {logs}"
         );
         assert!(
             logs.contains("caller_ip=192.0.2.1"),

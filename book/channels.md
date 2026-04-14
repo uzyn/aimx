@@ -7,7 +7,7 @@ Channel rules trigger shell commands when emails arrive at specific mailboxes. C
 When an email is ingested:
 
 1. The email is parsed and saved as a `.md` file
-2. aimx checks the mailbox's `on_receive` rules
+2. AIMX checks the mailbox's `on_receive` rules
 3. Each rule's match filters are evaluated
 4. If the trust policy allows it, the command executes
 5. Trigger failures are logged but **never block delivery**
@@ -124,7 +124,7 @@ Emails from `trusted_senders` always trigger rules, even if DKIM verification fa
 
 ### DKIM/SPF verification
 
-During email ingest, aimx verifies:
+During email ingest, AIMX verifies:
 
 - **DKIM** -- checks the sender's DKIM signature
 - **SPF** -- validates the sending server's IP against the sender domain's SPF record

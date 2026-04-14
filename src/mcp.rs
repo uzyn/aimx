@@ -375,7 +375,7 @@ impl AimxMcpServer {
 impl ServerHandler for AimxMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("aimx email server - manage mailboxes and emails for AI agents")
+            .with_instructions("AIMX email server - manage mailboxes and emails for AI agents")
     }
 }
 

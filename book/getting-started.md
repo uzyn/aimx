@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through installing aimx and setting up your first agent email address.
+This guide walks you through installing AIMX and setting up your first agent email address.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ This guide walks you through installing aimx and setting up your first agent ema
 
 ### Compatible VPS providers
 
-aimx requires direct SMTP access on port 25. Not all cloud providers allow this.
+AIMX requires direct SMTP access on port 25. Not all cloud providers allow this.
 
 | Provider | Port 25 | Notes |
 |----------|---------|-------|
@@ -75,8 +75,8 @@ Follow the on-screen prompts to add the required DNS records at your domain regi
 After DNS records propagate, verify the setup:
 
 ```bash
-# Check port 25 connectivity
-aimx verify
+# Check port 25 connectivity (requires root)
+sudo aimx verify
 
 # Check server status and mailbox counts
 aimx status
@@ -93,7 +93,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ## Connect your AI agent
 
-Add aimx as an MCP server in your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.):
+Add AIMX as an MCP server in your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.):
 
 ```json
 {

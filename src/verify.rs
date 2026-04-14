@@ -1,11 +1,23 @@
 use crate::config::Config;
-use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status};
+use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status, SystemOps};
 use std::path::Path;
 
 pub fn run(
     data_dir: Option<&Path>,
     verify_host: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    run_verify(data_dir, verify_host, &setup::RealSystemOps)
+}
+
+pub(crate) fn run_verify(
+    data_dir: Option<&Path>,
+    verify_host: Option<&str>,
+    sys: &dyn SystemOps,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !sys.check_root() {
+        return Err("`aimx verify` requires root. Run with: sudo aimx verify".into());
+    }
+
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir).ok(),
         None => Config::load_default().ok(),
@@ -14,7 +26,7 @@ pub fn run(
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
     let net = setup::RealNetworkOps::from_verify_host(host)?;
 
-    let port25 = detect_port25();
+    let port25 = detect_port25(sys);
 
     if matches!(port25, Port25Status::Free) {
         return run_with_temp_server(&net);
@@ -127,16 +139,15 @@ pub(crate) fn resolve_verify_host(
         .unwrap_or_else(|| default.to_string())
 }
 
-fn detect_port25() -> Port25Status {
-    let sys = setup::RealSystemOps;
-    setup::SystemOps::check_port25_occupancy(&sys).unwrap_or(Port25Status::Free)
+fn detect_port25(sys: &dyn SystemOps) -> Port25Status {
+    sys.check_port25_occupancy().unwrap_or(Port25Status::Free)
 }
 
 pub fn run_with_net(
     net: &dyn NetworkOps,
     port25: &Port25Status,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("aimx verify - Port 25 connectivity check\n");
+    println!("AIMX verify - Port 25 connectivity check\n");
 
     let mut all_pass = true;
 
@@ -231,6 +242,60 @@ mod tests {
         fn resolve_txt(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(vec![])
         }
+    }
+
+    struct MockSystemOps {
+        is_root: bool,
+    }
+
+    impl SystemOps for MockSystemOps {
+        fn write_file(
+            &self,
+            _path: &Path,
+            _content: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+        fn file_exists(&self, _path: &Path) -> bool {
+            false
+        }
+        fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+        fn is_service_running(&self, _service: &str) -> bool {
+            false
+        }
+        fn generate_tls_cert(
+            &self,
+            _cert_dir: &Path,
+            _domain: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+        fn get_aimx_binary_path(&self) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+            Ok(std::path::PathBuf::from("/usr/local/bin/aimx"))
+        }
+        fn check_root(&self) -> bool {
+            self.is_root
+        }
+        fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
+            Ok(Port25Status::Free)
+        }
+        fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn verify_requires_root() {
+        let sys = MockSystemOps { is_root: false };
+        let result = run_verify(None, Some("https://check.example.com"), &sys);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("requires root"),
+            "Expected root error, got: {err}"
+        );
     }
 
     // --- aimx running tests ---

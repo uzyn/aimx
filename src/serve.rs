@@ -69,7 +69,7 @@ async fn run_serve(
         .map_err(|e| format!("Failed to bind to {bind_addr}: {e}"))?;
 
     let actual_addr = listener.local_addr()?;
-    eprintln!("aimx SMTP listener started on {actual_addr}");
+    eprintln!("AIMX SMTP listener started on {actual_addr}");
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -88,7 +88,7 @@ async fn run_serve(
 
     let in_flight_msg = server.run(listener, shutdown_rx).await;
 
-    eprintln!("aimx SMTP listener shut down");
+    eprintln!("AIMX SMTP listener shut down");
 
     in_flight_msg
 }
@@ -101,7 +101,7 @@ pub mod service {
     pub fn generate_systemd_unit(aimx_path: &str, data_dir: &str) -> String {
         format!(
             "[Unit]\n\
-             Description=aimx SMTP server\n\
+             Description=AIMX SMTP server\n\
              After=network.target\n\
              \n\
              [Service]\n\
@@ -121,7 +121,7 @@ pub mod service {
         format!(
             "#!/sbin/openrc-run\n\
              \n\
-             description=\"aimx SMTP server\"\n\
+             description=\"AIMX SMTP server\"\n\
              command={aimx_path}\n\
              command_args=\"serve --data-dir {data_dir}\"\n\
              supervisor=supervise-daemon\n\

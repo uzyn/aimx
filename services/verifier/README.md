@@ -1,10 +1,9 @@
 # aimx-verifier
 
-Verification service for [aimx](https://github.com/uzyn/aimx). Provides two complementary HTTP endpoints plus a built-in port 25 listener:
+Verification service for [AIMX](https://github.com/uzyn/aimx). Provides an HTTP endpoint plus a built-in port 25 listener:
 
-1. **`/probe`** — full SMTP EHLO handshake back to the caller's IP on port 25. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after OpenSMTPD is installed.
-2. **`/reach`** — plain TCP connect to the caller's IP on port 25 (no SMTP handshake). Used by `aimx preflight` to confirm port 25 is reachable on a fresh VPS before OpenSMTPD is installed.
-3. **Port 25 listener** — built-in TCP listener on port 25 that implements a minimal but correct SMTP exchange (banner → EHLO/HELO → 250 → QUIT → 221 Bye), allowing aimx clients to test outbound port 25 reachability from their end.
+1. **`/probe`** — full SMTP EHLO handshake back to the caller's IP on port 25. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding.
+2. **Port 25 listener** — built-in TCP listener on port 25 that implements a minimal but correct SMTP exchange (banner → EHLO/HELO → 250 → QUIT → 221 Bye), allowing `aimx` clients to test outbound port 25 reachability via EHLO handshake.
 
 No MTA is required on the verifier server.
 
@@ -41,14 +40,9 @@ Response: `{"reachable": true, "ip": "1.2.3.4"}`
 
 Returns **HTTP 400** if the service is behind a reverse proxy (TCP peer is loopback) and the `X-AIMX-Client-IP` header is missing, unparseable, or points at a loopback/private/link-local address. This indicates a Caddyfile misconfiguration — the proxy should be injecting the header.
 
-#### `GET /reach`
-Connects back to the caller's IP on port 25 with a plain TCP connect (10-second timeout). Does NOT perform any SMTP handshake. Returns `reachable: true` as long as the TCP connection succeeds — any listening socket on port 25 counts. Used by `aimx preflight` to check reachability on a fresh VPS before OpenSMTPD (or any other MTA) is installed. Same response shape and same 400 behavior as `/probe`.
-
-Response: `{"reachable": true, "ip": "1.2.3.4"}`
-
 ### Port 25 Listener
 
-The service also listens on port 25 (configurable via `SMTP_BIND_ADDR`). When an aimx client connects, it receives a `220` banner, can complete a full EHLO/HELO/QUIT exchange, and receives a `221 Bye` on disconnect. This is a minimal but correct SMTP responder — not a real mail server (no `MAIL FROM`, `RCPT TO`, `DATA`, or `AUTH` support) — used solely as a target for outbound port 25 reachability tests.
+The service also listens on port 25 (configurable via `SMTP_BIND_ADDR`). When an AIMX client connects, it receives a `220` banner, can complete a full EHLO/HELO/QUIT exchange, and receives a `221 Bye` on disconnect. This is a minimal but correct SMTP responder — not a real mail server (no `MAIL FROM`, `RCPT TO`, `DATA`, or `AUTH` support) — used solely as a target for outbound port 25 reachability tests.
 
 ## Caddy Deployment
 
@@ -86,11 +80,11 @@ To self-host (replacing `check.aimx.email`):
 2. Point your domain's DNS to the server.
 3. Install Caddy and drop in the canonical `services/verifier/Caddyfile` (set `DOMAIN` as above).
 4. Run `aimx-verifier` with its default loopback bind (`BIND_ADDR=127.0.0.1:3025`).
-5. In your aimx `config.toml`, set `verify_host` to the base URL of your instance (no path):
+5. In your AIMX `config.toml`, set `verify_host` to the base URL of your instance (no path):
    ```toml
    verify_host = "https://check.yourdomain.com"
    ```
-   aimx appends `/probe` to this base URL when making HTTP checks. (A future release will also append `/reach` for pre-install preflight.)
+   `aimx` appends `/probe` to this base URL when making HTTP checks.
 
    You can also override it per-invocation:
    ```
@@ -153,7 +147,7 @@ docker compose logs -f verifier
 docker compose logs -f caddy
 ```
 
-From a remote machine (with DNS configured), `curl https://check.yourdomain.com/probe` and `curl https://check.yourdomain.com/reach` should return JSON with the caller's real public IP — not `127.0.0.1` or a private Docker bridge address.
+From a remote machine (with DNS configured), `curl https://check.yourdomain.com/probe` should return JSON with the caller's real public IP — not `127.0.0.1` or a private Docker bridge address.
 
 ### Running without compose
 

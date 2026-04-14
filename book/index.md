@@ -1,10 +1,10 @@
-# aimx User Guide
+# AIMX User Guide
 
 > Your server can receive email. Why are you routing through Gmail?
 
 **SMTP for agents. No middleman.**
 
-aimx is a self-hosted email system for AI agents. One command gives your agents their own email addresses on a domain you control -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs an email channel.
+AIMX is a self-hosted email system for AI agents. One command gives your agents their own email addresses on a domain you control -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs an email channel.
 
 ## How it works
 
@@ -43,7 +43,7 @@ sudo cp target/release/aimx /usr/local/bin/
 sudo aimx setup agent.yourdomain.com
 
 # 3. Verify
-aimx verify
+sudo aimx verify
 ```
 
 See the full [Getting Started](getting-started.md) guide for details.
