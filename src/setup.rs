@@ -1,6 +1,6 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
-use colored::Colorize;
+use crate::term;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::net::{IpAddr, Ipv6Addr};
@@ -582,7 +582,7 @@ pub fn display_dns_guidance(
 ) {
     let records = generate_dns_records(domain, server_ip, server_ipv6, dkim_value, dkim_selector);
     let dns_records: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
-    println!("\n{}", "[DNS]".bold());
+    println!("\n{}", term::header("[DNS]"));
     println!("Add the following DNS records at your domain registrar:\n");
     println!("  TYPE NAME                                          VALUE");
     println!("  ---- --------------------------------------------- -----");
@@ -813,13 +813,13 @@ pub fn display_dns_verification(
     println!("\nDNS Verification:\n");
     for (name, result) in results {
         match result {
-            DnsVerifyResult::Pass => println!("  {name}: {}", "PASS".green()),
+            DnsVerifyResult::Pass => println!("  {name}: {}", term::pass_badge()),
             DnsVerifyResult::Fail(msg) => {
-                println!("  {name}: {} - {msg}", "FAIL".red());
+                println!("  {name}: {} - {msg}", term::fail_badge());
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
                     println!(
                         "         {} {}  {}  {}",
-                        "→ Add:".dimmed(),
+                        term::dim("→ Add:"),
                         rec.record_type,
                         rec.name,
                         rec.value
@@ -828,11 +828,11 @@ pub fn display_dns_verification(
                 all_pass = false;
             }
             DnsVerifyResult::Missing(msg) => {
-                println!("  {name}: {} - {msg}", "MISSING".red());
+                println!("  {name}: {} - {msg}", term::missing_badge());
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
                     println!(
                         "         {} {}  {}  {}",
-                        "→ Add:".dimmed(),
+                        term::dim("→ Add:"),
                         rec.record_type,
                         rec.name,
                         rec.value
@@ -841,7 +841,7 @@ pub fn display_dns_verification(
                 all_pass = false;
             }
             DnsVerifyResult::Warn(msg) => {
-                println!("  {name}: {} - {msg}", "WARN".yellow());
+                println!("  {name}: {} - {msg}", term::warn_badge());
             }
         }
     }
@@ -850,7 +850,7 @@ pub fn display_dns_verification(
 }
 
 pub fn display_mcp_section(data_dir: &Path) {
-    println!("\n{}", "[MCP]".bold());
+    println!("\n{}", term::header("[MCP]"));
     println!(
         "Add AIMX to your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.).\n"
     );
@@ -881,22 +881,25 @@ pub fn mcp_config_snippet(data_dir: &Path) -> String {
 }
 
 pub fn display_deliverability_section(domain: &str, net: &dyn NetworkOps) {
-    println!("\n{}", "[Deliverability Improvement (Optional)]".bold());
+    println!(
+        "\n{}",
+        term::header("[Deliverability Improvement (Optional)]")
+    );
 
     print!("  PTR record... ");
     io::stdout().flush().ok();
     match check_ptr(net) {
         PreflightResult::Pass(Some(ptr)) => {
-            println!("{} ({ptr})", "PASS".green());
+            println!("{} ({ptr})", term::pass_badge());
         }
         PreflightResult::Pass(None) => {
-            println!("{}", "PASS".green());
+            println!("{}", term::pass_badge());
         }
         PreflightResult::Fail(msg) => {
-            println!("{}: {msg}", "FAIL".red());
+            println!("{}: {msg}", term::fail_badge());
         }
         PreflightResult::Warn(msg) => {
-            println!("{}", "WARN".yellow());
+            println!("{}", term::warn_badge());
             println!("  {msg}");
         }
     }
@@ -995,7 +998,7 @@ pub fn finalize_setup(
 
     println!(
         "\n{}\n",
-        format!("Setup complete for {domain}!").green().bold()
+        term::success_banner(&format!("Setup complete for {domain}!"))
     );
 
     Ok(())
@@ -1126,8 +1129,9 @@ pub fn run_setup(
     if already_configured {
         println!(
             "{}",
-            "Existing AIMX configuration detected. Skipping install, proceeding to verification."
-                .green()
+            term::success(
+                "Existing AIMX configuration detected. Skipping install, proceeding to verification."
+            )
         );
     } else {
         // Step 2: Port 25 conflict detection
@@ -1157,7 +1161,7 @@ pub fn run_setup(
 
         println!("Installing AIMX service...");
         sys.install_service_file(data_dir)?;
-        println!("{}", "`aimx serve` started.".green());
+        println!("{}", term::success("`aimx serve` started."));
     }
 
     // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
@@ -1166,9 +1170,9 @@ pub fn run_setup(
     print!("  Outbound port 25... ");
     io::stdout().flush()?;
     match check_outbound(net) {
-        PreflightResult::Pass(_) => println!("{}", "PASS".green()),
+        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
         PreflightResult::Fail(msg) => {
-            println!("{}", "FAIL".red());
+            println!("{}", term::fail_badge());
             eprintln!("\n  {msg}");
             eprintln!("\n  Compatible VPS providers with port 25 open:");
             for p in COMPATIBLE_PROVIDERS {
@@ -1176,19 +1180,19 @@ pub fn run_setup(
             }
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("{}: {msg}", "WARN".yellow()),
+        PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     print!("  Inbound port 25... ");
     io::stdout().flush()?;
     match check_inbound(net) {
-        PreflightResult::Pass(_) => println!("{}", "PASS".green()),
+        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
         PreflightResult::Fail(msg) => {
-            println!("{}", "FAIL".red());
+            println!("{}", term::fail_badge());
             eprintln!("\n  {msg}");
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("{}: {msg}", "WARN".yellow()),
+        PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     if port_failed {
@@ -1233,8 +1237,8 @@ pub fn run_setup(
     loop {
         println!(
             "\nPress {} to verify DNS records, or {} to finish and verify later.",
-            "Enter".bold(),
-            "q".bold()
+            term::highlight("Enter"),
+            term::highlight("q")
         );
         io::stdout().flush()?;
         let mut input = String::new();
@@ -1242,7 +1246,7 @@ pub fn run_setup(
         if input.trim().eq_ignore_ascii_case("q") {
             println!(
                 "Update your DNS records and run `{}` again to verify.",
-                format!("sudo aimx setup {domain}").bold()
+                term::highlight(&format!("sudo aimx setup {domain}"))
             );
             break;
         }
@@ -1260,7 +1264,7 @@ pub fn run_setup(
         if all_pass {
             println!(
                 "{}",
-                "All DNS records verified. Your email server is ready!".green()
+                term::success("All DNS records verified. Your email server is ready!")
             );
             break;
         } else {

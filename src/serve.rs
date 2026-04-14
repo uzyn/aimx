@@ -2,6 +2,7 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::smtp::SmtpServer;
+use crate::term;
 
 const DEFAULT_BIND: &str = "0.0.0.0:25";
 const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
@@ -53,7 +54,8 @@ async fn run_serve(
             );
         }
         eprintln!(
-            "Warning: TLS cert/key not found at {cert_path} / {key_path}, running without STARTTLS"
+            "{} TLS cert/key not found at {cert_path} / {key_path}, running without STARTTLS",
+            term::warn("Warning:")
         );
     }
 
@@ -69,7 +71,16 @@ async fn run_serve(
         .map_err(|e| format!("Failed to bind to {bind_addr}: {e}"))?;
 
     let actual_addr = listener.local_addr()?;
-    eprintln!("AIMX SMTP listener started on {actual_addr}");
+    eprintln!("{}", term::header("AIMX SMTP listener"));
+    eprintln!("  bind:  {}", term::highlight(&actual_addr.to_string()));
+    eprintln!(
+        "  tls:   {}",
+        if tls_available {
+            term::success("enabled")
+        } else {
+            term::warn("disabled")
+        }
+    );
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
@@ -88,7 +99,7 @@ async fn run_serve(
 
     let in_flight_msg = server.run(listener, shutdown_rx).await;
 
-    eprintln!("AIMX SMTP listener shut down");
+    eprintln!("{}", term::info("AIMX SMTP listener shut down"));
 
     in_flight_msg
 }

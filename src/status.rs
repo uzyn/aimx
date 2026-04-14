@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::ingest::EmailMetadata;
+use crate::term;
 use std::path::Path;
 
 pub struct StatusInfo {
@@ -170,30 +171,34 @@ fn extract_frontmatter(content: &str) -> Option<String> {
 pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
+    out.push_str(&format!("{}\n", term::header("Configuration")));
     out.push_str(&format!("Domain:           {}\n", info.domain));
     out.push_str(&format!("Data directory:   {}\n", info.data_dir));
     out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
     out.push_str(&format!(
         "DKIM key:         {}\n",
         if info.dkim_key_present {
-            "present"
+            term::success("present")
         } else {
-            "MISSING - run `aimx dkim-keygen`"
+            term::warn("MISSING - run `aimx dkim-keygen`")
         }
     ));
+
+    out.push_str(&format!("\n{}\n", term::header("Service")));
     out.push_str(&format!(
         "SMTP server:      {}\n",
         if info.smtp_running {
-            "running"
+            term::success("running")
         } else {
-            "not running"
+            term::warn("not running")
         }
     ));
 
     let total_msgs: usize = info.mailboxes.iter().map(|m| m.total).sum();
     let total_unread: usize = info.mailboxes.iter().map(|m| m.unread).sum();
+    out.push_str(&format!("\n{}\n", term::header("Mailboxes")));
     out.push_str(&format!(
-        "Mailboxes:        {} ({} messages, {} unread)\n",
+        "Total:            {} ({} messages, {} unread)\n",
         info.mailboxes.len(),
         total_msgs,
         total_unread,
@@ -208,13 +213,16 @@ pub fn format_status(info: &StatusInfo) -> String {
         for mb in &info.mailboxes {
             out.push_str(&format!(
                 "  {:<20} {:<30} {:>8} {:>8}\n",
-                mb.name, mb.address, mb.total, mb.unread,
+                term::highlight(&mb.name),
+                mb.address,
+                mb.total,
+                mb.unread,
             ));
         }
     }
 
     if !info.recent_activity.is_empty() {
-        out.push_str("\nRecent activity:\n");
+        out.push_str(&format!("\n{}\n", term::header("Recent activity:")));
         for email in &info.recent_activity {
             out.push_str(&format!(
                 "  [{}] {} {} - {} ({})\n",

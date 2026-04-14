@@ -1,5 +1,6 @@
 use crate::cli::MailboxCommand;
 use crate::config::{Config, MailboxConfig};
+use crate::term;
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -110,7 +111,7 @@ fn count_messages(dir: &Path) -> usize {
 
 fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     create_mailbox(config, name)?;
-    println!("Mailbox '{name}' created.");
+    println!("{}", term::success(&format!("Mailbox '{name}' created.")));
     Ok(())
 }
 
@@ -122,9 +123,9 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
-    println!("{:<20} MESSAGES", "MAILBOX");
+    println!("{:<20} MESSAGES", term::header("MAILBOX"));
     for (name, count) in mailboxes {
-        println!("{:<20} {}", name, count);
+        println!("{:<20} {}", term::highlight(&name), count);
     }
 
     Ok(())
@@ -143,7 +144,7 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     }
 
     delete_mailbox(config, name)?;
-    println!("Mailbox '{name}' deleted.");
+    println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
     Ok(())
 }
 
