@@ -1093,12 +1093,13 @@ pub fn run_setup(
     std::fs::create_dir_all(data_dir)?;
 
     let config_path = Config::config_path(data_dir);
-    let dkim_selector = if config_path.exists() {
-        Config::load(&config_path)
-            .map(|c| c.dkim_selector)
-            .unwrap_or_else(|_| "dkim".to_string())
+    let (dkim_selector, enable_ipv6) = if config_path.exists() {
+        match Config::load(&config_path) {
+            Ok(c) => (c.dkim_selector, c.enable_ipv6),
+            Err(_) => ("dkim".to_string(), false),
+        }
     } else {
-        "dkim".to_string()
+        ("dkim".to_string(), false)
     };
 
     // Re-entrant detection: if already configured, skip install/configure steps
@@ -1186,7 +1187,14 @@ pub fn run_setup(
 
     // Step 7: DNS guidance and verification (section [DNS])
     let server_ip = net.get_server_ip()?;
-    let server_ipv6 = net.get_server_ipv6()?;
+    // IPv6 outbound is opt-in via `enable_ipv6` in config.toml. When disabled,
+    // skip IPv6 detection entirely so AAAA and `ip6:` SPF guidance/verification
+    // are omitted — matching the IPv4-only default of `aimx send`.
+    let server_ipv6 = if enable_ipv6 {
+        net.get_server_ipv6()?
+    } else {
+        None
+    };
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
     let local_dkim_pubkey = dkim_value

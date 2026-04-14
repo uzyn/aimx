@@ -80,30 +80,38 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
 
 By default, `aimx send` delivers outbound email over IPv4 only. This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
 
-If your server has a global IPv6 address and you want outbound mail to use it, set:
+If your server has a global IPv6 address and you want outbound mail to use it:
 
-```toml
-enable_ipv6 = true
-```
+1. Set the flag in `/var/lib/aimx/config.toml`:
 
-Then restart the SMTP daemon so any in-flight config is reloaded:
+   ```toml
+   enable_ipv6 = true
+   ```
 
-```bash
-sudo systemctl restart aimx
-```
+2. Re-run `aimx setup` so the wizard detects the flag, displays the required AAAA + `ip6:` SPF records, and verifies them for you:
 
-**Additional DNS required when enabled.** Before IPv6 outbound will pass SPF at receivers like Gmail, you must also:
+   ```bash
+   sudo aimx setup agent.yourdomain.com
+   ```
 
-1. Add an `AAAA` record pointing at your server's IPv6 address.
-2. Update your SPF `TXT` record to include `ip6:<your-ipv6>` alongside `ip4:<your-ipv4>`.
+   `aimx setup` is re-entrant — it skips install steps on an existing configuration and jumps straight to DNS guidance + verification. When `enable_ipv6 = true`, it shows the extra AAAA row in the DNS table and includes the `ip6:` mechanism in the generated SPF record, then verifies both.
 
-Example SPF for a dual-stack server:
+3. Restart the SMTP daemon so the updated config is in effect:
 
-```
-v=spf1 ip4:203.0.113.10 ip6:2001:db8::1 -all
-```
+   ```bash
+   sudo systemctl restart aimx
+   ```
 
-See the DNS records table in [Setup](setup.md#dns-configuration) for the exact record formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
+**Required DNS when enabled.** Before IPv6 outbound will pass SPF at receivers like Gmail, you need:
+
+| Type | Name | Value |
+|------|------|-------|
+| AAAA | `agent.yourdomain.com` | your server's IPv6 address |
+| TXT (SPF) | `agent.yourdomain.com` | `v=spf1 ip4:<your-ipv4> ip6:<your-ipv6> -all` |
+
+See the full DNS records table in [Setup](setup.md#dns-configuration) for formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
+
+**When `enable_ipv6` is unset or `false`:** `aimx setup` and `aimx verify` ignore IPv6 entirely — no AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (but their presence is harmless).
 
 Leave `enable_ipv6` unset (or `false`) if any of these apply:
 - Your server does not have a global IPv6 address
