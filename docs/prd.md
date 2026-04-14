@@ -1,8 +1,8 @@
-# aimx — Product Requirements Document
+# AIMX — Product Requirements Document
 
 ## 1. Overview
 
-aimx is a self-hosted email system for AI agents. It gives agents their own email addresses on a domain the user controls, with mail stored as Markdown files, MCP integration for agent access, and channel rules to trigger actions on incoming mail. One binary, one setup command, no third parties.
+AIMX is a self-hosted email system for AI agents. It gives agents their own email addresses on a domain the user controls, with mail stored as Markdown files, MCP integration for agent access, and channel rules to trigger actions on incoming mail. One binary, one setup command, no third parties.
 
 **Tagline:** SMTP for agents. No middleman.
 
@@ -27,7 +27,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | Zero-to-working-email in one session | Time from `aimx setup` to verified send/receive | < 15 minutes (excluding DNS propagation) |
 | Agent-native email access | MCP tool coverage | All core email operations (list, read, send, reply) available via MCP |
 | Reliable delivery | DKIM/SPF/DMARC pass rate on outbound mail | 100% for correctly configured domains |
-| Minimal operational burden | Long-running processes managed by aimx | 1 (`aimx serve` — the only daemon, managed via systemd/OpenRC) |
+| Minimal operational burden | Long-running processes managed by AIMX | 1 (`aimx serve` — the only daemon, managed via systemd/OpenRC) |
 | Developer adoption | GitHub stars / installs | Establish initial user base; exact target TBD |
 
 ## 4. User Personas
@@ -40,7 +40,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### Agent Framework Developer (secondary)
 - **Description:** Developer building tools/frameworks for AI agents who wants to integrate email as a channel.
 - **Needs:** Standard MCP interface for email. Predictable file-based storage that's easy to read programmatically. Minimal operational overhead.
-- **Context:** Integrating aimx into a larger agent system. Cares about the MCP API surface and file format stability.
+- **Context:** Integrating AIMX into a larger agent system. Cares about the MCP API surface and file format stability.
 
 ## 5. User Stories
 
@@ -138,9 +138,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ## 7. Non-Functional Requirements
 
-- **NFR-1: Single binary, no runtime dependencies.** The entire aimx tool compiles to one binary. No external packages, no system users, no package manager interaction. The binary is fully self-contained.
+- **NFR-1: Single binary, no runtime dependencies.** The entire AIMX tool compiles to one binary. No external packages, no system users, no package manager interaction. The binary is fully self-contained.
 - **NFR-2: `aimx serve` is the daemon.** `aimx serve` runs as a long-lived SMTP listener process, managed by systemd or OpenRC. All other commands (`ingest`, `send`, `mcp`, `setup`, etc.) remain short-lived.
-- **NFR-3: Permissive licensing.** All aimx code and dependencies must use MIT, Apache-2.0, ISC, or BSD licenses. No GPL/AGPL.
+- **NFR-3: Permissive licensing.** All AIMX code and dependencies must use MIT, Apache-2.0, ISC, or BSD licenses. No GPL/AGPL.
 - **NFR-4: Cross-platform Unix.** Any Unix where Rust compiles and port 25 is available. CI tests Ubuntu, Alpine Linux (musl), and Fedora.
 - **NFR-5: Minimal resource usage.** aimx ingest must complete in < 1 second for typical emails (< 10MB).
 - **NFR-6: Secure defaults.** Self-signed TLS cert for STARTTLS (generated during setup, no Let's Encrypt needed), DKIM signing on all outbound, DMARC reject policy, SPF strict.

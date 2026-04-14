@@ -1,4 +1,4 @@
-# aimx
+# AIMX
 
 > You give your agents an entire server. Why borrow someone else's inbox?
 
@@ -302,11 +302,11 @@ Hello, this is the email body in plain text.
 The verifier service (`services/verifier/`) is a separate deployable service that provides:
 
 1. **Port probe** at `check.aimx.email` -- performs EHLO handshake back to caller's IP on port 25 to verify inbound SMTP reachability
-2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so aimx clients can test outbound port 25 reachability
+2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so AIMX clients can test outbound port 25 reachability
 
 No MTA is required on the verifier server. The service is open source and self-hostable. See `services/verifier/README.md` for deployment instructions.
 
-To point aimx at a self-hosted instance, set `verify_host` in `config.toml`:
+To point AIMX at a self-hosted instance, set `verify_host` in `config.toml`:
 
 ```toml
 verify_host = "https://verify.yourdomain.com"

@@ -1,9 +1,9 @@
-# aimx Manual Setup & Verification Guide
+# AIMX Manual Setup & Verification Guide
 
-This guide walks through every step needed to launch aimx, from deploying the verification infrastructure to running a production mail server. It is split into two parts:
+This guide walks through every step needed to launch AIMX, from deploying the verification infrastructure to running a production mail server. It is split into two parts:
 
 - **Part A** — Deploy the verifier service (done once, before anything else)
-- **Part B** — Set up an aimx mail server (done per server)
+- **Part B** — Set up an AIMX mail server (done per server)
 
 The verifier service must be running before any mail server can complete setup, because `aimx setup` and `aimx verify` both call its HTTP `/probe` endpoint (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25 via EHLO handshake). Both commands use `/probe` (full SMTP EHLO handshake).
 
@@ -125,7 +125,7 @@ The SMTP listener runs inside the `aimx-verifier` binary — no OpenSMTPD, TLS c
 sudo ufw allow 25/tcp
 ```
 
-If your provider blocks port 25 on the verifier host, the listener will bind successfully but remote aimx clients will not be able to reach it, and their outbound-port-25 check will fail even though their own provider is fine.
+If your provider blocks port 25 on the verifier host, the listener will bind successfully but remote AIMX clients will not be able to reach it, and their outbound-port-25 check will fail even though their own provider is fine.
 
 ### A5: Test the Verifier Service
 
@@ -160,9 +160,9 @@ curl https://check.aimx.email/probe
 # Expected: {"reachable":true,"ip":"<your-server-ip>"}
 ```
 
-### A6: Point aimx Mail Servers at Your Verifier Instance
+### A6: Point AIMX Mail Servers at Your Verifier Instance
 
-The default verify host is `https://check.aimx.email`. If you deployed your own instance in the steps above, tell aimx to use it either via `config.toml`:
+The default verify host is `https://check.aimx.email`. If you deployed your own instance in the steps above, tell AIMX to use it either via `config.toml`:
 
 ```toml
 verify_host = "https://check.yourdomain.com"
@@ -175,13 +175,13 @@ sudo aimx verify --verify-host https://check.yourdomain.com
 sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
 ```
 
-Precedence is **CLI flag > `verify_host` in `config.toml` > default** (`https://check.aimx.email`). The value must be a base URL starting with `http://` or `https://`; aimx appends `/probe` internally when calling the probe endpoint, and derives the outbound port 25 target (`host:25`) from the same URL. A trailing slash is accepted and stripped.
+Precedence is **CLI flag > `verify_host` in `config.toml` > default** (`https://check.aimx.email`). The value must be a base URL starting with `http://` or `https://`; AIMX appends `/probe` internally when calling the probe endpoint, and derives the outbound port 25 target (`host:25`) from the same URL. A trailing slash is accepted and stripped.
 
-Because aimx derives the outbound port-25 target from the same `verify_host` URL, the verifier service's HTTP probe and its TCP port-25 listener **must run on the same host** (or at least the same hostname in DNS). Self-hosting on a provider that blocks port 25 on the verifier host will leave aimx clients unable to exercise the outbound check.
+Because AIMX derives the outbound port-25 target from the same `verify_host` URL, the verifier service's HTTP probe and its TCP port-25 listener **must run on the same host** (or at least the same hostname in DNS). Self-hosting on a provider that blocks port 25 on the verifier host will leave AIMX clients unable to exercise the outbound check.
 
 ---
 
-## Part B: Set Up aimx on a Mail Server
+## Part B: Set Up AIMX on a Mail Server
 
 ### B1: Prerequisites
 
@@ -214,7 +214,7 @@ source $HOME/.cargo/env
 sudo apt-get update && sudo apt-get install -y dnsutils openssl curl
 ```
 
-### B2: Build & Install aimx
+### B2: Build & Install AIMX
 
 ```bash
 git clone https://github.com/uzyn/aimx.git
@@ -453,7 +453,7 @@ Available MCP tools: `mailbox_list`, `mailbox_create`, `mailbox_delete`, `email_
 
 **Firewall:**
 
-Only port 25 needs to be open for SMTP. No other ports are required by aimx.
+Only port 25 needs to be open for SMTP. No other ports are required by AIMX.
 
 **File permissions:**
 

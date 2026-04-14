@@ -1,6 +1,6 @@
 # Setup
 
-This guide covers every step of setting up aimx in detail -- from prerequisites through production hardening.
+This guide covers every step of setting up AIMX in detail -- from prerequisites through production hardening.
 
 For a shorter walkthrough, see [Getting Started](getting-started.md).
 
@@ -97,7 +97,7 @@ If you've already completed setup and want to re-verify, simply run `aimx setup`
 sudo aimx setup agent.yourdomain.com
 ```
 
-When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
+When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
 
 ### DNS retry loop
 
@@ -224,7 +224,7 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 
 ### Firewall
 
-Only port 25 needs to be open for SMTP. No other ports are required by aimx.
+Only port 25 needs to be open for SMTP. No other ports are required by AIMX.
 
 ### File permissions
 
@@ -241,7 +241,7 @@ Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailb
 
 ## Verifier service
 
-The verifier service is used during setup to test port 25 reachability. aimx uses a public instance at `check.aimx.email` by default.
+The verifier service is used during setup to test port 25 reachability. AIMX uses a public instance at `check.aimx.email` by default.
 
 ### Self-hosting the verifier service
 
@@ -274,7 +274,7 @@ If you prefer not to use the public instance:
 
 3. Set up a reverse proxy (e.g. Caddy) for HTTPS on the probe endpoint.
 
-4. Point aimx to your instance in `config.toml`:
+4. Point AIMX to your instance in `config.toml`:
    ```toml
    verify_host = "https://verify.yourdomain.com"
    ```

@@ -32,7 +32,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Channel triggers not firing | Trust policy blocking | Check `trust` setting and DKIM result (see [trust policies](channels.md#trust-policies)) |
 | DKIM verification failing | DNS record mismatch or key regenerated | Ensure DKIM DNS record matches current public key |
 
-## aimx serve diagnostics
+## `aimx serve` diagnostics
 
 ```bash
 # Check if aimx serve is running

@@ -1,6 +1,6 @@
 # Configuration
 
-aimx uses a single TOML configuration file for all settings.
+AIMX uses a single TOML configuration file for all settings.
 
 ## Config file location
 

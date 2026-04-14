@@ -42,7 +42,7 @@ Returns **HTTP 400** if the service is behind a reverse proxy (TCP peer is loopb
 
 ### Port 25 Listener
 
-The service also listens on port 25 (configurable via `SMTP_BIND_ADDR`). When an aimx client connects, it receives a `220` banner, can complete a full EHLO/HELO/QUIT exchange, and receives a `221 Bye` on disconnect. This is a minimal but correct SMTP responder — not a real mail server (no `MAIL FROM`, `RCPT TO`, `DATA`, or `AUTH` support) — used solely as a target for outbound port 25 reachability tests.
+The service also listens on port 25 (configurable via `SMTP_BIND_ADDR`). When an AIMX client connects, it receives a `220` banner, can complete a full EHLO/HELO/QUIT exchange, and receives a `221 Bye` on disconnect. This is a minimal but correct SMTP responder — not a real mail server (no `MAIL FROM`, `RCPT TO`, `DATA`, or `AUTH` support) — used solely as a target for outbound port 25 reachability tests.
 
 ## Caddy Deployment
 
@@ -80,7 +80,7 @@ To self-host (replacing `check.aimx.email`):
 2. Point your domain's DNS to the server.
 3. Install Caddy and drop in the canonical `services/verifier/Caddyfile` (set `DOMAIN` as above).
 4. Run `aimx-verifier` with its default loopback bind (`BIND_ADDR=127.0.0.1:3025`).
-5. In your aimx `config.toml`, set `verify_host` to the base URL of your instance (no path):
+5. In your AIMX `config.toml`, set `verify_host` to the base URL of your instance (no path):
    ```toml
    verify_host = "https://check.yourdomain.com"
    ```

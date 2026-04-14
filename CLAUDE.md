@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What is aimx
 
-Self-hosted email for AI agents. One binary, one setup command. Built-in SMTP server handles inbound; direct SMTP delivery for outbound. aimx handles everything: ingest to Markdown, DKIM signing, MCP server, channel triggers. `aimx serve` is the SMTP daemon; all other commands are short-lived processes.
+Self-hosted email for AI agents. One binary, one setup command. Built-in SMTP server handles inbound; direct SMTP delivery for outbound. AIMX handles everything: ingest to Markdown, DKIM signing, MCP server, channel triggers. `aimx serve` is the SMTP daemon; all other commands are short-lived processes.
 
 ## Build and test commands
 

@@ -1,4 +1,4 @@
-# aimx — Sprint Plan
+# AIMX — Sprint Plan
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
