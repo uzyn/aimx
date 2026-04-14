@@ -631,9 +631,15 @@ async fn test_ingest_creates_markdown_file() {
 #[tokio::test]
 async fn test_ingest_failure_returns_451() {
     let tmp = tempfile::TempDir::new().unwrap();
+    // Create a file, then use it as a directory component so create_dir_all
+    // fails even when running as root (file is not a directory)
+    let blocker = tmp.path().join("blocker");
+    std::fs::write(&blocker, "x").unwrap();
+    let bad_data_dir = blocker.join("data");
+
     let config = Config {
         domain: "test.local".to_string(),
-        data_dir: PathBuf::from("/nonexistent/path/that/does/not/exist"),
+        data_dir: bad_data_dir,
         dkim_selector: "dkim".to_string(),
         mailboxes: HashMap::new(),
         verify_host: None,
@@ -652,8 +658,6 @@ async fn test_ingest_failure_returns_451() {
         resp.starts_with("451"),
         "Expected 451 on ingest failure: {resp}"
     );
-
-    drop(tmp);
 }
 
 // --- S19.4: Connection hardening tests ---

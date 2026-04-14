@@ -2051,12 +2051,19 @@ mod tests {
 
     #[test]
     fn setup_with_domain_arg_skips_prompt() {
+        let tmp = TempDir::new().unwrap();
         let sys = MockSystemOps::default();
-        let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), None, &sys, &net);
-        // It will fail somewhere after domain validation (e.g. creating data dir
-        // or port checks), but should NOT fail on prompt
-        assert!(result.is_err() || result.is_ok());
+        let net = MockNetworkOps {
+            inbound_port25: false,
+            ..Default::default()
+        };
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        // Should progress past domain prompt and fail on port 25 check
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Port 25"),
+            "Expected port 25 failure, not a prompt error"
+        );
     }
 
     // S18.3 — Colorized output tests
