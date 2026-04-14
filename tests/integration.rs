@@ -973,6 +973,12 @@ fn setup_help_shows_domain_arg() {
 
 #[test]
 fn setup_without_domain_proceeds_to_root_check() {
+    // This test verifies non-root behavior; skip when running as root
+    // (e.g. Alpine/Fedora CI containers) since setup proceeds past root check
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("Skipping: running as root");
+        return;
+    }
     Command::cargo_bin("aimx")
         .unwrap()
         .arg("setup")
