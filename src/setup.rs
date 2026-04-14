@@ -756,7 +756,7 @@ pub fn display_dns_verification(
 pub fn display_mcp_section(data_dir: &Path) {
     println!("\n{}", "[MCP]".bold());
     println!(
-        "Add aimx to your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.).\n"
+        "Add AIMX to your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.).\n"
     );
     println!("Configuration snippet:\n");
     println!("{}\n", mcp_config_snippet(data_dir));
@@ -1039,7 +1039,7 @@ pub fn run_setup(
             println!("TLS certificate already exists.");
         }
 
-        println!("Installing aimx service...");
+        println!("Installing AIMX service...");
         sys.install_service_file(data_dir)?;
         println!("{}", "`aimx serve` started.".green());
     }
