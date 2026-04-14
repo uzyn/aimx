@@ -3,7 +3,7 @@ use crate::dkim;
 use colored::Colorize;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq)]
@@ -207,6 +207,18 @@ pub const DEFAULT_VERIFY_HOST: &str = "https://check.aimx.email";
 
 pub const DEFAULT_CHECK_SERVICE_SMTP_ADDR: &str = "check.aimx.email:25";
 
+fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    // Not link-local (fe80::/10)
+    (segments[0] & 0xffc0) != 0xfe80
+    // Not ULA (fc00::/7)
+    && (segments[0] & 0xfe00) != 0xfc00
+    // Not loopback
+    && !ip.is_loopback()
+    // Not unspecified
+    && !ip.is_unspecified()
+}
+
 #[derive(Debug)]
 pub struct RealNetworkOps {
     pub verify_host: String,
@@ -357,21 +369,24 @@ impl NetworkOps for RealNetworkOps {
     fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("hostname").arg("-I").output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let ip_str = stdout
-            .split_whitespace()
-            .next()
-            .ok_or("Could not determine server IP")?;
-        Ok(ip_str.parse()?)
+        for token in stdout.split_whitespace() {
+            if let Ok(ip) = token.parse::<IpAddr>()
+                && ip.is_ipv4()
+            {
+                return Ok(ip);
+            }
+        }
+        Err("Could not determine server IPv4 address".into())
     }
 
     fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("hostname").arg("-I").output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         for token in stdout.split_whitespace() {
-            if let Ok(ip) = token.parse::<IpAddr>()
-                && ip.is_ipv6()
+            if let Ok(IpAddr::V6(ipv6)) = token.parse::<IpAddr>()
+                && is_global_ipv6(&ipv6)
             {
-                return Ok(Some(ip));
+                return Ok(Some(IpAddr::V6(ipv6)));
             }
         }
         Ok(None)
@@ -2478,5 +2493,39 @@ mod tests {
         let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
         assert!(!results.iter().any(|(name, _)| name == "AAAA"));
         assert!(!results.iter().any(|(name, _)| name == "SPF (IPv6)"));
+    }
+
+    // is_global_ipv6 tests
+
+    #[test]
+    fn global_ipv6_accepts_global_unicast() {
+        let ip: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        assert!(is_global_ipv6(&ip));
+    }
+
+    #[test]
+    fn global_ipv6_rejects_link_local() {
+        let ip: Ipv6Addr = "fe80::1".parse().unwrap();
+        assert!(!is_global_ipv6(&ip));
+    }
+
+    #[test]
+    fn global_ipv6_rejects_ula() {
+        let fc: Ipv6Addr = "fc00::1".parse().unwrap();
+        let fd: Ipv6Addr = "fd00::1".parse().unwrap();
+        assert!(!is_global_ipv6(&fc));
+        assert!(!is_global_ipv6(&fd));
+    }
+
+    #[test]
+    fn global_ipv6_rejects_loopback() {
+        let ip: Ipv6Addr = "::1".parse().unwrap();
+        assert!(!is_global_ipv6(&ip));
+    }
+
+    #[test]
+    fn global_ipv6_rejects_unspecified() {
+        let ip: Ipv6Addr = "::".parse().unwrap();
+        assert!(!is_global_ipv6(&ip));
     }
 }
