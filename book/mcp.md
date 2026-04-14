@@ -1,6 +1,6 @@
 # MCP Server
 
-aimx includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
+AIMX includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
 
 ## Overview
 
@@ -18,7 +18,7 @@ The server runs in stdio mode -- it reads from stdin and writes to stdout. It is
 
 ## Agent integration
 
-Add aimx to any MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.). The configuration snippet is the same for all agents that support MCP stdio transport:
+Add AIMX to any MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.). The configuration snippet is the same for all agents that support MCP stdio transport:
 
 ```json
 {
@@ -50,7 +50,7 @@ If you use a non-default data directory, pass it via `--data-dir`:
 
 ## MCP tools
 
-aimx exposes 9 MCP tools organized into mailbox management and email operations.
+AIMX exposes 9 MCP tools organized into mailbox management and email operations.
 
 ### Mailbox tools
 

@@ -1,6 +1,6 @@
 # Setup
 
-This guide covers every step of setting up aimx in detail -- from prerequisites through production hardening.
+This guide covers every step of setting up AIMX in detail -- from prerequisites through production hardening.
 
 For a shorter walkthrough, see [Getting Started](getting-started.md).
 
@@ -46,16 +46,15 @@ aimx --version
 Before running setup, you can verify port 25 connectivity:
 
 ```bash
-aimx verify
+sudo aimx verify
 ```
 
-When `aimx serve` is running, `aimx verify` performs an outbound port 25 check plus an inbound EHLO handshake probe (no root needed). When nothing is on port 25 (fresh VPS), it tests TCP reachability via a temporary listener (requires root). If port 25 is occupied by another process, verify tells you to stop it before setup.
+`aimx verify` requires root. When `aimx serve` is running, it performs an outbound EHLO handshake plus an inbound EHLO handshake probe. When nothing is on port 25 (fresh VPS), it spawns a temporary listener and runs checks. If port 25 is occupied by another process, verify tells you to stop it before setup.
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
-| Outbound port 25 | Connects to `check.aimx.email` on port 25 to test outbound SMTP | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls the verify service to connect back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
-| SMTP handshake | Verifies `aimx serve` responds to EHLO (post-setup only) | Check `aimx serve` status and logs |
+| Outbound port 25 | Performs EHLO handshake to `check.aimx.email` on port 25 | Ask VPS provider to unblock outbound SMTP |
+| Inbound port 25 | Calls the verify service to perform EHLO handshake back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
 
 All checks should show PASS before proceeding with setup.
 
@@ -98,7 +97,7 @@ If you've already completed setup and want to re-verify, simply run `aimx setup`
 sudo aimx setup agent.yourdomain.com
 ```
 
-When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
+When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
 
 ### DNS retry loop
 
@@ -163,10 +162,10 @@ dig +short -x YOUR_SERVER_IP
 Run the automated verification:
 
 ```bash
-aimx verify
+sudo aimx verify
 ```
 
-This tests outbound port 25 connectivity and inbound SMTP reachability. When `aimx serve` is running, it also performs an EHLO handshake check. On a fresh VPS without `aimx serve`, it uses a plain TCP reach check instead (requires root).
+This tests outbound port 25 connectivity (via EHLO handshake) and inbound SMTP reachability (via EHLO probe). Requires root.
 
 Check server status at any time:
 
@@ -225,7 +224,7 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 
 ### Firewall
 
-Only port 25 needs to be open for SMTP. No other ports are required by aimx.
+Only port 25 needs to be open for SMTP. No other ports are required by AIMX.
 
 ### File permissions
 
@@ -242,7 +241,7 @@ Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailb
 
 ## Verifier service
 
-The verifier service is used during setup to test port 25 reachability. aimx uses a public instance at `check.aimx.email` by default.
+The verifier service is used during setup to test port 25 reachability. AIMX uses a public instance at `check.aimx.email` by default.
 
 ### Self-hosting the verifier service
 
@@ -275,20 +274,19 @@ If you prefer not to use the public instance:
 
 3. Set up a reverse proxy (e.g. Caddy) for HTTPS on the probe endpoint.
 
-4. Point aimx to your instance in `config.toml`:
+4. Point AIMX to your instance in `config.toml`:
    ```toml
    verify_host = "https://verify.yourdomain.com"
    ```
 
    Or override it per-invocation with `--verify-host`:
    ```
-   aimx verify --verify-host https://verify.yourdomain.com
+   sudo aimx verify --verify-host https://verify.yourdomain.com
    ```
 
 The verifier service provides:
 - `GET /health` -- health check
 - `GET /probe` -- connects back to caller's IP on port 25, performs EHLO handshake
-- `GET /reach` -- plain TCP connectivity check on port 25
 - Port 25 listener -- accepts TCP connections for outbound port 25 testing
 
 See the [verifier service README](../services/verifier/README.md) for full details.

@@ -1,4 +1,4 @@
-# aimx
+# AIMX
 
 > You give your agents an entire server. Why borrow someone else's inbox?
 
@@ -67,7 +67,7 @@ sudo aimx setup agent.yourdomain.com
 
 # 3. Follow the interactive prompts to add DNS records
 # 4. Verify the setup
-aimx verify
+sudo aimx verify
 
 # 5. Check status
 aimx status
@@ -93,8 +93,8 @@ sudo aimx setup agent.yourdomain.com
 # Check server status
 aimx status
 
-# Check port 25 connectivity
-aimx verify
+# Check port 25 connectivity (requires root)
+sudo aimx verify
 ```
 
 ### Mailbox management
@@ -195,7 +195,7 @@ data_dir = "/var/lib/aimx"
 dkim_selector = "dkim"
 
 # Verifier service base URL (default: https://check.aimx.email)
-# Used by `aimx verify`, `aimx setup`, and `aimx preflight`. Set this only if
+# Used by `aimx verify` and `aimx setup`. Set this only if
 # you are self-hosting the verifier service (see `services/verifier/`). aimx appends
 # `/probe` to this base URL internally.
 # verify_host = "https://verify.yourdomain.com"
@@ -302,20 +302,20 @@ Hello, this is the email body in plain text.
 The verifier service (`services/verifier/`) is a separate deployable service that provides:
 
 1. **Port probe** at `check.aimx.email` -- performs EHLO handshake back to caller's IP on port 25 to verify inbound SMTP reachability
-2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so aimx clients can test outbound port 25 reachability
+2. **Port 25 listener** at `check.aimx.email:25` -- accepts TCP connections so AIMX clients can test outbound port 25 reachability
 
 No MTA is required on the verifier server. The service is open source and self-hostable. See `services/verifier/README.md` for deployment instructions.
 
-To point aimx at a self-hosted instance, set `verify_host` in `config.toml`:
+To point AIMX at a self-hosted instance, set `verify_host` in `config.toml`:
 
 ```toml
 verify_host = "https://verify.yourdomain.com"
 ```
 
-Or override it per-invocation with the `--verify-host` flag, which is accepted by `aimx verify`, `aimx setup`, and `aimx preflight`:
+Or override it per-invocation with the `--verify-host` flag, which is accepted by `aimx verify` and `aimx setup`:
 
 ```bash
-aimx verify --verify-host https://verify.yourdomain.com
+sudo aimx verify --verify-host https://verify.yourdomain.com
 ```
 
 Precedence is **CLI flag > config > default** (`https://check.aimx.email`).

@@ -388,7 +388,7 @@ Written in Rust. Single binary. Minimal dependencies.
 | Component | Role | License |
 |---|---|---|
 | **OpenSMTPD** | SMTP transport (send/receive) | ISC (MIT-equivalent) |
-| **aimx** (this project) | Delivery, .md parsing, MCP, channel manager, DKIM signing, CLI | TBD (permissive) |
+| **AIMX** (this project) | Delivery, .md parsing, MCP, channel manager, DKIM signing, CLI | TBD (permissive) |
 
 ### Why OpenSMTPD
 

@@ -1,4 +1,4 @@
-# aimx — Sprint Plan
+# AIMX — Sprint Plan
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
@@ -1949,7 +1949,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 24 — Verify Cleanup + Sudo Requirement (Days 67–69.5) [NOT STARTED]
+## Sprint 24 — Verify Cleanup + Sudo Requirement (Days 67–69.5) [IN PROGRESS]
 
 **Goal:** Simplify `aimx verify` to use EHLO-only checks (no TCP-only reachability), require root, remove the `/reach` endpoint from the verifier service, and fix AIMX capitalization across user-facing output.
 
@@ -2036,7 +2036,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Done |
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
-| 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | Not Started |
+| 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | In Progress |
 
 ## Deferred to v2
 

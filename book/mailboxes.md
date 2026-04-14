@@ -1,6 +1,6 @@
 # Mailboxes & Email
 
-Mailboxes are the core organizational unit in aimx. Each mailbox maps an email address to a directory on disk.
+Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email address to a directory on disk.
 
 ## Concepts
 
@@ -10,7 +10,7 @@ Mailboxes are the core organizational unit in aimx. Each mailbox maps an email a
 
 ### Routing logic
 
-When an email arrives, aimx matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
+When an email arrives, AIMX matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
 
 For example, with mailboxes `support` and `catchall` configured:
 - `support@agent.yourdomain.com` -> delivered to the `support` mailbox
@@ -165,13 +165,13 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 ### How sending works
 
-1. aimx composes an RFC 5322 compliant message
+1. AIMX composes an RFC 5322 compliant message
 2. Signs the message with DKIM (RSA-SHA256) using your domain's private key
 3. Delivers the signed message directly to the recipient's MX server via SMTP
 
 ### Reply threading
 
-When replying to an email, aimx sets the `In-Reply-To` and `References` headers so the reply is threaded correctly in the recipient's mail client. Use `--reply-to` with the original message's `Message-ID` value.
+When replying to an email, AIMX sets the `In-Reply-To` and `References` headers so the reply is threaded correctly in the recipient's mail client. Use `--reply-to` with the original message's `Message-ID` value.
 
 The `email_reply` MCP tool handles threading automatically -- it reads the original email and sets the correct headers.
 
