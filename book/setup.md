@@ -120,6 +120,8 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 | PTR | Your server IP | `agent.yourdomain.com.` | VPS provider panel |
 
+The `AAAA` record and SPF `ip6:` mechanism are only needed if you enable IPv6 outbound delivery via `enable_ipv6` in `config.toml` — see [IPv6 delivery](configuration.md#ipv6-delivery-advanced). By default, `aimx send` uses IPv4 only, and the single `ip4:` SPF mechanism is sufficient.
+
 The DKIM public key value (`p=...`) is displayed by the setup wizard. To retrieve it again:
 
 ```bash

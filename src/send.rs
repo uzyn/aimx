@@ -15,9 +15,26 @@ pub trait MailTransport {
     ) -> Result<String, Box<dyn std::error::Error>>;
 }
 
-pub struct LettreTransport;
+pub struct LettreTransport {
+    enable_ipv6: bool,
+}
 
 impl LettreTransport {
+    pub fn new(enable_ipv6: bool) -> Self {
+        Self { enable_ipv6 }
+    }
+
+    fn resolve_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+        use std::net::ToSocketAddrs;
+        format!("{host}:25")
+            .to_socket_addrs()
+            .ok()?
+            .find_map(|addr| match addr {
+                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+                _ => None,
+            })
+    }
+
     fn extract_domain(recipient: &str) -> Result<String, Box<dyn std::error::Error>> {
         let addr = recipient
             .rsplit('<')
@@ -105,7 +122,15 @@ impl LettreTransport {
             .build_rustls()
             .map_err(|e| format!("TLS configuration error: {e}"))?;
 
-        let transport = lettre::SmtpTransport::builder_dangerous(host)
+        let connect_target = if self.enable_ipv6 {
+            host.to_string()
+        } else {
+            Self::resolve_ipv4(host)
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| host.to_string())
+        };
+
+        let transport = lettre::SmtpTransport::builder_dangerous(&connect_target)
             .hello_name(lettre::transport::smtp::extension::ClientId::Domain(
                 host.to_string(),
             ))
@@ -326,14 +351,13 @@ pub fn run(
     args: SendArgs,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let transport = LettreTransport;
-
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir)
             .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
         None => Config::load_default()
             .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
     };
+    let transport = LettreTransport::new(config.enable_ipv6);
     let private_key = dkim::load_private_key(&config.data_dir)
         .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))?;
 
@@ -943,6 +967,7 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         };
         config
             .save(&crate::config::Config::config_path(tmp.path()))
