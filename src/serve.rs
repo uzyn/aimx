@@ -102,13 +102,19 @@ pub mod service {
         format!(
             "[Unit]\n\
              Description=AIMX SMTP server\n\
-             After=network.target\n\
+             After=network-online.target nss-lookup.target\n\
+             Wants=network-online.target\n\
+             StartLimitBurst=5\n\
+             StartLimitIntervalSec=60s\n\
              \n\
              [Service]\n\
              Type=simple\n\
              ExecStart={aimx_path} serve --data-dir {data_dir}\n\
              Restart=on-failure\n\
              RestartSec=5s\n\
+             LimitNOFILE=65536\n\
+             TasksMax=4096\n\
+             ReadWritePaths={data_dir}\n\
              StandardOutput=journal\n\
              StandardError=journal\n\
              \n\
@@ -157,21 +163,51 @@ mod tests {
     #[test]
     fn systemd_unit_contains_required_fields() {
         let unit = generate_systemd_unit("/usr/local/bin/aimx", "/var/lib/aimx");
-        assert!(unit.contains("After=network.target"));
+        assert!(unit.contains("After=network-online.target nss-lookup.target"));
+        assert!(unit.contains("Wants=network-online.target"));
+        assert!(unit.contains("StartLimitBurst=5"));
+        assert!(unit.contains("StartLimitIntervalSec=60s"));
+        assert!(unit.contains("Type=simple"));
         assert!(unit.contains("ExecStart=/usr/local/bin/aimx serve --data-dir /var/lib/aimx"));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("RestartSec=5s"));
+        assert!(unit.contains("LimitNOFILE=65536"));
+        assert!(unit.contains("TasksMax=4096"));
+        assert!(unit.contains("ReadWritePaths=/var/lib/aimx"));
         assert!(unit.contains("StandardOutput=journal"));
+        assert!(unit.contains("StandardError=journal"));
         assert!(unit.contains("[Unit]"));
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("WantedBy=multi-user.target"));
+        // Intentionally omitted directives
+        assert!(
+            !unit.contains("ExecReload="),
+            "ExecReload must not be set (no SIGHUP handler)"
+        );
+        assert!(
+            !unit.contains("StateDirectory="),
+            "StateDirectory must not be set (conflicts with --data-dir)"
+        );
     }
 
     #[test]
     fn systemd_unit_custom_paths() {
         let unit = generate_systemd_unit("/opt/bin/aimx", "/data/aimx");
         assert!(unit.contains("ExecStart=/opt/bin/aimx serve --data-dir /data/aimx"));
+    }
+
+    #[test]
+    fn systemd_unit_readwritepaths_follows_data_dir() {
+        let unit = generate_systemd_unit("/opt/bin/aimx", "/custom/dir");
+        assert!(
+            unit.contains("ReadWritePaths=/custom/dir"),
+            "ReadWritePaths must substitute the data_dir argument"
+        );
+        assert!(
+            !unit.contains("ReadWritePaths=/var/lib/aimx"),
+            "ReadWritePaths must not leak the default data_dir"
+        );
     }
 
     #[test]

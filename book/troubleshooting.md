@@ -43,7 +43,13 @@ journalctl -u aimx -e
 
 # Restart the service
 sudo systemctl restart aimx
+
+# Clear a rate-limited service after repeated crashes
+# (the unit caps restarts at StartLimitBurst=5 within StartLimitIntervalSec=60s)
+sudo systemctl reset-failed aimx
 ```
+
+If `systemctl status aimx` reports `start-limit-hit`, the service has restarted too often in a short window. Run `sudo systemctl reset-failed aimx` to clear the counter, then `sudo systemctl start aimx` to try again. Investigate the underlying crash in `journalctl -u aimx -e` before restarting.
 
 On Alpine Linux (OpenRC):
 
