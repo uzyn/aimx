@@ -6,6 +6,11 @@ pub fn run(
     data_dir: Option<&Path>,
     verify_host: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let sys = setup::RealSystemOps;
+    if !setup::SystemOps::check_root(&sys) {
+        return Err("`aimx verify` requires root. Run with: sudo aimx verify".into());
+    }
+
     let config = match data_dir {
         Some(dir) => Config::load_from_data_dir(dir).ok(),
         None => Config::load_default().ok(),
@@ -136,7 +141,7 @@ pub fn run_with_net(
     net: &dyn NetworkOps,
     port25: &Port25Status,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("aimx verify - Port 25 connectivity check\n");
+    println!("AIMX verify - Port 25 connectivity check\n");
 
     let mut all_pass = true;
 

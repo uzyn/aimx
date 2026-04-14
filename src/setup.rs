@@ -231,12 +231,8 @@ impl RealNetworkOps {
         })
     }
 
-    /// Shared curl invocation for `/probe` and `/reach` verify-service paths.
-    /// Both endpoints return `{"reachable": bool, ...}`; any curl failure or
-    /// non-success exit maps to `Ok(false)` so the caller displays a FAIL
-    /// advisory rather than an error backtrace.
-    fn curl_reachable(&self, path: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        let url = format!("{}{path}", self.verify_host);
+    fn curl_probe(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        let url = format!("{}/probe", self.verify_host);
         let resp = std::process::Command::new("curl")
             .args(["-s", "-m", "60", &url])
             .output();
@@ -291,6 +287,7 @@ pub fn derive_smtp_addr_from_verify_host(verify_host: &str) -> String {
 
 impl NetworkOps for RealNetworkOps {
     fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        use std::io::{BufRead, BufReader, Write};
         use std::net::{TcpStream, ToSocketAddrs};
         use std::time::Duration;
 
@@ -300,14 +297,46 @@ impl NetworkOps for RealNetworkOps {
             return Ok(false);
         }
 
-        match TcpStream::connect_timeout(&addrs[0], Duration::from_secs(10)) {
-            Ok(_) => Ok(true),
-            Err(_) => Ok(false),
+        let stream = match TcpStream::connect_timeout(&addrs[0], Duration::from_secs(10)) {
+            Ok(s) => s,
+            Err(_) => return Ok(false),
+        };
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+
+        let mut reader = BufReader::new(stream.try_clone()?);
+        let mut writer = stream;
+
+        let mut banner = String::new();
+        if reader.read_line(&mut banner).is_err() || !banner.starts_with("220") {
+            return Ok(false);
         }
+
+        writer.write_all(b"EHLO aimx\r\n")?;
+        writer.flush()?;
+
+        let mut ehlo_resp = String::new();
+        loop {
+            ehlo_resp.clear();
+            if reader.read_line(&mut ehlo_resp).is_err() {
+                return Ok(false);
+            }
+            if ehlo_resp.starts_with("250 ") {
+                break;
+            }
+            if !ehlo_resp.starts_with("250-") {
+                return Ok(false);
+            }
+        }
+
+        let _ = writer.write_all(b"QUIT\r\n");
+        let _ = writer.flush();
+
+        Ok(true)
     }
 
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
-        self.curl_reachable("/probe")
+        self.curl_probe()
     }
 
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
@@ -945,7 +974,7 @@ pub fn run_setup(
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Step 1: Root check
     if !sys.check_root() {
-        return Err("aimx setup requires root. Run with: sudo aimx setup <domain>".into());
+        return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
     }
 
     // Resolve domain: use argument if provided, otherwise prompt interactively
@@ -961,7 +990,7 @@ pub fn run_setup(
         }
     };
 
-    println!("aimx setup for {domain}\n");
+    println!("AIMX setup for {domain}\n");
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
@@ -981,7 +1010,7 @@ pub fn run_setup(
     if already_configured {
         println!(
             "{}",
-            "Existing aimx configuration detected. Skipping install, proceeding to verification."
+            "Existing AIMX configuration detected. Skipping install, proceeding to verification."
                 .green()
         );
     } else {
@@ -989,7 +1018,7 @@ pub fn run_setup(
         match sys.check_port25_occupancy()? {
             Port25Status::Free => {}
             Port25Status::Aimx => {
-                println!("aimx is already running on port 25. Proceeding with setup.");
+                println!("`aimx serve` is already running on port 25. Proceeding with setup.");
             }
             Port25Status::OtherProcess(name) => {
                 return Err(format!(
@@ -1012,7 +1041,7 @@ pub fn run_setup(
 
         println!("Installing aimx service...");
         sys.install_service_file(data_dir)?;
-        println!("{}", "aimx serve started.".green());
+        println!("{}", "`aimx serve` started.".green());
     }
 
     // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
@@ -1049,8 +1078,8 @@ pub fn run_setup(
     if port_failed {
         return Err(
             "Port 25 checks failed. Your VPS provider may block SMTP traffic.\n\
-             aimx serve started but port 25 is not reachable.\n\
-             Fix the issues above and run `aimx setup` again."
+             `aimx serve` started but port 25 is not reachable.\n\
+             Fix the issues above and run `sudo aimx setup` again."
                 .into(),
         );
     }
@@ -1831,7 +1860,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("aimx setup requires root"),
+            err.contains("requires root"),
             "Expected root error, got: {err}"
         );
     }

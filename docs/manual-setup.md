@@ -5,19 +5,18 @@ This guide walks through every step needed to launch aimx, from deploying the ve
 - **Part A** — Deploy the verifier service (done once, before anything else)
 - **Part B** — Set up an aimx mail server (done per server)
 
-The verifier service must be running before any mail server can complete setup, because `aimx setup`, `aimx preflight`, and `aimx verify` all call its HTTP endpoints (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25). `aimx setup` and `aimx verify` use `/probe` (full SMTP EHLO handshake, for post-install validation). `aimx preflight` uses `/reach` (plain TCP connect, works before OpenSMTPD is installed).
+The verifier service must be running before any mail server can complete setup, because `aimx setup` and `aimx verify` both call its HTTP `/probe` endpoint (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25 via EHLO handshake). Both commands use `/probe` (full SMTP EHLO handshake).
 
 ---
 
 ## Part A: Deploy the aimx-verifier Service
 
-The aimx-verifier service provides three functions, all exposed from a single binary:
+The aimx-verifier service provides two functions, all exposed from a single binary:
 
-1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding after OpenSMTPD is installed. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
-2. **Reachability test** (`GET /reach`) — HTTPS endpoint that does a plain TCP connect to the caller's own IP on port 25 with a 10-second timeout. No SMTP handshake. Used by `aimx preflight` to confirm port 25 is reachable on a fresh VPS before OpenSMTPD is installed (any listening socket satisfies this check). Same response shape as `/probe`.
-3. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by aimx clients to test that their outbound port 25 is not blocked by their VPS provider. This is a plain tokio listener built into the `aimx-verifier` binary — **no OpenSMTPD or other MTA is required on the verifier server**.
+1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
+2. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by `aimx` clients to test that their outbound port 25 is not blocked by their VPS provider via EHLO handshake. This is a plain tokio listener built into the `aimx-verifier` binary — **no MTA is required on the verifier server**.
 
-Both `/probe` and `/reach` identify the caller via Caddy's `X-AIMX-Client-IP` header (injected by the canonical `Caddyfile`). Direct exposure of the backend without Caddy is not supported — see the security note in `services/verifier/README.md`.
+`/probe` identifies the caller via Caddy's `X-AIMX-Client-IP` header (injected by the canonical `Caddyfile`). Direct exposure of the backend without Caddy is not supported — see the security note in `services/verifier/README.md`.
 
 ### A1: Prerequisites
 
@@ -150,18 +149,15 @@ nc check.aimx.email 25
 
 The listener implements a minimal but correct SMTP exchange (banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`). The banner hostname is hardcoded as `check.aimx.email` in the binary even on self-hosted instances — don't be surprised to see it on your own domain.
 
-**Functional `/probe` and `/reach` tests:**
+**Functional `/probe` test:**
 
-Both endpoints always probe the caller's own IP — there is no `?ip=` parameter. To exercise them end-to-end, run `aimx preflight` (which hits `/reach`) or `aimx verify` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verifier service reached back and either (a) completed a plain TCP connect on `/reach` or (b) completed a full EHLO handshake on `/probe`, depending on which command you ran.
+The `/probe` endpoint always probes the caller's own IP — there is no `?ip=` parameter. To exercise it end-to-end, run `sudo aimx verify` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verifier service reached back and completed a full EHLO handshake.
 
-A `curl` from the mail server against either endpoint will also work and is useful for debugging:
+A `curl` from the mail server is useful for debugging:
 
 ```bash
-curl https://check.aimx.email/reach
-# Expected: {"reachable":true,"ip":"<your-server-ip>"}
-
 curl https://check.aimx.email/probe
-# Expected (after OpenSMTPD is installed): {"reachable":true,"ip":"<your-server-ip>"}
+# Expected: {"reachable":true,"ip":"<your-server-ip>"}
 ```
 
 ### A6: Point aimx Mail Servers at Your Verifier Instance
@@ -172,11 +168,10 @@ The default verify host is `https://check.aimx.email`. If you deployed your own 
 verify_host = "https://check.yourdomain.com"
 ```
 
-…or per-invocation with the `--verify-host` flag (accepted by `aimx verify`, `aimx setup`, and `aimx preflight`):
+…or per-invocation with the `--verify-host` flag (accepted by `aimx verify` and `aimx setup`):
 
 ```bash
-aimx verify --verify-host https://check.yourdomain.com
-aimx preflight --verify-host https://check.yourdomain.com
+sudo aimx verify --verify-host https://check.yourdomain.com
 sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
 ```
 

@@ -119,9 +119,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
 
 ### 6.8 Verifier Service
-- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. ~~`/reach` (plain TCP connect) was removed — `/probe` (EHLO handshake) is the single endpoint.~~
+- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
-- FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing aimx clients to test outbound port 25 connectivity via EHLO handshake.
+- FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing `aimx` clients to test outbound port 25 connectivity via EHLO handshake. _Note: outbound check now performs EHLO handshake directly from the client, not via `/reach`._
 - FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
 
 ### 6.9 CLI Commands

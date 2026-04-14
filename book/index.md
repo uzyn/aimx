@@ -43,7 +43,7 @@ sudo cp target/release/aimx /usr/local/bin/
 sudo aimx setup agent.yourdomain.com
 
 # 3. Verify
-aimx verify
+sudo aimx verify
 ```
 
 See the full [Getting Started](getting-started.md) guide for details.

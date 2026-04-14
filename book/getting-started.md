@@ -75,8 +75,8 @@ Follow the on-screen prompts to add the required DNS records at your domain regi
 After DNS records propagate, verify the setup:
 
 ```bash
-# Check port 25 connectivity
-aimx verify
+# Check port 25 connectivity (requires root)
+sudo aimx verify
 
 # Check server status and mailbox counts
 aimx status

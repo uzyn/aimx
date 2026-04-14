@@ -88,7 +88,7 @@ Uses `rmcp` crate with `#[tool]` attribute macros on `AimxMcpServer` methods. St
 
 ### Verifier service
 
-Axum HTTP server with `/probe` (EHLO handshake), `/reach` (TCP connect), `/health` endpoints. Runs a concurrent SMTP listener on port 25. Uses `X-AIMX-Client-IP` header from Caddy for caller identification. Deployed via `docker-compose.yml` with `network_mode: host`.
+Axum HTTP server with `/probe` (EHLO handshake) and `/health` endpoints. Runs a concurrent SMTP listener on port 25. Uses `X-AIMX-Client-IP` header from Caddy for caller identification. Deployed via `docker-compose.yml` with `network_mode: host`.
 
 ## Key conventions
 
