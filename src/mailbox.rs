@@ -171,6 +171,7 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         }
     }
 

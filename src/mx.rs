@@ -37,6 +37,23 @@ async fn fallback_to_a_record(
     }
 }
 
+/// Resolves a host to its IPv4 (A-record) addresses only, skipping AAAA.
+///
+/// Used by outbound SMTP when `enable_ipv6 = false`, so the connect target is
+/// pinned to an IPv4 address rather than letting the OS pick an address family.
+/// Returns an empty Vec when the host has no A record (e.g. AAAA-only hosts).
+pub async fn resolve_a(host: &str) -> Result<Vec<std::net::Ipv4Addr>, Box<dyn std::error::Error>> {
+    let resolver = TokioResolver::builder_tokio()
+        .map_err(|e| format!("Failed to create DNS resolver: {e}"))?
+        .build();
+
+    match resolver.ipv4_lookup(host).await {
+        Ok(response) => Ok(response.iter().map(|a| a.0).collect()),
+        Err(e) if e.is_no_records_found() || e.is_nx_domain() => Ok(vec![]),
+        Err(e) => Err(format!("DNS A-record lookup failed for {host}: {e}").into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
