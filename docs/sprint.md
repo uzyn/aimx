@@ -1949,7 +1949,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 ---
 
-## Sprint 24 — Verify Cleanup + Sudo Requirement (Days 67–69.5) [IN PROGRESS]
+## Sprint 24 — Verify Cleanup + Sudo Requirement (Days 67–69.5) [DONE]
 
 **Goal:** Simplify `aimx verify` to use EHLO-only checks (no TCP-only reachability), require root, remove the `/reach` endpoint from the verifier service, and fix AIMX capitalization across user-facing output.
 
@@ -1961,10 +1961,10 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `check_outbound_port25()` performs SMTP EHLO handshake (connect, read 220 banner, send EHLO, read 250, send QUIT) instead of bare TCP connect
-- [ ] Timeout remains reasonable (10–15s total for the handshake)
-- [ ] Existing tests updated to reflect new behavior
-- [ ] `aimx verify` outbound check passes against real `check.aimx.email:25` (manual VPS validation)
+- [x] `check_outbound_port25()` performs SMTP EHLO handshake (connect, read 220 banner, send EHLO, read 250, send QUIT) instead of bare TCP connect
+- [x] Timeout remains reasonable (10–15s total for the handshake)
+- [x] Existing tests updated to reflect new behavior
+- [ ] `aimx verify` outbound check passes against real `check.aimx.email:25` (manual VPS validation) <!-- Deferred: requires VPS with port 25; not testable in CI -->
 
 ### S24.2: Remove `/reach` endpoint from verifier service
 
@@ -1972,13 +1972,13 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `/reach` HTTP handler and route removed from `services/verifier/src/main.rs`
-- [ ] Any tests for `/reach` removed or updated
-- [ ] `services/verifier/README.md` updated — no mention of `/reach`
-- [ ] `curl_reachable()` in `setup.rs` renamed or simplified now that it only serves `/probe` (if the abstraction is no longer needed for two paths)
-- [ ] Grep for `reach` across entire codebase — remove stale references in comments, docs, `book/`, PRD
-- [ ] FR-38 in PRD updated: remove `/reach` description
-- [ ] FR-39b in PRD marked obsolete or removed
+- [x] `/reach` HTTP handler and route removed from `services/verifier/src/main.rs`
+- [x] Any tests for `/reach` removed or updated
+- [x] `services/verifier/README.md` updated — no mention of `/reach`
+- [x] `curl_reachable()` in `setup.rs` renamed to `curl_probe()` now that it only serves `/probe`
+- [x] Grep for `reach` across entire codebase — remove stale references in comments, docs, `book/`, PRD
+- [x] FR-38 in PRD updated: remove `/reach` description
+- [x] FR-39b in PRD marked obsolete or removed
 
 ### S24.3: Require sudo for `aimx verify`
 
@@ -1986,12 +1986,12 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P0
 
-- [ ] `aimx verify` checks for root at entry (reuse pattern from `aimx setup`) and exits with clear message if not root
-- [ ] Port 25 detection flow unchanged: `Aimx` → run checks, `Free` → spawn temp listener + run checks, `OtherProcess(name)` → error
-- [ ] `OtherProcess` error message matches exact wording: `Port 25 is occupied by \`{name}\`.\nStop or uninstall the process and run \`sudo aimx verify\` again to check.`
-- [ ] FR-48 in PRD updated: remove "No root requirement", add "Requires root"
-- [ ] Tests updated: add root-check test (mock pattern), update existing tests as needed
-- [ ] `book/` and README references to `aimx verify` updated to show `sudo aimx verify`
+- [x] `aimx verify` checks for root at entry (reuse pattern from `aimx setup`) and exits with clear message if not root
+- [x] Port 25 detection flow unchanged: `Aimx` → run checks, `Free` → spawn temp listener + run checks, `OtherProcess(name)` → error
+- [x] `OtherProcess` error message matches exact wording: `Port 25 is occupied by \`{name}\`.\nStop or uninstall the process and run \`sudo aimx verify\` again to check.`
+- [x] FR-48 in PRD updated: remove "No root requirement", add "Requires root"
+- [x] Tests updated: add root-check test (mock pattern via refactored `run_verify()` accepting `&dyn SystemOps`), update existing tests as needed
+- [x] `book/` and README references to `aimx verify` updated to show `sudo aimx verify`
 
 ### S24.4: Fix AIMX capitalization in user-facing output
 
@@ -1999,11 +1999,12 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 
 **Priority:** P1
 
-- [ ] Audit `src/*.rs` println/eprintln/error strings — fix "aimx" → "AIMX" where it refers to the product (e.g., "Your system is good for AIMX setup")
-- [ ] Audit `book/*.md` — fix product references to "AIMX", keep command references as `aimx`
-- [ ] Audit `README.md` — same pattern
-- [ ] Audit `services/verifier/` user-facing strings and README
-- [ ] Do NOT rename crate, binary, module, function, or config identifiers
+- [x] Audit `src/*.rs` println/eprintln/error strings — fix "aimx" → "AIMX" where it refers to the product (e.g., "Your system is good for AIMX setup")
+- [x] Audit `book/*.md` — fix product references to "AIMX", keep command references as `aimx`
+- [x] Audit `README.md` — same pattern
+- [x] Audit `services/verifier/` user-facing strings and README
+- [x] Do NOT rename crate, binary, module, function, or config identifiers
+- [x] Audit all `*.md` documentation files (`docs/`, `CLAUDE.md`, etc.) — fix product references to "AIMX" (15 files, 46 lines)
 
 ---
 
@@ -2036,7 +2037,7 @@ No GitHub Actions image publishing to ghcr.io in this sprint — not requested. 
 | 21 | 58–60.5 | `aimx serve` Daemon | CLI wiring, signal handling, systemd/OpenRC service files, end-to-end daemon test | Done |
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
-| 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | In Progress |
+| 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | Done |
 
 ## Deferred to v2
 
@@ -2101,3 +2102,6 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 21)** Inconsistent TLS file check in `can_read_tls` in `serve.rs` — cert uses `metadata().is_file()`, key uses `File::open()`. Use the same approach for both for consistency
 - [ ] **(Sprint 22)** `restart_service()` and `is_service_running()` hardcode `systemctl` — on OpenRC systems, `install_service_file` writes the init script correctly but service management still calls systemctl. Pre-existing issue, not a regression
 - [ ] **(Sprint 22)** `_domain` parameter in `is_already_configured` is now unused since smtpd.conf domain matching was removed — consider removing the parameter in a future cleanup
+- [ ] **(Sprint 24)** `CLAUDE.md` line 68 still says `setup.rs also contains run_preflight for aimx preflight` but `run_preflight` no longer exists — stale documentation reference
+- [ ] **(Sprint 24)** `docs/manual-setup.md` line 14: "provides two functions, all exposed" — "all" should be "both" (grammar leftover from when there were three items)
+- [ ] **(Sprint 24)** `docs/prd.md` NFR-5: "aimx ingest" in prose without backticks — should be `` `aimx ingest` `` for consistency with capitalization convention
