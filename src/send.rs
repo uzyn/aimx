@@ -266,22 +266,9 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
 }
 
 fn normalize_crlf(text: &str) -> String {
-    let mut result = String::with_capacity(text.len());
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            result.push_str("\r\n");
-            i += 2;
-        } else if bytes[i] == b'\r' || bytes[i] == b'\n' {
-            result.push_str("\r\n");
-            i += 1;
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
-        }
-    }
-    result
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\n', "\r\n")
 }
 
 fn normalize_message_id(id: &str) -> String {
@@ -1023,6 +1010,12 @@ mod tests {
     fn normalize_crlf_no_newlines() {
         let result = super::normalize_crlf("Hello world");
         assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn normalize_crlf_multibyte_utf8() {
+        let result = super::normalize_crlf("Héllo\nwörld\r\némail — sent\rfin");
+        assert_eq!(result, "Héllo\r\nwörld\r\némail — sent\r\nfin");
     }
 
     #[test]
