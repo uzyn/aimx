@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 24 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup)
-**Timeline:** ~69.5 calendar days
+**Total sprints:** 25 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix)
+**Timeline:** ~72.5 calendar days
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization).
 
 ---
@@ -208,6 +208,26 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 25 — Fix DKIM Key Permissions for Non-Root Send (Days 70–72.5) [NOT STARTED]
+
+**Goal:** Fix the bug where `aimx send` and MCP `email_send` fail after a standard `sudo aimx setup` because the DKIM private key is only readable by root.
+
+**Dependencies:** Sprint 24
+
+#### S25-1: Make DKIM private key globally readable
+
+**Context:** `generate_keypair()` in `dkim.rs` sets the private key to mode `0o600` (owner-only). Since `aimx setup` runs as root, the key becomes `root:root 0600`. Non-root users (agents, MCP, CLI) can't read it, so `aimx send` fails with a misleading "DKIM private key not found" error. The actual error is permission denied, but `load_private_key()` swallows the IO error. The fix: set the key to `0o644` (globally readable) since all local users need DKIM signing access for direct outbound delivery, and the key is only used for email signing (not authentication). Also fix the error message in `load_private_key` to include the actual IO error so permission vs not-found issues are distinguishable.
+
+**Priority:** P0
+
+- [ ] Change `dkim.rs` `generate_keypair()` permission from `0o600` to `0o644`
+- [ ] Update `load_private_key()` to include the actual IO error in the error message (e.g., "DKIM private key not found at {path}: {error}. Run `aimx dkim-keygen` first.")
+- [ ] Update the existing permission test (`private_key_has_restricted_permissions`) to expect `0o644`
+- [ ] Add integration test: generate keypair, verify file mode is `0o644`
+- [ ] Verify `aimx send` works without sudo after `sudo aimx setup` on a real system
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -238,6 +258,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 22 | 61–63.5 | Remove OpenSMTPD + Cross-Platform CI | Strip OpenSMTPD from setup/status/verify, Alpine + Fedora CI targets | Done |
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
 | 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | Done |
+| 25 | 70–72.5 | Fix DKIM Key Permissions for Non-Root Send | DKIM key `0o644`, fix misleading error message — `aimx send` works without sudo | Not Started |
 
 ## Deferred to v2
 
