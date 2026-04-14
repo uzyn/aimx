@@ -31,6 +31,7 @@ The `--data-dir` flag takes precedence over the environment variable.
 | `data_dir` | string | `/var/lib/aimx` | Directory for storing config, keys, and mailboxes |
 | `dkim_selector` | string | `dkim` | DKIM selector name used in DNS records |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx verify` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
+| `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
 
 ### Mailbox settings
 
@@ -75,6 +76,40 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
     └── attachments/
 ```
 
+## IPv6 delivery (advanced)
+
+By default, `aimx send` delivers outbound email over IPv4 only. This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
+
+If your server has a global IPv6 address and you want outbound mail to use it, set:
+
+```toml
+enable_ipv6 = true
+```
+
+Then restart the SMTP daemon so any in-flight config is reloaded:
+
+```bash
+sudo systemctl restart aimx
+```
+
+**Additional DNS required when enabled.** Before IPv6 outbound will pass SPF at receivers like Gmail, you must also:
+
+1. Add an `AAAA` record pointing at your server's IPv6 address.
+2. Update your SPF `TXT` record to include `ip6:<your-ipv6>` alongside `ip4:<your-ipv4>`.
+
+Example SPF for a dual-stack server:
+
+```
+v=spf1 ip4:203.0.113.10 ip6:2001:db8::1 -all
+```
+
+See the DNS records table in [Setup](setup.md#dns-configuration) for the exact record formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
+
+Leave `enable_ipv6` unset (or `false`) if any of these apply:
+- Your server does not have a global IPv6 address
+- You do not control the AAAA / SPF DNS records
+- You just want outbound mail to work reliably with the default SPF record
+
 ## Full config example
 
 ```toml
@@ -89,6 +124,9 @@ dkim_selector = "dkim"
 
 # Custom verifier service host (optional)
 # verify_host = "https://verify.yourdomain.com"
+
+# Opt into IPv6 outbound delivery (advanced, default: false)
+# enable_ipv6 = true
 
 # ----------------------------
 # Mailboxes
