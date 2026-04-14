@@ -74,7 +74,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-4: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
 - FR-5: Check reverse DNS (PTR) and warn (non-blocking) if not set.
 - FR-6: Generate 2048-bit RSA DKIM keypair.
-- FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation.
+- FR-7: Display required DNS records (MX, A, AAAA, SPF, DKIM, DMARC, PTR) and wait for user confirmation. Include AAAA record and `ip6:` SPF mechanism when the server has an IPv6 address.
 - FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` mailbox.
 - FR-10: Display MCP configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.).
@@ -90,7 +90,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.3 Email Sending (`aimx send`)
 - FR-17: Compose RFC 5322 compliant email from provided parameters (from, to, subject, body, attachments).
 - FR-18: Sign message with DKIM (RSA-SHA256) using the domain's private key.
-- FR-19: Deliver signed message directly to the recipient's MX server via SMTP (MX resolution + lettre transport). Return delivery errors immediately — no background queue.
+- FR-19: Deliver signed message directly to the recipient's MX server via SMTP (MX resolution + lettre transport). Support both IPv4 and IPv6 connections (OS decides). Return delivery errors immediately — no background queue.
 - FR-20: Support file attachments by path.
 - FR-21: Set proper In-Reply-To and References headers when replying.
 

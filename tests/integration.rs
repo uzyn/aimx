@@ -269,7 +269,7 @@ fn dkim_keygen_end_to_end() {
     assert!(private_pem.contains("BEGIN RSA PRIVATE KEY"));
 
     let public_pem = std::fs::read_to_string(tmp.path().join("dkim/public.key")).unwrap();
-    assert!(public_pem.contains("BEGIN RSA PUBLIC KEY"));
+    assert!(public_pem.contains("BEGIN PUBLIC KEY"));
 }
 
 #[test]
