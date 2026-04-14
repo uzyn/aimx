@@ -119,9 +119,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
 
 ### 6.8 Verifier Service
-- FR-38: Hosted verifier service at `check.aimx.email` exposing two complementary HTTP endpoints that both identify the caller via a Caddy-injected `X-AIMX-Client-IP` header and target the caller's own IP on port 25: `/reach` performs a plain TCP connect (any listening socket satisfies this check), and `/probe` performs a full SMTP EHLO handshake (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). Both endpoints apply a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy.
+- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. ~~`/reach` (plain TCP connect) was removed — `/probe` (EHLO handshake) is the single endpoint.~~
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
-- FR-39b: Port 25 listener on the verifier service that accepts TCP connections, allowing aimx clients to test outbound port 25 reachability.
+- FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing aimx clients to test outbound port 25 connectivity via EHLO handshake.
 - FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
 
 ### 6.9 CLI Commands
@@ -134,7 +134,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-45: `aimx mcp` — start MCP server in stdio mode.
 - FR-46: `aimx mailbox create|list|delete <name>` — mailbox management.
 - FR-47: `aimx status` — show server status, mailbox counts, recent activity.
-- FR-48: `aimx verify` — check port 25 connectivity. If `aimx serve` is running: outbound check + inbound EHLO probe. If port 25 is free: advise to start `aimx serve`. No root requirement.
+- FR-48: `aimx verify` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
 
 ## 7. Non-Functional Requirements
 

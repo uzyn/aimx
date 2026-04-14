@@ -169,7 +169,9 @@ pub fn run_with_net(
 
             println!();
             if all_pass {
-                println!("All checks passed. Port 25 is reachable. Your system is good for AIMX setup.\nRun `sudo aimx setup` to begin.");
+                println!(
+                    "All checks passed. Port 25 is reachable. Your system is good for AIMX setup.\nRun `sudo aimx setup` to begin."
+                );
                 Ok(())
             } else {
                 Err("Some checks failed. See details above.".into())
