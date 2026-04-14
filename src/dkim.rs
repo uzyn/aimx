@@ -1,5 +1,6 @@
-use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey};
-use rsa::pkcs8::LineEnding;
+use base64::Engine;
+use rsa::pkcs1::EncodeRsaPrivateKey;
+use rsa::pkcs8::{EncodePublicKey, LineEnding};
 use rsa::{RsaPrivateKey, RsaPublicKey};
 use std::path::Path;
 
@@ -29,7 +30,7 @@ pub fn generate_keypair(data_dir: &Path, force: bool) -> Result<(), Box<dyn std:
     }
 
     let public_key = RsaPublicKey::from(&private_key);
-    let public_pem = public_key.to_pkcs1_pem(LineEnding::LF)?;
+    let public_pem = public_key.to_public_key_pem(LineEnding::LF)?;
     std::fs::write(&public_path, public_pem.as_bytes())?;
 
     Ok(())
@@ -40,10 +41,16 @@ pub fn dns_record_value(data_dir: &Path) -> Result<String, Box<dyn std::error::E
     let pem = std::fs::read_to_string(&public_path)
         .map_err(|_| "DKIM public key not found. Run `aimx dkim-keygen` first.")?;
 
-    let b64 = pem
-        .lines()
-        .filter(|l| !l.starts_with("-----"))
-        .collect::<String>();
+    let public_key = if pem.contains("BEGIN RSA PUBLIC KEY") {
+        use rsa::pkcs1::DecodeRsaPublicKey;
+        RsaPublicKey::from_pkcs1_pem(&pem)?
+    } else {
+        use rsa::pkcs8::DecodePublicKey;
+        RsaPublicKey::from_public_key_pem(&pem)?
+    };
+
+    let spki_der = public_key.to_public_key_der()?;
+    let b64 = base64::engine::general_purpose::STANDARD.encode(spki_der.as_ref());
 
     Ok(format!("v=DKIM1; k=rsa; p={b64}"))
 }
@@ -144,7 +151,7 @@ mod tests {
         let private_key: RsaPrivateKey =
             rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(&private_pem).unwrap();
         let public_key: rsa::RsaPublicKey =
-            rsa::pkcs1::DecodeRsaPublicKey::from_pkcs1_pem(&public_pem).unwrap();
+            rsa::pkcs8::DecodePublicKey::from_public_key_pem(&public_pem).unwrap();
 
         assert_eq!(private_key.size() * 8, DKIM_KEY_BITS);
         assert_eq!(public_key.size() * 8, DKIM_KEY_BITS);

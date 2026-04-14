@@ -92,6 +92,17 @@ impl MailTransport for LettreTransport {
 }
 
 impl LettreTransport {
+    fn resolve_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
+        use std::net::ToSocketAddrs;
+        format!("{host}:25")
+            .to_socket_addrs()
+            .ok()?
+            .find_map(|addr| match addr {
+                std::net::SocketAddr::V4(v4) => Some(*v4.ip()),
+                _ => None,
+            })
+    }
+
     fn try_deliver(
         &self,
         host: &str,
@@ -105,7 +116,14 @@ impl LettreTransport {
             .build_rustls()
             .map_err(|e| format!("TLS configuration error: {e}"))?;
 
-        let transport = lettre::SmtpTransport::builder_dangerous(host)
+        let connect_target = Self::resolve_ipv4(host)
+            .map(|ip| ip.to_string())
+            .unwrap_or_else(|| host.to_string());
+
+        let transport = lettre::SmtpTransport::builder_dangerous(&connect_target)
+            .hello_name(lettre::transport::smtp::extension::ClientId::Domain(
+                host.to_string(),
+            ))
             .port(25)
             .tls(lettre::transport::smtp::client::Tls::Opportunistic(
                 tls_params,
