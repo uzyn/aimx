@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 25 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix)
-**Timeline:** ~72.5 calendar days
+**Total sprints:** 26 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support)
+**Timeline:** ~75.5 calendar days
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization).
 
 ---
@@ -242,6 +242,51 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 26 — IPv6 Support for Outbound SMTP (Days 73–75.5) [NOT STARTED]
+
+**Goal:** Remove the IPv4-only workaround from outbound delivery and properly support IPv6 across SPF records, DNS guidance, and verification. The IPv4 preference was added in Sprint 25 as a workaround for SPF failures — now that DKIM is fixed, let the OS resolve addresses naturally and ensure SPF covers both address families.
+
+**Dependencies:** Sprint 25
+
+**Testing environment:** Same as Sprint 25. Use `sudo aimx send --from hello@agent.zeroshot.lol --to chua@uzyn.com --subject Hey --body "Test"` to verify delivery works over whichever address family the OS selects.
+
+#### S26-1: Remove IPv4-only outbound restriction
+
+**Context:** `resolve_ipv4()` in `send.rs:95-104` forces all outbound SMTP connections through IPv4 by filtering DNS results for A records only. This was a workaround for SPF failures when connecting over IPv6 (Sprint 25, commit 47168f8). Now that DKIM signing is correct, the restriction should be removed — let the OS decide which address family to use when connecting to MX servers. Remove `resolve_ipv4()` and the `connect_target` override in `try_deliver()`, so `lettre` connects directly to the MX hostname.
+
+**Priority:** P0
+
+- [ ] Remove `resolve_ipv4()` function from `send.rs`
+- [ ] Remove `connect_target` logic in `try_deliver()` — pass `host` directly to `SmtpTransport::builder_dangerous()`
+- [ ] Verify existing tests still pass
+- [ ] Live test: `sudo aimx send --from hello@agent.zeroshot.lol --to chua@uzyn.com --subject Hey --body "Test"` delivers successfully
+
+#### S26-2: Add IPv6 to DNS guidance and SPF record
+
+**Context:** `setup.rs` detects the server IP via `hostname -I` (which returns both IPv4 and IPv6 addresses) but only uses the first address. The generated SPF record (`v=spf1 ip4:{server_ip} -all`) and DNS guidance only cover IPv4. When the OS connects to a recipient MX over IPv6, SPF fails because the server's IPv6 address isn't in the record. Fix: detect both IPv4 and IPv6 addresses from `hostname -I`, generate SPF with both `ip4:` and `ip6:` mechanisms, add an AAAA record to the DNS guidance, and pass both addresses through the setup flow.
+
+**Priority:** P0
+
+- [ ] `get_server_ip()` (or new helper) returns both IPv4 and IPv6 addresses from `hostname -I`
+- [ ] `generate_dns_records()` produces SPF record with both `ip4:` and `ip6:` when IPv6 is available (e.g., `v=spf1 ip4:X.X.X.X ip6:2001:db8::1 -all`)
+- [ ] `generate_dns_records()` includes an AAAA record when IPv6 address is available
+- [ ] `display_dns_guidance()` shows the AAAA record to the user
+- [ ] Tests updated for dual-stack DNS record generation
+
+#### S26-3: Add `ip6:` support to SPF verification
+
+**Context:** `spf_contains_ip()` in `setup.rs:569-582` only checks `ip4:` mechanisms — this is the open backlog item from Sprint 8. Add `ip6:` mechanism support so that `verify_spf()` correctly validates SPF records containing IPv6 addresses. Also update `verify_all_dns()` to verify SPF against both the server's IPv4 and IPv6 addresses when both are present.
+
+**Priority:** P0
+
+- [ ] `spf_contains_ip()` also checks `ip6:` and `+ip6:` prefixes
+- [ ] `verify_spf()` can verify against IPv6 addresses
+- [ ] `verify_all_dns()` checks SPF for both IPv4 and IPv6 when both are available
+- [ ] Unit tests: SPF pass/fail/missing for `ip6:` mechanisms, dual-stack verification
+- [ ] Mark Sprint 8 backlog item "Add `ip6:` mechanism support to `spf_contains_ip()`" as triaged
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -273,6 +318,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 23 | 64–66.5 | Documentation + PRD Update | Update PRD (NFR-1/2/4, FRs), CLAUDE.md, README, book/, clean up backlog | Done |
 | 24 | 67–69.5 | Verify Cleanup + Sudo Requirement | EHLO-only outbound check, remove `/reach` endpoint, `sudo aimx verify`, AIMX capitalization | Done |
 | 25 | 70–72.5 | Fix `aimx send` (Permissions + DKIM Signing) | DKIM key `0o644`, fix DKIM signature verification at Gmail — `aimx send` works end-to-end | Done |
+| 26 | 73–75.5 | IPv6 Support for Outbound SMTP | Remove IPv4-only workaround, dual-stack SPF records, `ip6:` verification | Not Started |
 
 ## Deferred to v2
 
@@ -323,7 +369,7 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 6)** Handle multiline (folded) Authentication-Results headers in `extract_auth_result` — _Obsolete: echo removed in Sprint 10 (S10.1)_
 - [x] **(Sprint 6)** Add `Message-ID` and `Date` headers to echo reply (RFC 5322 compliance) — _Obsolete: echo removed in Sprint 10 (S10.1)_
 - [x] **(Sprint 6)** Handle missing catchall mailbox gracefully in `aimx verify` — _Triaged into Sprint 7 (S7.4)_
-- [ ] **(Sprint 8)** Add `ip6:` mechanism support to `spf_contains_ip()` for IPv6 server addresses
+- [ ] **(Sprint 8)** Add `ip6:` mechanism support to `spf_contains_ip()` for IPv6 server addresses — _Triaged into Sprint 26_
 - [x] **(Sprint 8)** Quote data dir path in `generate_smtpd_conf` MDA command to handle paths with spaces — _Obsolete: `generate_smtpd_conf` removed in Sprint 22_
 - [x] **(Sprint 11)** `parse_port25_status` uses `smtpd` substring match which could misidentify non-OpenSMTPD processes — _Obsolete: OpenSMTPD-specific port parsing removed in Sprint 22_
 - [x] **(Sprint 11)** Dead `Fail` branch for PTR in `verify.rs` — _Obsolete: `check_ptr()` is no longer called from `verify.rs`; moved to `setup.rs` where the `Fail` arm is a defensive match on the `PreflightResult` enum_
