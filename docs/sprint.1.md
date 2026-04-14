@@ -1,0 +1,936 @@
+# AIMX — Sprint Archive 1
+
+> **Sprints 1–8** | Archived from [`sprint.md`](sprint.md) | Archive 1 of 2
+
+## Sprint 1 — Core Pipeline + Idea Validation (Days 1–2.5) [DONE]
+
+**Goal:** Get the inbound and outbound email pipeline working end-to-end so the core idea can be validated on a real VPS with manual OpenSMTPD configuration. Establish CI and test infrastructure from day one.
+
+**Dependencies:** None
+
+### S1.1 — Project Scaffolding + CI
+
+*As a developer, I want a well-structured Rust project with CI so that all subsequent work has a solid foundation and regressions are caught automatically.*
+
+**Technical context:** Set up workspace with `clap` for CLI dispatch, `serde` + `serde_yaml` for config, `mail-parser` for MIME. Use a single binary with subcommands. Define the `config.yaml` schema covering domain, mailboxes, and channel rules (channel rules won't be implemented until Sprint 4, but the schema should be forward-compatible). Set up GitHub Actions CI from the start.
+
+**Acceptance criteria:**
+- [x] `cargo build` produces a single `aimx` binary
+- [x] `aimx --help` shows all planned subcommands (ingest, send, mcp, mailbox, setup, status, preflight, verify)
+- [x] `config.yaml` schema defined and parseable with serde: domain, data directory, mailboxes with addresses and on_receive stubs
+- [x] Default data directory is `/var/lib/aimx/`
+- [x] Tests pass for config parsing with sample config
+- [x] GitHub Actions CI workflow runs on push and PR: `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check`
+- [x] CI uses stable Rust toolchain
+- [x] Test fixtures directory (`tests/fixtures/`) created with sample `.eml` files for ingest testing (plain text, HTML-only, multipart, with attachments)
+
+### S1.2 — Email Ingest Pipeline
+
+*As an agent operator, I want incoming emails stored as Markdown files so that my agent can read them without parsing libraries.*
+
+**Technical context:** `aimx ingest <rcpt>` reads raw `.eml` from stdin (piped by OpenSMTPD's MDA). Use `mail-parser` to extract headers, body (prefer text/plain, fall back to HTML→plaintext), and attachments. Generate Markdown with YAML frontmatter matching the format in the PRD. Route to mailbox directory based on RCPT TO local part; fall back to `catchall`.
+
+**Acceptance criteria:**
+- [x] `cat test.eml | aimx ingest user@domain.com` produces a correctly formatted `.md` file in the `user` mailbox directory
+- [x] Frontmatter includes all required fields: id, message_id, from, to, subject, date, in_reply_to, references, attachments, mailbox, read
+- [x] `read` is set to `false` on ingest
+- [x] File is named `YYYY-MM-DD-NNN.md` with incrementing counter per day
+- [x] Unrecognized local parts route to `catchall` mailbox
+- [x] HTML-only emails are converted to plaintext
+- [x] Multipart emails extract text/plain correctly
+- [x] Unit tests for EML→Markdown conversion using fixture `.eml` files (plain text, HTML-only, multipart)
+- [x] Unit tests for frontmatter generation and YAML validity
+- [x] Unit tests for mailbox routing (known mailbox, unknown → catchall)
+- [x] Integration test: pipe fixture `.eml` via stdin → verify `.md` output file content against expected snapshot <!-- Partial: integration tests verify fixture parseability, not full pipeline snapshot output -->
+
+### S1.3 — Attachment Extraction
+
+*As an agent operator, I want email attachments extracted to the filesystem so that agents can access attached files directly.*
+
+**Acceptance criteria:**
+- [x] Attachments saved to `<mailbox>/attachments/<filename>` within the data directory
+- [x] Duplicate filenames are deduplicated (append counter)
+- [x] Frontmatter `attachments` array lists each with filename, content_type, size, and relative path
+- [x] Unit tests: extract single attachment, multiple attachments, duplicate filenames, no attachments
+- [x] Integration test: ingest `.eml` with attachments → verify files on disk match original content <!-- Partial: integration test checks attachment count, not full disk content -->
+
+### S1.4 — Basic Email Sending
+
+*As an agent operator, I want to send emails from the command line so that I can test outbound delivery immediately.*
+
+**Technical context:** `aimx send` composes an RFC 5322 message and hands it to `/usr/sbin/sendmail` (provided by OpenSMTPD). No DKIM signing yet — that comes in Sprint 2. This is intentionally minimal to enable quick validation.
+
+**Acceptance criteria:**
+- [x] `aimx send --from user@domain.com --to recipient@example.com --subject "Test" --body "Hello"` composes and sends an email
+- [x] Generated message has valid RFC 5322 headers (From, To, Subject, Date, Message-ID)
+- [x] Message is handed to sendmail for delivery
+- [x] Sending errors produce clear error messages
+- [x] Unit tests for RFC 5322 message composition (verify headers, body, Message-ID format)
+- [x] Unit test: sendmail handoff is abstracted behind a trait so tests don't require a real MTA
+
+### S1.5 — Mailbox Management
+
+*As an agent operator, I want to create multiple mailboxes so that different agents or functions have dedicated email addresses.*
+
+**Acceptance criteria:**
+- [x] `aimx mailbox create schedule` creates the directory and registers in `config.yaml`
+- [x] `aimx mailbox list` shows all mailboxes with message counts
+- [x] `aimx mailbox delete schedule` removes directory and config entry (with confirmation prompt)
+- [x] Creating a mailbox that already exists produces a clear error
+- [x] `catchall` mailbox cannot be deleted
+- [x] Unit tests for create/list/delete operations using temp directories
+- [x] Unit tests for error cases: duplicate create, delete catchall, delete non-existent
+
+### VPS Validation Guide — Sprint 1
+
+**Prerequisites:** A VPS with port 25 open (Hetzner, OVH, BuyVM, Vultr). A domain you control.
+
+```bash
+# 1. Install OpenSMTPD
+sudo apt update && sudo apt install -y opensmtpd
+
+# 2. Build aimx from source
+cargo install --path .
+sudo cp target/release/aimx /usr/local/bin/
+
+# 3. Create data directory and initial config
+sudo mkdir -p /var/lib/aimx/catchall
+sudo cat > /var/lib/aimx/config.yaml <<EOF
+domain: agent.yourdomain.com
+mailboxes:
+  catchall:
+    address: "*@agent.yourdomain.com"
+EOF
+
+# 4. Configure OpenSMTPD (minimal, no TLS yet)
+sudo cat > /etc/smtpd.conf <<EOF
+listen on 0.0.0.0
+action "deliver" mda "/usr/local/bin/aimx ingest %{rcpt}"
+match from any for domain "agent.yourdomain.com" action "deliver"
+match for any action "relay"
+EOF
+sudo systemctl restart opensmtpd
+
+# 5. Set up DNS records
+#    MX   agent.yourdomain.com → your-server-ip (priority 10)
+#    A    agent.yourdomain.com → your-server-ip
+
+# 6. Test inbound: send an email from your personal Gmail to
+#    anything@agent.yourdomain.com, then check:
+ls /var/lib/aimx/catchall/
+cat /var/lib/aimx/catchall/*.md
+
+# 7. Test outbound (no DKIM yet, may land in spam):
+aimx send --from catchall@agent.yourdomain.com \
+          --to your-personal@gmail.com \
+          --subject "Test from aimx" \
+          --body "Hello from my agent's email server!"
+
+# 8. Check Gmail — the reply may be in spam (no DKIM yet, that's Sprint 2)
+```
+
+**What you're validating:** The core thesis — emails arrive as readable Markdown files, and outbound email works. If this feels right, the idea is validated.
+
+---
+
+## Sprint 2 — DKIM + Production-Quality Outbound (Days 3–5) [DONE]
+
+**Goal:** Make outbound email pass authentication checks (DKIM/SPF/DMARC) so messages land in inboxes, not spam folders.
+
+**Dependencies:** Sprint 1 (send pipeline, config schema)
+
+### S2.1 — DKIM Key Generation
+
+*As an agent operator, I want DKIM signing handled natively so that outbound mail passes authentication checks without external tools.*
+
+**Technical context:** Generate 2048-bit RSA keypair using `rsa` crate. Store private key at `<data_dir>/dkim/private.key`, public key at `<data_dir>/dkim/public.key`. Add a CLI command or integrate into setup flow. The public key needs to be formatted for DNS TXT record output.
+
+**Acceptance criteria:**
+- [x] `aimx dkim-keygen` (or equivalent) generates 2048-bit RSA keypair
+- [x] Keys stored in `<data_dir>/dkim/` directory
+- [x] Command outputs the DNS TXT record value for the DKIM public key
+- [x] Existing keys are not overwritten without confirmation
+- [x] Unit test: generated keypair is valid 2048-bit RSA
+- [x] Unit test: DNS TXT record output is correctly formatted
+
+### S2.2 — DKIM Signing on Outbound
+
+*As an agent operator, I want all outbound emails DKIM-signed so that recipients' mail servers verify authenticity.*
+
+**Technical context:** Use `mail-auth` crate for DKIM signing (RSA-SHA256). Sign after composing RFC 5322 message, before handing to sendmail. Sign headers: From, To, Subject, Date, Message-ID, In-Reply-To, References.
+
+**Acceptance criteria:**
+- [x] All outbound email is signed with DKIM-Signature header
+- [x] Signature algorithm is RSA-SHA256
+- [x] DKIM selector is configurable (default: `dkim`)
+- [x] Signed message passes verification when checked against the published DNS record
+- [x] Missing private key produces a clear error, not a crash
+- [x] Unit test: sign a message with a test keypair, then verify the signature with `mail-auth` in the same test (round-trip)
+- [x] Unit test: missing key returns appropriate error
+
+### S2.3 — Email Threading
+
+*As an agent operator, I want email threading support so that replies are grouped correctly in recipients' mail clients.*
+
+**Acceptance criteria:**
+- [x] `aimx send --reply-to <message-id>` sets correct In-Reply-To header
+- [x] References header is built from the original email's References + Message-ID
+- [x] Thread-aware replies display correctly in Gmail's conversation view <!-- Not verifiable in automated tests; requires manual VPS validation -->
+- [x] Unit tests: In-Reply-To set correctly, References chain built from original email's References + Message-ID
+
+### S2.4 — File Attachments on Send
+
+*As an agent operator, I want to send emails with file attachments so that agents can share documents.*
+
+**Acceptance criteria:**
+- [x] `aimx send --attachment /path/to/file.pdf` attaches the file with correct MIME type
+- [x] Multiple `--attachment` flags supported
+- [x] Attachment Content-Type is inferred from file extension
+- [x] Missing file produces a clear error
+- [x] Unit tests: single attachment, multiple attachments, MIME type inference, missing file error
+
+### VPS Validation Guide — Sprint 2
+
+```bash
+# 1. Generate DKIM keys
+sudo aimx dkim-keygen
+
+# 2. Add DNS records (the command will print what to add):
+#    TXT  dkim._domainkey.agent.yourdomain.com → "v=DKIM1; k=rsa; p=MIIBIj..."
+#    TXT  agent.yourdomain.com → "v=spf1 ip4:YOUR_IP -all"
+#    TXT  _dmarc.agent.yourdomain.com → "v=DMARC1; p=reject"
+
+# 3. Wait for DNS propagation (check with dig):
+dig TXT dkim._domainkey.agent.yourdomain.com
+
+# 4. Send a test email:
+aimx send --from catchall@agent.yourdomain.com \
+          --to your-personal@gmail.com \
+          --subject "DKIM test" \
+          --body "This should land in your inbox, not spam."
+
+# 5. In Gmail, click "Show original" on the received email. Verify:
+#    DKIM: PASS
+#    SPF: PASS
+#    DMARC: PASS
+
+# 6. Test with https://www.mail-tester.com — send to their test address,
+#    aim for a score of 9/10 or higher.
+
+# 7. Test threading — reply to an email:
+aimx send --from catchall@agent.yourdomain.com \
+          --to your-personal@gmail.com \
+          --subject "Re: DKIM test" \
+          --body "This is a reply." \
+          --reply-to "<message-id-from-original>"
+#    Verify it threads correctly in Gmail.
+```
+
+**What you're validating:** Outbound mail is production-quality — DKIM/SPF/DMARC all pass, emails land in inbox, threading works.
+
+---
+
+## Sprint 2.5 — Non-blocking Cleanup (Days 5.5–6) [DONE]
+
+**Goal:** Address accumulated non-blocking improvements from Sprint 1 and Sprint 2 reviews.
+
+**Dependencies:** Sprint 2 (merged)
+
+### S2.5-1: Ingest Hardening + Testing
+
+- [x] Add `--data-dir` or `AIMX_DATA_DIR` CLI option to override the hardcoded `/var/lib/aimx/` path *(from Sprint 1 review)*
+- [x] Add mailbox name validation to prevent `..`, `/`, or empty strings in `create_mailbox` *(from Sprint 1 review)*
+- [x] Replace hand-rolled `yaml_escape` with `serde_yaml` struct serialization for frontmatter *(from Sprint 1 review)*
+- [x] Add `\r` to the quoting condition in `yaml_escape` for hardening *(from Sprint 1 review)* — Superseded: `yaml_escape` replaced entirely by `serde_yaml` struct serialization
+- [x] Enhance integration tests to exercise `ingest_email()` with fixture files through the full pipeline *(from Sprint 1 review)*
+
+### S2.5-2: Send Hardening + Testing
+
+- [x] Escape attachment filenames in MIME headers to prevent malformed headers *(from Sprint 2 review)*
+- [x] Add integration test for `aimx dkim-keygen` CLI end-to-end *(from Sprint 2 review)*
+- [x] Refactor duplicated header construction logic in `compose_message()` *(from Sprint 2 review)*
+- [x] Add test verifying `dkim_selector` config value is used at runtime *(from Sprint 2 review)*
+
+---
+
+## Sprint 3 — MCP Server (Days 6–8.5) [DONE]
+
+**Goal:** Give AI agents full email access via MCP so that Claude Code (or any MCP client) can read, send, and manage email programmatically.
+
+**Dependencies:** Sprint 1 (ingest, mailbox management), Sprint 2 (send with DKIM)
+
+### S3.1 — MCP Transport + Mailbox Tools
+
+*As an agent framework developer, I want a standard MCP interface for email so that any MCP-compatible agent can use email.*
+
+**Technical context:** Use `rmcp` crate for MCP stdio transport. `aimx mcp` starts the server, launched on-demand by the MCP client (no daemon). Implement `mailbox_create`, `mailbox_list`, `mailbox_delete` as MCP tools that wrap the existing CLI logic.
+
+**Acceptance criteria:**
+- [x] `aimx mcp` starts an MCP server in stdio mode
+- [x] Server responds to MCP `initialize` handshake correctly
+- [x] `mailbox_create(name)` creates mailbox and returns confirmation
+- [x] `mailbox_list()` returns all mailboxes with message counts (total and unread)
+- [x] `mailbox_delete(name)` deletes mailbox (with appropriate safeguards)
+- [x] Server exits cleanly when stdin closes
+- [x] Integration tests: spawn `aimx mcp` as child process, send JSON-RPC requests via stdin, assert responses (initialize handshake, tool calls, error cases)
+
+### S3.2 — Email Read + List Tools
+
+*As an agent operator, I want my agent to list and read emails via MCP so that it can process incoming messages programmatically.*
+
+**Acceptance criteria:**
+- [x] `email_list(mailbox)` returns frontmatter of all emails in the mailbox
+- [x] `email_list` supports optional filters: `unread` (bool), `from` (string), `since` (datetime), `subject` (string)
+- [x] `email_read(mailbox, id)` returns full Markdown content of the email
+- [x] `email_mark_read(mailbox, id)` updates frontmatter `read: true`
+- [x] `email_mark_unread(mailbox, id)` updates frontmatter `read: false`
+- [x] Non-existent mailbox or email ID returns clear MCP error
+- [x] Unit tests for email listing with each filter type and combinations
+- [x] Unit tests for mark read/unread (verify frontmatter file is updated correctly)
+- [x] Integration tests via MCP JSON-RPC: list, read, mark_read, error cases
+
+### S3.3 — Email Send + Reply Tools
+
+*As an agent operator, I want my agent to send and reply to emails via MCP so that it can compose and respond to messages programmatically.*
+
+**Acceptance criteria:**
+- [x] `email_send(from_mailbox, to, subject, body, attachments?)` composes, DKIM-signs, and sends
+- [x] `email_reply(mailbox, id, body)` replies with correct In-Reply-To/References headers
+- [x] Send/reply return confirmation with the sent Message-ID
+- [x] Errors (missing mailbox, invalid recipient, missing DKIM key) return clear MCP errors
+- [x] Integration tests via MCP JSON-RPC: send and reply (using mock MTA trait from Sprint 1)
+
+### VPS Validation Guide — Sprint 3
+
+```bash
+# 1. Add MCP config to Claude Code:
+#    In ~/.claude/settings.json:
+#    {
+#      "mcpServers": {
+#        "email": {
+#          "command": "/usr/local/bin/aimx",
+#          "args": ["mcp"]
+#        }
+#      }
+#    }
+
+# 2. Start Claude Code and test:
+#    "List all my mailboxes"
+#    "Show me unread emails in the catchall mailbox"
+#    "Read the latest email"
+#    "Send an email to my-personal@gmail.com saying hello"
+#    "Reply to the last email from alice@example.com"
+
+# 3. Verify Claude Code can:
+#    - See mailbox list with counts
+#    - Read email content
+#    - Send email that arrives in your Gmail
+#    - Reply with correct threading
+```
+
+**What you're validating:** The full agent experience — Claude Code can autonomously read and respond to email.
+
+---
+
+## Sprint 4 — Channel Manager + Inbound Trust (Days 8–10) [DONE]
+
+**Goal:** Enable automated reactions to incoming email (triggers) with security gating so that agents can act on email automatically while being protected from spoofed senders.
+
+**Dependencies:** Sprint 1 (ingest pipeline, config schema)
+
+### S4.1 — Channel Manager: Trigger Execution
+
+*As an agent operator, I want channel rules that execute commands on incoming mail so that my agent can react to emails automatically.*
+
+**Technical context:** During `aimx ingest`, after saving the `.md` file, read the mailbox's `on_receive` rules from `config.yaml`. For each `cmd` trigger, substitute template variables (`{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`) and execute the command via shell. Run synchronously. Log failures to stderr but never block delivery.
+
+**Acceptance criteria:**
+- [x] `on_receive` rules in `config.yaml` execute on email delivery to that mailbox
+- [x] Template variables `{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}` are substituted correctly
+- [x] Trigger failures are logged but do not block email delivery or cause `aimx ingest` to exit non-zero
+- [x] Multiple triggers on the same mailbox execute in order
+- [x] Mailboxes with no triggers work without errors
+- [x] Unit tests for template variable substitution (all variables, special characters in values)
+- [x] Integration test: ingest email with trigger config → verify trigger command executed (use `touch {filepath}.triggered` as test command)
+- [x] Integration test: failing trigger does not affect email delivery (`.md` still saved)
+
+### S4.2 — Match Filters
+
+*As an agent operator, I want to filter channel triggers by sender, subject, or attachment presence so that agents only act on relevant emails.*
+
+**Acceptance criteria:**
+- [x] `match.from` supports glob patterns (e.g., `*@company.com`)
+- [x] `match.subject` matches as substring (case-insensitive)
+- [x] `match.has_attachment` filters on attachment presence (bool)
+- [x] All conditions are AND logic — all must match for trigger to fire
+- [x] Trigger with no `match` block fires on every email
+- [x] Unit tests for each filter type: from glob match/mismatch, subject match/mismatch, has_attachment true/false
+- [x] Unit tests for AND logic: partial match does not fire, full match fires
+
+### S4.3 — Inbound DKIM/SPF Verification
+
+*As an agent operator, I want inbound DKIM/SPF verification so that channel triggers only fire on authenticated emails when I enable trust policies.*
+
+**Technical context:** Use `mail-auth` crate to verify DKIM signature and SPF record of the incoming message during `aimx ingest`. Store results in frontmatter. This runs on the raw `.eml` before Markdown conversion.
+
+**Acceptance criteria:**
+- [x] Inbound emails have `dkim: pass|fail|none` and `spf: pass|fail|none` in frontmatter
+- [x] Verification uses the `mail-auth` crate against the sender's published DNS records
+- [x] Verification failure does not block email storage — mail is always saved
+- [x] Verification results are accurate when tested against known DKIM-signed email (e.g., from Gmail) <!-- Partial: requires real DNS; verified functional at runtime, not testable in CI -->
+- [x] Unit test: parse DKIM/SPF results from a known-good DKIM-signed `.eml` fixture (captured from Gmail) <!-- Partial: unsigned email tested; DKIM-signed fixture requires real DNS for verification -->
+- [x] Unit test: unsigned email produces `dkim: none`, `spf: none`
+
+### S4.4 — Trust Policy + Trusted Senders
+
+*As an agent operator, I want per-mailbox trust policies so that triggers only fire on authenticated emails when I choose.*
+
+**Acceptance criteria:**
+- [x] `trust: none` (default) — all triggers fire regardless of verification result
+- [x] `trust: verified` — triggers only fire when `dkim: pass`
+- [x] `trusted_senders` allowlist accepts glob patterns (e.g., `*@company.com`, `alice@gmail.com`)
+- [x] Allowlisted senders always trigger, bypassing DKIM check
+- [x] Trust settings are per-mailbox in `config.yaml`
+- [x] Email is always stored regardless of trust result
+- [x] Unit tests for trust gating: trust=none fires always, trust=verified blocks on dkim!=pass, trusted_senders bypasses check
+- [x] Integration test: full ingest pipeline with trust=verified config — DKIM-pass email triggers, DKIM-fail email stores but does not trigger
+
+### VPS Validation Guide — Sprint 4
+
+```bash
+# 1. Set up a trigger in config.yaml:
+#    mailboxes:
+#      catchall:
+#        address: "*@agent.yourdomain.com"
+#        on_receive:
+#          - type: cmd
+#            command: 'echo "New email from {from}: {subject}" >> /tmp/aimx-triggers.log'
+#          - type: cmd
+#            command: 'ntfy pub your-topic "Email from {from}: {subject}"'
+#            match:
+#              from: "*@gmail.com"
+
+# 2. Send a test email from Gmail → check /tmp/aimx-triggers.log
+# 3. Send from non-Gmail → verify only the first trigger fires
+
+# 4. Test trust gating:
+#    mailboxes:
+#      secure:
+#        address: secure@agent.yourdomain.com
+#        trust: verified
+#        on_receive:
+#          - type: cmd
+#            command: 'echo "TRUSTED: {from}" >> /tmp/aimx-triggers.log'
+#
+# Send from Gmail (DKIM passes) → trigger fires
+# Send from a server with no DKIM → trigger does NOT fire, but email is still stored
+
+# 5. Verify frontmatter contains dkim/spf results:
+cat /var/lib/aimx/catchall/*.md | head -20
+```
+
+---
+
+## Sprint 5 — Setup Wizard (Days 10.5–12.5) [DONE]
+
+**Goal:** Replace all manual VPS setup with a single `aimx setup <domain>` command that handles everything from preflight checks to DNS verification.
+
+**Dependencies:** Sprint 1 (config, ingest), Sprint 2 (DKIM keygen)
+
+### S5.1 — Preflight Checks
+
+*As an agent operator, I want setup to verify port 25 reachability before proceeding so that I don't waste time configuring a server that can't deliver mail.*
+
+**Technical context:** Outbound check: connect to `gmail-smtp-in.l.google.com:25`. Inbound check: make HTTP request to `check.aimx.email` probe service with callback IP (the probe service connects back on port 25). PTR check: reverse DNS lookup on server IP. If port 25 is blocked, stop with clear error listing compatible providers.
+
+**Acceptance criteria:**
+- [x] Outbound port 25 check connects to a well-known MX and reports pass/fail
+- [x] Inbound port 25 check requests probe from `check.aimx.email` and reports pass/fail
+- [x] PTR record check warns (non-blocking) if not set, with instructions
+- [x] Port 25 blocked → setup stops with error message listing compatible VPS providers
+- [x] `aimx preflight` runs these checks standalone without proceeding to setup
+- [x] Unit tests for each check result path (pass, fail, timeout) using mockable network traits
+
+### S5.2 — OpenSMTPD Configuration
+
+*As an agent operator, I want setup to configure OpenSMTPD automatically so that I don't have to write smtpd.conf manually.*
+
+**Technical context:** Install OpenSMTPD via `apt install opensmtpd`. Generate self-signed TLS cert for STARTTLS (`openssl req -x509 ...`). Write `smtpd.conf` with TLS, MDA delivery to `aimx ingest`, and relay for outbound. Restart OpenSMTPD.
+
+**Acceptance criteria:**
+- [x] Setup installs OpenSMTPD if not present (via apt)
+- [x] Self-signed TLS cert generated and placed in `/etc/ssl/aimx/`
+- [x] `smtpd.conf` written with TLS, inbound delivery via `aimx ingest`, and outbound relay
+- [x] OpenSMTPD restarted successfully after configuration
+- [x] Existing OpenSMTPD config is backed up before overwriting
+- [x] Unit test: generated `smtpd.conf` content is correct for a given domain and IP
+- [x] Unit test: TLS cert generation produces valid self-signed cert
+
+### S5.3 — DNS Guidance + Verification
+
+*As an agent operator, I want setup to display required DNS records and verify them so that I get clear instructions and confirmation.*
+
+**Acceptance criteria:**
+- [x] Setup displays all required DNS records: MX, A, SPF, DKIM, DMARC, PTR
+- [x] Records include the actual values (server IP, DKIM public key)
+- [x] Setup pauses and waits for user to confirm DNS records are added
+- [x] After confirmation, setup verifies each record via DNS lookup
+- [x] Failed verification shows which records are wrong/missing with guidance
+- [x] Unit test: DNS record display formatting for each record type
+- [x] Unit test: verification logic handles each record type's pass/fail/missing states
+
+### S5.4 — Setup Finalization
+
+*As an agent operator, I want setup to create a default mailbox and show me the MCP config so that I'm ready to go immediately after setup.*
+
+**Acceptance criteria:**
+- [x] Default `catchall` mailbox created
+- [x] DKIM keypair generated (if not already present)
+- [x] Data directory created with correct permissions
+- [x] MCP configuration snippet for Claude Code displayed
+- [x] Gmail whitelist instructions displayed
+- [x] Setup is idempotent — running again doesn't break existing config
+
+### VPS Validation Guide — Sprint 5
+
+```bash
+# 1. Get a FRESH VPS (Hetzner Cloud, OVH, BuyVM, Vultr)
+# 2. Install aimx binary
+# 3. Run setup:
+sudo aimx setup agent.yourdomain.com
+
+# 4. Follow the interactive prompts:
+#    - Preflight checks should pass (port 25 open)
+#    - Add DNS records as instructed
+#    - Wait for DNS verification to pass
+#    - Setup completes with catchall mailbox
+
+# 5. Test the full flow without any manual OpenSMTPD config:
+#    - Send email from Gmail → verify .md appears
+#    - Send email via aimx send → verify DKIM passes in Gmail
+#    - Add MCP config to Claude Code → verify agent access works
+
+# 6. Time the process — target is < 15 minutes (excluding DNS propagation)
+```
+
+---
+
+## Sprint 5.5 — Non-blocking Cleanup (Days 12.5–13) [DONE]
+
+**Goal:** Address accumulated non-blocking improvements from sprint reviews.
+
+**Dependencies:** Sprint 5 (merged)
+
+### S5.5-1: Serialization + Error Handling
+
+- [x] Replace `unwrap_or_default()` on `serde_yaml::to_string()` with `expect()` or error propagation *(from Sprint 2.5 review)*
+- [x] Narrow `tokio` features from `"full"` to specific needed features *(from Sprint 3 review)*
+
+### S5.5-2: Send Module Improvements
+
+- [x] Add unit test for `write_common_headers` with `references = Some(...)` path *(from Sprint 3 review)*
+
+### S5.5-3: Channel/Ingest Improvements
+
+- [x] Deduplicate DNS resolver creation in `verify_dkim_async` and `verify_spf_async` *(from Sprint 4 review)*
+- [x] Fix SPF domain fallback semantics — variable naming and fallback logic *(from Sprint 4 review)*
+- [x] Add captured DKIM-signed `.eml` fixture from Gmail for verification testing *(from Sprint 4 review)*
+- [x] Verify `mail-auth` `dkim_headers` field is stable public API *(from Sprint 4 review)*
+
+### S5.5-4: Setup Improvements
+
+- [x] Implement timestamped backup for pre-aimx OpenSMTPD config *(from Sprint 5 review)*
+
+---
+
+## Sprint 6 — Verify Service + Polish (Days 13–15.5) [DONE]
+
+**Goal:** Complete the product with the hosted verification service, remaining CLI commands, and documentation for open source release.
+
+**Dependencies:** Sprint 5 (setup wizard references verify service)
+
+### S6.1 — Verify Service: Port Probe
+
+*As an agent operator, I want inbound port 25 checked by an external service during setup so that I know my server is reachable before configuring everything.*
+
+**Technical context:** Lightweight HTTP service at `check.aimx.email`. Receives a request with the caller's IP, connects back to that IP on port 25, returns the result. Can be a Cloudflare Worker, a small Rust/Node service, or equivalent. Must be open source and self-hostable.
+
+**Acceptance criteria:**
+- [x] `check.aimx.email` accepts probe requests with target IP
+- [x] Service connects to target IP on port 25 and reports open/closed
+- [x] Response is a simple JSON payload: `{ "reachable": true/false }`
+- [x] Service source code is in the aimx repo (e.g., `services/verify/`)
+- [x] Service is self-hostable with clear deployment instructions
+- [x] Tests for the verify service (unit tests appropriate to the chosen platform — e.g., Cloudflare Worker test harness or Rust integration tests)
+
+### S6.2 — Verify Service: Email Echo
+
+*As an agent operator, I want an end-to-end delivery test so that I can confirm the full pipeline works after setup.*
+
+**Technical context:** Email endpoint at `verify@aimx.email`. Receives a test email from the user's server, verifies DKIM, and sends a reply. The reply confirms DKIM pass/fail status. Used during `aimx setup` and `aimx verify`.
+
+**Acceptance criteria:**
+- [x] `verify@aimx.email` receives email and sends an auto-reply
+- [x] Reply includes DKIM/SPF verification result of the received message
+- [x] Service handles concurrent requests from multiple users
+- [x] Service source code is in the aimx repo alongside the probe service
+
+### S6.3 — CLI Polish: status, preflight, verify
+
+*As an agent operator, I want to check server status and verify my setup with simple commands.*
+
+**Acceptance criteria:**
+- [x] `aimx status` shows: domain, mailbox count, message counts (total/unread), OpenSMTPD running status, DKIM key presence
+- [x] `aimx preflight` runs port 25 + DNS checks without installing anything (extracted from setup wizard)
+- [x] `aimx verify` sends test email to `verify@aimx.email`, waits for reply, reports pass/fail
+- [x] All commands have clear, formatted output
+- [x] All commands have `--help` with usage examples
+- [x] Unit tests for `aimx status` output formatting with various states (no mailboxes, multiple mailboxes, missing DKIM key)
+
+### S6.4 — Documentation
+
+*As a developer discovering aimx, I want clear documentation so that I can understand what it does and get started quickly.*
+
+**Acceptance criteria:**
+- [x] README.md with: project description, quick start, requirements, installation, usage examples
+- [x] Compatible VPS providers listed with port 25 status
+- [x] MCP configuration example for Claude Code
+- [x] Channel manager configuration examples
+- [x] Trust policy documentation
+- [x] `config.yaml` reference with all fields documented
+- [x] LICENSE file (MIT or Apache-2.0)
+
+### VPS Validation Guide — Sprint 6
+
+```bash
+# 1. Full fresh-VPS end-to-end test:
+sudo aimx setup agent.yourdomain.com
+# Setup should now include the end-to-end verify step using verify@aimx.email
+
+# 2. After setup, test CLI commands:
+aimx status
+aimx preflight
+aimx verify
+
+# 3. Test the full agent workflow:
+#    - Configure Claude Code MCP
+#    - Have Claude create a mailbox
+#    - Have Claude send email
+#    - Send email to the agent from Gmail
+#    - Have Claude read the email and reply
+#    - Set up a channel trigger that invokes Claude on incoming mail
+
+# 4. Review README — would a stranger understand how to set this up?
+```
+
+---
+
+## Sprint 7 — Security Hardening + Critical Fixes (Days 16–18.5) [DONE]
+
+**Goal:** Fix all critical and high-severity issues found in the post-v1 code review audit. These address security vulnerabilities, data loss risks, and PRD compliance gaps.
+
+**Dependencies:** Sprint 6 (merged)
+
+### S7.1 — Enforce DKIM Signing on All Outbound Email
+
+*As an agent operator, I expect outbound email to always be DKIM-signed, and to get a clear error if signing is impossible — not a silently unsigned message that may land in spam.*
+
+**Context:** There are two outbound code paths and both silently skip DKIM when the key is missing:
+
+1. **CLI path** (`src/send.rs`, `run()` function, ~line 197): Config is loaded with `.ok()` (line 203–206), swallowing any load error. The private key is loaded with `.ok()` (line 209). If either is `None`, the code prints `eprintln!("Warning: DKIM signing disabled (no key found)")` (line 214) and proceeds to send the email unsigned. The `send_with_transport()` function (line 180) accepts `dkim_key: Option<...>` and simply skips signing when `None`.
+
+2. **MCP path** (`src/mcp.rs`): Both `email_send` (~line 238) and `email_reply` (~line 278) call `load_dkim_key(&config)` (a helper at line 532 that returns `Option<RsaPrivateKey>` via `.ok()`). The result is passed through `.as_ref().map(...)` to build `dkim_info` (lines 268–270 for send, lines 350–354 for reply). If the key is missing, `dkim_info` is `None` and `send_with_transport` sends unsigned — with **no warning or error message at all**.
+
+**What should happen:** Both paths should return an error when the DKIM key can't be loaded, refusing to send unsigned email. This was the original intent per FR-18 ("Sign message with DKIM"), S2.2 AC ("Missing private key produces a clear error, not a crash"), and S3.3 AC ("Errors … missing DKIM key … return clear MCP errors").
+
+**Approach:** Change `send::run()` to propagate config/key load errors instead of using `.ok()`. In MCP, change `load_dkim_key` to return `Result` and have `email_send`/`email_reply` return `Err(...)` when the key is missing.
+
+**Acceptance criteria:**
+- [x] `send::run()` returns an error when DKIM config or private key cannot be loaded — send must not proceed unsigned
+- [x] MCP `email_send` returns a clear MCP error when DKIM key is unavailable
+- [x] MCP `email_reply` returns a clear MCP error when DKIM key is unavailable
+- [x] Unit test: `send::run()` with missing DKIM key returns error (not warning)
+- [x] Unit test: MCP send/reply with missing DKIM key returns error response
+
+### S7.2 — Sanitize Email Headers Against CRLF Injection
+
+*As a security-conscious operator, I need outbound email composition to be safe from header injection, even when input comes from an AI agent via MCP.*
+
+**Context:** In `src/send.rs`, the function `write_common_headers()` (line 57) builds MIME headers by directly interpolating user-controlled values:
+
+```rust
+msg.push_str(&format!("From: {}\r\n", args.from));   // line 58
+msg.push_str(&format!("To: {}\r\n", args.to));       // line 59
+msg.push_str(&format!("Subject: {}\r\n", args.subject)); // line 60
+```
+
+If any of these values contain `\r\n`, an attacker can inject arbitrary additional headers or even start the message body early. For example, a subject of `"Hello\r\nBcc: victim@evil.com\r\n\r\nInjected body"` would inject a Bcc header and replace the body.
+
+Note that attachment filenames **are** already sanitized — `escape_filename()` (line 50) strips `\r` and `\n`. The same pattern needs to be applied (or a stricter one — reject rather than strip) to the From/To/Subject header values.
+
+The primary attack vector is MCP tool calls (`email_send`/`email_reply` in `src/mcp.rs`) where input originates from an AI agent that may be processing untrusted data. CLI args are lower risk since shells typically don't pass raw CRLF, but defense-in-depth applies.
+
+**Approach:** Add a `sanitize_header_value()` function that strips `\r` and `\n` characters (matching the `escape_filename` approach), and call it in `write_common_headers()` for all three fields. Alternatively, return an error from `compose_message()` if any header value contains CRLF — this is stricter and may be preferable for a security fix.
+
+**Acceptance criteria:**
+- [x] From, To, and Subject values are sanitized to strip or reject CRLF sequences before header interpolation
+- [x] Sanitization covers both `\r\n` and bare `\n` injection vectors
+- [x] `compose_message()` returns an error if a header value contains CRLF after sanitization (defense in depth)
+- [x] Unit test: subject containing `\r\n` does not produce injected headers
+- [x] Unit test: from/to containing `\r\n` does not produce injected headers
+- [x] Unit test: normal headers with no CRLF pass through unchanged
+
+### S7.3 — Atomic File ID Generation in Ingest
+
+*As an operator running a production mail server, I need concurrent deliveries to never overwrite each other.*
+
+**Context:** In `src/ingest.rs`, the function `generate_file_id()` (line 407) generates email IDs using a check-then-act pattern:
+
+```rust
+fn generate_file_id(mailbox_dir: &Path) -> String {
+    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let mut counter = 1u32;
+    loop {
+        let candidate = format!("{today}-{counter:03}");
+        let path = mailbox_dir.join(format!("{candidate}.md"));
+        if !path.exists() {       // <-- checks existence (line 414)
+            return candidate;      // <-- returns ID, but doesn't create the file
+        }
+        counter += 1;
+    }
+}
+```
+
+The ID is returned to `ingest_email()` which later writes the file at line 142: `std::fs::write(&filepath, content)?;`. Between the existence check and the write, a concurrent `aimx ingest` process could pick the same ID, and the second write would silently overwrite the first email.
+
+While OpenSMTPD's default MDA delivery is typically serialized per-recipient, this is not architecturally guaranteed — custom configs, multiple domains, or future changes could introduce concurrency.
+
+**Approach:** Merge ID generation and file creation into a single atomic operation. Replace `generate_file_id()` + `fs::write()` with a function that uses `OpenOptions::new().write(true).create_new(true).open(...)` in a loop. `create_new(true)` atomically fails if the file already exists (maps to `O_CREAT | O_EXCL`), so the loop increments the counter and retries on collision. The function should return both the ID and the open file handle (or just write the content directly).
+
+**Acceptance criteria:**
+- [x] File creation uses `OpenOptions::new().create_new(true)` (or equivalent atomic create) to prevent TOCTOU race
+- [x] On collision, the ID counter increments and retries
+- [x] Unit test: two rapid `generate_file_id` calls for the same day produce different IDs
+- [x] Unit test: pre-existing file triggers retry rather than overwrite
+
+### S7.4 — Fix Verify Race Condition
+
+*As an operator running `aimx verify`, I need the reply detection to work reliably regardless of timing.*
+
+**Context:** In `src/verify.rs`, the `run()` function (line 10) has a race condition in its reply detection logic. The current execution order is:
+
+```
+line 35:  send::run(send_args, data_dir)?;           // 1. Send test email
+line 36:  println!("Test email sent.\n");
+...
+line 43:  let before: Vec<String> = list_md_files(&catchall_dir);  // 2. Snapshot "before" files
+line 46:  while elapsed < MAX_WAIT_SECS {             // 3. Poll for new files
+line 50:      let after = list_md_files(&catchall_dir);
+line 51:      let new_files = after.iter().filter(|f| !before.contains(f)).collect();
+```
+
+The problem: the "before" snapshot (step 2) is taken **after** the email is sent (step 1). If the verify service at `verify@aimx.email` replies very quickly, the reply could arrive and be written to the catchall directory between steps 1 and 2. In that case, the reply file would appear in the "before" set and would never be detected as "new" by the polling loop — causing a false timeout.
+
+**Fix:** Swap lines 35 and 43 — take the snapshot before sending. This is a two-line reorder. The `catchall_dir` is already computed earlier (line 41: `let catchall_dir = config.mailbox_dir("catchall")`), so moving the snapshot before the send is straightforward.
+
+Also handle the edge case where the catchall mailbox directory doesn't exist — `list_md_files` (line 78) returns an empty Vec on error via `unwrap_or_default()`, which silently hides a misconfigured catchall. If the directory is missing, `verify` should error immediately with a clear message.
+
+**Acceptance criteria:**
+- [x] "Before" file snapshot is taken *before* sending the test email
+- [x] Existing unit tests still pass after reordering
+- [x] Handle edge case: missing catchall mailbox directory produces a clear error instead of silently returning empty *(also addresses Sprint 6 backlog item)*
+
+### S7.5 — Integrate End-to-End Verify into Setup
+
+*As an operator completing setup, I want the wizard to confirm the full pipeline works — not just that DNS records exist.*
+
+**Context:** In `src/setup.rs`, the `run_setup()` function (line 725) currently ends after DNS record verification:
+
+```
+line 766:  let results = verify_all_dns(net, domain, &server_ip, &dkim_selector);
+line 767:  let all_pass = display_dns_verification(&results);
+line 769-775: if all_pass { "ready!" } else { "some records not correct" }
+line 777:  Ok(())  // <-- setup ends here, no end-to-end email test
+```
+
+The PRD requirement FR-8 states: "Run end-to-end verification by sending/receiving test email via `verify@aimx.email`." The `verify::run()` function already exists in `src/verify.rs` and does exactly this — it sends a test email, polls for a reply, and reports pass/fail. But `run_setup()` never calls it.
+
+The sprint 6 VPS validation guide (sprint.md line 614) explicitly says: "Setup should now include the end-to-end verify step using verify@aimx.email."
+
+**Approach:** After the DNS verification block (line 775), add a prompt asking the user if they want to run end-to-end verification. If yes, call `verify::run(Some(data_dir))`. Make the verify step non-blocking — if it fails (likely due to DNS propagation delays), print a warning suggesting the user run `aimx verify` later, and still exit successfully. The existing interactive pattern in setup (line 761–764: "press Enter to verify...") provides a good template for the UX.
+
+Note: `run_setup()` takes `sys: &dyn SystemOps` and `net: &dyn NetworkOps` for testability. The verify call uses `send::run()` internally which calls real sendmail — this isn't mockable via the existing traits. For unit testing, consider adding a flag or trait method to skip the actual verify call, or test the prompt/flow logic separately from the email send.
+
+**Acceptance criteria:**
+- [x] After DNS verification passes, `run_setup()` offers to run end-to-end email verification
+- [x] If verify fails, setup completes with a warning (non-blocking — DNS may still be propagating)
+- [x] If verify passes, setup reports full success including email delivery confirmation
+- [x] If user declines verify, setup completes normally (verify is optional during setup since DNS propagation may be pending)
+- [x] Unit test: `run_setup()` flow includes verify step call (using mockable traits) <!-- Partial: VerifyRunner trait is tested via mock, but no test exercises the full run_setup_with_verify flow due to stdin dependency -->
+
+---
+
+## Sprint 8 — Setup Robustness, CI & Documentation (Days 19–21.5) [DONE]
+
+**Goal:** Fix medium and low-severity issues: strengthen DNS verification, propagate configuration correctly, add CI coverage for the verify service, and resolve documentation inconsistencies.
+
+**Dependencies:** Sprint 7
+
+### S8.1 — Improve DNS Verification Accuracy
+
+*As an operator, I want DNS verification to catch real misconfiguration, not just confirm that records exist.*
+
+**Context:** In `src/setup.rs`, the three DNS verification functions are overly permissive:
+
+1. **SPF** — `verify_spf()` (line 496): Filters TXT records for those starting with `"v=spf1"`, then checks `spf.iter().any(|r| r.contains(expected_ip))` (line 503). This is a bare substring match — if the expected IP is `"1.2.3.4"`, it would also match a record containing `"ip4:1.2.3.45"` or `"ip4:11.2.3.4"`. Should instead parse the SPF mechanisms and match the exact IP.
+
+2. **DKIM** — `verify_dkim()` (line 516): Looks up `{selector}._domainkey.{domain}` TXT, filters for records containing `"v=DKIM1"` (line 520), and returns Pass if any match exists. It does **not** check that the `p=` public key in the DNS record matches the private key on disk (`<data_dir>/dkim/private.key`). An operator could publish the wrong key and setup would still say PASS.
+
+3. **DMARC** — `verify_dmarc()` (line 531): Looks up `_dmarc.{domain}` TXT, filters for `"v=DMARC1"` (line 535), and returns Pass if any match. A record of `"v=DMARC1; p=none"` passes — but `p=none` means no enforcement, which defeats the purpose of DMARC for deliverability. Should warn when policy is too permissive.
+
+All three functions use the same `DnsVerifyResult` enum (Pass/Fail/Missing) and are called via `verify_all_dns()` (line 546) and displayed by `display_dns_verification()`. The existing mock infrastructure (`MockNetworkOps` with `txt_records` HashMap) makes these fully testable.
+
+**Acceptance criteria:**
+- [x] SPF verification checks for the IP in proper SPF mechanisms (`ip4:X.X.X.X/32`, `ip4:X.X.X.X `, or end-of-string) — not bare substring
+- [x] DKIM verification extracts the `p=` value from the DNS record and confirms it matches the local public key
+- [x] DMARC verification warns if policy is `p=none` (too permissive for production)
+- [x] Unit test: SPF with similar-prefix IP (e.g., "1.2.3.4" vs "1.2.3.45") correctly fails
+- [x] Unit test: DKIM record with mismatched public key reports failure
+- [x] Unit test: DMARC with `p=none` reports warning
+
+### S8.2 — Propagate --data-dir to OpenSMTPD Ingest Command
+
+*As an operator using a custom data directory, I need OpenSMTPD's MDA command to use the same path.*
+
+**Context:** In `src/setup.rs`, `generate_smtpd_conf()` (line 324) takes `domain` and `aimx_binary` parameters and generates the OpenSMTPD config. The MDA action is hardcoded as:
+
+```rust
+action "deliver" mda "{aimx_binary} ingest %{{rcpt}}"  // line 335
+```
+
+Meanwhile, `run_setup()` (line 725) accepts an optional `data_dir` parameter (line 727) and defaults to `/var/lib/aimx` (line 740). All config and mailbox operations use this custom path. But the generated `smtpd.conf` doesn't pass `--data-dir` to the ingest command.
+
+**Result:** If an operator runs `sudo aimx setup mydomain.com --data-dir /opt/aimx`, setup creates config at `/opt/aimx/config.yaml` and mailboxes under `/opt/aimx/`. But when OpenSMTPD delivers mail, it invokes `aimx ingest user@domain.com` (no `--data-dir`), which defaults to `/var/lib/aimx` — so ingest looks for config in the wrong place and mail either fails or goes to the wrong directory.
+
+**Approach:** Add a `data_dir: Option<&Path>` parameter to `generate_smtpd_conf()`. When the data dir is non-default, generate `action "deliver" mda "{aimx_binary} ingest --data-dir {data_dir} %{{rcpt}}"`. The caller in `configure_opensmtpd()` (line 344) and `run_setup()` need to thread the data dir through. There's an existing unit test `generated smtpd.conf content is correct` that will need updating.
+
+**Acceptance criteria:**
+- [x] `generate_smtpd_conf()` accepts a data directory parameter
+- [x] When data dir is non-default, the MDA command includes `--data-dir <path>`
+- [x] Default path (`/var/lib/aimx`) omits the flag for cleaner config
+- [x] Unit test: custom data dir produces `--data-dir` in smtpd.conf
+- [x] Unit test: default data dir omits `--data-dir` in smtpd.conf
+
+### S8.3 — Fix SPF Verification Domain Fallback
+
+*As an operator, I want SPF verification results to be accurate, not evaluated against the wrong domain.*
+
+**Context:** In `src/ingest.rs`, the `verify_spf_async()` function (line 204) determines which domain to use for SPF evaluation:
+
+```rust
+let mail_from = extract_mail_from(raw).unwrap_or_default();       // line 210
+let from_domain = mail_from.split('@').nth(1).unwrap_or("");      // line 211
+
+let helo_domain = if !from_domain.is_empty() {
+    from_domain                                                     // line 213: use sender domain
+} else {
+    rcpt.split('@').nth(1).unwrap_or("")                           // line 216: FALLBACK to recipient domain
+};
+```
+
+When the sender's From domain can't be determined (empty mail_from or missing @), the code falls back to using the **recipient's** domain for SPF evaluation (line 216). This is semantically wrong — SPF records are published by the sending domain. Evaluating the recipient domain's SPF record against the sending IP is meaningless and could produce false passes (if the recipient domain's SPF happens to include the sending IP) or false fails.
+
+The `helo_domain` variable is then used both as the HELO domain **and** the mail-from domain in the `mail-auth` call: `resolver.verify_spf_sender(ip, helo_domain, helo_domain, &mail_from)` (line 223–224).
+
+Note: Sprint 5.5 partially addressed this (renamed variables, clarified fallback logic) but the fundamental issue — falling back to recipient domain — was not fixed.
+
+**Approach:** When `from_domain` is empty, return `"none"` immediately instead of falling back. Also extract the domain-selection logic into a standalone function (e.g., `fn spf_domain(mail_from: &str, rcpt: &str) -> Option<&str>`) that returns `None` when the sender domain can't be determined. This was already an open backlog item from Sprint 5.5.
+
+**Acceptance criteria:**
+- [x] SPF verification returns `spf: none` when the sender domain cannot be determined, instead of falling back to recipient domain
+- [x] SPF domain-selection logic extracted into a standalone testable function *(also resolves Sprint 5.5 backlog item)*
+- [x] Unit test: empty sender domain produces `spf: none`, not evaluation against recipient domain
+- [x] Unit test: valid sender domain is used correctly
+
+### S8.4 — Configurable Verify Service URLs
+
+*As an operator self-hosting the verify service, I need to point the client at my own instance.*
+
+**Context:** Two values are hardcoded as constants with no configuration override:
+
+1. **Probe URL** — In `src/setup.rs`, `check_inbound_port25()` (line 141) shells out to `curl` with a hardcoded URL:
+   ```rust
+   .args(["-s", "-m", "15", "https://check.aimx.email/probe"])  // line 143
+   ```
+
+2. **Verify address** — In `src/verify.rs`, the target email for end-to-end testing:
+   ```rust
+   const VERIFY_ADDRESS: &str = "verify@aimx.email";  // line 5
+   ```
+
+The verify service README (`services/verify/README.md`, line 54–60) documents self-hosting instructions and explicitly tells users to "point the probe URL to your service" — but there's no `config.yaml` field or CLI flag to do so.
+
+The `Config` struct is defined in `src/config.rs` and currently has: `domain`, `data_dir`, `dkim_selector`, `mailboxes`. New optional fields need to be added there with serde defaults.
+
+**Approach:** Add `probe_url: Option<String>` and `verify_address: Option<String>` to `Config`. In `check_inbound_port25()`, read the URL from config (or pass it as a parameter). In `verify::run()`, read the address from config. Both fall back to the current hardcoded defaults when not set. Also add `--probe-url` and `--verify-address` CLI flags to `aimx setup` and `aimx verify` that override the config value. Update the verify service README to reference these config fields.
+
+**Acceptance criteria:**
+- [x] `config.yaml` supports optional `probe_url` and `verify_address` fields
+- [x] `check_inbound_port25()` uses configured probe URL, defaulting to `https://check.aimx.email/probe`
+- [x] `verify::run()` uses configured verify address, defaulting to `verify@aimx.email`
+- [x] Unit test: custom probe URL is used when configured
+- [x] Unit test: custom verify address is used when configured
+- [x] Update verify service README to document the config fields
+
+### S8.5 — CI Coverage for Verify Service
+
+*As a contributor, I need CI to catch regressions in the verify service, not just the main crate.*
+
+**Context:** The verify service at `services/verify/` is a standalone Cargo project (package name `aimx-verify`, see `services/verify/Cargo.toml`). It is **not** a workspace member of the root `Cargo.toml`.
+
+The CI workflow (`.github/workflows/ci.yml`) runs three checks, all at the repo root only:
+
+```yaml
+- name: Check formatting
+  run: cargo fmt -- --check           # line 28 — only checks root crate
+
+- name: Clippy
+  run: cargo clippy -- -D warnings    # line 31 — only checks root crate
+
+- name: Run tests
+  run: cargo test                      # line 34 — only runs root crate tests
+```
+
+This means the verify service can accumulate lint warnings, formatting drift, or test failures without CI catching them.
+
+**Approach:** Add a second job (or additional steps in the existing job) that runs the same checks with `working-directory: services/verify`. Alternatively, convert to a Cargo workspace — but that may pull in the verify service's dependencies (actix-web, etc.) into the main binary's build, so separate CI steps are likely cleaner.
+
+**Acceptance criteria:**
+- [x] CI workflow runs `cargo test` in `services/verify/` directory
+- [x] CI workflow runs `cargo clippy -- -D warnings` for `services/verify/`
+- [x] CI workflow runs `cargo fmt -- --check` for `services/verify/`
+
+### S8.6 — Documentation & Status Fixes
+
+*As a user reading docs or running `aimx status`, I expect accuracy and consistency.*
+
+**Context — Status "recent activity":** The PRD (FR-47, `docs/prd.md` line 132) specifies: "`aimx status` — show server status, mailbox counts, recent activity." The current `format_status()` in `src/status.rs` (line 109) outputs domain, data dir, DKIM selector, DKIM key presence, OpenSMTPD status, and mailbox table (name, address, total, unread) — but no "recent activity" section. The `StatusInfo` struct (line 5) would need a new field, and `gather_status()` (line 21) would need to read the most recent email(s) per mailbox (e.g., last 3–5 by date from the `.md` frontmatter).
+
+**Context — DigitalOcean inconsistency:** Two docs make contradictory claims:
+- `README.md` line 56: `| DigitalOcean | On request | Submit support ticket |` — listed as a compatible provider
+- `docs/idea.md` line 434: `| DigitalOcean | Permanently blocks SMTP, recommends against self-hosted mail |` — listed under "Not supported"
+
+One of these is wrong. Research suggests DigitalOcean's current policy is closer to the idea.md version (SMTP is restricted and difficult to unblock), but this should be verified. Pick the accurate position and update both files to match.
+
+**Context — GitHub URLs:** Existing Sprint 6 backlog item: GitHub repo URLs in `README.md` and `services/verify/README.md` reference the wrong owner/org. Find and fix all occurrences.
+
+**Acceptance criteria:**
+- [x] `aimx status` includes a "Recent activity" section showing the last few emails received (most recent per mailbox)
+- [x] `StatusInfo` struct extended with recent activity data; `gather_status()` reads recent emails from mailbox directories
+- [x] README.md and docs/idea.md are consistent on DigitalOcean — pick the accurate position and update both
+- [x] Fix GitHub URLs in README.md and services/verify/README.md *(existing Sprint 6 backlog item)*
+- [x] Unit test: `format_status` output includes recent activity section
+
+---
+
+*Archive 1 of 2. See [`sprint.md`](sprint.md) for the active plan and full Summary Table.*
