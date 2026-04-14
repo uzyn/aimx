@@ -85,7 +85,7 @@ When run without a domain argument, setup will prompt you to enter the domain an
 
 After initial setup, the wizard displays three clearly labeled sections:
 
-- **[DNS]** -- the records you need to add (MX, A, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
+- **[DNS]** -- the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
 - **[MCP]** -- configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
 - **[Deliverability Improvement (Optional)]** -- PTR record guidance and Gmail filter/whitelist instructions
 
@@ -112,9 +112,10 @@ After the setup wizard displays the required DNS records, add them at your domai
 
 | Type | Name | Value | Where to set |
 |------|------|-------|--------------|
-| A | `agent.yourdomain.com` | Your server IP | Domain registrar |
+| A | `agent.yourdomain.com` | Your server IPv4 | Domain registrar |
+| AAAA | `agent.yourdomain.com` | Your server IPv6 (if available) | Domain registrar |
 | MX | `agent.yourdomain.com` | `10 agent.yourdomain.com.` | Domain registrar |
-| TXT | `agent.yourdomain.com` | `v=spf1 ip4:YOUR_IP -all` | Domain registrar |
+| TXT | `agent.yourdomain.com` | `v=spf1 ip4:YOUR_IP -all` (or `v=spf1 ip4:YOUR_IP ip6:YOUR_IPV6 -all` with IPv6) | Domain registrar |
 | TXT | `dkim._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 | PTR | Your server IP | `agent.yourdomain.com.` | VPS provider panel |
@@ -134,7 +135,11 @@ After adding DNS records, verify them manually:
 ```bash
 # A record
 dig +short A agent.yourdomain.com
-# Expected: your server IP
+# Expected: your server IPv4 address
+
+# AAAA record (if your server has IPv6)
+dig +short AAAA agent.yourdomain.com
+# Expected: your server IPv6 address
 
 # MX record
 dig +short MX agent.yourdomain.com
@@ -142,7 +147,7 @@ dig +short MX agent.yourdomain.com
 
 # SPF record
 dig +short TXT agent.yourdomain.com
-# Should include: v=spf1 ip4:YOUR_IP -all
+# Should include: v=spf1 ip4:YOUR_IP -all (or v=spf1 ip4:YOUR_IP ip6:YOUR_IPV6 -all)
 
 # DKIM record
 dig +short TXT dkim._domainkey.agent.yourdomain.com
@@ -217,7 +222,7 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 
 ### Preventing spam classification
 
-1. Ensure all 6 DNS records are correctly set (especially DKIM, SPF, DMARC)
+1. Ensure all DNS records are correctly set (especially DKIM, SPF, DMARC, and AAAA if your server has IPv6)
 2. Set a PTR record at your VPS provider
 3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam
 4. Alternatively, reply to an email from the domain -- Gmail learns it's not spam
