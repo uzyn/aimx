@@ -33,6 +33,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         dkim_selector: "dkim".to_string(),
         mailboxes,
         verify_host: None,
+        enable_ipv6: false,
     }
 }
 
@@ -643,6 +644,7 @@ async fn test_ingest_failure_returns_451() {
         dkim_selector: "dkim".to_string(),
         mailboxes: HashMap::new(),
         verify_host: None,
+        enable_ipv6: false,
     };
     let (port, _shutdown) = start_server(config).await;
     let mut client = TestClient::connect(port).await;

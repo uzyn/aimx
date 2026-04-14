@@ -406,6 +406,7 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         };
 
         let info = gather_status(&config);
@@ -496,6 +497,7 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         };
 
         let activity = gather_recent_activity(&config);

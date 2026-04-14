@@ -19,6 +19,9 @@ pub struct Config {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_host: Option<String>,
+
+    #[serde(default)]
+    pub enable_ipv6: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -183,6 +186,7 @@ has_attachment = true
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         };
 
         config.save(&path).unwrap();
@@ -271,6 +275,25 @@ verify_host = "https://verify.example.com"
         let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.domain, "test.com");
+    }
+
+    #[test]
+    fn enable_ipv6_defaults_to_false() {
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(!config.enable_ipv6);
+    }
+
+    #[test]
+    fn parse_enable_ipv6_true() {
+        let toml_str = r#"
+domain = "test.com"
+enable_ipv6 = true
+
+[mailboxes]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.enable_ipv6);
     }
 
     #[test]

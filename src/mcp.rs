@@ -265,7 +265,7 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::LettreTransport;
+        let transport = send::LettreTransport::new(config.enable_ipv6);
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
@@ -354,7 +354,7 @@ impl AimxMcpServer {
         };
 
         let private_key = load_dkim_key(&config)?;
-        let transport = send::LettreTransport;
+        let transport = send::LettreTransport::new(config.enable_ipv6);
         let dkim_info = Some((
             &private_key,
             config.domain.as_str(),
@@ -597,6 +597,7 @@ mod tests {
             dkim_selector: "dkim".to_string(),
             mailboxes,
             verify_host: None,
+            enable_ipv6: false,
         }
     }
 

@@ -244,6 +244,16 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ## Sprint 26 — IPv6 Support for Outbound SMTP (Days 73–75.5) [DONE]
 
+> **Follow-up addendum (post-merge):** A later PR (`enable-ipv6-config-flag`)
+> flipped the default back to IPv4-only and made IPv6 outbound opt-in via a
+> new `enable_ipv6` bool in `config.toml`. The Sprint 26 ACs below still
+> describe the original "OS chooses the family" behaviour that shipped when
+> this sprint merged; the current shipped default is IPv4-only, and the
+> dual-stack SPF / AAAA guidance is only emitted by `aimx setup` when
+> `enable_ipv6 = true`. See PRD FR-7, FR-19, resolved-decision #8 and
+> `book/configuration.md` "IPv6 delivery (advanced)" for the current
+> behaviour.
+
 **Goal:** Remove the IPv4-only workaround from outbound delivery and properly support IPv6 across SPF records, DNS guidance, and verification. The IPv4 preference was added in Sprint 25 as a workaround for SPF failures — now that DKIM is fixed, let the OS resolve addresses naturally and ensure SPF covers both address families.
 
 **Dependencies:** Sprint 25
