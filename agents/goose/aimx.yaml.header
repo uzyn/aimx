@@ -1,0 +1,15 @@
+version: "1.0.0"
+title: "AIMX Email"
+description: >
+  Self-hosted email for AI agents. Send, read, reply to, and manage email
+  via AIMX MCP tools stored as Markdown files on the local filesystem.
+extensions:
+  - type: stdio
+    name: aimx
+    cmd: /usr/local/bin/aimx
+    args:
+      - mcp
+    timeout: 300
+    description: >
+      AIMX MCP server — nine tools for mailbox and email operations.
+prompt: |

@@ -63,6 +63,23 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
         },
+        AgentSpec {
+            name: "goose",
+            source_subdir: "goose",
+            // Goose discovers recipes by filename stem from
+            // ~/.config/goose/recipes/ — we install one file, not a
+            // directory. Destination template points at the file itself.
+            dest_template: "$XDG_CONFIG_HOME/goose/recipes",
+            activation_hint: goose_hint,
+        },
+        AgentSpec {
+            name: "openclaw",
+            source_subdir: "openclaw",
+            // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md — we ship a
+            // skill-directory package (no flat SKILL.md at the root).
+            dest_template: "$HOME/.openclaw/skills/aimx",
+            activation_hint: openclaw_hint,
+        },
     ]
 }
 
@@ -140,6 +157,60 @@ fn gemini_hint(data_dir: Option<&Path>) -> String {
          then restart Gemini CLI:\n\
          \n\
          {snippet_text}"
+    )
+}
+
+fn goose_hint(_data_dir: Option<&Path>) -> String {
+    // Goose runs recipes by filename stem; `aimx.yaml` → `goose run --recipe aimx`.
+    // If GOOSE_RECIPE_GITHUB_REPO is set, Goose loads recipes from a GitHub
+    // repo; suggest the user commit the installed file into that repo so
+    // every team member can invoke `goose run --recipe aimx`.
+    let mut out = String::new();
+    out.push_str(
+        "Recipe installed. Run it with:\n\
+         \n\
+         \x20\x20goose run --recipe aimx\n",
+    );
+
+    if let Some(repo) = std::env::var_os("GOOSE_RECIPE_GITHUB_REPO") {
+        let repo = repo.to_string_lossy();
+        out.push_str(&format!(
+            "\n\
+             GOOSE_RECIPE_GITHUB_REPO is set to {repo}. Goose also loads \
+             recipes from that GitHub repo — commit and push \
+             ~/.config/goose/recipes/aimx.yaml into {repo} to share it with \
+             your team.\n"
+        ));
+    }
+
+    out
+}
+
+fn openclaw_hint(data_dir: Option<&Path>) -> String {
+    // OpenClaw exposes `openclaw mcp set <name> <json>` — the user can wire
+    // MCP with one pasted command. Route the JSON through serde_json so
+    // paths with `"` or `\` escape correctly.
+    let args: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
+    };
+    let snippet = serde_json::json!({
+        "command": "/usr/local/bin/aimx",
+        "args": args,
+    });
+    let snippet_text = serde_json::to_string(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
+    format!(
+        "Skill installed. Register the AIMX MCP server with OpenClaw:\n\
+         \n\
+         \x20\x20openclaw mcp set aimx '{snippet_text}'\n\
+         \n\
+         Restart the OpenClaw gateway after registration so the new server \
+         is loaded."
     )
 }
 
@@ -363,6 +434,35 @@ pub fn assemble_plugin_files(
             continue;
         }
 
+        // Goose recipe: `<name>.yaml.header` + indented primer → `<name>.yaml`.
+        // The primer is appended as a YAML block scalar (each line prefixed by
+        // two spaces) so it sits under a `prompt: |` key in the header.
+        if rel
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".yaml.header"))
+        {
+            let stem = rel.file_name().unwrap().to_string_lossy();
+            let new_name = stem.trim_end_matches(".header").to_string();
+            let target = rel.with_file_name(new_name);
+
+            let mut combined = bytes.clone();
+            let primer_text = std::str::from_utf8(primer)
+                .map_err(|e| format!("common primer not valid UTF-8: {e}"))?;
+            let indented = indent_block(primer_text, "  ");
+            combined.extend_from_slice(indented.as_bytes());
+
+            let final_bytes = if let Some(dd) = data_dir {
+                let text = std::str::from_utf8(&combined)
+                    .map_err(|e| format!("recipe yaml not valid UTF-8: {e}"))?;
+                rewrite_recipe_data_dir(text, dd).into_bytes()
+            } else {
+                combined
+            };
+
+            transformed.push((target, final_bytes));
+            continue;
+        }
+
         if rel.file_name().is_some_and(|n| n == "plugin.json")
             && let Some(dd) = data_dir
         {
@@ -449,6 +549,76 @@ pub fn rewrite_plugin_args(json_text: &str, data_dir: &Path) -> Result<String, S
             s
         })
         .map_err(|e| format!("failed to serialize plugin.json: {e}"))
+}
+
+/// Prefix every line of `text` with `prefix`. Empty lines stay empty (no
+/// trailing whitespace) to keep YAML block scalars tidy.
+fn indent_block(text: &str, prefix: &str) -> String {
+    let mut out = String::with_capacity(text.len() + text.lines().count() * prefix.len());
+    for line in text.split_inclusive('\n') {
+        // Split line body from its trailing newline (if any) so blank lines
+        // are emitted as just "\n", not "  \n".
+        let (body, newline) = match line.strip_suffix('\n') {
+            Some(b) => (b, "\n"),
+            None => (line, ""),
+        };
+        if body.is_empty() {
+            out.push_str(newline);
+        } else {
+            out.push_str(prefix);
+            out.push_str(body);
+            out.push_str(newline);
+        }
+    }
+    out
+}
+
+/// Rewrite the `args:` array on the first stdio extension in a Goose recipe
+/// YAML so the command runs with `--data-dir <path>`. Implemented as a
+/// simple line-oriented transform — we inject `--data-dir` + path entries
+/// before the existing `- mcp` line under `args:`. This avoids pulling in a
+/// YAML serializer that would rewrite the whole file and risk breaking the
+/// `prompt: |` block scalar.
+pub fn rewrite_recipe_data_dir(yaml_text: &str, data_dir: &Path) -> String {
+    let dd = data_dir.to_string_lossy().into_owned();
+    let mut out = String::with_capacity(yaml_text.len() + 64);
+    let mut in_args = false;
+    let mut injected = false;
+
+    for line in yaml_text.split_inclusive('\n') {
+        let trimmed = line.trim_end_matches('\n');
+        if !injected && !in_args && trimmed.trim_start() == "args:" {
+            in_args = true;
+            out.push_str(line);
+            continue;
+        }
+
+        if in_args && !injected {
+            // Expect `      - mcp` (indented list item). When we see the
+            // first list item, inject --data-dir entries before it.
+            if let Some(idx) = trimmed.find("- ") {
+                let indent = &trimmed[..idx];
+                out.push_str(indent);
+                out.push_str("- --data-dir\n");
+                out.push_str(indent);
+                out.push_str("- ");
+                // Quote the path for YAML — a double-quoted scalar escapes
+                // special chars safely via serde_json's string serializer.
+                let quoted = serde_json::to_string(&dd).unwrap_or_else(|_| format!("\"{dd}\""));
+                out.push_str(&quoted);
+                out.push('\n');
+                injected = true;
+                // Fall through to emit the original `- mcp` line.
+            } else if !trimmed.trim_start().is_empty() && !trimmed.starts_with(' ') {
+                // Left the args block before seeing a list item — abort injection.
+                in_args = false;
+            }
+        }
+
+        out.push_str(line);
+    }
+
+    out
 }
 
 fn write_files(
@@ -1140,9 +1310,263 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_four_agents_in_canonical_order() {
+    fn registry_lists_six_agents_in_canonical_order() {
         let names: Vec<&str> = registry().iter().map(|s| s.name).collect();
-        assert_eq!(names, vec!["claude-code", "codex", "opencode", "gemini"]);
+        assert_eq!(
+            names,
+            vec![
+                "claude-code",
+                "codex",
+                "opencode",
+                "gemini",
+                "goose",
+                "openclaw"
+            ]
+        );
+    }
+
+    #[test]
+    fn registry_contains_sprint_30_agents() {
+        for name in ["goose", "openclaw"] {
+            assert!(
+                find_agent(name).is_some(),
+                "registry missing sprint-30 agent: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_goose_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("goose".into()), false, false, false, None, &env).unwrap();
+
+        // Default XDG_CONFIG_HOME = $HOME/.config, so recipe lives at
+        // $HOME/.config/goose/recipes/aimx.yaml.
+        let recipe = tmp.path().join(".config/goose/recipes/aimx.yaml");
+        assert!(recipe.exists(), "expected recipe at {}", recipe.display());
+        // .header file must be absent — it is a source template, not an artifact.
+        assert!(
+            !tmp.path()
+                .join(".config/goose/recipes/aimx.yaml.header")
+                .exists()
+        );
+        // README.md is developer-facing and must not be installed.
+        assert!(!tmp.path().join(".config/goose/recipes/README.md").exists());
+
+        let text = std::fs::read_to_string(&recipe).unwrap();
+        assert!(text.contains("title: \"AIMX Email\""), "recipe: {text}");
+        assert!(text.contains("prompt: |"), "recipe: {text}");
+        // Primer content appears indented as part of the prompt block.
+        assert!(
+            text.contains("  # AIMX primer for agents"),
+            "recipe: {text}"
+        );
+        assert!(
+            text.contains("  - `mailbox_create(name: string)`"),
+            "recipe: {text}"
+        );
+        // Extensions section references AIMX's stdio MCP server.
+        assert!(text.contains("type: stdio"), "recipe: {text}");
+        assert!(text.contains("name: aimx"), "recipe: {text}");
+        assert!(text.contains("cmd: /usr/local/bin/aimx"), "recipe: {text}");
+        // Default install has no --data-dir in args.
+        assert!(!text.contains("--data-dir"));
+    }
+
+    #[test]
+    fn install_goose_respects_xdg_config_home_override() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        let xdg = tmp.path().join("alt-xdg");
+        env.xdg = Some(xdg.clone());
+
+        run_with_env(Some("goose".into()), false, false, false, None, &env).unwrap();
+
+        assert!(xdg.join("goose/recipes/aimx.yaml").exists());
+    }
+
+    #[test]
+    fn install_goose_with_custom_data_dir_rewrites_recipe_args() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let custom = PathBuf::from("/custom/aimx-data");
+
+        run_with_env(
+            Some("goose".into()),
+            false,
+            false,
+            false,
+            Some(&custom),
+            &env,
+        )
+        .unwrap();
+
+        let recipe = tmp.path().join(".config/goose/recipes/aimx.yaml");
+        let text = std::fs::read_to_string(&recipe).unwrap();
+        assert!(text.contains("--data-dir"), "recipe: {text}");
+        assert!(text.contains("/custom/aimx-data"), "recipe: {text}");
+        // The original `- mcp` entry must still be present after injection.
+        assert!(text.contains("- mcp"), "recipe: {text}");
+    }
+
+    #[test]
+    fn goose_activation_hint_mentions_recipe_command() {
+        let spec = find_agent("goose").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("goose run --recipe aimx"));
+    }
+
+    #[test]
+    fn goose_activation_hint_mentions_github_repo_when_env_set() {
+        // SAFETY: tests touching process env must serialize. We save and
+        // restore to avoid cross-test pollution.
+        // SAFETY: these calls modify process environment — test must be isolated.
+        unsafe {
+            std::env::set_var("GOOSE_RECIPE_GITHUB_REPO", "myorg/goose-recipes");
+        }
+        let spec = find_agent("goose").unwrap();
+        let hint = (spec.activation_hint)(None);
+        unsafe {
+            std::env::remove_var("GOOSE_RECIPE_GITHUB_REPO");
+        }
+        assert!(hint.contains("GOOSE_RECIPE_GITHUB_REPO"));
+        assert!(hint.contains("myorg/goose-recipes"));
+        assert!(hint.contains("aimx.yaml"));
+    }
+
+    #[test]
+    fn install_openclaw_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("openclaw".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".openclaw/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+        assert!(!dest.join("README.md").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(
+            skill.starts_with("---\n"),
+            "missing YAML frontmatter: {skill:.200}"
+        );
+        assert!(skill.contains("name: aimx"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("Trust model"));
+    }
+
+    #[test]
+    fn openclaw_activation_hint_prints_mcp_set_command() {
+        let spec = find_agent("openclaw").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("openclaw mcp set aimx"));
+        assert!(hint.contains("/usr/local/bin/aimx"));
+        assert!(hint.contains("\"args\""));
+        assert!(hint.contains("mcp"));
+        assert!(!hint.contains("--data-dir"));
+
+        let hint_custom = (spec.activation_hint)(Some(Path::new("/custom/aimx-data")));
+        assert!(hint_custom.contains("--data-dir"));
+        assert!(hint_custom.contains("/custom/aimx-data"));
+    }
+
+    #[test]
+    fn openclaw_activation_hint_escapes_special_chars_in_data_dir() {
+        // Paths with special chars must serialize via serde_json so the
+        // printed command stays a valid shell-quoted JSON argument.
+        let spec = find_agent("openclaw").unwrap();
+        let weird = PathBuf::from("/tmp/has\"quote\\and-backslash");
+        let hint = (spec.activation_hint)(Some(&weird));
+
+        // Extract the JSON body between the first pair of single quotes.
+        let start = hint.find('\'').unwrap() + 1;
+        let end = hint.rfind('\'').unwrap();
+        let json_body = &hint[start..end];
+
+        let parsed: serde_json::Value = serde_json::from_str(json_body)
+            .unwrap_or_else(|e| panic!("activation snippet not valid JSON: {e}\n{json_body}"));
+        let args = parsed.get("args").and_then(|v| v.as_array()).unwrap();
+        // args[1] is the --data-dir path (args = ["--data-dir", <path>, "mcp"]).
+        let path = args.get(1).and_then(|v| v.as_str()).unwrap();
+        assert_eq!(path, "/tmp/has\"quote\\and-backslash");
+    }
+
+    #[test]
+    fn assembled_goose_recipe_contains_indented_primer() {
+        let source = AGENTS_DIR.get_dir("goose").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, recipe_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "aimx.yaml")
+            .expect("assembled aimx.yaml should be present");
+
+        let header = AGENTS_DIR
+            .get_file("goose/aimx.yaml.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        // The recipe should be header + indent_block(primer, "  ").
+        let mut expected = Vec::new();
+        expected.extend_from_slice(header);
+        expected
+            .extend_from_slice(indent_block(std::str::from_utf8(primer).unwrap(), "  ").as_bytes());
+
+        assert_eq!(recipe_bytes, &expected);
+    }
+
+    #[test]
+    fn assembled_openclaw_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("openclaw").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("openclaw/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    #[test]
+    fn indent_block_preserves_blank_lines_without_trailing_whitespace() {
+        let input = "first\n\nthird\n";
+        let got = indent_block(input, "  ");
+        assert_eq!(got, "  first\n\n  third\n");
+    }
+
+    #[test]
+    fn rewrite_recipe_data_dir_injects_args_before_mcp() {
+        let input = "extensions:\n  - type: stdio\n    name: aimx\n    cmd: /usr/local/bin/aimx\n    args:\n      - mcp\nprompt: |\n  body\n";
+        let got = rewrite_recipe_data_dir(input, Path::new("/custom/path"));
+        assert!(got.contains("- --data-dir"), "got: {got}");
+        assert!(got.contains("\"/custom/path\""), "got: {got}");
+        assert!(got.contains("- mcp"), "got: {got}");
+        // Order matters: --data-dir must appear before mcp.
+        let dd_idx = got.find("- --data-dir").unwrap();
+        let mcp_idx = got.find("- mcp").unwrap();
+        assert!(dd_idx < mcp_idx, "data-dir should come before mcp");
     }
 
     #[cfg(unix)]

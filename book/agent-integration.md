@@ -52,8 +52,8 @@ grows as more agents are landed in subsequent sprints.
 | Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. |
 | OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. |
 | Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. |
-
-More agents — Goose and OpenClaw — land in Sprint 30.
+| Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. |
+| OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. |
 
 ### Claude Code
 
@@ -196,6 +196,84 @@ Restart Gemini CLI after editing `settings.json`. See
 [`agents/gemini/README.md`](https://github.com/uzyn/aimx/tree/main/agents/gemini)
 for the schema reference.
 
+### Goose
+
+[Goose](https://goose-docs.ai/) uses YAML "recipes" rather than plugins or
+skills. A recipe bundles a goal, an agent-facing `prompt`, and the MCP
+`extensions` that run alongside the agent — so one file carries both the
+MCP wiring AND the AIMX primer. No separate config-file edit is needed.
+
+Install:
+
+```bash
+aimx agent-setup goose
+```
+
+The installer writes `~/.config/goose/recipes/aimx.yaml`. Run the recipe
+with:
+
+```bash
+goose run --recipe aimx
+```
+
+Goose resolves the `--recipe aimx` argument to `aimx.yaml` in the
+recipes directory.
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup goose
+```
+
+The recipe's stdio extension args will be rewritten to include
+`--data-dir /custom/path` before `mcp`.
+
+**Sharing recipes with a team:** if you set the
+`GOOSE_RECIPE_GITHUB_REPO` environment variable, Goose loads recipes
+from a GitHub repo. In that case, commit the generated
+`~/.config/goose/recipes/aimx.yaml` into your repo so every user can
+invoke `goose run --recipe aimx`. The installer detects the env var at
+install time and prints a pointer to this workflow.
+
+See [`agents/goose/README.md`](https://github.com/uzyn/aimx/tree/main/agents/goose)
+for the schema reference.
+
+### OpenClaw
+
+[OpenClaw](https://docs.openclaw.ai/) uses skill directories (similar
+to Claude Code) for agent-facing instructions and a separate JSON5
+config file for MCP servers at `~/.openclaw/openclaw.json`. Rather than
+having you hand-edit the JSON5 file, AIMX uses OpenClaw's first-class
+`openclaw mcp set` CLI to register the MCP server non-interactively.
+
+Install:
+
+```bash
+aimx agent-setup openclaw
+```
+
+The installer writes `~/.openclaw/skills/aimx/SKILL.md` and prints a
+command like:
+
+```bash
+openclaw mcp set aimx '{"command":"/usr/local/bin/aimx","args":["mcp"]}'
+```
+
+Run that command — it edits `~/.openclaw/openclaw.json` for you — then
+restart the OpenClaw gateway so the new MCP server is loaded.
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup openclaw
+```
+
+The printed `openclaw mcp set` command's JSON will include
+`--data-dir /custom/path` in the `args` array.
+
+See [`agents/openclaw/README.md`](https://github.com/uzyn/aimx/tree/main/agents/openclaw)
+for the schema reference.
+
 ## Manual MCP wiring
 
 If your agent is not yet supported, wire AIMX in manually as a plain MCP
@@ -266,3 +344,30 @@ Gemini CLI requires the `mcpServers.aimx` block in
 the printed JSON block into `settings.json`. If the file did not exist
 before you ran the installer, create it with just the printed object as
 its contents.
+
+### Goose: `goose run --recipe aimx` says "recipe not found"
+
+Goose resolves `--recipe <name>` to `<name>.yaml` under
+`~/.config/goose/recipes/`. Confirm the file is there:
+
+```bash
+ls ~/.config/goose/recipes/aimx.yaml
+```
+
+If it is missing, re-run `aimx agent-setup goose`. If `XDG_CONFIG_HOME`
+is set to a non-default value, Goose and AIMX will both honour it —
+check under `$XDG_CONFIG_HOME/goose/recipes/` instead.
+
+### OpenClaw: `openclaw mcp set` says "command not found"
+
+The activation step needs the `openclaw` CLI on your `PATH`. If
+OpenClaw is installed in a non-standard location, run the printed JSON
+through your own OpenClaw binary:
+
+```bash
+/path/to/openclaw mcp set aimx '...'
+```
+
+Alternatively, hand-edit `~/.openclaw/openclaw.json` and add the
+printed object under `mcpServers.aimx`. The JSON5 format accepts
+comments and trailing commas but vanilla JSON works too.

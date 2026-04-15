@@ -20,35 +20,15 @@ The server runs in stdio mode -- it reads from stdin and writes to stdout. It is
 
 ## Agent integration
 
-Add AIMX to any MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.). The configuration snippet is the same for all agents that support MCP stdio transport:
+Install AIMX into your agent with one command: see [Agent Integration](agent-integration.md)
+for the full list of supported agents (Claude Code, Codex CLI, OpenCode,
+Gemini CLI, Goose, OpenClaw) and one-line install commands. The
+per-agent installer wires both the MCP server and the agent-facing
+skill/recipe into the correct per-user location — no copy-paste of
+JSON snippets from this chapter is required.
 
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-For Claude Code, add this to `~/.claude/settings.json`. Other agents may use different config file locations -- check your agent's MCP documentation.
-
-### Custom data directory
-
-If you use a non-default data directory, pass it via `--data-dir`:
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["--data-dir", "/custom/path", "mcp"]
-    }
-  }
-}
-```
+If your agent is not in the registry yet, see the "Manual MCP wiring"
+section of the agent integration chapter for the generic pattern.
 
 ## MCP tools
 
