@@ -15,6 +15,25 @@ fn setup_test_env(tmp: &Path) -> String {
     std::fs::create_dir_all(tmp.join("alice")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
+    // Sprint 34: `aimx serve` loads the DKIM private key at startup and
+    // refuses to start if it's missing. Every integration test that spawns
+    // `aimx serve` as a subprocess needs a DKIM key on disk inside the
+    // AIMX_CONFIG_DIR tempdir. Generate via the `dkim-keygen` subcommand
+    // through the binary path to keep this helper dependency-free.
+    let dkim_dir = tmp.join("dkim");
+    if !dkim_dir.join("private.key").exists() {
+        let status = StdCommand::new(aimx_binary_path())
+            .env("AIMX_CONFIG_DIR", tmp)
+            .arg("dkim-keygen")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("Failed to run aimx dkim-keygen in test setup");
+        assert!(
+            status.success(),
+            "aimx dkim-keygen exited non-zero in test setup"
+        );
+    }
     config_path.to_string_lossy().to_string()
 }
 
@@ -253,7 +272,13 @@ fn ingest_via_env_var() {
 #[test]
 fn dkim_keygen_end_to_end() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env(tmp.path());
+    // Write config.toml but skip DKIM key generation — the `dkim-keygen`
+    // command itself is under test and must start from a clean slate.
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        tmp.path().display()
+    );
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     aimx_cmd(tmp.path())
         .arg("--data-dir")
@@ -277,7 +302,11 @@ fn dkim_keygen_end_to_end() {
 #[test]
 fn dkim_keygen_no_overwrite() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env(tmp.path());
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        tmp.path().display()
+    );
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     aimx_cmd(tmp.path())
         .arg("--data-dir")
@@ -299,7 +328,11 @@ fn dkim_keygen_no_overwrite() {
 #[test]
 fn dkim_keygen_force_overwrite() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env(tmp.path());
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        tmp.path().display()
+    );
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     aimx_cmd(tmp.path())
         .arg("--data-dir")
@@ -1168,8 +1201,11 @@ fn serve_e2e_receive_email_and_shutdown() {
     setup_test_env(tmp.path());
     let port = find_free_port();
 
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
     let mut child = StdCommand::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1234,8 +1270,11 @@ fn serve_e2e_multi_recipient() {
     setup_test_env(tmp.path());
     let port = find_free_port();
 
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
     let mut child = StdCommand::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1289,8 +1328,11 @@ fn serve_e2e_connection_refused_after_shutdown() {
     setup_test_env(tmp.path());
     let port = find_free_port();
 
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
     let mut child = StdCommand::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1340,12 +1382,30 @@ fn setup_test_env_with_bob(tmp: &Path) -> String {
     std::fs::create_dir_all(tmp.join("bob")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
+    // Sprint 34: `aimx serve` requires the DKIM private key at startup.
+    let dkim_dir = tmp.join("dkim");
+    if !dkim_dir.join("private.key").exists() {
+        let status = StdCommand::new(aimx_binary_path())
+            .env("AIMX_CONFIG_DIR", tmp)
+            .arg("dkim-keygen")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("Failed to run aimx dkim-keygen in test setup");
+        assert!(
+            status.success(),
+            "aimx dkim-keygen exited non-zero in test setup"
+        );
+    }
     config_path.to_string_lossy().to_string()
 }
 
 fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
+    let runtime = tmp.join("run");
+    std::fs::create_dir_all(&runtime).ok();
     let mut child = StdCommand::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", tmp)
+        .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
         .arg(tmp)
         .arg("serve")
@@ -1759,4 +1819,174 @@ fn serve_e2e_to_cc_bcc_combined() {
     }
 
     stop_serve(child);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 34 — UDS send listener integration tests.
+//
+// These tests spawn `aimx serve` as a subprocess (same pattern as the
+// `serve_e2e_*` tests above) and drive the `/run/aimx/send.sock` UDS
+// listener with a raw Unix-socket client. `AIMX_RUNTIME_DIR` is overridden
+// to a tempdir so the socket lives inside the test sandbox; the binary
+// under test creates it with mode `0o666`. We never exercise the real MX
+// delivery path — the `ERR DOMAIN` and `ERR MALFORMED` responses prove the
+// framing and handler wiring are intact without reaching the network.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn wait_for_socket(path: &Path, timeout: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    while started.elapsed() < timeout {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_creates_send_socket_with_world_writable_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket {} never appeared",
+        sock.display()
+    );
+
+    let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o666,
+        "UDS send socket must be world-writable (0o666); got {mode:o}"
+    );
+
+    stop_serve(child);
+}
+
+#[cfg(unix)]
+#[test]
+fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
+    use std::io::Read as _;
+    use std::os::unix::net::UnixStream;
+
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Submit an AIMX/1 SEND with a From: domain that does not match the
+    // configured primary domain (`agent.example.com`). This must be
+    // rejected with `ERR DOMAIN` before any MX lookup happens, proving
+    // both the wire parser and the handler wiring end-to-end.
+    let body = b"From: alice@not-the-domain.example\r\n\
+                 To: user@gmail.com\r\n\
+                 Subject: Hi\r\n\
+                 Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                 Message-ID: <integ-abc@not-the-domain.example>\r\n\
+                 \r\n\
+                 hello\r\n";
+    let header = format!(
+        "AIMX/1 SEND\nFrom-Mailbox: alice\nContent-Length: {}\n\n",
+        body.len()
+    );
+
+    let mut client = UnixStream::connect(&sock).expect("connect UDS");
+    client.write_all(header.as_bytes()).unwrap();
+    client.write_all(body).unwrap();
+    // Signal "no more bytes coming" so the server can return the response.
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
+
+    let mut resp = String::new();
+    client.read_to_string(&mut resp).expect("read response");
+
+    assert!(
+        resp.starts_with("AIMX/1 ERR DOMAIN"),
+        "expected ERR DOMAIN, got {resp:?}"
+    );
+    assert!(resp.ends_with('\n'), "response must be LF-terminated");
+
+    stop_serve(child);
+}
+
+#[cfg(unix)]
+#[test]
+fn uds_send_listener_rejects_malformed_request() {
+    use std::io::Read as _;
+    use std::os::unix::net::UnixStream;
+
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Wrong leading line — must be rejected with `ERR MALFORMED`.
+    let mut client = UnixStream::connect(&sock).expect("connect UDS");
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    client
+        .shutdown(std::net::Shutdown::Write)
+        .expect("shutdown write");
+
+    let mut resp = String::new();
+    client.read_to_string(&mut resp).expect("read response");
+    assert!(
+        resp.starts_with("AIMX/1 ERR MALFORMED"),
+        "expected ERR MALFORMED, got {resp:?}"
+    );
+
+    stop_serve(child);
+}
+
+#[cfg(unix)]
+#[test]
+fn uds_send_listener_cleaned_up_after_sigterm() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Clean shutdown — the listener removes the socket file so the next
+    // start does not trip the stale-socket retry path.
+    stop_serve(child);
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(5) {
+        if !sock.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!(
+        "send.sock should be removed on clean shutdown but still exists at {}",
+        sock.display()
+    );
 }
