@@ -27,6 +27,16 @@ pub struct AgentSpec {
 }
 
 /// Static registry of supported agents.
+///
+/// Source-tree layout asymmetry by design: plugin-style agents
+/// (`claude-code`, `codex`) nest their skill under `skills/aimx/` because
+/// the plugin manifest lives at the package root and the skill is a
+/// sibling subdirectory. Skill-only agents (`opencode`, `gemini`) install
+/// directly into a skills directory, so their source tree is flat with
+/// `SKILL.md.header` at the top. `assemble_plugin_files` walks each
+/// source tree relative to its root and handles both shapes. Do not
+/// "normalize" the layout — the destination template determines the
+/// depth.
 pub fn registry() -> &'static [AgentSpec] {
     &[
         AgentSpec {
@@ -61,53 +71,75 @@ fn claude_code_hint(_data_dir: Option<&Path>) -> String {
 }
 
 fn codex_hint(_data_dir: Option<&Path>) -> String {
+    // Codex CLI's canonical MCP wiring lives in `~/.codex/config.toml`
+    // under `[mcp_servers.*]`. This installer ships a `.codex-plugin/
+    // plugin.json` that mirrors Claude Code's plugin shape (camelCase
+    // `mcpServers`) on the assumption that plugin-managed MCP servers
+    // follow the same schema. That assumption has not been validated
+    // against a live Codex CLI (see deferred manual validation in
+    // docs/sprint.md for Sprint 29); revisit once Codex CLI is available
+    // in the sandbox.
     "Plugin installed. Restart Codex CLI to pick it up (it is auto-discovered from ~/.codex/plugins/).".to_string()
 }
 
 fn opencode_hint(data_dir: Option<&Path>) -> String {
-    let command_array = match data_dir {
-        Some(dd) => format!(
-            "[\"/usr/local/bin/aimx\", \"--data-dir\", \"{}\", \"mcp\"]",
-            dd.display()
-        ),
-        None => "[\"/usr/local/bin/aimx\", \"mcp\"]".to_string(),
+    // Route the JSON snippet through serde_json so that a `--data-dir` path
+    // containing `"` or `\` is properly escaped. `format!`-based string
+    // building would produce an invalid snippet the user would copy into
+    // their OpenCode config.
+    let command: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "/usr/local/bin/aimx".to_string(),
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["/usr/local/bin/aimx".to_string(), "mcp".to_string()],
     };
+    let snippet = serde_json::json!({
+        "mcp": {
+            "aimx": {
+                "command": command,
+            }
+        }
+    });
+    let snippet_text = serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
     format!(
         "Skill installed. Add the following block to the `mcp` object in \
          your OpenCode config (~/.config/opencode/opencode.json or \
          <repo>/opencode.json), then restart OpenCode:\n\
          \n\
-         {{\n\
-         \x20\x20\"mcp\": {{\n\
-         \x20\x20\x20\x20\"aimx\": {{\n\
-         \x20\x20\x20\x20\x20\x20\"command\": {command_array}\n\
-         \x20\x20\x20\x20}}\n\
-         \x20\x20}}\n\
-         }}"
+         {snippet_text}"
     )
 }
 
 fn gemini_hint(data_dir: Option<&Path>) -> String {
-    let args_line = match data_dir {
-        Some(dd) => format!(
-            "\x20\x20\x20\x20\x20\x20\"args\": [\"--data-dir\", \"{}\", \"mcp\"]",
-            dd.display()
-        ),
-        None => "\x20\x20\x20\x20\x20\x20\"args\": [\"mcp\"]".to_string(),
+    // Route the JSON snippet through serde_json (see opencode_hint).
+    let args: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
     };
+    let snippet = serde_json::json!({
+        "mcpServers": {
+            "aimx": {
+                "command": "/usr/local/bin/aimx",
+                "args": args,
+            }
+        }
+    });
+    let snippet_text = serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
     format!(
         "Skill installed. Merge the following block into \
          ~/.gemini/settings.json (create the file if it does not exist), \
          then restart Gemini CLI:\n\
          \n\
-         {{\n\
-         \x20\x20\"mcpServers\": {{\n\
-         \x20\x20\x20\x20\"aimx\": {{\n\
-         \x20\x20\x20\x20\x20\x20\"command\": \"/usr/local/bin/aimx\",\n\
-         {args_line}\n\
-         \x20\x20\x20\x20}}\n\
-         \x20\x20}}\n\
-         }}"
+         {snippet_text}"
     )
 }
 
@@ -250,6 +282,18 @@ fn install(
     opts: &InstallOptions,
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    install_to_writer(spec, opts, env, &mut io::stdout())
+}
+
+/// Testable core of `install`: writes user-facing output to `out` instead
+/// of stdout. Tests use this to assert that `--print` emits the activation
+/// snippet.
+fn install_to_writer(
+    spec: &AgentSpec,
+    opts: &InstallOptions,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = AGENTS_DIR.get_dir(spec.source_subdir).ok_or_else(|| {
         format!(
             "internal error: missing embedded source for '{}'",
@@ -262,28 +306,29 @@ fn install(
 
     if opts.print {
         for (rel, bytes) in &files {
-            println!("=== {} ===", rel.display());
+            writeln!(out, "=== {} ===", rel.display())?;
             match std::str::from_utf8(bytes) {
-                Ok(text) => println!("{text}"),
-                Err(_) => println!("<{} bytes of binary content>", bytes.len()),
+                Ok(text) => writeln!(out, "{text}")?,
+                Err(_) => writeln!(out, "<{} bytes of binary content>", bytes.len())?,
             }
         }
         // `--print` also emits the activation hint so snippet-style agents
         // (opencode, gemini) expose their MCP JSON block under dry-run.
-        println!("=== activation ===");
-        println!("{hint}");
+        writeln!(out, "=== activation ===")?;
+        writeln!(out, "{hint}")?;
         return Ok(());
     }
 
     let dest_root = resolve_dest(spec.dest_template, env)?;
     write_files(&dest_root, &files, opts.force, env)?;
 
-    println!(
+    writeln!(
+        out,
         "{} {}",
         term::success("Installed"),
         term::highlight(&dest_root.to_string_lossy())
-    );
-    println!("{hint}");
+    )?;
+    writeln!(out, "{hint}")?;
 
     Ok(())
 }
@@ -586,7 +631,10 @@ mod tests {
 
         // plugin.json should have default args (no --data-dir).
         let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
-        assert!(plugin.contains("\"mcp\""));
+        assert!(
+            plugin.contains("\"mcpServers\""),
+            "claude-code plugin.json must declare `mcpServers`: {plugin}"
+        );
         assert!(!plugin.contains("--data-dir"));
     }
 
@@ -668,7 +716,7 @@ mod tests {
         let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
         assert!(plugin.contains("--data-dir"));
         assert!(plugin.contains("/custom/aimx-data"));
-        assert!(plugin.contains("\"mcp\""));
+        assert!(plugin.contains("\"mcpServers\""));
     }
 
     #[test]
@@ -787,7 +835,13 @@ mod tests {
         assert!(skill.contains("mailbox_create"));
 
         let plugin = std::fs::read_to_string(dest.join(".codex-plugin/plugin.json")).unwrap();
-        assert!(plugin.contains("\"mcp\""));
+        // Assert on the exact schema key so a drift to snake_case
+        // (`mcp_servers`) or something else is caught, not silently passed
+        // by the substring `"mcp"` that lives inside `"mcpServers"`.
+        assert!(
+            plugin.contains("\"mcpServers\""),
+            "codex plugin.json must declare `mcpServers`: {plugin}"
+        );
         assert!(!plugin.contains("--data-dir"));
     }
 
@@ -922,18 +976,89 @@ mod tests {
     fn opencode_print_emits_activation_snippet() {
         // --print should dump both the file tree and the activation hint so
         // snippet-style agents surface their JSON block under dry-run.
+        // Capture via install_to_writer so we can assert on the actual
+        // printed bytes — not just that no files were written.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
 
-        // We can't easily capture stdout here without adding infrastructure,
-        // so assert --print writes no files and succeeds for all snippet
-        // agents (the hint content itself is covered by the activation_hint
-        // tests above).
-        run_with_env(Some("opencode".into()), false, false, true, None, &env).unwrap();
-        assert!(!tmp.path().join(".config/opencode").exists());
+        let spec = find_agent("opencode").unwrap();
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
 
-        run_with_env(Some("gemini".into()), false, false, true, None, &env).unwrap();
+        assert!(
+            printed.contains("=== activation ==="),
+            "printed output missing activation marker: {printed}"
+        );
+        assert!(
+            printed.contains("\"mcp\""),
+            "printed activation snippet missing `mcp` key: {printed}"
+        );
+        assert!(
+            printed.contains("\"aimx\""),
+            "printed activation snippet missing `aimx` key: {printed}"
+        );
+        assert!(
+            printed.contains("/usr/local/bin/aimx"),
+            "printed activation snippet missing aimx path: {printed}"
+        );
+        assert!(
+            !tmp.path().join(".config/opencode").exists(),
+            "--print must not write files"
+        );
+
+        // Gemini --print also emits its mcpServers snippet.
+        let spec = find_agent("gemini").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+        assert!(printed.contains("=== activation ==="));
+        assert!(
+            printed.contains("\"mcpServers\""),
+            "gemini activation snippet missing `mcpServers`: {printed}"
+        );
+        assert!(printed.contains("/usr/local/bin/aimx"));
         assert!(!tmp.path().join(".gemini").exists());
+    }
+
+    #[test]
+    fn print_snippet_escapes_data_dir_with_special_chars() {
+        // A data-dir path containing a double-quote or backslash must not
+        // produce a broken JSON snippet — serde_json escapes it for us.
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let spec = find_agent("opencode").unwrap();
+        let weird = PathBuf::from("/tmp/has\"quote\\and-backslash");
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: Some(&weird),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+
+        // Extract the activation section and confirm it parses as JSON.
+        let (_, after) = printed.split_once("=== activation ===\n").unwrap();
+        let snippet = after
+            .lines()
+            .skip_while(|l| l.trim().is_empty() || l.starts_with("Skill installed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: serde_json::Value = serde_json::from_str(snippet.trim())
+            .unwrap_or_else(|e| panic!("activation snippet not valid JSON: {e}\n{snippet}"));
+        let cmd = parsed
+            .pointer("/mcp/aimx/command")
+            .and_then(|v| v.as_array())
+            .expect("command array missing");
+        let last_path = cmd.get(2).and_then(|v| v.as_str()).unwrap();
+        assert_eq!(last_path, "/tmp/has\"quote\\and-backslash");
     }
 
     #[test]
