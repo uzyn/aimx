@@ -4,7 +4,7 @@
 
 **SMTP for agents. No middleman.**
 
-One command to give your AI agents their own email addresses -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs an email channel.
+One command to give your AI agents their own email addresses -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, Codex CLI, OpenCode, Gemini CLI, and any MCP-capable agent that needs an email channel.
 
 ```bash
 aimx setup agent.mydomain.com
@@ -141,18 +141,18 @@ aimx send --from support@agent.yourdomain.com \
 aimx mcp
 ```
 
-Add to Claude Code (`~/.claude/settings.json`):
+Install AIMX into your agent with one command per agent:
 
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+aimx agent-setup claude-code    # Claude Code
+aimx agent-setup codex          # Codex CLI
+aimx agent-setup opencode       # OpenCode
+aimx agent-setup gemini         # Gemini CLI
 ```
+
+Run `aimx agent-setup --list` to see every supported agent and its
+destination path. See [`book/agent-integration.md`](book/agent-integration.md)
+for per-agent activation steps and manual MCP wiring.
 
 Available MCP tools:
 - `mailbox_list` -- list all mailboxes with message counts
