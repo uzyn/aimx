@@ -29,7 +29,7 @@ pub struct RecentEmail {
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
-    let dkim_key_present = config.data_dir.join("dkim/private.key").exists();
+    let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
     let smtp_running = check_smtp_running();
 
     let mut mailboxes: Vec<MailboxStatus> = config
@@ -237,11 +237,10 @@ pub fn format_status(info: &StatusInfo) -> String {
     out
 }
 
-pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)?,
-        None => Config::load_default()?,
-    };
+pub fn run(_data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+    // Config path is resolved via `config_path()` (default `/etc/aimx/`) —
+    // `--data-dir` no longer drives it post-filesystem-split (Sprint 33).
+    let config = Config::load_resolved()?;
 
     let info = gather_status(&config);
     print!("{}", format_status(&info));
@@ -473,6 +472,9 @@ mod tests {
     fn gather_status_with_temp_dir() {
         let tmp = tempfile::TempDir::new().unwrap();
         let data_dir = tmp.path();
+
+        // Point AIMX_CONFIG_DIR at `tmp` so `dkim_dir()` resolves inside it.
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(data_dir);
 
         std::fs::create_dir_all(data_dir.join("dkim")).unwrap();
         std::fs::write(data_dir.join("dkim/private.key"), "test").unwrap();

@@ -660,7 +660,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 33 — Filesystem Split + `aimx` Group Foundation (Days 92–94.5) [NOT STARTED]
+## Sprint 33 — Filesystem Split + `aimx` Group Foundation (Days 92–94.5) [IN PROGRESS]
 
 **Goal:** Move configuration and DKIM secrets to `/etc/aimx/`, establish the `aimx` system group, and provide the `/run/aimx/` runtime directory. No behavior change is visible to agents yet — this is the foundation every subsequent v0.2 sprint builds on.
 

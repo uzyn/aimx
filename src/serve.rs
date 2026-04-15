@@ -14,10 +14,12 @@ pub fn run(
     tls_key: Option<&str>,
     data_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)?,
-        None => Config::load_default()?,
-    };
+    // Config lives at `config_path()` (default `/etc/aimx/config.toml`).
+    // `--data-dir` is kept for forward-compat (callers may still pass it for
+    // storage overrides applied downstream of this call), but it no longer
+    // governs the config location (v0.2 filesystem split — Sprint 33).
+    let _ = data_dir;
+    let config = Config::load_resolved()?;
 
     let bind_addr = bind.unwrap_or(DEFAULT_BIND);
     let tls_explicit = tls_cert.is_some() || tls_key.is_some();
@@ -113,7 +115,15 @@ fn can_read_tls(cert: &std::path::Path, key: &std::path::Path) -> bool {
 }
 
 pub mod service {
+    /// Name of the POSIX group that owns `/run/aimx/` and (in Sprint 34)
+    /// `/run/aimx/send.sock`. Agent users are added with `usermod -aG aimx`.
+    pub const AIMX_GROUP: &str = "aimx";
+
     pub fn generate_systemd_unit(aimx_path: &str, data_dir: &str) -> String {
+        // `RuntimeDirectory=aimx` makes systemd create `/run/aimx/` at
+        // service start and tear it down on stop. Mode `0750` + `Group=aimx`
+        // gate socket access to members of the `aimx` system group (the
+        // socket itself lands inside `/run/aimx/` in Sprint 34).
         format!(
             "[Unit]\n\
              Description=AIMX SMTP server\n\
@@ -124,12 +134,16 @@ pub mod service {
              \n\
              [Service]\n\
              Type=simple\n\
+             User=root\n\
+             Group=aimx\n\
              ExecStart={aimx_path} serve --data-dir {data_dir}\n\
              Restart=on-failure\n\
              RestartSec=5s\n\
              LimitNOFILE=65536\n\
              TasksMax=4096\n\
              ReadWritePaths={data_dir}\n\
+             RuntimeDirectory=aimx\n\
+             RuntimeDirectoryMode=0750\n\
              StandardOutput=journal\n\
              StandardError=journal\n\
              \n\
@@ -139,16 +153,24 @@ pub mod service {
     }
 
     pub fn generate_openrc_script(aimx_path: &str, data_dir: &str) -> String {
+        // OpenRC has no direct `RuntimeDirectory=` analogue — use
+        // `checkpath` in `start_pre` to mint `/run/aimx/` owned by
+        // `root:aimx` with mode `0750` every service start.
         format!(
             "#!/sbin/openrc-run\n\
              \n\
              description=\"AIMX SMTP server\"\n\
              command={aimx_path}\n\
              command_args=\"serve --data-dir {data_dir}\"\n\
+             command_user=\"root:aimx\"\n\
              supervisor=supervise-daemon\n\
              \n\
              depend() {{\n\
              \tafter net\n\
+             }}\n\
+             \n\
+             start_pre() {{\n\
+             \tcheckpath -d -m 0750 -o root:aimx /run/aimx || return 1\n\
              }}\n"
         )
     }
@@ -261,6 +283,42 @@ mod tests {
     fn systemd_unit_custom_paths() {
         let unit = generate_systemd_unit("/opt/bin/aimx", "/data/aimx");
         assert!(unit.contains("ExecStart=/opt/bin/aimx serve --data-dir /data/aimx"));
+    }
+
+    #[test]
+    fn systemd_unit_exposes_runtime_dir_and_aimx_group() {
+        let unit = generate_systemd_unit("/usr/local/bin/aimx", "/var/lib/aimx");
+        assert!(
+            unit.contains("RuntimeDirectory=aimx"),
+            "systemd unit must declare RuntimeDirectory=aimx so `/run/aimx/` \
+             is created by systemd (Sprint 33 S33-4)"
+        );
+        assert!(
+            unit.contains("RuntimeDirectoryMode=0750"),
+            "runtime dir mode must be 0750 so only root + aimx group can traverse it"
+        );
+        assert!(
+            unit.contains("Group=aimx"),
+            "service must run with the aimx supplementary group so the UDS \
+             socket (Sprint 34) inherits group ownership"
+        );
+        assert!(
+            unit.contains("User=root"),
+            "User=root remains — the daemon still binds port 25"
+        );
+    }
+
+    #[test]
+    fn openrc_script_creates_runtime_dir_with_aimx_group() {
+        let script = generate_openrc_script("/usr/local/bin/aimx", "/var/lib/aimx");
+        assert!(
+            script.contains("checkpath -d -m 0750 -o root:aimx /run/aimx"),
+            "OpenRC script must mint /run/aimx with the aimx group (S33-4): {script}"
+        );
+        assert!(
+            script.contains("start_pre()"),
+            "start_pre hook is how OpenRC emulates systemd's RuntimeDirectory"
+        );
     }
 
     #[test]

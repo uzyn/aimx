@@ -14,6 +14,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct AimxMcpServer {
+    /// Retained for forward-compat with callers that still pass `--data-dir`,
+    /// even though config is now resolved via `config_path()` (Sprint 33).
+    #[allow(dead_code)]
     data_dir: PathBuf,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -94,8 +97,7 @@ impl AimxMcpServer {
     }
 
     fn load_config(&self) -> Result<Config, String> {
-        Config::load_from_data_dir(&self.data_dir)
-            .map_err(|e| format!("Failed to load config: {e}"))
+        Config::load_resolved().map_err(|e| format!("Failed to load config: {e}"))
     }
 }
 
@@ -540,8 +542,8 @@ pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> 
     Ok(())
 }
 
-fn load_dkim_key(config: &Config) -> Result<rsa::RsaPrivateKey, String> {
-    dkim::load_private_key(&config.data_dir)
+fn load_dkim_key(_config: &Config) -> Result<rsa::RsaPrivateKey, String> {
+    dkim::load_private_key(&crate::config::dkim_dir())
         .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))
 }
 
@@ -601,10 +603,11 @@ mod tests {
         }
     }
 
-    fn setup_config(config: &Config) {
+    fn setup_config(config: &Config) -> crate::config::test_env::ConfigDirOverride {
         std::fs::create_dir_all(&config.data_dir).unwrap();
-        let config_path = Config::config_path(&config.data_dir);
-        config.save(&config_path).unwrap();
+        let guard = crate::config::test_env::ConfigDirOverride::set(&config.data_dir);
+        config.save(&crate::config::config_path()).unwrap();
+        guard
     }
 
     fn create_test_email(dir: &std::path::Path, id: &str, meta: &EmailMetadata) {
@@ -784,7 +787,7 @@ mod tests {
     fn set_read_status_marks_read() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         let meta = sample_meta("2025-06-01-001", "sender@test.com", "Test", false);
         create_test_email(&tmp.path().join("alice"), "2025-06-01-001", &meta);
@@ -800,7 +803,7 @@ mod tests {
     fn set_read_status_marks_unread() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         let meta = sample_meta("2025-06-01-001", "sender@test.com", "Test", true);
         create_test_email(&tmp.path().join("alice"), "2025-06-01-001", &meta);
@@ -816,7 +819,7 @@ mod tests {
     fn set_read_status_nonexistent_mailbox() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         let result = set_read_status(&config, "nonexistent", "2025-06-01-001", true);
         assert!(result.is_err());
@@ -827,7 +830,7 @@ mod tests {
     fn set_read_status_nonexistent_email() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         std::fs::create_dir_all(tmp.path().join("alice")).unwrap();
         let result = set_read_status(&config, "alice", "nonexistent", true);
@@ -852,7 +855,7 @@ mod tests {
     fn list_mailboxes_with_unread_counts() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         let meta1 = sample_meta("2025-06-01-001", "a@test.com", "A", false);
         let meta2 = sample_meta("2025-06-01-002", "b@test.com", "B", true);
@@ -924,7 +927,7 @@ mod tests {
     fn set_read_status_rejects_path_traversal() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config(&config);
+        let _cfg_guard = setup_config(&config);
 
         std::fs::create_dir_all(tmp.path().join("alice")).unwrap();
         let result = set_read_status(&config, "alice", "../../etc/passwd", true);
@@ -936,6 +939,7 @@ mod tests {
     fn load_dkim_key_missing_returns_error() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let result = load_dkim_key(&config);
         assert!(result.is_err());
         assert!(
@@ -949,7 +953,9 @@ mod tests {
     fn load_dkim_key_present_returns_ok() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        // Point AIMX_CONFIG_DIR at `tmp` so `dkim_dir()` resolves there.
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        crate::dkim::generate_keypair(&crate::config::dkim_dir(), false).unwrap();
         let result = load_dkim_key(&config);
         assert!(result.is_ok());
     }

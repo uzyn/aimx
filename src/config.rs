@@ -3,6 +3,34 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
+const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
+const CONFIG_DIR_ENV: &str = "AIMX_CONFIG_DIR";
+
+/// Resolve the configuration directory.
+///
+/// Precedence:
+/// 1. `AIMX_CONFIG_DIR` environment variable (tests, non-standard installs)
+/// 2. `/etc/aimx/` default
+///
+/// Mirrors the `--data-dir` / `AIMX_DATA_DIR` shape used for the storage
+/// directory, but is deliberately **independent** of it: `--data-dir`
+/// governs `/var/lib/aimx/` (storage), `AIMX_CONFIG_DIR` governs
+/// `/etc/aimx/` (config + DKIM secrets).
+pub fn config_dir() -> PathBuf {
+    std::env::var_os(CONFIG_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_CONFIG_DIR))
+}
+
+/// Path to the main `config.toml` file.
+pub fn config_path() -> PathBuf {
+    config_dir().join("config.toml")
+}
+
+/// Path to the DKIM directory containing `private.key` and `public.key`.
+pub fn dkim_dir() -> PathBuf {
+    config_dir().join("dkim")
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Config {
@@ -81,16 +109,13 @@ impl Config {
         Ok(())
     }
 
-    pub fn config_path(data_dir: &Path) -> PathBuf {
-        data_dir.join("config.toml")
-    }
-
-    pub fn load_from_data_dir(data_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load(&Self::config_path(data_dir))
-    }
-
-    pub fn load_default() -> Result<Self, Box<dyn std::error::Error>> {
-        Self::load_from_data_dir(Path::new(DEFAULT_DATA_DIR))
+    /// Load the config from the canonical path returned by [`config_path`].
+    ///
+    /// Replaces the old `load_from_data_dir` — config no longer lives inside
+    /// the storage directory. Override via the `AIMX_CONFIG_DIR` env var
+    /// (tests, non-standard installs).
+    pub fn load_resolved() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load(&config_path())
     }
 
     pub fn mailbox_dir(&self, name: &str) -> PathBuf {
@@ -106,8 +131,55 @@ impl Config {
     }
 }
 
+/// Test-only helpers for overriding `AIMX_CONFIG_DIR` safely from multiple
+/// test modules. Process-wide env is not parallel-safe, so every test that
+/// mutates this variable must go through [`ConfigDirOverride`] — it
+/// serializes mutations behind a module-level [`Mutex`] and restores the
+/// previous value on drop.
+#[cfg(test)]
+pub(crate) mod test_env {
+    use super::CONFIG_DIR_ENV;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    static CONFIG_DIR_GUARD: Mutex<()> = Mutex::new(());
+
+    pub(crate) struct ConfigDirOverride {
+        _guard: std::sync::MutexGuard<'static, ()>,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl ConfigDirOverride {
+        pub(crate) fn set(path: &Path) -> Self {
+            let guard = CONFIG_DIR_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(CONFIG_DIR_ENV);
+            // SAFETY: env mutation serialized via CONFIG_DIR_GUARD.
+            unsafe {
+                std::env::set_var(CONFIG_DIR_ENV, path);
+            }
+            Self {
+                _guard: guard,
+                prev,
+            }
+        }
+    }
+
+    impl Drop for ConfigDirOverride {
+        fn drop(&mut self) {
+            // SAFETY: env mutation serialized via CONFIG_DIR_GUARD.
+            unsafe {
+                match &self.prev {
+                    Some(v) => std::env::set_var(CONFIG_DIR_ENV, v),
+                    None => std::env::remove_var(CONFIG_DIR_ENV),
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_env::ConfigDirOverride;
     use super::*;
     use tempfile::TempDir;
 
@@ -294,6 +366,49 @@ enable_ipv6 = true
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.enable_ipv6);
+    }
+
+    #[test]
+    fn config_dir_defaults_to_etc_aimx_when_env_unset() {
+        // Hold the guard by setting an override to a sentinel, then remove
+        // the var while still holding it. The `set`/drop dance keeps the
+        // serialization invariant without exposing the raw mutex.
+        let tmp = TempDir::new().unwrap();
+        let override_guard = ConfigDirOverride::set(tmp.path());
+        // SAFETY: serialization ensured by `override_guard` holding the
+        // CONFIG_DIR_GUARD; drop will restore the prior value.
+        unsafe {
+            std::env::remove_var(CONFIG_DIR_ENV);
+        }
+        assert_eq!(config_dir(), PathBuf::from("/etc/aimx"));
+        assert_eq!(config_path(), PathBuf::from("/etc/aimx/config.toml"));
+        assert_eq!(dkim_dir(), PathBuf::from("/etc/aimx/dkim"));
+        drop(override_guard);
+    }
+
+    #[test]
+    fn config_dir_env_var_overrides_default() {
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+        assert_eq!(config_dir(), tmp.path());
+        assert_eq!(config_path(), tmp.path().join("config.toml"));
+        assert_eq!(dkim_dir(), tmp.path().join("dkim"));
+    }
+
+    #[test]
+    fn load_resolved_reads_from_config_dir() {
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+
+        let config_file = tmp.path().join("config.toml");
+        std::fs::write(
+            &config_file,
+            "domain = \"resolved.example.com\"\n[mailboxes]\n",
+        )
+        .unwrap();
+
+        let config = Config::load_resolved().unwrap();
+        assert_eq!(config.domain, "resolved.example.com");
     }
 
     #[test]

@@ -278,7 +278,7 @@ The setup wizard performs these steps automatically:
 2. Generates a self-signed TLS certificate at `/etc/ssl/aimx/`
 3. Installs and starts `aimx serve` as a systemd/OpenRC service
 4. Runs port checks (outbound 25, inbound 25 via `/probe`)
-5. Generates the DKIM keypair at `/var/lib/aimx/dkim/`, writes `/var/lib/aimx/config.toml`, and creates the catchall mailbox directory
+5. Creates the `aimx` system group, generates the DKIM keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`), writes `/etc/aimx/config.toml` (mode `0640`, `root:root`), and creates the catchall mailbox directory under `/var/lib/aimx/`
 6. Displays the DNS records you need to add (see next step)
 7. After you add the records and press Enter, resolves and validates each one
 
@@ -386,7 +386,7 @@ aimx mailbox create notifications
 aimx mailbox list
 ```
 
-Edit `/var/lib/aimx/config.toml` to configure channel rules (triggers on incoming mail):
+Edit `/etc/aimx/config.toml` to configure channel rules (triggers on incoming mail):
 
 ```toml
 [mailboxes.support]
