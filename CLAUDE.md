@@ -58,7 +58,9 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 - `setup.rs` — `aimx setup [domain]`: interactive setup wizard. Prompts for domain when omitted, generates TLS cert + DKIM keys, installs systemd/OpenRC service file for `aimx serve`, displays colorized [DNS]/[MCP]/[Deliverability] sections, DNS retry loop, re-entrant detection. Requires root.
 - `ingest.rs` — `aimx ingest`: reads raw `.eml` from stdin (called by `aimx serve` in-process, or via stdin for manual use), parses MIME, writes Markdown with TOML frontmatter (`+++` delimiters), extracts attachments, fires channel triggers.
-- `send.rs` — `aimx send`: composes RFC 5322 message, DKIM-signs it, delivers via direct SMTP to recipient's MX.
+- `send.rs` — `aimx send`: thin UDS client. Composes an unsigned RFC 5322 message and submits it to `aimx serve` over `/run/aimx/send.sock` as one `AIMX/1 SEND` request frame. Signing (DKIM) and MX delivery live in `aimx serve`; this module no longer touches the DKIM key or the network. Refuses to run as root. Exit codes: `0` OK, `1` daemon ERR, `2` socket-missing / connect failure / root, `3` malformed response.
+- `send_protocol.rs` / `send_handler.rs` — `AIMX/1 SEND` wire codec and daemon-side signing + delivery handler (Sprint 34).
+- `transport.rs` — daemon-side `MailTransport` trait, `LettreTransport` (real MX delivery), `FileDropTransport` (test-only, triggered by `AIMX_TEST_MAIL_DROP`).
 - `mx.rs` — MX resolution: resolves recipient domain to MX hostnames via `hickory-resolver`, falls back to A record per RFC 5321.
 - `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations.
 - `channel.rs` — channel manager: match filters + shell command triggers on ingest.
@@ -69,7 +71,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 ### Trait-based testing pattern
 
-`setup.rs` defines `SystemOps` and `NetworkOps` traits with real and mock implementations. Tests use `MockSystemOps`/`MockNetworkOps` to simulate OS and network operations without requiring root or network access. The `send.rs` module uses `MailTransport` trait similarly. This pattern is used throughout — extend it when adding system-dependent functionality.
+`setup.rs` defines `SystemOps` and `NetworkOps` traits with real and mock implementations. Tests use `MockSystemOps`/`MockNetworkOps` to simulate OS and network operations without requiring root or network access. `transport.rs` defines the `MailTransport` trait consumed by `send_handler.rs`; production uses `LettreTransport` and tests inject a mock. This pattern is used throughout — extend it when adding system-dependent functionality.
 
 ### Config and storage
 

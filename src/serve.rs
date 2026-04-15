@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::dkim;
-use crate::send::{LettreTransport, MailTransport};
 use crate::send_handler::SendContext;
 use crate::send_protocol;
 use crate::smtp::SmtpServer;
 use crate::term;
+use crate::transport::{FileDropTransport, LettreTransport, MailTransport};
 
 const DEFAULT_BIND: &str = "0.0.0.0:25";
 const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
@@ -97,8 +97,16 @@ async fn run_serve(
     };
 
     // Build the SendContext shared across every per-connection UDS task.
+    //
+    // `AIMX_TEST_MAIL_DROP` (test-only) replaces the real MX transport with
+    // a file-drop transport so integration tests can observe the signed
+    // outbound message without reaching the network. In production this env
+    // var is never set.
     let transport: Arc<dyn MailTransport + Send + Sync> =
-        Arc::new(LettreTransport::new(config.enable_ipv6));
+        match std::env::var_os("AIMX_TEST_MAIL_DROP") {
+            Some(path) => Arc::new(FileDropTransport::new(PathBuf::from(path))),
+            None => Arc::new(LettreTransport::new(config.enable_ipv6)),
+        };
     let send_ctx = Arc::new(SendContext {
         dkim_key,
         primary_domain: config.domain.clone(),

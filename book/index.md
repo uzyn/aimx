@@ -14,7 +14,9 @@ Inbound:
                                              -> channel manager (triggers agent)
 
 Outbound:
-  MCP tool call -> aimx send -> DKIM sign -> direct SMTP to recipient MX
+  MCP tool call -> aimx send -> UDS (/run/aimx/send.sock) -> aimx serve
+                                                          -> DKIM sign
+                                                          -> direct SMTP to recipient MX
 ```
 
 - **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.

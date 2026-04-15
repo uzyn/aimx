@@ -1,238 +1,32 @@
+//! `aimx send` — thin UDS client for `AIMX/1 SEND`.
+//!
+//! As of Sprint 35, this module no longer signs, loads DKIM keys, or talks
+//! to MX servers directly. It composes an unsigned RFC 5322 message,
+//! opens `/run/aimx/send.sock`, writes a single `AIMX/1 SEND` request frame,
+//! and maps the daemon's response to a stable CLI exit code + user message.
+//!
+//! Signing and MX delivery live in `aimx serve` (see `send_handler.rs` and
+//! `transport.rs`).
+
 use crate::cli::SendArgs;
 use crate::config::Config;
-use crate::dkim;
+use crate::send_protocol::{self, ErrCode, SendRequest};
+use crate::serve::send_socket_path;
 use crate::term;
 use base64::Engine;
 use chrono::Utc;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
-
-pub trait MailTransport {
-    fn send(
-        &self,
-        sender: &str,
-        recipient: &str,
-        message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>>;
-}
-
-pub struct LettreTransport {
-    enable_ipv6: bool,
-}
-
-/// Outcome of picking a connect target for outbound SMTP.
-///
-/// Exists so the `enable_ipv6 = false` path can be tested without real DNS.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum ConnectTarget {
-    /// Connect over this literal (hostname when `enable_ipv6 = true`, or an
-    /// IPv4 string when `enable_ipv6 = false` and an A record was found).
-    Target(String),
-    /// IPv4-only was requested but the MX host has no A record. Caller should
-    /// skip this MX so the flag is not silently violated.
-    SkipNoIpv4,
-}
-
-/// Pure, testable connect-target selection.
-///
-/// - `enable_ipv6 = true` → always use the hostname; OS picks the family.
-/// - `enable_ipv6 = false` + at least one A record → use the first A.
-/// - `enable_ipv6 = false` + no A records → `SkipNoIpv4` so the caller can
-///   move on to the next MX instead of silently falling through to the
-///   hostname (which may resolve to IPv6 and violate the flag).
-pub(crate) fn select_connect_target(
-    host: &str,
-    enable_ipv6: bool,
-    ipv4_addrs: &[std::net::Ipv4Addr],
-) -> ConnectTarget {
-    if enable_ipv6 {
-        return ConnectTarget::Target(host.to_string());
-    }
-    match ipv4_addrs.first() {
-        Some(addr) => ConnectTarget::Target(addr.to_string()),
-        None => ConnectTarget::SkipNoIpv4,
-    }
-}
-
-impl LettreTransport {
-    pub fn new(enable_ipv6: bool) -> Self {
-        Self { enable_ipv6 }
-    }
-
-    /// Resolves an MX hostname's A records only (no AAAA).
-    ///
-    /// This helper has been added, removed, and re-added across Sprints 25, 26,
-    /// and this follow-up PR. It exists specifically to honour the opt-in
-    /// `enable_ipv6` flag: when the flag is false we pin the connect target to
-    /// an IPv4 literal so `lettre`/the OS cannot silently select an AAAA
-    /// record. Do not delete without re-auditing the flag semantics.
-    fn resolve_ipv4(host: &str) -> Result<Vec<std::net::Ipv4Addr>, Box<dyn std::error::Error>> {
-        let rt = tokio::runtime::Handle::try_current();
-        match rt {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_a(host)))
-            }
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
-                rt.block_on(crate::mx::resolve_a(host))
-            }
-        }
-    }
-
-    fn extract_domain(recipient: &str) -> Result<String, Box<dyn std::error::Error>> {
-        let addr = recipient
-            .rsplit('<')
-            .next()
-            .unwrap_or(recipient)
-            .trim_end_matches('>');
-        addr.split('@')
-            .nth(1)
-            .map(|d| d.to_string())
-            .ok_or_else(|| format!("Invalid recipient address: {recipient}").into())
-    }
-}
-
-impl MailTransport for LettreTransport {
-    fn send(
-        &self,
-        sender: &str,
-        recipient: &str,
-        message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let domain = Self::extract_domain(recipient)?;
-        let rt = tokio::runtime::Handle::try_current();
-
-        let mx_hosts = match rt {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_mx(&domain)))?
-            }
-            Err(_) => {
-                let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
-                rt.block_on(crate::mx::resolve_mx(&domain))?
-            }
-        };
-
-        let sender_addr: lettre::Address = Self::extract_domain(sender).and_then(|_| {
-            let bare = sender
-                .rsplit('<')
-                .next()
-                .unwrap_or(sender)
-                .trim_end_matches('>');
-            bare.parse()
-                .map_err(|e| format!("Invalid sender address '{sender}': {e}").into())
-        })?;
-
-        let envelope = lettre::address::Envelope::new(
-            Some(sender_addr),
-            vec![
-                recipient
-                    .parse()
-                    .map_err(|e| format!("Invalid recipient address '{recipient}': {e}"))?,
-            ],
-        )
-        .map_err(|e| format!("Failed to create envelope: {e}"))?;
-
-        deliver_across_mx(&domain, &mx_hosts, |host| {
-            self.try_deliver(host, &envelope, message)
-        })
-    }
-}
-
-/// Iterate MX hosts, short-circuiting on the first success. When every MX
-/// fails, return a single error that contains *all* per-MX failures (not just
-/// the last one) so operators can debug multi-MX outages without tailing logs.
-pub(crate) fn deliver_across_mx<F>(
-    domain: &str,
-    mx_hosts: &[String],
-    mut deliver: F,
-) -> Result<String, Box<dyn std::error::Error>>
-where
-    F: FnMut(&str) -> Result<String, Box<dyn std::error::Error>>,
-{
-    let mut errors: Vec<String> = Vec::new();
-
-    for host in mx_hosts {
-        match deliver(host) {
-            Ok(server) => return Ok(server),
-            Err(e) => {
-                errors.push(format!("{host}: {e}"));
-            }
-        }
-    }
-
-    let joined = if errors.is_empty() {
-        String::new()
-    } else {
-        errors.join("; ")
-    };
-    Err(format!("All MX servers for {domain} unreachable: {joined}").into())
-}
-
-impl LettreTransport {
-    fn try_deliver(
-        &self,
-        host: &str,
-        envelope: &lettre::address::Envelope,
-        message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        use lettre::Transport;
-
-        // Note: SNI uses `host` while the connect target may be a bare IPv4
-        // literal (IPv4-only mode). This is fine here because
-        // `dangerous_accept_invalid_certs(true)` is set — cert name mismatch
-        // is accepted. If that flag is ever flipped, SNI and the TLS peer
-        // identity would need to be reconciled.
-        let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
-            .dangerous_accept_invalid_certs(true)
-            .build_rustls()
-            .map_err(|e| format!("TLS configuration error: {e}"))?;
-
-        let ipv4_addrs = if self.enable_ipv6 {
-            Vec::new()
-        } else {
-            Self::resolve_ipv4(host).unwrap_or_default()
-        };
-
-        let connect_target = match select_connect_target(host, self.enable_ipv6, &ipv4_addrs) {
-            ConnectTarget::Target(t) => t,
-            ConnectTarget::SkipNoIpv4 => {
-                return Err(format!("{host}: no A record (enable_ipv6 = false); skipping").into());
-            }
-        };
-
-        let transport = lettre::SmtpTransport::builder_dangerous(&connect_target)
-            .hello_name(lettre::transport::smtp::extension::ClientId::Domain(
-                host.to_string(),
-            ))
-            .port(25)
-            .tls(lettre::transport::smtp::client::Tls::Opportunistic(
-                tls_params,
-            ))
-            .timeout(Some(std::time::Duration::from_secs(60)))
-            .build();
-
-        transport
-            .send_raw(envelope, message)
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                let msg = e.to_string();
-                if msg.contains("Connection refused") {
-                    format!("Connection refused by {host}").into()
-                } else if msg.contains("timed out") || msg.contains("Timeout") {
-                    format!("Connection timed out to {host}").into()
-                } else {
-                    format!("Rejected by {host}: {msg}").into()
-                }
-            })?;
-
-        Ok(host.to_string())
-    }
-}
 
 #[derive(Debug)]
 pub struct ComposeResult {
     pub message: Vec<u8>,
+    /// RFC 5322 Message-ID of the composed message. The daemon echoes this
+    /// back in the `AIMX/1 OK` response, so the client itself never needs to
+    /// read the field — it's part of the public API for other callers
+    /// (tests, future schedulers).
+    #[allow(dead_code)]
     pub message_id: String,
 }
 
@@ -402,69 +196,290 @@ pub fn build_references(original_references: Option<&str>, original_message_id: 
     }
 }
 
-pub fn send_with_transport(
-    args: &SendArgs,
-    transport: &dyn MailTransport,
-    dkim_key: Option<(&rsa::RsaPrivateKey, &str, &str)>,
-) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let composed = compose_message(args)?;
-
-    let final_message = if let Some((key, domain, selector)) = dkim_key {
-        dkim::sign_message(&composed.message, key, domain, selector)?
+/// Extract the mailbox name (local part) from an RFC 5322 `From:` header.
+/// Handles both `user@host` and `"Name" <user@host>` forms. Returns `None`
+/// if the address has no local part.
+fn extract_mailbox_name(from: &str) -> Option<String> {
+    let s = from.trim();
+    let bare = if let Some(start) = s.rfind('<') {
+        let tail = &s[start + 1..];
+        let end = tail.find('>').unwrap_or(tail.len());
+        &tail[..end]
     } else {
-        composed.message
+        s
+    };
+    let at = bare.find('@')?;
+    let local = bare[..at].trim();
+    if local.is_empty() {
+        None
+    } else {
+        Some(local.to_string())
+    }
+}
+
+/// Resolve the registered `from_mailbox` name for a composed `From:` header.
+///
+/// Prefers an exact mailbox whose `address` equals the bare sender address;
+/// falls back to matching by local part (so `aimx send --from foo@domain`
+/// picks the mailbox named `foo` when it exists); finally falls back to the
+/// catchall entry if one is configured.
+fn resolve_from_mailbox(config: &Config, from_header: &str) -> Result<String, String> {
+    let bare = {
+        let s = from_header.trim();
+        if let Some(start) = s.rfind('<') {
+            let tail = &s[start + 1..];
+            let end = tail.find('>').unwrap_or(tail.len());
+            tail[..end].trim().to_string()
+        } else {
+            s.to_string()
+        }
     };
 
-    let server = transport.send(&args.from, &args.to, &final_message)?;
-    Ok((composed.message_id, server))
+    for (name, mb) in &config.mailboxes {
+        if mb.address.eq_ignore_ascii_case(&bare) {
+            return Ok(name.clone());
+        }
+    }
+
+    if let Some(local) = extract_mailbox_name(from_header)
+        && config.mailboxes.contains_key(&local)
+    {
+        return Ok(local);
+    }
+
+    for (name, mb) in &config.mailboxes {
+        if mb.address.starts_with('*') {
+            return Ok(name.clone());
+        }
+    }
+
+    Err(format!(
+        "no mailbox in /etc/aimx/config.toml matches From: {bare}"
+    ))
+}
+
+/// CLI exit codes exposed by `aimx send`. Kept as named constants so the
+/// unit tests and downstream tooling can reference them symbolically.
+pub const EXIT_OK: i32 = 0;
+pub const EXIT_DAEMON_ERR: i32 = 1;
+pub const EXIT_CONNECT: i32 = 2;
+pub const EXIT_MALFORMED: i32 = 3;
+
+/// Outcome of submitting one `AIMX/1 SEND` request.
+#[derive(Debug)]
+pub enum SubmitOutcome {
+    Ok {
+        message_id: String,
+    },
+    Err {
+        code: ErrCode,
+        reason: String,
+    },
+    /// The daemon replied with something that isn't a valid `AIMX/1` frame.
+    Malformed(String),
+}
+
+/// Submit a prepared [`SendRequest`] over the UDS at `socket_path` and return
+/// the parsed outcome. Extracted so integration tests (and the real client)
+/// share the exact same framing logic.
+pub async fn submit_request(
+    socket_path: &Path,
+    request: &SendRequest,
+) -> Result<SubmitOutcome, io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_response_line(&buf))
+}
+
+fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
+    let text = match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        Err(_) => return SubmitOutcome::Malformed("response is not UTF-8".to_string()),
+    };
+
+    let line = text.lines().next().unwrap_or("").trim_end_matches('\r');
+    if line.is_empty() {
+        return SubmitOutcome::Malformed("empty response from daemon".to_string());
+    }
+
+    let rest = match line.strip_prefix("AIMX/1 ") {
+        Some(r) => r,
+        None => {
+            return SubmitOutcome::Malformed(format!("unexpected response: {line:?}"));
+        }
+    };
+
+    if let Some(message_id) = rest.strip_prefix("OK ") {
+        return SubmitOutcome::Ok {
+            message_id: message_id.trim().to_string(),
+        };
+    }
+    if let Some(err_body) = rest.strip_prefix("ERR ") {
+        let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
+        let code = match code_str {
+            "MAILBOX" => ErrCode::Mailbox,
+            "DOMAIN" => ErrCode::Domain,
+            "SIGN" => ErrCode::Sign,
+            "DELIVERY" => ErrCode::Delivery,
+            "TEMP" => ErrCode::Temp,
+            "MALFORMED" => ErrCode::Malformed,
+            _ => {
+                return SubmitOutcome::Malformed(format!(
+                    "unknown ERR code {code_str:?} in response"
+                ));
+            }
+        };
+        return SubmitOutcome::Err {
+            code,
+            reason: reason.trim().to_string(),
+        };
+    }
+
+    SubmitOutcome::Malformed(format!("unexpected response: {line:?}"))
+}
+
+/// Is the current process running as root? Factored out so tests can override.
+#[cfg(unix)]
+fn current_is_root() -> bool {
+    // SAFETY: libc::geteuid is a simple syscall with no preconditions.
+    unsafe { libc::geteuid() == 0 }
+}
+
+#[cfg(not(unix))]
+fn current_is_root() -> bool {
+    false
+}
+
+/// Map a daemon response to a CLI exit code + stderr/stdout messaging, then
+/// write the output through the caller-supplied sinks. Pure function so
+/// tests don't have to observe real stderr.
+pub fn render_outcome<O: io::Write, E: io::Write>(
+    outcome: SubmitOutcome,
+    stdout: &mut O,
+    stderr: &mut E,
+) -> i32 {
+    match outcome {
+        SubmitOutcome::Ok { message_id } => {
+            let _ = writeln!(
+                stderr,
+                "{}",
+                term::success(&format!("Email sent.\nMessage-ID: {message_id}"))
+            );
+            let _ = stdout.write_all(message_id.as_bytes());
+            let _ = stdout.write_all(b"\n");
+            EXIT_OK
+        }
+        SubmitOutcome::Err { code, reason } => {
+            let _ = writeln!(
+                stderr,
+                "{} [{}]: {reason}",
+                term::error("Error"),
+                code.as_str()
+            );
+            EXIT_DAEMON_ERR
+        }
+        SubmitOutcome::Malformed(reason) => {
+            let _ = writeln!(
+                stderr,
+                "{} malformed response from aimx daemon: {reason}",
+                term::error("Error:")
+            );
+            EXIT_MALFORMED
+        }
+    }
+}
+
+/// Build the `AIMX/1 SEND` request frame from composed CLI args + config.
+pub fn build_request(args: &SendArgs, config: &Config) -> Result<SendRequest, String> {
+    let composed = compose_message(args).map_err(|e| e.to_string())?;
+    let from_mailbox = resolve_from_mailbox(config, &args.from)?;
+    Ok(SendRequest {
+        from_mailbox,
+        body: composed.message,
+    })
+}
+
+fn run_inner(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    if current_is_root() {
+        eprintln!(
+            "{} send is a per-user operation — run without sudo",
+            term::error("Error:")
+        );
+        std::process::exit(EXIT_CONNECT);
+    }
+
+    let request = match build_request(&args, &config) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(e.into());
+        }
+    };
+
+    let socket = send_socket_path();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+
+    let submit_result = rt.block_on(async { submit_request(&socket, &request).await });
+
+    let outcome = match submit_result {
+        Ok(o) => o,
+        Err(e) => {
+            handle_connect_error(&socket, &e);
+            std::process::exit(EXIT_CONNECT);
+        }
+    };
+
+    let code = render_outcome(outcome, &mut io::stdout(), &mut io::stderr());
+    if code != EXIT_OK {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn handle_connect_error(socket: &Path, err: &io::Error) {
+    if err.kind() == io::ErrorKind::NotFound {
+        eprintln!(
+            "{} aimx daemon not running — check 'systemctl status aimx'",
+            term::error("Error:")
+        );
+    } else {
+        eprintln!(
+            "{} Failed to connect to aimx daemon at {}: {err}",
+            term::error("Error:"),
+            socket.display()
+        );
+    }
 }
 
 pub fn run(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    let transport = LettreTransport::new(config.enable_ipv6);
-    let private_key = dkim::load_private_key(&crate::config::dkim_dir())
-        .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))?;
+    run_inner(args, config)
+}
 
-    let dkim_info = Some((
-        &private_key,
-        config.domain.as_str(),
-        config.dkim_selector.as_str(),
-    ));
-
-    let (message_id, server) = send_with_transport(&args, &transport, dkim_info)?;
-    eprintln!(
-        "{}",
-        term::success(&format!(
-            "Delivered to {server} for {}. Message-ID: {message_id}",
-            args.to
-        ))
-    );
-    Ok(())
+/// Resolve the UDS socket path the client will connect to. Thin wrapper over
+/// [`send_socket_path`] exposed for MCP callers that want to share the same
+/// path lookup.
+#[allow(dead_code)]
+pub fn client_socket_path() -> PathBuf {
+    send_socket_path()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::send_protocol::SendResponse;
     use std::sync::{Arc, Mutex};
-
-    struct MockTransport {
-        sent: Arc<Mutex<Vec<Vec<u8>>>>,
-        should_fail: bool,
-    }
-
-    impl MailTransport for MockTransport {
-        fn send(
-            &self,
-            _sender: &str,
-            _recipient: &str,
-            message: &[u8],
-        ) -> Result<String, Box<dyn std::error::Error>> {
-            if self.should_fail {
-                return Err("Mock transport failure".into());
-            }
-            self.sent.lock().unwrap().push(message.to_vec());
-            Ok("mock-mx.example.com".to_string())
-        }
-    }
 
     fn test_args() -> SendArgs {
         SendArgs {
@@ -475,6 +490,36 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+        }
+    }
+
+    fn test_config() -> Config {
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "agent".to_string(),
+            crate::config::MailboxConfig {
+                address: "agent@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        Config {
+            domain: "example.com".to_string(),
+            data_dir: std::path::PathBuf::from("/tmp"),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
         }
     }
 
@@ -511,60 +556,6 @@ mod tests {
         assert!(mid_line.contains('<'));
         assert!(mid_line.contains('>'));
         assert!(mid_line.contains("@example.com"));
-    }
-
-    #[test]
-    fn send_via_mock_transport() {
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let transport = MockTransport {
-            sent: sent.clone(),
-            should_fail: false,
-        };
-
-        let args = test_args();
-        let (message_id, server) = send_with_transport(&args, &transport, None).unwrap();
-
-        assert!(!message_id.is_empty());
-        assert_eq!(server, "mock-mx.example.com");
-        let messages = sent.lock().unwrap();
-        assert_eq!(messages.len(), 1);
-        let text = String::from_utf8(messages[0].clone()).unwrap();
-        assert!(text.contains("From: agent@example.com"));
-    }
-
-    #[test]
-    fn send_failure_propagates() {
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let transport = MockTransport {
-            sent,
-            should_fail: true,
-        };
-
-        let args = test_args();
-        let result = send_with_transport(&args, &transport, None);
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Mock transport failure")
-        );
-    }
-
-    #[test]
-    fn send_with_transport_returns_delivery_info() {
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let transport = MockTransport {
-            sent,
-            should_fail: false,
-        };
-
-        let args = test_args();
-        let (message_id, server) = send_with_transport(&args, &transport, None).unwrap();
-
-        assert!(message_id.starts_with('<'));
-        assert!(message_id.ends_with('>'));
-        assert_eq!(server, "mock-mx.example.com");
     }
 
     #[test]
@@ -748,33 +739,6 @@ mod tests {
         let result = compose_message(&args);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
-    }
-
-    #[test]
-    fn send_with_dkim_signing() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
-        let private_key = crate::dkim::load_private_key(tmp.path()).unwrap();
-
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let transport = MockTransport {
-            sent: sent.clone(),
-            should_fail: false,
-        };
-
-        let args = test_args();
-        send_with_transport(
-            &args,
-            &transport,
-            Some((&private_key, "example.com", "dkim")),
-        )
-        .unwrap();
-
-        let messages = sent.lock().unwrap();
-        assert_eq!(messages.len(), 1);
-        let text = String::from_utf8(messages[0].clone()).unwrap();
-        assert!(text.contains("DKIM-Signature:"));
-        assert!(text.contains("From: agent@example.com"));
     }
 
     #[test]
@@ -989,158 +953,6 @@ mod tests {
     }
 
     #[test]
-    fn dkim_selector_config_used() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
-        let private_key = crate::dkim::load_private_key(tmp.path()).unwrap();
-
-        let sent = Arc::new(Mutex::new(Vec::new()));
-        let transport = MockTransport {
-            sent: sent.clone(),
-            should_fail: false,
-        };
-
-        let custom_selector = "myselector";
-        let args = test_args();
-        send_with_transport(
-            &args,
-            &transport,
-            Some((&private_key, "example.com", custom_selector)),
-        )
-        .unwrap();
-
-        let messages = sent.lock().unwrap();
-        let text = String::from_utf8(messages[0].clone()).unwrap();
-        assert!(text.contains("s=myselector"));
-    }
-
-    #[test]
-    fn run_with_missing_dkim_key_returns_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        let mut mailboxes = std::collections::HashMap::new();
-        mailboxes.insert(
-            "catchall".to_string(),
-            crate::config::MailboxConfig {
-                address: "*@test.com".to_string(),
-                on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-            },
-        );
-        let config = crate::config::Config {
-            domain: "test.com".to_string(),
-            data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "dkim".to_string(),
-            mailboxes,
-            verify_host: None,
-            enable_ipv6: false,
-        };
-
-        let args = test_args();
-        let result = run(args, config);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("DKIM") || err.contains("private key"),
-            "Error should mention DKIM key: {err}"
-        );
-    }
-
-    #[test]
-    fn select_connect_target_ipv6_enabled_returns_hostname() {
-        let target = select_connect_target("mx.example.com", true, &[]);
-        assert_eq!(target, ConnectTarget::Target("mx.example.com".to_string()));
-    }
-
-    #[test]
-    fn select_connect_target_ipv6_enabled_ignores_ipv4_addrs() {
-        let addrs = vec!["1.2.3.4".parse().unwrap()];
-        let target = select_connect_target("mx.example.com", true, &addrs);
-        assert_eq!(target, ConnectTarget::Target("mx.example.com".to_string()));
-    }
-
-    #[test]
-    fn select_connect_target_ipv4_mode_uses_first_a_record() {
-        let addrs: Vec<std::net::Ipv4Addr> = vec![
-            "203.0.113.10".parse().unwrap(),
-            "203.0.113.11".parse().unwrap(),
-        ];
-        let target = select_connect_target("mx.example.com", false, &addrs);
-        assert_eq!(target, ConnectTarget::Target("203.0.113.10".to_string()));
-    }
-
-    #[test]
-    fn select_connect_target_ipv4_mode_without_a_record_skips() {
-        let target = select_connect_target("aaaa-only.example.com", false, &[]);
-        assert_eq!(target, ConnectTarget::SkipNoIpv4);
-    }
-
-    #[test]
-    fn deliver_across_mx_returns_first_success() {
-        let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
-        let result = deliver_across_mx("example.com", &hosts, |host| Ok(host.to_string()));
-        assert_eq!(result.unwrap(), "mx1.example.com");
-    }
-
-    #[test]
-    fn deliver_across_mx_falls_through_to_second() {
-        let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
-        let result = deliver_across_mx("example.com", &hosts, |host| {
-            if host == "mx1.example.com" {
-                Err("connection refused".into())
-            } else {
-                Ok(host.to_string())
-            }
-        });
-        assert_eq!(result.unwrap(), "mx2.example.com");
-    }
-
-    #[test]
-    fn deliver_across_mx_collects_all_errors_on_total_failure() {
-        let hosts = vec![
-            "mx1.example.com".to_string(),
-            "mx2.example.com".to_string(),
-            "mx3.example.com".to_string(),
-        ];
-        let result = deliver_across_mx(
-            "example.com",
-            &hosts,
-            |host| -> Result<String, Box<dyn std::error::Error>> {
-                Err(format!("{host}-specific failure").into())
-            },
-        );
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("example.com"));
-        // Every MX host's specific error must appear — not just the last one.
-        assert!(
-            err.contains("mx1.example.com") && err.contains("mx1.example.com-specific failure"),
-            "mx1 error missing from: {err}"
-        );
-        assert!(
-            err.contains("mx2.example.com") && err.contains("mx2.example.com-specific failure"),
-            "mx2 error missing from: {err}"
-        );
-        assert!(
-            err.contains("mx3.example.com") && err.contains("mx3.example.com-specific failure"),
-            "mx3 error missing from: {err}"
-        );
-    }
-
-    #[test]
-    fn lettre_transport_extract_domain() {
-        assert_eq!(
-            LettreTransport::extract_domain("user@gmail.com").unwrap(),
-            "gmail.com"
-        );
-        assert_eq!(
-            LettreTransport::extract_domain("User <user@gmail.com>").unwrap(),
-            "gmail.com"
-        );
-        assert!(LettreTransport::extract_domain("nodomain").is_err());
-    }
-
-    #[test]
     fn normalize_crlf_bare_lf() {
         let result = super::normalize_crlf("Hello\nWorld\n");
         assert_eq!(result, "Hello\r\nWorld\r\n");
@@ -1214,5 +1026,278 @@ mod tests {
                 panic!("Found bare LF at byte offset {i}: ...{context}");
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Sprint 35: client wire-layer tests. These use a tempdir-scoped UDS
+    // + an in-memory handler so we never hit the real `/run/aimx/`.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn resolve_from_mailbox_exact_match() {
+        let cfg = test_config();
+        assert_eq!(
+            resolve_from_mailbox(&cfg, "agent@example.com").unwrap(),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn resolve_from_mailbox_display_name_form() {
+        let cfg = test_config();
+        assert_eq!(
+            resolve_from_mailbox(&cfg, "Agent <agent@example.com>").unwrap(),
+            "agent"
+        );
+    }
+
+    #[test]
+    fn resolve_from_mailbox_falls_through_to_catchall() {
+        let cfg = test_config();
+        // Local part doesn't match a named mailbox; should resolve to catchall.
+        assert_eq!(
+            resolve_from_mailbox(&cfg, "nobody@example.com").unwrap(),
+            "catchall"
+        );
+    }
+
+    #[test]
+    fn parse_response_ok() {
+        let buf = b"AIMX/1 OK <abc@example.com>\n";
+        match parse_response_line(buf) {
+            SubmitOutcome::Ok { message_id } => {
+                assert_eq!(message_id, "<abc@example.com>");
+            }
+            _ => panic!("expected Ok"),
+        }
+    }
+
+    #[test]
+    fn parse_response_err_domain() {
+        let buf = b"AIMX/1 ERR DOMAIN sender domain does not match\n";
+        match parse_response_line(buf) {
+            SubmitOutcome::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Domain);
+                assert_eq!(reason, "sender domain does not match");
+            }
+            _ => panic!("expected Err"),
+        }
+    }
+
+    #[test]
+    fn parse_response_err_all_codes() {
+        for (label, expected) in [
+            ("MAILBOX", ErrCode::Mailbox),
+            ("DOMAIN", ErrCode::Domain),
+            ("SIGN", ErrCode::Sign),
+            ("DELIVERY", ErrCode::Delivery),
+            ("TEMP", ErrCode::Temp),
+            ("MALFORMED", ErrCode::Malformed),
+        ] {
+            let buf = format!("AIMX/1 ERR {label} reason here\n");
+            match parse_response_line(buf.as_bytes()) {
+                SubmitOutcome::Err { code, .. } => assert_eq!(code, expected),
+                _ => panic!("expected Err for {label}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_response_unknown_prefix() {
+        let buf = b"HTTP/1.1 200 OK\n";
+        assert!(matches!(
+            parse_response_line(buf),
+            SubmitOutcome::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn parse_response_unknown_err_code() {
+        let buf = b"AIMX/1 ERR SPLORG something\n";
+        assert!(matches!(
+            parse_response_line(buf),
+            SubmitOutcome::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn parse_response_empty() {
+        assert!(matches!(
+            parse_response_line(b""),
+            SubmitOutcome::Malformed(_)
+        ));
+    }
+
+    #[test]
+    fn render_outcome_ok_returns_exit_0() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(
+            SubmitOutcome::Ok {
+                message_id: "<x@example.com>".to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, EXIT_OK);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(err_text.contains("Email sent."));
+        assert!(err_text.contains("<x@example.com>"));
+    }
+
+    #[test]
+    fn render_outcome_err_returns_exit_1_with_code_prefix() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(
+            SubmitOutcome::Err {
+                code: ErrCode::Domain,
+                reason: "sender domain does not match aimx domain".to_string(),
+            },
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, EXIT_DAEMON_ERR);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(err_text.contains("[DOMAIN]"));
+        assert!(err_text.contains("sender domain does not match"));
+    }
+
+    #[test]
+    fn render_outcome_malformed_returns_exit_3() {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(
+            SubmitOutcome::Malformed("garbage".to_string()),
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, EXIT_MALFORMED);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(err_text.contains("malformed response"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submit_request_end_to_end_via_fake_listener() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let captured: Arc<Mutex<Option<SendRequest>>> = Arc::new(Mutex::new(None));
+        let captured_c = Arc::clone(&captured);
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = stream.into_split();
+            let req = send_protocol::parse_request(&mut reader).await.unwrap();
+            *captured_c.lock().unwrap() = Some(req);
+            send_protocol::write_response(
+                &mut writer,
+                &SendResponse::Ok {
+                    message_id: "<srv@example.com>".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.shutdown().await.ok();
+        });
+
+        let request = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+        };
+        let outcome = submit_request(&sock, &request).await.unwrap();
+        server.await.unwrap();
+
+        match outcome {
+            SubmitOutcome::Ok { message_id } => assert_eq!(message_id, "<srv@example.com>"),
+            _ => panic!("expected Ok"),
+        }
+        let seen = captured.lock().unwrap().clone().unwrap();
+        assert_eq!(seen.from_mailbox, "alice");
+        assert_eq!(seen.body, b"From: alice@example.com\r\n\r\nhi\r\n".to_vec());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submit_request_missing_socket_returns_not_found() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist.sock");
+        let request = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+        };
+        let result = submit_request(&missing, &request).await;
+        let err = result.unwrap_err();
+        assert!(
+            err.kind() == io::ErrorKind::NotFound || err.kind() == io::ErrorKind::ConnectionRefused,
+            "expected NotFound or ConnectionRefused, got {:?}",
+            err.kind()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submit_request_daemon_err_domain_mapped_to_exit_1() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = stream.into_split();
+            let _ = send_protocol::parse_request(&mut reader).await.unwrap();
+            send_protocol::write_response(
+                &mut writer,
+                &SendResponse::Err {
+                    code: ErrCode::Domain,
+                    reason: "sender domain does not match aimx domain".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.shutdown().await.ok();
+        });
+
+        let request = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: b"From: alice@other.org\r\n\r\nhi\r\n".to_vec(),
+        };
+        let outcome = submit_request(&sock, &request).await.unwrap();
+        server.await.unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(outcome, &mut out, &mut err);
+        assert_eq!(code, EXIT_DAEMON_ERR);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(err_text.contains("[DOMAIN]"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn submit_request_malformed_response_mapped_to_exit_3() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("test.sock");
+
+        let listener = tokio::net::UnixListener::bind(&sock).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (mut reader, mut writer) = stream.into_split();
+            let _ = send_protocol::parse_request(&mut reader).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(b"garbage not a frame\n").await.unwrap();
+            writer.shutdown().await.ok();
+        });
+
+        let request = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+        };
+        let outcome = submit_request(&sock, &request).await.unwrap();
+        server.await.unwrap();
+
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(outcome, &mut out, &mut err);
+        assert_eq!(code, EXIT_MALFORMED);
     }
 }

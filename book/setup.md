@@ -121,7 +121,7 @@ After the setup wizard displays the required DNS records, add them at your domai
 
 Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx as of v0.2. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
 
-The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml` — see [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx send` uses IPv4 only and the single `ip4:` SPF mechanism is sufficient; any existing AAAA record in DNS is left alone.
+The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml` — see [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient; any existing AAAA record in DNS is left alone.
 
 The DKIM public key value (`p=...`) is displayed by the setup wizard. To retrieve it again:
 

@@ -16,8 +16,8 @@ use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
 use crate::dkim;
-use crate::send::MailTransport;
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
+use crate::transport::MailTransport;
 
 /// Context shared across every per-connection send.
 ///
