@@ -540,7 +540,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 31 — Channel-Trigger Cookbook (Days 87–89.5) [IN PROGRESS]
+## Sprint 31 — Channel-Trigger Cookbook (Days 87–89.5) [DONE]
 
 **Goal:** Document email→agent channel-trigger recipes side-by-side for every supported agent. No new CLI surface — this is a docs + integration-test sprint leveraging the existing `cmd` trigger plumbing (`src/channel.rs`).
 
@@ -552,11 +552,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `book/channel-recipes.md` authored with subsections for Claude Code (`claude -p`), Codex CLI (`codex exec`), OpenCode (`opencode run`), Gemini CLI (verify non-interactive flag; likely `gemini --prompt` or similar — confirm against current Gemini CLI docs), Goose (`goose run -t`), OpenClaw (`openclaw run` or shell equivalent — verify; OpenClaw may not have a non-interactive mode suitable for triggers, in which case document the limitation), Aider (`aider --message`)
-- [ ] Each subsection contains: (1) a working `[[mailbox.catchall.channel]]` TOML snippet, (2) an explanation of the agent-specific flags (approval mode, output format, non-interactive), (3) notes on exit-code handling and where logs go
-- [ ] Chapter opens with a "what counts as a channel-trigger recipe" overview and a cross-reference to `book/channels.md` (the trigger mechanics)
-- [ ] Chapter closes with a summary table: agent · MCP-supported? · channel-trigger CLI · approval-mode flag · non-interactive flag — covers all six v1 agents (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus Aider
-- [ ] Flag references verified against each agent's current docs (CLI help output or official docs URL linked per agent)
+- [x] `book/channel-recipes.md` authored with subsections for all six v1 agents plus Aider. OpenClaw documented as a limitation (no non-interactive `run`/`exec` CLI found in current docs) with pointer to `docs.openclaw.ai` per the sprint's explicit allowance
+- [x] Each subsection contains a working `[[mailbox.catchall.channel]]` TOML snippet, agent-specific flag explanation (approval mode, output format, non-interactive), and notes on exit-code handling/logs
+- [x] Chapter opens with overview and cross-reference to `book/channels.md`
+- [x] Chapter closes with summary table covering all six v1 agents plus Aider
+- [x] Flag references verified against each agent's current docs; chapter includes an explicit flag-drift warning directing readers to run `<agent> --help` before production use
 
 #### S31-2: Integration test for a representative channel recipe
 
@@ -564,9 +564,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] New integration test under `tests/` (or `src/channel.rs` tests) drives the full ingest→trigger path end-to-end using a fixture `.eml` and an assert-able command (e.g., a shell one-liner that writes `{filepath}` to a temp marker)
-- [ ] Test asserts: the marker file was created, its contents contain the expected `filepath` and `subject` tokens, and ingest delivery completed even when the command exits non-zero
-- [ ] Runs in CI against Ubuntu, Alpine, Fedora (shares the existing CI matrix)
+- [x] New integration test `channel_recipe_end_to_end_with_templated_args` in `tests/integration.rs` drives ingest → match → templated shell command end-to-end using `tests/fixtures/plain.eml`
+- [x] Test asserts the marker file was created and its contents contain the expected `{filepath}` and `{subject}` expansions; a paired `false` sibling rule proves trigger failure does not block delivery
+- [x] Runs in the existing CI matrix (45 integration tests now pass, +1 new)
 
 #### S31-3: Cross-link and README update
 
@@ -574,14 +574,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `book/channels.md`, `book/agent-integration.md`, top-level `README.md`, and each `agents/<agent>/README.md` link `book/channel-recipes.md`
-- [ ] `book/SUMMARY.md` (mdbook index) lists `channel-recipes.md`
-- [ ] All cross-links resolve in a local `mdbook build`
-- [ ] Top of `channel-recipes.md` has a summary table of all five v1 agents + Aider: MCP support · Channel-trigger pattern · Notes
+- [x] `book/channels.md`, `book/agent-integration.md`, top-level `README.md`, and each of the six `agents/<agent>/README.md` files link `book/channel-recipes.md`
+- [x] `book/SUMMARY.md` created (new mdbook-compatible index) listing `channel-recipes.md` alongside all other chapters
+- [ ] All cross-links resolve in a local `mdbook build` <!-- Partial: repo has no `book.toml` yet; `SUMMARY.md` is in mdbook-compatible format ready for future adoption. Tracked in Non-blocking Review Backlog (Sprint 31). -->
+- [x] Top of `channel-recipes.md` has a summary table of all six v1 agents + Aider: MCP support · Channel-trigger pattern · Notes
 
 ---
 
-## Sprint 32 — Non-blocking Cleanup (Days 89.5–92) [NOT STARTED]
+## Sprint 32 — Non-blocking Cleanup (Days 89.5–92) [IN PROGRESS]
 
 **Goal:** Address accumulated non-blocking improvements from sprint reviews (Sprints 12, 19, 20, 21, 22, 26, 27). Grouped by theme; each story is self-contained with enough context for implementation without consulting the original review threads.
 
@@ -695,8 +695,8 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 28 | 79.5–82 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Done |
 | 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Done |
 | 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Done |
-| 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | In Progress |
-| 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
+| 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Done |
+| 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | In Progress |
 
 ## Deferred to v2
 
@@ -772,6 +772,8 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 30)** Manual end-to-end validation of the Goose recipe on a real machine — run `aimx agent-setup goose`, then `goose run --recipe aimx`, and confirm the MCP extension loads and AIMX tools are callable. Recipe format and CLI verb verified against current Goose docs; 51 agent_setup unit tests cover install + YAML injection, but actual `goose run` execution was not exercised (sandbox lacks Goose). Any schema drift is a follow-up patch.
 - [ ] **(Sprint 30)** Manual end-to-end validation of the OpenClaw skill on a real machine — run `aimx agent-setup openclaw`, paste the printed `openclaw mcp set aimx '<json>'` command, and confirm MCP tools appear and the skill is discoverable. `openclaw mcp set` CLI verified against current OpenClaw docs; POSIX shell escaping covers `'`-in-path edge case, but live activation was not exercised (sandbox lacks OpenClaw).
 - [ ] **(Sprint 30, nice-to-have)** Add a second `indent_block` test with multi-line input missing a trailing newline in `src/agent_setup.rs`. Cycle 1 reviewer flagged as nice-to-have; current tests cover the primary path. Low priority.
+- [ ] **(Sprint 31)** Add `book.toml` and wire `mdbook build` into CI so cross-link resolution is actually enforced. Sprint 31 shipped `book/SUMMARY.md` in mdbook-compatible format, but the repo has no `book.toml` yet, so the "all cross-links resolve in a local mdbook build" AC was deferred. The follow-up is small: add a minimal `book.toml`, add an `mdbook build` step to `.github/workflows/ci.yml` (or a new docs job), and make it fail on broken links.
+- [ ] **(Sprint 31, nice-to-have)** Swap OpenClaw's limitation note in `book/channel-recipes.md` for a real recipe once OpenClaw ships a non-interactive `run`/`exec` CLI. Until then, the chapter points at `docs.openclaw.ai` for updates.
 
 ### Deferred Feature Sprints
 
