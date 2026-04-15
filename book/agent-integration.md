@@ -9,6 +9,10 @@ knows when and how to use those tools).
 This page covers what the installer does, the list of supported agents, and
 how to wire AIMX in manually if your agent is not yet in the registry.
 
+Once your agent is installed, see [Channel Recipes](channel-recipes.md)
+for email-triggered workflows — side-by-side non-interactive CLI
+invocations for every supported agent.
+
 ## What `aimx agent-setup` does
 
 `aimx agent-setup <agent>`:

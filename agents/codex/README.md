@@ -34,6 +34,12 @@ aimx --data-dir /custom/path agent-setup codex
 The installer rewrites the plugin's `mcpServers.aimx.args` to include
 `--data-dir /custom/path` before writing `plugin.json` to disk.
 
+## Channel-trigger recipes
+
+To have AIMX invoke `codex exec` automatically when an email arrives,
+see the
+[Channel Recipes](../../book/channel-recipes.md#codex-cli) chapter.
+
 ## Schema reference
 
 The plugin manifest follows the Codex CLI plugin schema documented at

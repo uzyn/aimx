@@ -61,6 +61,11 @@ aimx --data-dir /custom/path agent-setup goose
 The recipe's `extensions[0].args` will include `--data-dir /custom/path`
 before `mcp`.
 
+## Channel-trigger recipes
+
+To have AIMX invoke `goose run` automatically when an email arrives,
+see the [Channel Recipes](../../book/channel-recipes.md#goose) chapter.
+
 ## Schema reference
 
 Goose recipe schema is documented at

@@ -54,6 +54,12 @@ aimx --data-dir /custom/path agent-setup gemini
 
 The printed JSON block's `args` will include `--data-dir /custom/path`.
 
+## Channel-trigger recipes
+
+To have AIMX invoke `gemini -p` automatically when an email arrives,
+see the
+[Channel Recipes](../../book/channel-recipes.md#gemini-cli) chapter.
+
 ## Schema reference
 
 Gemini CLI's skill and MCP conventions are documented at
