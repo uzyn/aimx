@@ -172,7 +172,7 @@ fn install(
         )
     })?;
 
-    let files = assemble_plugin_files(spec, source, opts.data_dir)?;
+    let files = assemble_plugin_files(source, opts.data_dir)?;
 
     if opts.print {
         for (rel, bytes) in &files {
@@ -204,7 +204,6 @@ fn install(
 /// Returns `(relative_path, bytes)` pairs. Relative paths are relative to
 /// the install destination root.
 pub fn assemble_plugin_files(
-    spec: &AgentSpec,
     source: &Dir<'_>,
     data_dir: Option<&Path>,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
@@ -240,10 +239,13 @@ pub fn assemble_plugin_files(
         }
 
         // Skip README.md at the top of the plugin source — it is developer-facing,
-        // not an artifact to install. Include it only if the agent author wants
-        // it; for our single spec we filter it out.
+        // not an artifact to install.
+        //
+        // NOTE: this match is deliberately top-level only (`rel.as_os_str()`
+        // rather than `rel.file_name()`), so a nested file such as
+        // `docs/README.md` inside a plugin tree would still be installed.
+        // Keep this scoping if you touch the filter.
         if rel.as_os_str() == "README.md" {
-            let _ = spec.name; // touch to silence unused warning when only one branch
             continue;
         }
 
@@ -283,10 +285,12 @@ fn collect_entries(
 /// Rewrite `mcpServers.<server>.args` in a plugin.json-like JSON so that the
 /// command runs with `--data-dir <path>`. Preserves other fields.
 ///
-/// This is intentionally a targeted string-level rewrite rather than a full
-/// JSON round-trip — it keeps the formatting of the hand-authored file intact
-/// while swapping only the `args` array.
-fn rewrite_plugin_args(json_text: &str, data_dir: &Path) -> Result<String, String> {
+/// Implementation parses the JSON into `serde_json::Value`, swaps the `args`
+/// array on each server entry, and re-serializes via `to_string_pretty`. The
+/// output is therefore serde-formatted, not byte-identical to the hand-authored
+/// file — acceptable because `plugin.json` has no comments or meaningful
+/// whitespace to preserve.
+pub fn rewrite_plugin_args(json_text: &str, data_dir: &Path) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(json_text)
         .map_err(|e| format!("plugin.json is not valid JSON: {e}"))?;
 
@@ -590,6 +594,77 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf());
         let err = run_with_env(None, false, false, false, None, &env).unwrap_err();
         assert!(err.to_string().contains("agent name"));
+    }
+
+    #[test]
+    fn install_tty_prompt_yes_overwrites() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+
+        // First install succeeds.
+        run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
+
+        // Second install: TTY says "y", overwrite proceeds.
+        env.tty = true;
+        env.responses = RefCell::new(vec!["y\n".to_string()]);
+        run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".claude/plugins/aimx");
+        assert!(dest.join(".claude-plugin/plugin.json").exists());
+    }
+
+    #[test]
+    fn install_tty_prompt_no_aborts() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+
+        // First install succeeds.
+        run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
+
+        // Second install: TTY says "n", install aborts.
+        env.tty = true;
+        env.responses = RefCell::new(vec!["n\n".to_string()]);
+        let err =
+            run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap_err();
+        assert!(err.to_string().contains("aborted by user"));
+    }
+
+    #[test]
+    fn assembled_skill_md_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("claude-code").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "skills/aimx/SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("claude-code/skills/aimx/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(
+            skill_bytes, &expected,
+            "SKILL.md must be exact concatenation of header followed by primer"
+        );
+    }
+
+    #[test]
+    fn rewrite_plugin_args_rejects_malformed_json() {
+        let err = rewrite_plugin_args("{ not json", Path::new("/tmp/x")).unwrap_err();
+        assert!(
+            err.contains("plugin.json is not valid JSON"),
+            "unexpected error: {err}"
+        );
     }
 
     #[cfg(unix)]
