@@ -4,7 +4,7 @@
 //!
 //! - [`success`] — green, used for PASS banners and "operation complete" messages
 //! - [`error`]   — red + bold, used for fatal errors and the `Error:` prefix on stderr
-//! - [`warn`]    — yellow, used for non-fatal warnings (PTR missing, DNS pending, TLS self-signed)
+//! - [`warn`]    — yellow, used for non-fatal warnings (DNS pending, TLS self-signed)
 //! - [`info`]    — plain, reserved for informational output (kept uncolored so the
 //!   palette stays minimal; wrap if we ever add a cyan accent)
 //! - [`header`]  — bold, used for section headers like `[DNS]`, `[MCP]`, `[Deliverability]`

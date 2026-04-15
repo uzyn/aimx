@@ -6,7 +6,7 @@ AIMX uses a single TOML configuration file for all settings.
 
 The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`.
 
-Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and only the `aimx` system group needs access to the local submission socket.
+Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and inaccessible to non-root processes.
 
 ### Data directory override
 
