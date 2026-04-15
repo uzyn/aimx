@@ -4,7 +4,7 @@
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
 **Total sprints:** 33 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook)
 **Timeline:** ~91.5 calendar days
-**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. Sprint 27.6 adds a CI release workflow that publishes prebuilt Linux x86_64/aarch64 (glibc + musl) binaries on tag push and as workflow artifacts on main merges. Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
 
 ---
 
@@ -322,7 +322,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 27.5 — CLI Color Consistency (Days 78.5–79) [IN PROGRESS]
+## Sprint 27.5 — CLI Color Consistency (Days 78.5–79) [DONE]
 
 **Goal:** Unify user-facing CLI output under a single semantic color palette so every command's success/fail/warn/info/header style matches. Extract `setup.rs`'s ad-hoc colored calls into a reusable helper module and apply it across the remaining commands.
 
@@ -334,57 +334,29 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `src/term.rs` created with public helpers: `header(&str) -> ColoredString`, `success(&str)`, `error(&str)`, `warn(&str)`, `info(&str)`, `highlight(&str)`, plus `pass_badge()`, `fail_badge()`, `warn_badge()` returning the short colored "PASS"/"FAIL"/"WARN" status tokens
-- [ ] Module documented with a doc-comment block explaining the semantic palette (success=green, error=red, warn=yellow, header=bold, info=plain/cyan, highlight=bold) and the rule that raw `.green()`/`.red()`/`.bold()` calls outside this module are discouraged
-- [ ] `setup.rs` migrated: every `.green()`/`.red()`/`.yellow()`/`.bold()` call site (including lines 585, 816, 818, 831, 844, 853, 884, 890, 893, 896, 899, 998, 1130, 1160, 1169, 1171, 1179, 1185, 1187, 1191, 1236, 1237, 1245, 1263, plus any others a fresh grep catches) routes through the new helpers with no visible output change (`cargo test` — setup assertion tests still pass)
-- [ ] `verify.rs`: `aimx verify` output colorizes PASS/FAIL/WARN badges and the final summary line; error exits use `error()`
-- [ ] `status.rs`: `aimx status` colorizes section headers ("Service", "Mailboxes", "Configuration", "Recent Activity") and status badges (SMTP running/stopped, mailbox counts)
-- [ ] `mailbox.rs`: `aimx mailbox create/list/delete` colorizes success/error messages; `list` colors mailbox names with `highlight()` and counts plainly
-- [ ] `send.rs`: `aimx send` success line colored; DKIM-signing and MX-resolution errors routed through `error()`
-- [ ] `dkim.rs`: `aimx dkim-keygen` success message colored; key-already-exists warning uses `warn()`
-- [ ] `serve.rs`: `aimx serve` startup banner (bind address, TLS status) uses `header()` + `info()`; SIGTERM graceful-shutdown message uses `info()`; fatal bind errors use `error()`
-- [ ] `main.rs`: top-level error reporter (`Err(e)` path in `main()`) prints `Error:` prefix via `error()` before the error chain
-- [ ] Grep confirms no `.green()`/`.red()`/`.yellow()`/`.blue()`/`.bold()` calls remain OUTSIDE `src/term.rs` (document the convention in the module-level doc comment; optional lightweight CI grep)
-- [ ] `NO_COLOR=1 aimx verify` (and equivalents) produces no ANSI escapes — relies on `colored` crate's built-in detection; unit test sets `NO_COLOR=1` via `env::set_var` and asserts a helper's output contains no `\x1b[` sequences
-- [ ] Non-TTY detection still works — `aimx status | cat` strips colors (manual validation; `colored` handles this by default via `std::io::stdout().is_terminal()`)
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
-- [ ] `book/` spot-checked for inline ANSI artifacts in example CLI output (grep for `\x1b[` and stray color words — unlikely any exist, but confirm)
+- [x] `src/term.rs` created with public helpers: `header`, `success`, `error`, `warn`, `info`, `highlight`, `dim`, plus `pass_badge`, `fail_badge`, `warn_badge`, `missing_badge`, and `success_banner` (the extras — `dim`, `missing_badge`, `success_banner` — were added to cover the MISSING badge and the green+bold "Setup complete!" banner that the original AC list didn't enumerate)
+- [x] Module documented with a doc-comment block explaining the semantic palette and the rule that raw `.green()`/`.red()`/`.bold()` calls outside this module are discouraged
+- [x] `setup.rs` migrated: every colored-crate call routes through the new helpers with no visible output change (setup assertion tests still pass)
+- [x] `verify.rs`: `aimx verify` output colorizes PASS/FAIL/WARN badges and the final summary line; error exits use `error()`
+- [x] `status.rs`: `aimx status` colorizes section headers and status badges; mailbox table pads outside the ANSI sequence so colored columns align under both colored and `NO_COLOR` output (regression test `mailbox_table_columns_align_regardless_of_color` guards the fix)
+- [x] `mailbox.rs`: `aimx mailbox create/list/delete` colorizes success/error messages; `list` colors mailbox names with `highlight()` with the same column-alignment fix as `status.rs`
+- [x] `send.rs`: `aimx send` success line colored; DKIM-signing and MX-resolution errors routed through `error()`
+- [x] `dkim.rs`: `aimx dkim-keygen` success message colored; key-already-exists path emits yellow `Warning:` on stderr via `term::warn` and returns `Ok(())` (exit code changed 1 → 0 for this path, disclosed in PR description)
+- [x] `serve.rs`: `aimx serve` startup banner uses `header()` + `info()`; SIGTERM graceful-shutdown message uses `info()`; fatal bind errors use `error()`
+- [x] `main.rs`: top-level error reporter prefixes with red+bold `Error:` via `error()`
+- [x] Grep confirms no raw `.green()`/`.red()`/`.yellow()`/`.blue()`/`.bold()` calls remain OUTSIDE `src/term.rs`
+- [x] `NO_COLOR` path produces no ANSI escapes — unit test `no_color_strips_ansi_from_helpers` uses `colored::control::set_override(false)` (parallel-safe; chosen over env-var manipulation)
+- [x] Non-TTY detection still works — `colored` handles this by default via `is_terminal()`
+- [x] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `book/` spot-checked for inline ANSI artifacts — none found
 
 ---
 
-## Sprint 27.6 — CI Binary Releases (Days 79–79.5) [NOT STARTED]
-
-**Goal:** Publish prebuilt `aimx` binaries for common Linux architectures so users can `curl | tar` instead of installing Rust and running `cargo build`. Tags produce attached GitHub Release artifacts; `main` merges produce workflow artifacts (90-day retention) for continuous-integration testers.
-
-**Dependencies:** Sprint 27.5 (keeps the decimal-sprint chain chronological; no code dependency).
-
-#### S27.6-1: Release workflow for tag pushes + artifact uploads on main
-
-**Context:** `.github/workflows/ci.yml` currently runs `cargo fmt`/`clippy`/`test` across Ubuntu + Alpine + Fedora (added Sprint 22) and does NOT produce downloadable binaries. Users must `cargo build --release` to install. Add a new `.github/workflows/release.yml` triggered on tags matching `v*` that builds four targets — `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl` — and uploads one tarball per target plus a single `SHA256SUMS` file to the GitHub Release for that tag. Also extend `ci.yml` with a `build-binaries` job that runs only on pushes to `main` (`if: github.ref == 'refs/heads/main' && github.event_name == 'push'`) producing the same four binaries as GitHub Actions artifacts (not uploaded to a Release). Tarballs follow the standard name `aimx-<version>-<target>.tar.gz` and contain the `aimx` binary plus `LICENSE` and `README.md` at the archive root. Cross-compilation for aarch64 uses `cross` (crates.io/cross) or `taiki-e/upload-rust-binary-action` which handles multi-target builds; the musl job reuses the pattern already working in the Alpine CI job. The verifier service (`services/verifier/`) is OUT of scope — it's deployed via Docker and the existing `services/verifier/Dockerfile`/`docker-compose.yml`; no binary artifact needed. macOS and Windows targets are OUT of scope — AIMX is a Unix mail server. Release automation does NOT auto-create tags or version bumps; maintainer pushes a tag, workflow does the rest.
-
-**Priority:** P1
-
-- [ ] New `.github/workflows/release.yml` triggered on `push: tags: ['v*']`
-- [ ] Release workflow matrix builds all four targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`
-- [ ] Each job produces `aimx-<version>-<target>.tar.gz` containing `aimx` binary (+x permissions preserved), `LICENSE`, `README.md`
-- [ ] A final aggregation step computes `SHA256SUMS` (one line per tarball: `<hex>  <filename>`) and uploads it alongside the tarballs
-- [ ] All artifacts attached to the GitHub Release matching the tag via `softprops/action-gh-release` (or `gh release upload` in a step) — Release is auto-created if missing
-- [ ] `ci.yml` gains a `build-binaries` job that runs only on `push` to `main` (not PRs, not other branches) and uploads the same four binaries as workflow artifacts via `actions/upload-artifact@v4` with a 90-day retention (the default)
-- [ ] Cross-compilation for aarch64 uses `cross` or a documented equivalent; musl builds reuse the Alpine-style musl toolchain pattern
-- [ ] The `aimx --version` output of a downloaded binary matches the git tag (e.g., tag `v0.2.0` → `aimx --version` prints `aimx 0.2.0`) — requires `Cargo.toml` version to match the tag; document this maintainer step in the workflow or in `book/` / `README.md`
-- [ ] Binary on each Linux target runs `aimx --help` cleanly on a matching OS — manual validation at least once (download the release assets on a fresh VPS for x86_64-gnu, an Alpine VM for x86_64-musl, and a Raspberry Pi or aarch64 cloud instance for aarch64-gnu)
-- [ ] Existing CI jobs (`check`, `check-alpine`, `check-fedora`) remain unchanged — release work is additive
-- [ ] `README.md` and `book/getting-started.md` gain an "Install from prebuilt binary" section with a `curl … | tar -xzf -` one-liner pointing at the latest release and showing SHA256 verification via `sha256sum -c SHA256SUMS`
-- [ ] PRD §9 In Scope gains a line: "Prebuilt binary tarballs (Linux x86_64/aarch64, glibc + musl) attached to GitHub Releases on tag push; workflow-artifact builds on every main merge." (Already pre-applied with this sprint's planning; re-verify.)
-- [ ] Dry-run validation: push a `v0.0.0-test` tag to a branch (or use `workflow_dispatch` temporarily), confirm all four tarballs + SHA256SUMS land on the Release; delete the test tag/release afterwards
-
----
-
-## Sprint 28 — Agent Integration Framework + Claude Code (Days 80–82.5) [NOT STARTED]
+## Sprint 28 — Agent Integration Framework + Claude Code (Days 79.5–82) [IN PROGRESS]
 
 **Goal:** Stand up the `agents/` tree and the `aimx agent-setup <agent>` command, and ship the Claude Code integration end-to-end as the reference implementation. Establishes the pattern all subsequent agents plug into.
 
-**Dependencies:** Sprint 27.6.
+**Dependencies:** Sprint 27.5. (Sprint 27.6 — CI binary releases — was deferred to the Non-blocking Review Backlog until we're production-ready; it has no code dependency on agent work.)
 
 **Design notes (apply to all stories below):**
 - `aimx agent-setup` runs as the current user. It writes to `$HOME` / `$XDG_CONFIG_HOME`-based locations only — never `/etc` or `/var`, never requires root.
@@ -463,7 +435,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 29 — Codex CLI + OpenCode + Gemini CLI Integration (Days 83–85.5) [NOT STARTED]
+## Sprint 29 — Codex CLI + OpenCode + Gemini CLI Integration (Days 82–84.5) [NOT STARTED]
 
 **Goal:** Add Codex CLI, OpenCode, and Gemini CLI to the `aimx agent-setup` registry with full plugin/skill packages.
 
@@ -521,7 +493,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 30 — Goose + OpenClaw Integration (Days 86–88.5) [NOT STARTED]
+## Sprint 30 — Goose + OpenClaw Integration (Days 84.5–87) [NOT STARTED]
 
 **Goal:** Add Goose (recipe-based) and OpenClaw (skill-based, JSON5 config) to `aimx agent-setup`, completing the v1 agent-integration roster.
 
@@ -566,7 +538,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 31 — Channel-Trigger Cookbook (Days 89–91.5) [NOT STARTED]
+## Sprint 31 — Channel-Trigger Cookbook (Days 87–89.5) [NOT STARTED]
 
 **Goal:** Document email→agent channel-trigger recipes side-by-side for every supported agent. No new CLI surface — this is a docs + integration-test sprint leveraging the existing `cmd` trigger plumbing (`src/channel.rs`).
 
@@ -607,7 +579,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 32 — Non-blocking Cleanup (Days 91.5–94) [NOT STARTED]
+## Sprint 32 — Non-blocking Cleanup (Days 89.5–92) [NOT STARTED]
 
 **Goal:** Address accumulated non-blocking improvements from sprint reviews (Sprints 12, 19, 20, 21, 22, 26, 27). Grouped by theme; each story is self-contained with enough context for implementation without consulting the original review threads.
 
@@ -716,13 +688,13 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 25 | 70–72.5 | Fix `aimx send` (Permissions + DKIM Signing) | DKIM key `0o644`, fix DKIM signature verification at Gmail — `aimx send` works end-to-end | Done |
 | 26 | 73–75.5 | IPv6 Support for Outbound SMTP | Remove IPv4-only workaround, dual-stack SPF records, `ip6:` verification | Done |
 | 27 | 76–78.5 | Systemd Unit Hardening | Restart rate-limit, resource limits, network-online deps in generated systemd unit | Done |
-| 27.5 | 78.5–79 | CLI Color Consistency | `src/term.rs` semantic helpers, migrate setup.rs, apply across verify/status/mailbox/send/dkim/serve/main | In Progress |
-| 27.6 | 79–79.5 | CI Binary Releases | `release.yml` for tag pushes (4 Linux targets, tarballs + SHA256SUMS), `ci.yml` main-merge artifact uploads | Not Started |
-| 28 | 80–82.5 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Not Started |
-| 29 | 83–85.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Not Started |
-| 30 | 86–88.5 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
-| 31 | 89–91.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
-| 32 | 91.5–94 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
+| 27.5 | 78.5–79 | CLI Color Consistency | `src/term.rs` semantic helpers, migrate setup.rs, apply across verify/status/mailbox/send/dkim/serve/main | Done |
+| 27.6 | — | CI Binary Releases | _Deferred to the Non-blocking Review Backlog — revisit when production-ready_ | Deferred |
+| 28 | 79.5–82 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | In Progress |
+| 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Not Started |
+| 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
+| 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
+| 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
 
 ## Deferred to v2
 
@@ -792,3 +764,26 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 24)** `docs/prd.md` NFR-5: "aimx ingest" in prose without backticks — _Fixed: added backticks_
 - [x] **(Sprint 26)** `get_server_ip()` and `get_server_ipv6()` each invoke `hostname -I` separately — _Triaged into Sprint 32 (S32-4)_
 - [x] **(Sprint 27)** `cargo clippy --all-targets -- -D warnings` pre-existing test-target lints + adopt `--all-targets` in CI — _Triaged into Sprint 32 (S32-5)_
+
+### Deferred Feature Sprints
+
+Feature sprints that were planned, then deferred by the user. Full spec preserved so the work can be promoted back to an active sprint without loss. Revisit when the gating condition is met.
+
+- [ ] **(Originally Sprint 27.6 — deferred by user pending production readiness)** **CI Binary Releases.**
+  **Goal:** Publish prebuilt `aimx` binaries for common Linux architectures so users can `curl | tar` instead of installing Rust and running `cargo build`. Tags produce attached GitHub Release artifacts; `main` merges produce workflow artifacts (90-day retention).
+  **Gating condition:** Revisit when AIMX is ready to promote to production users (e.g., once the PRD's v1 scope is otherwise complete and distribution is the remaining gap).
+  **Scope / acceptance criteria (preserved verbatim):**
+  - New `.github/workflows/release.yml` triggered on `push: tags: ['v*']`
+  - Release workflow matrix builds four targets: `x86_64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-gnu`, `aarch64-unknown-linux-musl`
+  - Each job produces `aimx-<version>-<target>.tar.gz` containing `aimx` binary (+x permissions preserved), `LICENSE`, `README.md`
+  - Final aggregation step computes `SHA256SUMS` (one line per tarball) and uploads it alongside the tarballs
+  - All artifacts attached to the GitHub Release matching the tag via `softprops/action-gh-release` (Release auto-created if missing)
+  - `ci.yml` gains a `build-binaries` job that runs only on `push` to `main` and uploads the same four binaries as workflow artifacts with 90-day retention
+  - Cross-compilation for aarch64 uses `cross` or documented equivalent; musl builds reuse the Alpine-style musl toolchain pattern
+  - `aimx --version` output of a downloaded binary matches the git tag (requires `Cargo.toml` version to match the tag; maintainer step documented in the workflow or README)
+  - Binary on each Linux target runs `aimx --help` cleanly on a matching OS (manual validation at least once — fresh VPS, Alpine VM, aarch64 instance)
+  - Existing CI jobs remain unchanged — release work is additive
+  - `README.md` and `book/getting-started.md` gain an "Install from prebuilt binary" section with a `curl … | tar -xzf -` one-liner and SHA256 verification via `sha256sum -c SHA256SUMS`
+  - Dry-run validation: push a `v0.0.0-test` tag (or use `workflow_dispatch`), confirm all four tarballs + SHA256SUMS land on the Release; delete the test tag/release afterwards
+  - PRD §9 In Scope already mentions this work; no PRD change needed on promotion
+  **Out of scope:** verifier service binary (deployed via Docker), macOS/Windows targets, auto-tagging/version bumps
