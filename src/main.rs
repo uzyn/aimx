@@ -1,3 +1,4 @@
+mod agent_setup;
 mod channel;
 mod cli;
 mod config;
@@ -68,6 +69,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Verify { verify_host } => {
             verify::run(cli.data_dir.as_deref(), verify_host.as_deref())
         }
+        Command::AgentSetup {
+            agent,
+            list,
+            force,
+            print,
+        } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
     }
 }
 
