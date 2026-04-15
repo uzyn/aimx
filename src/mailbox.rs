@@ -6,9 +6,9 @@ use std::path::Path;
 
 pub fn run(
     cmd: MailboxCommand,
-    _data_dir: Option<&std::path::Path>,
+    data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_resolved()?;
+    let config = Config::load_resolved_with_data_dir(data_dir)?;
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),

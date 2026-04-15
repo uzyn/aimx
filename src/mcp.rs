@@ -14,10 +14,10 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct AimxMcpServer {
-    /// Retained for forward-compat with callers that still pass `--data-dir`,
-    /// even though config is now resolved via `config_path()` (Sprint 33).
-    #[allow(dead_code)]
-    data_dir: PathBuf,
+    /// CLI `--data-dir` / `AIMX_DATA_DIR` override. When `Some`, it
+    /// supersedes `config.data_dir` for all storage operations; when
+    /// `None`, the value from `/etc/aimx/config.toml` is used.
+    data_dir_override: Option<PathBuf>,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
 }
@@ -89,15 +89,16 @@ pub struct EmailReplyParams {
 }
 
 impl AimxMcpServer {
-    pub fn new(data_dir: PathBuf) -> Self {
+    pub fn new(data_dir_override: Option<PathBuf>) -> Self {
         Self {
-            data_dir,
+            data_dir_override,
             tool_router: Self::tool_router(),
         }
     }
 
     fn load_config(&self) -> Result<Config, String> {
-        Config::load_resolved().map_err(|e| format!("Failed to load config: {e}"))
+        Config::load_resolved_with_data_dir(self.data_dir_override.as_deref())
+            .map_err(|e| format!("Failed to load config: {e}"))
     }
 }
 
@@ -382,11 +383,7 @@ impl ServerHandler for AimxMcpServer {
 }
 
 pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let data_dir = data_dir
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("/var/lib/aimx"));
-
-    let server = AimxMcpServer::new(data_dir);
+    let server = AimxMcpServer::new(data_dir.map(|p| p.to_path_buf()));
     let transport = rmcp::transport::io::stdio();
 
     let service = server
@@ -877,7 +874,7 @@ mod tests {
     #[test]
     fn mcp_server_has_correct_tool_count() {
         let tmp = TempDir::new().unwrap();
-        let server = AimxMcpServer::new(tmp.path().to_path_buf());
+        let server = AimxMcpServer::new(Some(tmp.path().to_path_buf()));
         let tools = server.tool_router.list_all();
         assert_eq!(tools.len(), 9);
     }
@@ -885,7 +882,7 @@ mod tests {
     #[test]
     fn mcp_server_tool_names() {
         let tmp = TempDir::new().unwrap();
-        let server = AimxMcpServer::new(tmp.path().to_path_buf());
+        let server = AimxMcpServer::new(Some(tmp.path().to_path_buf()));
         let tools = server.tool_router.list_all();
         let names: Vec<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
 

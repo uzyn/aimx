@@ -14,12 +14,11 @@ pub fn run(
     tls_key: Option<&str>,
     data_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Config lives at `config_path()` (default `/etc/aimx/config.toml`).
-    // `--data-dir` is kept for forward-compat (callers may still pass it for
-    // storage overrides applied downstream of this call), but it no longer
-    // governs the config location (v0.2 filesystem split — Sprint 33).
-    let _ = data_dir;
-    let config = Config::load_resolved()?;
+    // Config lives at `config_path()` (default `/etc/aimx/config.toml`);
+    // `--data-dir` no longer governs that path (v0.2 filesystem split —
+    // Sprint 33). It still overrides `config.data_dir` for the storage
+    // directory used by the ingest pipeline.
+    let config = Config::load_resolved_with_data_dir(data_dir)?;
 
     let bind_addr = bind.unwrap_or(DEFAULT_BIND);
     let tls_explicit = tls_cert.is_some() || tls_key.is_some();

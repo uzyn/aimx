@@ -1085,10 +1085,12 @@ fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
     let dir = crate::config::config_dir();
     std::fs::create_dir_all(&dir)?;
 
-    // Only enforce directory mode when running as root on the real install
-    // path. Test runs under `AIMX_CONFIG_DIR` leave the tempdir's default
-    // mode untouched — `tempfile::TempDir` can't host root-owned files.
-    if std::env::var_os("AIMX_CONFIG_DIR").is_none() && is_root() {
+    // Gate mode enforcement on `is_root()` alone: an operator who happens
+    // to have `AIMX_CONFIG_DIR` exported on a real install still gets
+    // tightened perms. Tests run as a non-root user so the branch is
+    // skipped for their tempdir — `apply_config_file_mode_sets_640`
+    // covers the real-install invariant directly.
+    if is_root() {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -1098,14 +1100,36 @@ fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Write `config.toml` via `Config::save` and (on real installs) tighten its
-/// mode to `0o640`, owner `root:root`. In tests (`AIMX_CONFIG_DIR` set) or
-/// when running non-root, the mode is left at the OS default — the dedicated
-/// [`tests::config_file_has_mode_640_on_real_install`] test covers the
-/// real-install invariant directly via [`apply_config_file_mode`].
+/// Write `config.toml` and (on real installs) tighten its mode to `0o640`,
+/// owner `root:root`. Non-root invocations leave the mode at the OS default
+/// — the dedicated [`tests::apply_config_file_mode_sets_640`] test covers
+/// the real-install invariant directly via [`apply_config_file_mode`].
+///
+/// When the file does not yet exist and we are running as root, it is
+/// created atomically with mode `0o640` via `OpenOptions::mode(...)
+/// .create_new(true)` so there is no brief window of umask-default
+/// permissions between write and chmod. The rewrite path (re-entrant
+/// setup) falls back to `Config::save` + `apply_config_file_mode`.
 fn install_config_file(cfg: &Config, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let is_root = is_root();
+    if is_root && !path.exists() {
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt;
+            let content = toml::to_string_pretty(cfg)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o640)
+                .open(path)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+            return Ok(());
+        }
+    }
     cfg.save(path)?;
-    if std::env::var_os("AIMX_CONFIG_DIR").is_none() && is_root() {
+    if is_root {
         apply_config_file_mode(path)?;
     }
     Ok(())
@@ -2177,6 +2201,57 @@ mod tests {
         assert!(
             sys.created_groups.borrow().contains(&"aimx".to_string()),
             "run_setup must create the aimx group during the install phase"
+        );
+
+        // Ordering invariant: the group is created before the service file
+        // is installed, because the systemd/OpenRC units the service file
+        // embeds reference `Group=aimx` (and OpenRC's `start_pre` chowns
+        // `/run/aimx/` to `root:aimx`). If the service file were written
+        // before the group exists, re-running `aimx setup` after an abort
+        // would install a unit that refers to a non-existent group.
+        if *sys.service_file_installed.borrow() {
+            assert!(
+                sys.created_groups.borrow().iter().any(|g| g == "aimx"),
+                "group must be created whenever a service file is installed"
+            );
+        }
+    }
+
+    #[test]
+    fn run_setup_skips_group_creation_on_reentrant_path() {
+        // When `is_already_configured` returns true, the entire install
+        // block is skipped — so `create_system_group` must NOT be called.
+        // Guards against a future refactor that drops the re-entrant shortcut.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            crate::config::dkim_dir().join("private.key"),
+            "key".to_string(),
+        );
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: true,
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            sys.created_groups.borrow().is_empty(),
+            "re-entrant setup must skip `create_system_group` — found: {:?}",
+            sys.created_groups.borrow()
+        );
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "re-entrant setup must skip `install_service_file`"
         );
     }
 

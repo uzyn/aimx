@@ -118,6 +118,21 @@ impl Config {
         Self::load(&config_path())
     }
 
+    /// Load the config and apply an optional `--data-dir` / `AIMX_DATA_DIR`
+    /// override for the storage path. `config.data_dir` is the source of
+    /// truth post-Sprint 33; this helper lets the CLI flag still redirect
+    /// storage (its documented purpose) without touching the config file on
+    /// disk.
+    pub fn load_resolved_with_data_dir(
+        data_dir_override: Option<&Path>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut cfg = Self::load_resolved()?;
+        if let Some(dir) = data_dir_override {
+            cfg.data_dir = dir.to_path_buf();
+        }
+        Ok(cfg)
+    }
+
     pub fn mailbox_dir(&self, name: &str) -> PathBuf {
         self.data_dir.join(name)
     }
