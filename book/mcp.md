@@ -1,5 +1,7 @@
 # MCP Server
 
+> To install AIMX into your agent, see [Agent Integration](agent-integration.md).
+
 AIMX includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
 
 ## Overview

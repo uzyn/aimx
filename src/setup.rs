@@ -851,33 +851,41 @@ pub fn display_dns_verification(
 
 pub fn display_mcp_section(data_dir: &Path) {
     println!("\n{}", term::header("[MCP]"));
-    println!(
-        "Add AIMX to your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.).\n"
-    );
-    println!("Configuration snippet:\n");
-    println!("{}\n", mcp_config_snippet(data_dir));
+    for line in mcp_section_lines(data_dir) {
+        println!("{line}");
+    }
 }
 
-pub fn mcp_config_snippet(data_dir: &Path) -> String {
-    let aimx_path = "/usr/local/bin/aimx";
-    let data_dir_str = data_dir.to_string_lossy();
+/// Produce the plain-text body of the `[MCP]` section (without the header
+/// line itself). Returned as a vector of lines so tests can assert on
+/// content without spawning a subprocess.
+pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    lines.push("Wire AIMX into your AI agent with one command per agent:".to_string());
+    lines.push(String::new());
 
-    let args = if data_dir_str == "/var/lib/aimx" {
-        r#"["mcp"]"#.to_string()
-    } else {
-        format!(r#"["--data-dir", "{data_dir_str}", "mcp"]"#)
-    };
+    for spec in crate::agent_setup::registry() {
+        let cmd = if data_dir == Path::new("/var/lib/aimx") {
+            format!("aimx agent-setup {}", spec.name)
+        } else {
+            format!(
+                "aimx --data-dir {} agent-setup {}",
+                data_dir.display(),
+                spec.name
+            )
+        };
+        lines.push(format!("  {cmd}"));
+    }
 
-    format!(
-        r#"{{
-  "mcpServers": {{
-    "email": {{
-      "command": "{aimx_path}",
-      "args": {args}
-    }}
-  }}
-}}"#
-    )
+    lines.push(String::new());
+    lines.push(
+        "Run `aimx agent-setup --list` to see supported agents and destination paths.".to_string(),
+    );
+    lines.push(
+        "See `book/agent-integration.md` for the full list and manual MCP wiring.".to_string(),
+    );
+    lines.push(String::new());
+    lines
 }
 
 pub fn display_deliverability_section(domain: &str, net: &dyn NetworkOps) {
@@ -1880,18 +1888,34 @@ mod tests {
     }
 
     #[test]
-    fn mcp_snippet_default_data_dir() {
-        let snippet = mcp_config_snippet(Path::new("/var/lib/aimx"));
-        assert!(snippet.contains("\"command\": \"/usr/local/bin/aimx\""));
-        assert!(snippet.contains("\"args\": [\"mcp\"]"));
-        assert!(!snippet.contains("--data-dir"));
+    fn mcp_section_default_lists_claude_code_install_command() {
+        let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("aimx agent-setup claude-code"),
+            "expected claude-code install command in:\n{joined}"
+        );
+        assert!(!joined.contains("mcpServers"));
+        assert!(!joined.contains("--data-dir"));
     }
 
     #[test]
-    fn mcp_snippet_custom_data_dir() {
-        let snippet = mcp_config_snippet(Path::new("/custom/data"));
-        assert!(snippet.contains("--data-dir"));
-        assert!(snippet.contains("/custom/data"));
+    fn mcp_section_custom_data_dir_threads_override_into_commands() {
+        let lines = mcp_section_lines(Path::new("/custom/data"));
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("aimx --data-dir /custom/data agent-setup claude-code"),
+            "expected --data-dir override in install command:\n{joined}"
+        );
+        assert!(!joined.contains("mcpServers"));
+    }
+
+    #[test]
+    fn mcp_section_points_at_agent_integration_doc() {
+        let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
+        let joined = lines.join("\n");
+        assert!(joined.contains("agent-integration.md"));
+        assert!(joined.contains("aimx agent-setup --list"));
     }
 
     #[test]

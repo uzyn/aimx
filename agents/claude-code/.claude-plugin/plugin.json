@@ -1,0 +1,15 @@
+{
+  "name": "aimx",
+  "description": "Self-hosted email for AI agents. Provides MCP tools for sending, reading, and managing email stored as Markdown files.",
+  "version": "0.1.0",
+  "author": {
+    "name": "AIMX",
+    "url": "https://github.com/uzyn/aimx"
+  },
+  "mcpServers": {
+    "aimx": {
+      "command": "/usr/local/bin/aimx",
+      "args": ["mcp"]
+    }
+  }
+}
