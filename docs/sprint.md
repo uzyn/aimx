@@ -493,7 +493,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 30 — Goose + OpenClaw Integration (Days 84.5–87) [IN PROGRESS]
+## Sprint 30 — Goose + OpenClaw Integration (Days 84.5–87) [DONE]
 
 **Goal:** Add Goose (recipe-based) and OpenClaw (skill-based, JSON5 config) to `aimx agent-setup`, completing the v1 agent-integration roster.
 
@@ -507,11 +507,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/goose/aimx-recipe.yaml` authored: `title: "AIMX Email"`, `prompt: |` = common primer content, `extensions:` = stdio entry for `aimx mcp`
-- [ ] `goose` registered in `agent_setup.rs`; destination respects `GOOSE_RECIPE_GITHUB_REPO` env var (documented in activation hint); falls back to `~/.config/goose/recipes/aimx.yaml` when env var unset
-- [ ] Activation hint prints the correct invocation verb (`goose run --recipe aimx` or equivalent)
-- [ ] Unit tests cover: default path install, `GOOSE_RECIPE_GITHUB_REPO` set path, `--print` output
-- [ ] Recipe format verified against current Goose docs (link in `agents/goose/README.md`)
+- [x] Recipe authored as `agents/goose/aimx.yaml.header` (filename deviation from plan: ends `aimx.yaml` at install time so `goose run --recipe aimx` resolves correctly) with `title`, `prompt: |` = common primer, `extensions:` stdio entry for `aimx mcp`
+- [x] `goose` registered in `agent_setup.rs`; destination `$HOME/.config/goose/recipes/aimx.yaml`; activation hint references `$GOOSE_RECIPE_GITHUB_REPO` by name (deterministic — hint doesn't read env var at render time) for team-sharing guidance
+- [x] Activation hint prints `goose run --recipe aimx`
+- [x] Unit tests cover default-path install, `--print` output, line-oriented YAML injection of `--data-dir` preserving the `prompt: |` block scalar, byte-for-byte env-independence, and negative tests for `rewrite_recipe_data_dir` error path (missing `args:` injection point)
+- [x] Recipe format verified against current Goose docs (link in `agents/goose/README.md`)
+- [ ] Manual validation on a machine with Goose installed: `aimx agent-setup goose` → `goose run --recipe aimx` → MCP extension loads <!-- Partial: deferred — sandbox lacks Goose. Tracked in Non-blocking Review Backlog (Sprint 30). -->
 
 #### S30-2: `agents/openclaw/` skill + registry entry
 
@@ -519,11 +520,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/openclaw/skills/aimx/SKILL.md` authored with valid OpenClaw frontmatter (`name: aimx`, `description`), body = common primer
-- [ ] `agents/openclaw/README.md` documents the two-step activation: copy skill via `aimx agent-setup openclaw`, then run the printed `openclaw mcp set` command
-- [ ] `openclaw` registered in `agent_setup.rs`; activation hint prints the exact `openclaw mcp set` command
-- [ ] Unit tests: install layout + activation-hint stability
-- [ ] OpenClaw skill and MCP command syntax verified against current OpenClaw docs (link in README)
+- [x] `agents/openclaw/SKILL.md.header` authored (flat skill layout) with valid frontmatter; assembled with the common primer at install time via `include_dir!`
+- [x] `agents/openclaw/README.md` documents the two-step activation: `aimx agent-setup openclaw`, then run the printed `openclaw mcp set` command
+- [x] `openclaw` registered in `agent_setup.rs`; activation hint prints the exact `openclaw mcp set aimx '<json>'` command. JSON body is POSIX-shell-escaped via new `posix_single_quote` helper (`'\''` trick) so `--data-dir` paths containing `'` survive intact
+- [x] Unit tests cover install layout, activation-hint stability, and the single-quote round-trip: construct `--data-dir` with embedded `'`, render hint, extract quoted argument, unquote, parse as JSON, assert byte-for-byte equality
+- [x] OpenClaw skill and `openclaw mcp set` CLI syntax verified against current OpenClaw docs (link in README)
+- [ ] Manual validation on a machine with OpenClaw installed: `aimx agent-setup openclaw` → paste the printed `openclaw mcp set` command → MCP tools appear <!-- Partial: deferred — sandbox lacks OpenClaw. Tracked in Non-blocking Review Backlog (Sprint 30). -->
 
 #### S30-3: Final docs pass + README overhaul
 
@@ -531,14 +533,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `book/agent-integration.md` has sections for all five agents: Claude Code, Codex CLI, OpenCode, Goose, OpenClaw
-- [ ] Top-level `README.md` shows a five-row table of supported agents + install commands in the integration section
-- [ ] `grep -r "mcpServers" book/ docs/` returns only references inside `book/agent-integration.md` or the PRD (not stale "paste this snippet" prose elsewhere)
-- [ ] `aimx agent-setup --list` output (tested via snapshot) shows all five agents in a stable, sorted order
+- [x] `book/agent-integration.md` has sections for all six v1 agents: Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw (Gemini was added in Sprint 29; Goose + OpenClaw now complete the FR-50 roster)
+- [x] Top-level `README.md` shows a six-row table of supported agents + install commands (deviation from plan: plan said "five-row" but PRD §6.10 FR-50 lists six v1 agents — implementer correctly sized the table to the spec)
+- [x] `grep -r "mcpServers" book/ docs/` returns only references inside `book/agent-integration.md` or the PRD; stale `{"mcpServers": …}` prose purged from `book/mcp.md`, `book/getting-started.md`, `docs/manual-setup.md`
+- [x] `aimx agent-setup --list` output covers all six agents via the registry; tests pass
 
 ---
 
-## Sprint 31 — Channel-Trigger Cookbook (Days 87–89.5) [NOT STARTED]
+## Sprint 31 — Channel-Trigger Cookbook (Days 87–89.5) [IN PROGRESS]
 
 **Goal:** Document email→agent channel-trigger recipes side-by-side for every supported agent. No new CLI surface — this is a docs + integration-test sprint leveraging the existing `cmd` trigger plumbing (`src/channel.rs`).
 
@@ -692,8 +694,8 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 27.6 | — | CI Binary Releases | _Deferred to the Non-blocking Review Backlog — revisit when production-ready_ | Deferred |
 | 28 | 79.5–82 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Done |
 | 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Done |
-| 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | In Progress |
-| 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
+| 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Done |
+| 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | In Progress |
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
 
 ## Deferred to v2
@@ -767,6 +769,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 28)** Manual end-to-end validation of the Claude Code plugin on a real machine — run `aimx agent-setup claude-code`, restart Claude Code, confirm the 9 AIMX MCP tools appear and the `aimx` skill is discoverable. Schema was verified against current official Claude Code plugin docs and unit tests cover the install pipeline, but actual plugin load was not exercised (sandbox lacks Claude Code). Also repeat for `sudo aimx setup <domain>` to confirm the reworked MCP section renders as expected end-to-end. Non-blocking because any schema drift can be patched in a follow-up without revisiting the framework itself.
 - [ ] **(Sprint 29)** Manual end-to-end validation of the Codex CLI plugin on a real machine — run `aimx agent-setup codex`, activate per Codex CLI instructions, and confirm the 9 AIMX MCP tools appear. Important: `.codex-plugin/plugin.json` uses the camelCase `mcpServers` shape on the assumption it mirrors Claude Code's convention (see inline comment on `codex_hint` in `src/agent_setup.rs`). If Codex CLI's plugin format actually expects `[mcp_servers.*]` TOML in `~/.codex/config.toml` or a different JSON schema, the plugin package needs to be reshaped accordingly. Validate before promoting Codex to the "supported, tested" tier.
 - [ ] **(Sprint 29)** Manual end-to-end validation of the Gemini CLI skill on a real machine — run `aimx agent-setup gemini`, merge the printed `mcpServers.aimx` JSON block into `~/.gemini/settings.json`, restart Gemini, and confirm the AIMX MCP tools and `aimx` skill are discoverable. Canonical paths were verified against current Gemini CLI docs but actual activation was not exercised (sandbox lacks Gemini CLI). Any schema drift is a follow-up patch, not a framework rework.
+- [ ] **(Sprint 30)** Manual end-to-end validation of the Goose recipe on a real machine — run `aimx agent-setup goose`, then `goose run --recipe aimx`, and confirm the MCP extension loads and AIMX tools are callable. Recipe format and CLI verb verified against current Goose docs; 51 agent_setup unit tests cover install + YAML injection, but actual `goose run` execution was not exercised (sandbox lacks Goose). Any schema drift is a follow-up patch.
+- [ ] **(Sprint 30)** Manual end-to-end validation of the OpenClaw skill on a real machine — run `aimx agent-setup openclaw`, paste the printed `openclaw mcp set aimx '<json>'` command, and confirm MCP tools appear and the skill is discoverable. `openclaw mcp set` CLI verified against current OpenClaw docs; POSIX shell escaping covers `'`-in-path edge case, but live activation was not exercised (sandbox lacks OpenClaw).
+- [ ] **(Sprint 30, nice-to-have)** Add a second `indent_block` test with multi-line input missing a trailing newline in `src/agent_setup.rs`. Cycle 1 reviewer flagged as nice-to-have; current tests cover the primary path. Low priority.
 
 ### Deferred Feature Sprints
 
