@@ -6,8 +6,8 @@
 //! responsibility — this one deals only in parsed `SendRequest`s.
 //!
 //! The handler is deliberately testable: real MX delivery is abstracted
-//! behind the [`MailTransport`](crate::send::MailTransport) trait so tests
-//! can inject a mock.
+//! behind the [`MailTransport`](crate::transport::MailTransport) trait so
+//! tests can inject a mock.
 
 use std::collections::HashSet;
 use std::sync::Arc;

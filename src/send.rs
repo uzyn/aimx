@@ -16,18 +16,12 @@ use crate::term;
 use base64::Engine;
 use chrono::Utc;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use uuid::Uuid;
 
 #[derive(Debug)]
 pub struct ComposeResult {
     pub message: Vec<u8>,
-    /// RFC 5322 Message-ID of the composed message. The daemon echoes this
-    /// back in the `AIMX/1 OK` response, so the client itself never needs to
-    /// read the field — it's part of the public API for other callers
-    /// (tests, future schedulers).
-    #[allow(dead_code)]
-    pub message_id: String,
 }
 
 fn escape_filename(name: &str) -> String {
@@ -104,7 +98,6 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
 
         return Ok(ComposeResult {
             message: msg.into_bytes(),
-            message_id,
         });
     }
 
@@ -155,7 +148,6 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
 
     Ok(ComposeResult {
         message: msg.into_bytes(),
-        message_id,
     })
 }
 
@@ -359,6 +351,18 @@ fn current_is_root() -> bool {
     false
 }
 
+/// Write the root-refusal error message to `stderr` and return the exit
+/// code. Pure function so tests can verify the message without observing
+/// real stderr or requiring an actual root process.
+pub fn render_root_refusal<E: io::Write>(stderr: &mut E) -> i32 {
+    let _ = writeln!(
+        stderr,
+        "{} send is a per-user operation — run without sudo",
+        term::error("Error:")
+    );
+    EXIT_CONNECT
+}
+
 /// Map a daemon response to a CLI exit code + stderr/stdout messaging, then
 /// write the output through the caller-supplied sinks. Pure function so
 /// tests don't have to observe real stderr.
@@ -410,11 +414,8 @@ pub fn build_request(args: &SendArgs, config: &Config) -> Result<SendRequest, St
 
 fn run_inner(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     if current_is_root() {
-        eprintln!(
-            "{} send is a per-user operation — run without sudo",
-            term::error("Error:")
-        );
-        std::process::exit(EXIT_CONNECT);
+        let code = render_root_refusal(&mut io::stderr());
+        std::process::exit(code);
     }
 
     let request = match build_request(&args, &config) {
@@ -465,14 +466,6 @@ fn handle_connect_error(socket: &Path, err: &io::Error) {
 
 pub fn run(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     run_inner(args, config)
-}
-
-/// Resolve the UDS socket path the client will connect to. Thin wrapper over
-/// [`send_socket_path`] exposed for MCP callers that want to share the same
-/// path lookup.
-#[allow(dead_code)]
-pub fn client_socket_path() -> PathBuf {
-    send_socket_path()
 }
 
 #[cfg(test)]
@@ -745,9 +738,15 @@ mod tests {
     fn compose_returns_message_id() {
         let args = test_args();
         let result = compose_message(&args).unwrap();
-        assert!(result.message_id.starts_with('<'));
-        assert!(result.message_id.ends_with('>'));
-        assert!(result.message_id.contains('@'));
+        let text = String::from_utf8(result.message).unwrap();
+        let mid_line = text
+            .lines()
+            .find(|l| l.starts_with("Message-ID:"))
+            .expect("composed message must contain a Message-ID header");
+        let value = mid_line.trim_start_matches("Message-ID:").trim();
+        assert!(value.starts_with('<'));
+        assert!(value.ends_with('>'));
+        assert!(value.contains('@'));
     }
 
     #[test]
@@ -1062,6 +1061,31 @@ mod tests {
     }
 
     #[test]
+    fn resolve_from_mailbox_no_match_no_catchall_errors() {
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "agent".to_string(),
+            crate::config::MailboxConfig {
+                address: "agent@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        let cfg = Config {
+            domain: "example.com".to_string(),
+            data_dir: std::path::PathBuf::from("/tmp"),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let err = resolve_from_mailbox(&cfg, "nobody@example.com").unwrap_err();
+        assert!(err.contains("no mailbox"));
+        assert!(err.contains("nobody@example.com"));
+    }
+
+    #[test]
     fn parse_response_ok() {
         let buf = b"AIMX/1 OK <abc@example.com>\n";
         match parse_response_line(buf) {
@@ -1175,6 +1199,16 @@ mod tests {
         assert_eq!(code, EXIT_MALFORMED);
         let err_text = String::from_utf8_lossy(&err);
         assert!(err_text.contains("malformed response"));
+    }
+
+    #[test]
+    fn render_root_refusal_returns_exit_2_with_message() {
+        let mut err = Vec::new();
+        let code = render_root_refusal(&mut err);
+        assert_eq!(code, EXIT_CONNECT);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(err_text.contains("send is a per-user operation"));
+        assert!(err_text.contains("run without sudo"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

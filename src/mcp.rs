@@ -237,7 +237,7 @@ impl AimxMcpServer {
 
     #[tool(
         name = "email_send",
-        description = "Compose, DKIM-sign, and send an email"
+        description = "Submit an email for DKIM signing and delivery via the aimx daemon"
     )]
     fn email_send(
         &self,
@@ -267,7 +267,7 @@ impl AimxMcpServer {
             attachments: params.attachments.unwrap_or_default(),
         };
 
-        submit_via_daemon(&args, &config, &params.from_mailbox)
+        submit_via_daemon(&args, &params.from_mailbox)
     }
 
     #[tool(
@@ -342,18 +342,14 @@ impl AimxMcpServer {
             attachments: vec![],
         };
 
-        submit_via_daemon(&args, &config, &params.mailbox)
+        submit_via_daemon(&args, &params.mailbox)
     }
 }
 
 /// Compose `args` into an `AIMX/1 SEND` request and submit it to
 /// `aimx serve` over the UDS. MCP, like `aimx send`, no longer signs or
 /// delivers mail directly — everything goes through the daemon.
-fn submit_via_daemon(
-    args: &SendArgs,
-    _config: &Config,
-    from_mailbox: &str,
-) -> Result<String, String> {
+fn submit_via_daemon(args: &SendArgs, from_mailbox: &str) -> Result<String, String> {
     let composed = send::compose_message(args).map_err(|e| e.to_string())?;
     let request = SendRequest {
         from_mailbox: from_mailbox.to_string(),
