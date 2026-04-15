@@ -134,23 +134,40 @@ impl MailTransport for LettreTransport {
         )
         .map_err(|e| format!("Failed to create envelope: {e}"))?;
 
-        let mut last_error: Option<String> = None;
+        deliver_across_mx(&domain, &mx_hosts, |host| {
+            self.try_deliver(host, &envelope, message)
+        })
+    }
+}
 
-        for host in &mx_hosts {
-            match self.try_deliver(host, &envelope, message) {
-                Ok(server) => return Ok(server),
-                Err(e) => {
-                    last_error = Some(format!("{host}: {e}"));
-                }
+/// Iterate MX hosts, short-circuiting on the first success. When every MX
+/// fails, return a single error that contains *all* per-MX failures (not just
+/// the last one) so operators can debug multi-MX outages without tailing logs.
+pub(crate) fn deliver_across_mx<F>(
+    domain: &str,
+    mx_hosts: &[String],
+    mut deliver: F,
+) -> Result<String, Box<dyn std::error::Error>>
+where
+    F: FnMut(&str) -> Result<String, Box<dyn std::error::Error>>,
+{
+    let mut errors: Vec<String> = Vec::new();
+
+    for host in mx_hosts {
+        match deliver(host) {
+            Ok(server) => return Ok(server),
+            Err(e) => {
+                errors.push(format!("{host}: {e}"));
             }
         }
-
-        Err(format!(
-            "All MX servers for {domain} unreachable: {}",
-            last_error.unwrap_or_default()
-        )
-        .into())
     }
+
+    let joined = if errors.is_empty() {
+        String::new()
+    } else {
+        errors.join("; ")
+    };
+    Err(format!("All MX servers for {domain} unreachable: {joined}").into())
 }
 
 impl LettreTransport {
@@ -1085,6 +1102,57 @@ mod tests {
     }
 
     #[test]
+    fn deliver_across_mx_returns_first_success() {
+        let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
+        let result = deliver_across_mx("example.com", &hosts, |host| Ok(host.to_string()));
+        assert_eq!(result.unwrap(), "mx1.example.com");
+    }
+
+    #[test]
+    fn deliver_across_mx_falls_through_to_second() {
+        let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
+        let result = deliver_across_mx("example.com", &hosts, |host| {
+            if host == "mx1.example.com" {
+                Err("connection refused".into())
+            } else {
+                Ok(host.to_string())
+            }
+        });
+        assert_eq!(result.unwrap(), "mx2.example.com");
+    }
+
+    #[test]
+    fn deliver_across_mx_collects_all_errors_on_total_failure() {
+        let hosts = vec![
+            "mx1.example.com".to_string(),
+            "mx2.example.com".to_string(),
+            "mx3.example.com".to_string(),
+        ];
+        let result = deliver_across_mx(
+            "example.com",
+            &hosts,
+            |host| -> Result<String, Box<dyn std::error::Error>> {
+                Err(format!("{host}-specific failure").into())
+            },
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("example.com"));
+        // Every MX host's specific error must appear — not just the last one.
+        assert!(
+            err.contains("mx1.example.com") && err.contains("mx1.example.com-specific failure"),
+            "mx1 error missing from: {err}"
+        );
+        assert!(
+            err.contains("mx2.example.com") && err.contains("mx2.example.com-specific failure"),
+            "mx2 error missing from: {err}"
+        );
+        assert!(
+            err.contains("mx3.example.com") && err.contains("mx3.example.com-specific failure"),
+            "mx3 error missing from: {err}"
+        );
+    }
+
+    #[test]
     fn lettre_transport_extract_domain() {
         assert_eq!(
             LettreTransport::extract_domain("user@gmail.com").unwrap(),
@@ -1166,7 +1234,7 @@ mod tests {
 
         for (i, byte) in raw.iter().enumerate() {
             if *byte == b'\n' && (i == 0 || raw[i - 1] != b'\r') {
-                let context_start = if i > 20 { i - 20 } else { 0 };
+                let context_start = i.saturating_sub(20);
                 let context = String::from_utf8_lossy(&raw[context_start..=i]);
                 panic!("Found bare LF at byte offset {i}: ...{context}");
             }

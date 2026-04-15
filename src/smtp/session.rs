@@ -483,13 +483,16 @@ impl SmtpSession {
         session_state: &mut SessionState,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         let config = Arc::clone(&self.params.config);
-        let data = data.to_vec();
+        // One allocation shared across all recipients via refcount. For large
+        // DATA payloads (up to message_max) with many RCPT TOs, this avoids
+        // an N-way copy of the full message.
+        let data = Arc::new(data.to_vec());
         let mut succeeded = 0usize;
         let mut failed = 0usize;
 
         for rcpt in &session_state.forward_paths {
             let config = Arc::clone(&config);
-            let data = data.clone();
+            let data = Arc::clone(&data);
             let rcpt_owned = rcpt.clone();
             let peer = self.params.peer_addr;
 

@@ -105,7 +105,11 @@ async fn run_serve(
 }
 
 fn can_read_tls(cert: &std::path::Path, key: &std::path::Path) -> bool {
-    std::fs::metadata(cert).is_ok_and(|m| m.is_file()) && std::fs::File::open(key).is_ok()
+    // Use the same check for both so a permissions mismatch between cert and
+    // key is not masked: `metadata().is_file()` hides read-permission issues
+    // that only surface at `File::open()`, while `File::open()` actually
+    // touches the file descriptor path rustls will ultimately traverse.
+    std::fs::File::open(cert).is_ok() && std::fs::File::open(key).is_ok()
 }
 
 pub mod service {
@@ -163,6 +167,57 @@ pub mod service {
             InitSystem::OpenRC
         } else {
             InitSystem::Unknown
+        }
+    }
+
+    /// Pure dispatch table for `restart_service`: returns the `(program,
+    /// args)` the real implementation will invoke. Split out so the
+    /// systemd-vs-OpenRC routing can be unit-tested without shelling out.
+    pub fn restart_service_command(
+        init: &InitSystem,
+        service: &str,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "sudo",
+                vec![
+                    "systemctl".to_string(),
+                    "restart".to_string(),
+                    service.to_string(),
+                ],
+            )),
+            InitSystem::OpenRC => Some((
+                "sudo",
+                vec![
+                    "rc-service".to_string(),
+                    service.to_string(),
+                    "restart".to_string(),
+                ],
+            )),
+            InitSystem::Unknown => None,
+        }
+    }
+
+    /// Pure dispatch table for `is_service_running`: returns the `(program,
+    /// args)` to probe the service's running state.
+    pub fn is_service_running_command(
+        init: &InitSystem,
+        service: &str,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "systemctl",
+                vec![
+                    "is-active".to_string(),
+                    "--quiet".to_string(),
+                    service.to_string(),
+                ],
+            )),
+            InitSystem::OpenRC => Some((
+                "rc-service",
+                vec![service.to_string(), "status".to_string()],
+            )),
+            InitSystem::Unknown => None,
         }
     }
 }
@@ -236,6 +291,52 @@ mod tests {
         let script = generate_openrc_script("/opt/bin/aimx", "/data/aimx");
         assert!(script.contains("command=/opt/bin/aimx"));
         assert!(script.contains("command_args=\"serve --data-dir /data/aimx\""));
+    }
+
+    #[test]
+    fn restart_service_systemd_dispatch() {
+        let (prog, args) = restart_service_command(&InitSystem::Systemd, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec!["systemctl", "restart", "aimx"]);
+    }
+
+    #[test]
+    fn restart_service_openrc_dispatch() {
+        let (prog, args) = restart_service_command(&InitSystem::OpenRC, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(
+            args,
+            vec!["rc-service", "aimx", "restart"],
+            "OpenRC restart must invoke `rc-service <svc> restart`, not systemctl"
+        );
+    }
+
+    #[test]
+    fn restart_service_unknown_init_returns_none() {
+        assert!(restart_service_command(&InitSystem::Unknown, "aimx").is_none());
+    }
+
+    #[test]
+    fn is_service_running_systemd_dispatch() {
+        let (prog, args) = is_service_running_command(&InitSystem::Systemd, "aimx").unwrap();
+        assert_eq!(prog, "systemctl");
+        assert_eq!(args, vec!["is-active", "--quiet", "aimx"]);
+    }
+
+    #[test]
+    fn is_service_running_openrc_dispatch() {
+        let (prog, args) = is_service_running_command(&InitSystem::OpenRC, "aimx").unwrap();
+        assert_eq!(prog, "rc-service");
+        assert_eq!(
+            args,
+            vec!["aimx", "status"],
+            "OpenRC status must invoke `rc-service <svc> status`, not systemctl"
+        );
+    }
+
+    #[test]
+    fn is_service_running_unknown_init_returns_none() {
+        assert!(is_service_running_command(&InitSystem::Unknown, "aimx").is_none());
     }
 
     #[test]
