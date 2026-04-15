@@ -581,7 +581,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 32 — Non-blocking Cleanup (Days 89.5–92) [IN PROGRESS]
+## Sprint 32 — Non-blocking Cleanup (Days 89.5–92) [DONE]
 
 **Goal:** Address accumulated non-blocking improvements from sprint reviews (Sprints 12, 19, 20, 21, 22, 26, 27). Grouped by theme; each story is self-contained with enough context for implementation without consulting the original review threads.
 
@@ -593,11 +593,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] Bounded concurrent-connection gate added to `run_smtp_listener` accept loop (default cap documented in code comment; tunable via env var or config if trivial, otherwise hardcoded sensible default like 128)
-- [ ] When the gate is saturated, newly accepted connections either wait with a short timeout or are dropped cleanly (do NOT block indefinitely on accept — it stalls the listener)
-- [ ] Unit or integration test confirms the gate's upper bound is honored (N+1 concurrent connections see the last one blocked/dropped)
-- [ ] Inline "deferred to Sprint 14" comment removed from `services/verifier/src/main.rs`
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean in `services/verifier/`
+- [x] Bounded `tokio::sync::Semaphore` gate added with default cap 128 (tunable via `SMTP_MAX_CONCURRENT` env var)
+- [x] Uses `try_acquire_owned` so saturated gate drops the excess connection cleanly rather than blocking the accept loop
+- [x] New `smtp_listener_concurrency_gate_drops_excess` test confirms the upper bound is honored
+- [x] Inline "deferred to Sprint 14" comment removed
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean in `services/verifier/` (43 tests pass)
 
 ### S32-2: Outbound delivery — share DATA buffer across recipients + collect all MX errors
 
@@ -605,11 +605,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] `deliver_message()` no longer clones DATA per recipient; uses `Arc<Vec<u8>>` (or equivalent shared buffer) so one allocation serves all recipients
-- [ ] When all MX servers fail, `LettreTransport` returns (or logs) every per-MX error, not just the last one — either as a joined string, a structured error variant holding `Vec<(mx_host, error)>`, or a multi-line error message
-- [ ] Unit test covers the multi-MX all-fail path and asserts all errors appear in the returned error
-- [ ] Existing send integration tests still pass
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `deliver_message()` wraps DATA in `Arc<Vec<u8>>` — one allocation serves all recipients
+- [x] New `deliver_across_mx` pure helper collects every per-MX error into the returned failure (not just the last one)
+- [x] New `deliver_across_mx_collects_all_errors_on_total_failure` test asserts all errors appear in the returned error
+- [x] Existing send integration tests still pass
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S32-3: TLS file check + service management consistency
 
@@ -617,11 +617,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] `can_read_tls` uses the same approach (either `metadata().is_file()` or `File::open()`) for both cert and key
-- [ ] `restart_service()` and `is_service_running()` dispatch to `systemctl` on systemd systems and `rc-service` on OpenRC systems, reusing the existing OS-detection helper already consumed by `install_service_file()`
-- [ ] OpenRC service-management code path covered by a unit test (mock the OS ops trait, assert the right command is invoked)
-- [ ] `is_already_configured` signature no longer takes `_domain`; all call sites updated
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `can_read_tls` uses `File::open()` for both cert and key (unified approach)
+- [x] `restart_service()` and `is_service_running()` route through `detect_init_system` via new pure `restart_service_command`/`is_service_running_command` helpers — systemd uses `systemctl`, OpenRC uses `rc-service`
+- [x] OpenRC service-management code path unit-tested via the pure command-builder helpers
+- [x] `is_already_configured` signature drops `_domain`; all 4 call sites updated
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S32-4: Network ops dedup — single `hostname -I` call
 
@@ -629,11 +629,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P3
 
-- [ ] `NetworkOps` exposes a single call that returns both the IPv4 and IPv6 addresses (whichever are present)
-- [ ] `RealNetworkOps` implementation invokes `hostname -I` once and parses both families
-- [ ] `MockNetworkOps` accepts both values for tests
-- [ ] Existing Sprint 26 IPv4/IPv6 call sites and tests updated — no behavior change from the outside
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `NetworkOps::get_server_ips() -> (Option<Ipv4Addr>, Option<Ipv6Addr>)` method returns both families
+- [x] `RealNetworkOps` invokes `hostname -I` exactly once via new `parse_hostname_i_output` helper (skips non-global IPv6)
+- [x] `MockNetworkOps` updated in `setup.rs` + `verify.rs` to accept both values
+- [x] Existing Sprint 26 IPv4/IPv6 call sites and tests updated — no behavior change
+- [x] New dedup + parser unit tests added
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S32-5: CI clippy `--all-targets` adoption + fix pre-existing test lints
 
@@ -641,9 +642,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] All test-target clippy errors surfaced by `cargo clippy --all-targets -- -D warnings` on `main` (pre-Sprint 32) are fixed — verified by running locally before and after
-- [ ] `.github/workflows/ci.yml` updated so every clippy invocation uses `--all-targets -- -D warnings` (check the Ubuntu, Alpine, and Fedora jobs, plus `services/verifier/`'s clippy call)
-- [ ] `cargo clippy --all-targets -- -D warnings` is clean on both `aimx` and `aimx-verifier` crates
+- [x] All 4 pre-existing test-target lints fixed: `collapsible_str_replace` ×2 in `dkim.rs`, `implicit_saturating_sub` in `send.rs`, `field_reassign_with_default` in `setup.rs`
+- [x] `.github/workflows/ci.yml` core-tests + verifier-tests jobs flipped to `cargo clippy --all-targets -- -D warnings`; commented-out Alpine/Fedora jobs updated to match
+- [x] `cargo clippy --all-targets -- -D warnings` clean on both `aimx` and `aimx-verifier` crates
 
 ### S32-6: Post-merge cosmetic cleanups
 
@@ -651,9 +652,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P3
 
-- [ ] `smtp_session` writer destructuring folded
-- [ ] `docs/sprint.md` Non-blocking Review Backlog: each Sprint 32-consumed item marked `[x] — _Triaged into Sprint 32 (SN-M)_`
-- [ ] `cargo fmt -- --check` clean
+- [x] `smtp_session` writer destructuring folded
+- [x] Sprint 32-consumed backlog items were already marked `[x] — _Triaged into Sprint 32 (SN-M)_` during the triage-in pass; implementer verified no stragglers remained
+- [x] `cargo fmt -- --check` clean
 
 ---
 
@@ -696,7 +697,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Done |
 | 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Done |
 | 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Done |
-| 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | In Progress |
+| 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Done |
 
 ## Deferred to v2
 
@@ -774,6 +775,7 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 30, nice-to-have)** Add a second `indent_block` test with multi-line input missing a trailing newline in `src/agent_setup.rs`. Cycle 1 reviewer flagged as nice-to-have; current tests cover the primary path. Low priority.
 - [ ] **(Sprint 31)** Add `book.toml` and wire `mdbook build` into CI so cross-link resolution is actually enforced. Sprint 31 shipped `book/SUMMARY.md` in mdbook-compatible format, but the repo has no `book.toml` yet, so the "all cross-links resolve in a local mdbook build" AC was deferred. The follow-up is small: add a minimal `book.toml`, add an `mdbook build` step to `.github/workflows/ci.yml` (or a new docs job), and make it fail on broken links.
 - [ ] **(Sprint 31, nice-to-have)** Swap OpenClaw's limitation note in `book/channel-recipes.md` for a real recipe once OpenClaw ships a non-interactive `run`/`exec` CLI. Until then, the chapter points at `docs.openclaw.ai` for updates.
+- [ ] **(Sprint 32, nice-to-have)** `RealNetworkOps::check_ptr_record` still calls `get_server_ips()` internally, so the full setup flow shells out to `hostname -I` twice end-to-end. The S32-4 trait-level AC is satisfied, but if a future sprint touches `check_ptr_record`, consider threading the already-detected IPv4 through from `run_setup` so the setup flow only invokes `hostname -I` once.
 
 ### Deferred Feature Sprints
 
