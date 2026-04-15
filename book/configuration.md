@@ -4,11 +4,13 @@ AIMX uses a single TOML configuration file for all settings.
 
 ## Config file location
 
-The default config file is at `/var/lib/aimx/config.toml`. This file is created automatically by `aimx setup`.
+The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`.
+
+Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and only the `aimx` system group needs access to the local submission socket.
 
 ### Data directory override
 
-The data directory (which contains `config.toml`, DKIM keys, and all mailboxes) can be overridden:
+The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only in v0.2 — config and DKIM keys are under `/etc/aimx/`. To relocate it:
 
 ```bash
 # CLI flag (works with any command)
@@ -20,6 +22,16 @@ aimx status
 ```
 
 The `--data-dir` flag takes precedence over the environment variable.
+
+### Config directory override
+
+For tests or non-standard installs, override the config directory with:
+
+```bash
+export AIMX_CONFIG_DIR=/custom/etc/path
+```
+
+This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim/public.key`) are read from. Under normal operation you should **not** set this — `aimx setup` writes to `/etc/aimx/` and every command picks it up from there.
 
 ## Settings reference
 
@@ -61,11 +73,16 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
 ## Storage layout
 
 ```
-/var/lib/aimx/
-├── config.toml              # Configuration file
-├── dkim/
-│   ├── private.key          # RSA private key (mode 0600)
-│   └── public.key           # RSA public key
+/etc/aimx/                   # Config + secrets (root-owned, mode 0755)
+├── config.toml              # Configuration file (mode 0640, root:root)
+└── dkim/
+    ├── private.key          # RSA private key (mode 0600, root-only)
+    └── public.key           # RSA public key (mode 0644)
+
+/run/aimx/                   # Runtime directory (mode 0750, root:aimx)
+└── send.sock                # (Sprint 34) local submission socket
+
+/var/lib/aimx/               # Mailbox storage
 ├── catchall/                # Default mailbox
 │   ├── 2025-01-15-001.md
 │   ├── 2025-01-15-002.md
@@ -82,7 +99,7 @@ By default, `aimx send` delivers outbound email over IPv4 only. This matches the
 
 If your server has a global IPv6 address and you want outbound mail to use it:
 
-1. Set the flag in `/var/lib/aimx/config.toml`:
+1. Set the flag in `/etc/aimx/config.toml`:
 
    ```toml
    enable_ipv6 = true

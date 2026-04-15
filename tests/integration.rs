@@ -18,6 +18,16 @@ fn setup_test_env(tmp: &Path) -> String {
     config_path.to_string_lossy().to_string()
 }
 
+/// Build an `aimx` Command pre-wired with `AIMX_CONFIG_DIR` pointed at the
+/// test's tempdir. v0.2 (Sprint 33) moved config out of the storage
+/// directory, so integration tests must override both the storage path
+/// (`--data-dir` / `AIMX_DATA_DIR`) and the config lookup via this env var.
+fn aimx_cmd(tmp: &Path) -> Command {
+    let mut cmd = Command::cargo_bin("aimx").unwrap();
+    cmd.env("AIMX_CONFIG_DIR", tmp);
+    cmd
+}
+
 fn read_frontmatter(md_path: &Path) -> toml::Value {
     let content = std::fs::read_to_string(md_path).unwrap();
     let parts: Vec<&str> = content.splitn(3, "+++").collect();
@@ -76,8 +86,7 @@ fn ingest_plain_fixture_full_pipeline() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -107,8 +116,7 @@ fn ingest_html_fixture_full_pipeline() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/html_only.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -135,8 +143,7 @@ fn ingest_multipart_fixture_full_pipeline() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/multipart.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -159,8 +166,7 @@ fn ingest_attachment_fixture_full_pipeline() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/with_attachment.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -191,8 +197,7 @@ fn ingest_routes_to_named_mailbox() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -214,8 +219,7 @@ fn ingest_unknown_routes_to_catchall() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -234,8 +238,7 @@ fn ingest_via_env_var() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .env("AIMX_DATA_DIR", tmp.path())
         .arg("ingest")
         .arg("catchall@agent.example.com")
@@ -252,8 +255,7 @@ fn dkim_keygen_end_to_end() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("dkim-keygen")
@@ -277,16 +279,14 @@ fn dkim_keygen_no_overwrite() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("dkim-keygen")
         .assert()
         .success();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("dkim-keygen")
@@ -301,8 +301,7 @@ fn dkim_keygen_force_overwrite() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("dkim-keygen")
@@ -311,8 +310,7 @@ fn dkim_keygen_force_overwrite() {
 
     let original = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("dkim-keygen")
@@ -338,6 +336,7 @@ struct McpClient {
 impl McpClient {
     fn spawn(data_dir: &Path) -> Self {
         let mut child = StdCommand::new(aimx_binary_path())
+            .env("AIMX_CONFIG_DIR", data_dir)
             .arg("--data-dir")
             .arg(data_dir)
             .arg("mcp")
@@ -743,8 +742,7 @@ fn ingest_trigger_executes_on_delivery() {
     setup_test_env_with_triggers(tmp.path(), &marker);
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -782,8 +780,7 @@ command = "false"
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -824,8 +821,7 @@ command = "touch {}"
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -866,8 +862,7 @@ command = "touch {}"
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -890,8 +885,7 @@ fn ingest_frontmatter_contains_dkim_spf() {
     setup_test_env(tmp.path());
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -944,8 +938,7 @@ command = "touch {}"
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -996,8 +989,7 @@ command = "false"
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -1062,8 +1054,7 @@ fn status_shows_domain_and_mailboxes() {
     setup_test_env(tmp.path());
 
     let eml = b"From: sender@example.com\r\nTo: catchall@agent.example.com\r\nSubject: Test\r\nMessage-ID: <status-test@example.com>\r\n\r\nBody\r\n";
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("ingest")
@@ -1072,8 +1063,7 @@ fn status_shows_domain_and_mailboxes() {
         .assert()
         .success();
 
-    Command::cargo_bin("aimx")
-        .unwrap()
+    aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("status")
@@ -1179,6 +1169,7 @@ fn serve_e2e_receive_email_and_shutdown() {
     let port = find_free_port();
 
     let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1244,6 +1235,7 @@ fn serve_e2e_multi_recipient() {
     let port = find_free_port();
 
     let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1298,6 +1290,7 @@ fn serve_e2e_connection_refused_after_shutdown() {
     let port = find_free_port();
 
     let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("serve")
@@ -1352,6 +1345,7 @@ fn setup_test_env_with_bob(tmp: &Path) -> String {
 
 fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
     let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp)
         .arg("--data-dir")
         .arg(tmp)
         .arg("serve")

@@ -423,14 +423,11 @@ pub fn run(
     args: SendArgs,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)
-            .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
-        None => Config::load_default()
-            .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?,
-    };
+    let _ = data_dir;
+    let config = Config::load_resolved()
+        .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?;
     let transport = LettreTransport::new(config.enable_ipv6);
-    let private_key = dkim::load_private_key(&config.data_dir)
+    let private_key = dkim::load_private_key(&crate::config::dkim_dir())
         .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))?;
 
     let dkim_info = Some((
@@ -1026,6 +1023,7 @@ mod tests {
     #[test]
     fn run_with_missing_dkim_key_returns_error() {
         let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let mut mailboxes = std::collections::HashMap::new();
         mailboxes.insert(
             "catchall".to_string(),
@@ -1044,9 +1042,7 @@ mod tests {
             verify_host: None,
             enable_ipv6: false,
         };
-        config
-            .save(&crate::config::Config::config_path(tmp.path()))
-            .unwrap();
+        config.save(&crate::config::config_path()).unwrap();
 
         let args = test_args();
         let result = run(args, Some(tmp.path()));
