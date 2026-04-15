@@ -727,7 +727,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 33.1 — Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup (Days 94.5–97) [IN PROGRESS]
+## Sprint 33.1 — Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup (Days 94.5–97) [DONE]
 
 **Goal:** Reverse two scope decisions before Sprint 34 builds on them: (a) drop PTR/reverse-DNS handling entirely (operator responsibility, out of aimx scope), (b) drop the `aimx` system group introduced in S33-4 — the UDS send socket in Sprint 34 will be world-writable (`0o666`), so group-gated authorization is no longer needed. Also clear the actionable items on the Non-blocking Review Backlog in the same sprint, and run manual end-to-end validation of the Claude Code + Codex CLI plugins on a real machine.
 
@@ -744,13 +744,13 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `check_ptr()` and any PTR-specific helpers removed from `src/setup.rs`
-- [ ] `NetworkOps::check_ptr_record` trait method and `MockNetworkOps` implementation removed
-- [ ] `display_deliverability_section` no longer surfaces a PTR status block (the section may be deleted entirely if PTR was its only content)
-- [ ] All PTR-related tests removed from `src/setup.rs` and `src/verify.rs` test modules
-- [ ] Docs sweep: `book/setup.md`, `book/troubleshooting.md`, `book/getting-started.md`, `docs/manual-setup.md`, `README.md` — no remaining PTR/reverse-DNS mentions
-- [ ] `docs/prd.md` FR-5 already removed; FR-7 already updated to drop PTR from the DNS-records list — verify
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `check_ptr()` and any PTR-specific helpers removed from `src/setup.rs`
+- [x] `NetworkOps::check_ptr_record` trait method and `MockNetworkOps` implementation removed
+- [x] `display_deliverability_section` no longer surfaces a PTR status block (the section may be deleted entirely if PTR was its only content)
+- [x] All PTR-related tests removed from `src/setup.rs` and `src/verify.rs` test modules
+- [x] Docs sweep: `book/setup.md`, `book/troubleshooting.md`, `book/getting-started.md`, `docs/manual-setup.md`, `README.md` — no remaining PTR/reverse-DNS mentions
+- [x] `docs/prd.md` FR-5 already removed; FR-7 already updated to drop PTR from the DNS-records list — verify
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-2: Drop `aimx` system group and group-gating
 
@@ -758,15 +758,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `SystemOps::create_system_group` trait method removed along with real and `MockSystemOps` implementations
-- [ ] Generated systemd unit no longer contains `Group=aimx`; `RuntimeDirectory=aimx` retained (default `RuntimeDirectoryMode=0755` — drop the explicit `RuntimeDirectoryMode=0750` line)
-- [ ] Generated OpenRC script no longer does `chown root:aimx` or `command_user="root:aimx"`; `checkpath -d -m 0755 -o root:root /run/aimx` retained
-- [ ] `run_setup` call graph: `create_system_group` call removed from install phase; re-entrant short-circuit path unchanged
-- [ ] Setup output: `[Group access]` section deleted; no `usermod -aG aimx` instruction printed
-- [ ] `book/setup.md`, `book/configuration.md`, `docs/manual-setup.md` — no remaining references to the `aimx` group
-- [ ] Tests updated: `systemd_unit_exposes_runtime_dir_and_aimx_group` replaced by `systemd_unit_declares_runtime_dir_without_group`; `group_section_mentions_aimx_group_and_usermod` removed; `run_setup_creates_aimx_group_when_not_configured` and `run_setup_skips_group_creation_on_reentrant_path` removed
-- [ ] `docs/prd.md` FR-1d already removed; FR-18b already rewritten — verify
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `SystemOps::create_system_group` trait method removed along with real and `MockSystemOps` implementations
+- [x] Generated systemd unit no longer contains `Group=aimx`; `RuntimeDirectory=aimx` retained (default `RuntimeDirectoryMode=0755` — drop the explicit `RuntimeDirectoryMode=0750` line)
+- [x] Generated OpenRC script no longer does `chown root:aimx` or `command_user="root:aimx"`; `checkpath -d -m 0755 -o root:root /run/aimx` retained
+- [x] `run_setup` call graph: `create_system_group` call removed from install phase; re-entrant short-circuit path unchanged
+- [x] Setup output: `[Group access]` section deleted; no `usermod -aG aimx` instruction printed
+- [x] `book/setup.md`, `book/configuration.md`, `docs/manual-setup.md` — no remaining references to the `aimx` group
+- [x] Tests updated: `systemd_unit_exposes_runtime_dir_and_aimx_group` replaced by `systemd_unit_declares_runtime_dir_without_group`; `group_section_mentions_aimx_group_and_usermod` removed; `run_setup_creates_aimx_group_when_not_configured` and `run_setup_skips_group_creation_on_reentrant_path` removed
+- [x] `docs/prd.md` FR-1d already removed; FR-18b already rewritten — verify
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-3: Drop `data_dir` param from `verify::run_verify`
 
@@ -774,10 +774,10 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `verify::run_verify` signature no longer takes `data_dir: Option<&Path>`
-- [ ] `main.rs` dispatch updated
-- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `verify::run_verify` signature no longer takes `data_dir: Option<&Path>`
+- [x] `main.rs` dispatch updated
+- [x] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-4: Factor `is_root()` into `src/platform.rs`
 
@@ -785,11 +785,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `src/platform.rs` created; exports `pub fn is_root() -> bool`
-- [ ] `setup.rs` and `verify.rs` both use `crate::platform::is_root`; local copies deleted
-- [ ] Module declared in `main.rs`
-- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/platform.rs` created; exports `pub fn is_root() -> bool`
+- [x] `setup.rs` and `verify.rs` both use `crate::platform::is_root`; local copies deleted
+- [x] Module declared in `main.rs`
+- [x] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-5: Drop unused `_data_dir` params from runtime `run()` signatures
 
@@ -797,11 +797,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] Each `run()` signature accepts `data_dir_override: Option<&Path>` (or the existing typed param) and threads it through its own `Config::load_resolved_with_data_dir` call
-- [ ] All dispatch sites in `main.rs` updated consistently
-- [ ] No `#[allow(unused)]` or leading-underscore dead params remain
-- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Each `run()` signature accepts `data_dir_override: Option<&Path>` (or the existing typed param) and threads it through its own `Config::load_resolved_with_data_dir` call
+- [x] All dispatch sites in `main.rs` updated consistently
+- [x] No `#[allow(unused)]` or leading-underscore dead params remain
+- [x] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-6: Second `indent_block` test (multi-line, no trailing newline)
 
@@ -809,9 +809,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] New test `indent_block_handles_multiline_without_trailing_newline` added
-- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New test `indent_block_handles_multiline_without_trailing_newline` added
+- [x] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-7: OpenClaw research + `aimx agent-setup openclaw` reshape
 
@@ -819,13 +819,13 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] OpenClaw CLI capabilities documented inline in PR description (link to upstream docs)
-- [ ] If interactive-only: `aimx agent-setup openclaw` prints step-by-step manual setup guide (exact commands the operator runs)
-- [ ] If non-interactive: `aimx agent-setup openclaw` writes the skill + prints the single command
-- [ ] `book/channel-recipes.md` OpenClaw section updated to match
-- [ ] Existing OpenClaw unit tests updated for the new output
-- [ ] Backlog items (Sprint 30 OpenClaw + Sprint 31 nice-to-have OpenClaw recipe) marked `[x] _Done in Sprint 33.1_`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] OpenClaw CLI capabilities documented inline in PR description (link to upstream docs)
+- [x] If interactive-only: `aimx agent-setup openclaw` prints step-by-step manual setup guide (exact commands the operator runs)
+- [x] If non-interactive: `aimx agent-setup openclaw` writes the skill + prints the single command
+- [x] `book/channel-recipes.md` OpenClaw section updated to match
+- [x] Existing OpenClaw unit tests updated for the new output
+- [x] Backlog items (Sprint 30 OpenClaw + Sprint 31 nice-to-have OpenClaw recipe) marked `[x] _Done in Sprint 33.1_`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33.1-8: Manual E2E validation — Claude Code + Codex CLI plugins (this machine)
 
@@ -833,16 +833,16 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `aimx agent-setup claude-code` run on this machine — 9 MCP tools appear in Claude Code, `aimx` skill discoverable (paste test output into PR description)
-- [ ] `aimx agent-setup codex` run on this machine — plugin accepted by Codex CLI; if format diverges, adjust schema and retest
-- [ ] If any divergence found → fix + add regression test for the real schema
-- [ ] Corresponding Non-blocking Backlog items (Sprint 28 Claude Code, Sprint 29 Codex CLI) marked `[x] _Validated in Sprint 33.1_`
-- [ ] Sprint 29 Gemini CLI, Sprint 30 Goose, Sprint 30 OpenClaw backlog items marked `[x] _Requires manual validation on real agent environments — deferred_` (Gemini + Goose remain deferred; OpenClaw covered by S33.1-7)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `aimx agent-setup claude-code` run on this machine — 9 MCP tools appear in Claude Code, `aimx` skill discoverable (paste test output into PR description)
+- [x] `aimx agent-setup codex` run on this machine — plugin accepted by Codex CLI; if format diverges, adjust schema and retest
+- [x] If any divergence found → fix + add regression test for the real schema
+- [x] Corresponding Non-blocking Backlog items (Sprint 28 Claude Code, Sprint 29 Codex CLI) marked `[x] _Validated in Sprint 33.1_`
+- [x] Sprint 29 Gemini CLI, Sprint 30 Goose, Sprint 30 OpenClaw backlog items marked `[x] _Requires manual validation on real agent environments — deferred_` (Gemini + Goose remain deferred; OpenClaw covered by S33.1-7)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 97–99.5) [NOT STARTED]
+## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 97–99.5) [IN PROGRESS]
 
 **Goal:** Move DKIM signing and outbound SMTP delivery inside `aimx serve`, exposed to local clients over a world-writable Unix domain socket at `/run/aimx/send.sock` (`root:root 0666`). `aimx send` is not yet rewritten (that's Sprint 35); this sprint stands up the daemon side and proves it works with a hand-written test client.
 
@@ -1304,8 +1304,8 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Done |
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Done |
 | 33 | 92–94.5 | v0.2 Filesystem Split + `aimx` Group (group reverted in 33.1) | `/etc/aimx/` for config + DKIM keys, `/run/aimx/` via `RuntimeDirectory=aimx`, DKIM private key back to `600` root-only | Done |
-| 33.1 | 94.5–97 | Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup | Strip PTR/reverse-DNS, drop `aimx` system group + group-gating, clear ready-now backlog items, manual E2E validation of Claude Code + Codex CLI plugins | In Progress |
-| 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | Not started |
+| 33.1 | 94.5–97 | Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup | Strip PTR/reverse-DNS, drop `aimx` system group + group-gating, clear ready-now backlog items, manual E2E validation of Claude Code + Codex CLI plugins | Done |
+| 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | In Progress |
 | 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Not started |
 | 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Not started |
 | 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
