@@ -2,9 +2,11 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 33 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook)
-**Timeline:** ~91.5 calendar days
-**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent.
+**Total sprints:** 41 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 8 v0.2 pre-launch reshape)
+**Timeline:** ~112 calendar days (v1: ~92 days, v0.2 reshape: ~20 days)
+**v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
+
+**v0.2 Scope (pre-launch reshape, Sprints 33–40):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable) and creates the `aimx` system group. Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
 
 ---
 
@@ -658,6 +660,492 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 33 — Filesystem Split + `aimx` Group Foundation (Days 92–94.5) [NOT STARTED]
+
+**Goal:** Move configuration and DKIM secrets to `/etc/aimx/`, establish the `aimx` system group, and provide the `/run/aimx/` runtime directory. No behavior change is visible to agents yet — this is the foundation every subsequent v0.2 sprint builds on.
+
+**Dependencies:** Sprint 32 (v1 complete).
+
+**Design notes (apply to all stories below):**
+- Pre-launch: there are no existing installs to migrate. `aimx setup` writes directly to the new locations; no dual-read compatibility shims.
+- Every path that was previously `/var/lib/aimx/{config.toml,dkim/*}` must now resolve via the new config-dir lookup. A single `config_dir()` helper (new or promoted) is the source of truth, analogous to today's `data_dir()`.
+- Tests: the trait-based mock pattern from v1 (`SystemOps`, `NetworkOps`, `MailTransport`) extends cleanly. Add `FileSystemOps` fakes if a current test hardcodes `/var/lib/aimx/config.toml`.
+
+#### S33-1: `config_dir()` helper + `AIMX_CONFIG_DIR` env var
+
+**Context:** Today `config.rs` opens `/var/lib/aimx/config.toml` directly. Introduce `config_dir()` in `src/config.rs` that resolves, in order: `AIMX_CONFIG_DIR` env var → `/etc/aimx/` default. Mirror the shape of today's `data_dir()` so tests can override via env var in `tempfile::TempDir`. `config.toml` then always resolves to `<config_dir>/config.toml`. The DKIM key pair lives under `<config_dir>/dkim/{private,public}.key` (see S33-3). Retire every direct reference to `/var/lib/aimx/config.toml` or `<data_dir>/config.toml` — grep the whole crate and the verifier crate.
+
+**Priority:** P0
+
+- [ ] `config_dir()` added to `src/config.rs`; returns `PathBuf` from `AIMX_CONFIG_DIR` if set, else `/etc/aimx/`
+- [ ] `config_path()` (or `config_file()`) returns `config_dir().join("config.toml")`
+- [ ] `--data-dir` CLI flag remains unchanged (it governs `/var/lib/aimx/`, not config)
+- [ ] No callers reference `/var/lib/aimx/config.toml` literally after this story; grep confirms
+- [ ] Tests use `std::env::set_var("AIMX_CONFIG_DIR", tmp.path())` with the existing parallel-safety pattern (scoped serial guard where required)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33-2: `aimx setup` writes config to `/etc/aimx/config.toml` (mode `640`)
+
+**Context:** `setup.rs` currently creates `/var/lib/aimx/config.toml` via `fs::write`. Change it to create `/etc/aimx/` (mode `755`), then write `config.toml` inside with mode `640`, owner `root:root`. Use a single helper (e.g., `install_config_file`) that applies mode via `std::os::unix::fs::PermissionsExt`. If `AIMX_CONFIG_DIR` is set (tests), skip the mode enforcement — `tempfile::TempDir` can't host root-owned files and tests don't need to verify mode (a dedicated mode-enforcement unit test covers the real-install path).
+
+**Priority:** P0
+
+- [ ] `setup.rs` creates `/etc/aimx/` with mode `755` if absent
+- [ ] Config written to `<config_dir>/config.toml` with mode `640`, owner `root:root` when running as root on a real install
+- [ ] Re-entrant setup: if `<config_dir>/config.toml` already exists and matches the domain, proceed (existing re-entrant pattern preserved — see `is_already_configured`)
+- [ ] Unit test asserts the written mode is `0o640` (use `/tmp`-style path + permissions check; skip only when the test is running non-root via `nix::unistd::geteuid`)
+- [ ] `book/configuration.md` updated with the new path
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33-3: DKIM keys move to `/etc/aimx/dkim/` (private `600`, public `644`)
+
+**Context:** `src/dkim.rs` `generate_keypair()` writes to `<data_dir>/dkim/{private,public}.key` today, and Sprint 25 relaxed the private key to mode `0o644` specifically so the non-root `aimx send` process could read it. v0.2 reverses that: private key moves to `<config_dir>/dkim/private.key` with mode `0o600`, owner `root:root`, and is never again read by non-root code (see S34-2 for how `aimx serve` takes over signing). Public key moves to `<config_dir>/dkim/public.key` with mode `0o644`. `load_private_key()` must now return a clear permission-denied error when invoked non-root, pointing the user at `aimx send` instead of manually running `aimx send`-equivalent code — but in practice, the only remaining non-root caller of `load_private_key()` at the end of this sprint should be tests and the `aimx dkim-keygen` helper.
+
+**Priority:** P0
+
+- [ ] `generate_keypair()` writes private key to `<config_dir>/dkim/private.key` with mode `0o600`, public key to `<config_dir>/dkim/public.key` with mode `0o644`
+- [ ] The Sprint 25 test `private_key_has_restricted_permissions` is updated back to expect `0o600`
+- [ ] New test `public_key_is_world_readable` asserts `0o644` on the public key
+- [ ] `load_private_key()` error message on permission denied reads: `DKIM private key is readable only by root. This command must be invoked by \`aimx serve\` (root) — non-root processes must submit mail via \`aimx send\` instead.`
+- [ ] All consumers of `load_private_key()` audited — after this story, callers are `aimx serve` (root) and the test harness only
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33-4: `aimx` system group + `/run/aimx/` via `RuntimeDirectory=aimx`
+
+**Context:** `aimx setup` must create an `aimx` system group during setup (idempotent — skip if it already exists) on systems with `groupadd`/`addgroup`. Group membership gates access to `/run/aimx/send.sock` once S34 lands; this sprint just creates the group and the runtime directory. `/run/aimx/` itself is provided by systemd — add `RuntimeDirectory=aimx`, `RuntimeDirectoryMode=0750`, `Group=aimx` to the generated systemd unit (still running as `User=root`). On OpenRC (Alpine) the init script gains an equivalent `checkpath -d -m 0750 -o root:aimx /run/aimx` step. Setup output (`display_deliverability_section` or a new `display_group_section`) prints the `usermod -aG aimx <user>` instruction the operator runs once to join an agent user to the group.
+
+**Priority:** P0
+
+- [ ] `setup.rs` creates `aimx` group idempotently (detect `groupadd` vs `addgroup`); `SystemOps` gains `create_system_group(name)` trait method with `MockSystemOps` support
+- [ ] Generated systemd unit includes `RuntimeDirectory=aimx`, `RuntimeDirectoryMode=0750`, `Group=aimx` (while `User=root` stays); existing unit template tests extended
+- [ ] Generated OpenRC script has equivalent `checkpath` step; existing unit template tests extended
+- [ ] Setup output section prints the `usermod -aG aimx <user>` instruction and names the group explicitly
+- [ ] `book/setup.md` documents the group and the post-setup `usermod` step (+ `newgrp aimx` or logout/login hint)
+- [ ] Re-running `aimx setup` does NOT error when the group already exists
+- [ ] Tests cover: group creation command shape for both systemd/groupadd and OpenRC/addgroup; systemd unit contains `RuntimeDirectory=aimx`; `install_service_file` still passes
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 94.5–97) [NOT STARTED]
+
+**Goal:** Move DKIM signing and outbound SMTP delivery inside `aimx serve`, exposed to local clients over the Unix domain socket at `/run/aimx/send.sock`. `aimx send` is not yet rewritten (that's Sprint 35); this sprint stands up the daemon side and proves it works with a hand-written test client.
+
+**Dependencies:** Sprint 33 (config dir, DKIM paths, `/run/aimx/` runtime dir, `aimx` group).
+
+**Design notes:**
+- Wire protocol is text-ish in the framing but binary-safe in the body — `Content-Length` gives an exact byte count. This mirrors HTTP/1.1's framing discipline without inheriting HTTP's parsing surface.
+- DKIM key loaded **once** at `aimx serve` startup into `Arc<DkimKey>` — every accepted send reuses the same in-memory key. Reloading on every connection would defeat the point of moving signing inside the daemon.
+- No queue, no retries: each UDS accept spawns a per-connection tokio task that signs, delivers, writes the response frame, and exits. Existing `LettreTransport` + `hickory-resolver` MX resolution (from Sprints 19–20) is reused as-is.
+
+#### S34-1: `src/send_protocol.rs` — wire format codec
+
+**Context:** Author a new module `src/send_protocol.rs` with pure codec logic: `SendRequest { from_mailbox: String, body: Vec<u8> }`, `SendResponse::Ok { message_id: String } | SendResponse::Err { code: ErrCode, reason: String }`, and `ErrCode { Mailbox, Domain, Sign, Delivery, Temp, Malformed }`. Provide async `parse_request<R: AsyncRead + Unpin>(&mut R) -> Result<SendRequest>` and `write_response<W: AsyncWrite + Unpin>(&mut W, &SendResponse) -> Result<()>`. Parser reads headers line-by-line up to the blank line, then reads exactly `Content-Length` bytes. Reject unknown commands (only `AIMX/1 SEND` is accepted), missing required headers, non-UTF-8 header names, and bodies exceeding the configured max size (default: reuse the inbound SMTP DATA limit of 25 MB from NFR-6 configurability). Codec module has zero IO beyond the `AsyncRead`/`AsyncWrite` generics — no tokio-net, no filesystem, no signing.
+
+**Priority:** P0
+
+- [ ] `src/send_protocol.rs` added; exports `SendRequest`, `SendResponse`, `ErrCode`, `parse_request`, `write_response`
+- [ ] `parse_request` reads the leading `AIMX/1 SEND\n` line, then headers until blank line, then `Content-Length` bytes
+- [ ] Required headers: `From-Mailbox`, `Content-Length`. Unknown headers ignored for forward-compat
+- [ ] Rejects: wrong leading line → `Malformed`; missing required header → `Malformed`; `Content-Length` not parseable or exceeds cap → `Malformed`; body truncated → `Malformed`
+- [ ] `write_response` emits `AIMX/1 OK <message-id>\n` or `AIMX/1 ERR <code> <reason>\n` (codes rendered as `MAILBOX`, `DOMAIN`, `SIGN`, `DELIVERY`, `TEMP`, `MALFORMED`)
+- [ ] Round-trip unit tests for every response variant; `tokio-test::io::Builder` used for controlled async streams
+- [ ] Parser fuzzed lightly with: truncated body, oversized body, CRLF vs LF, header case-insensitivity on names, duplicate `Content-Length`, missing blank line, empty body, body containing the literal `AIMX/1 SEND\n` (must NOT be misparsed as a second request)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S34-2: `aimx serve` binds `/run/aimx/send.sock` + accept loop
+
+**Context:** Extend `src/serve.rs` to bind a `tokio::net::UnixListener` on `/run/aimx/send.sock` alongside the existing TCP SMTP listener. Bind-time ownership: the socket inherits `root:aimx 660` from `RuntimeDirectory` + the `aimx` group — set the mode explicitly with `std::os::unix::fs::PermissionsExt::set_mode(0o660)` after bind, chown to `root:aimx` (the file inherits from `RuntimeDirectory` owner by default but be explicit for OpenRC paths). On every accept, read `SO_PEERCRED` via `tokio::net::UnixStream::peer_cred()` and log `peer_uid` / `peer_pid` to the existing tracing pipeline (which already routes to journald). Each accepted connection gets its own tokio task — no bounded semaphore in this sprint (defense-in-depth concurrency cap can be a follow-up if review flags it). Bind failures are fatal at startup (`main` returns non-zero); runtime accept errors are logged and do not kill the listener.
+
+**Priority:** P0
+
+- [ ] `serve.rs` binds `UnixListener` at `send_socket_path()` (new helper: `<runtime_dir>/send.sock`; `AIMX_RUNTIME_DIR` env var overrides for tests)
+- [ ] Socket mode set to `0o660` after bind; owner `root:aimx` (chown call guarded behind `nix::unistd::geteuid().is_root()` so non-root test runs skip it)
+- [ ] `SO_PEERCRED` read on each accept; `peer_uid`/`peer_pid` emitted at `info` level via `tracing`
+- [ ] Bind failure: process exits with `1` and a clear `error!` log naming the socket path and the errno
+- [ ] SIGTERM/SIGINT graceful shutdown drains the UDS accept loop the same way it drains the SMTP listener
+- [ ] Unit test binds the listener in a tempdir (override via `AIMX_RUNTIME_DIR`), connects from the same process, asserts accept fires and peer-cred fields are present
+- [ ] Integration test: start `aimx serve` in a tempdir (systemd unit generation bypassed, binary invoked directly), connect a raw Unix socket, assert the listener accepts
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S34-3: Daemon-side send handler — domain validation, DKIM sign, deliver
+
+**Context:** Author `src/send_handler.rs` (new module) containing the per-connection handler: accept a `SendRequest`, look up the sender's `From:` header, validate the domain against `<config_dir>/config.toml`'s primary domain (case-insensitive, any local part accepted), DKIM-sign via the `Arc<DkimKey>` loaded at `aimx serve` startup (see below), deliver via the existing `LettreTransport` MX resolution path from Sprint 20, and emit the appropriate `SendResponse`. Error mapping: `From:` missing or malformed → `Malformed`; sender domain mismatch → `Domain`; `From-Mailbox` not registered in config → `Mailbox`; DKIM signing failure → `Sign`; permanent SMTP error from any MX → `Delivery` (with the last remote response in the `reason`); transient SMTP error → `Temp`. The DKIM key is loaded in `serve.rs::main` before the accept loop starts; a failure to load is fatal (`aimx serve` refuses to start). Every concurrent send is an independent tokio task — no queue, no Mutex yet (filename-allocation Mutex comes in Sprint 38 with sent-items persistence).
+
+**Priority:** P0
+
+- [ ] `src/send_handler.rs` created; `async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse`
+- [ ] `SendContext` holds `Arc<DkimKey>`, primary domain, registered mailboxes, and an `Arc<dyn MailTransport>` for injection in tests
+- [ ] `serve.rs::main` loads DKIM key once at startup; start failure is fatal with a clear message naming `/etc/aimx/dkim/private.key`
+- [ ] `From:` parsing extracts local@domain; domain compare is case-insensitive; any local part accepted
+- [ ] Domain mismatch returns `ERR DOMAIN sender domain does not match aimx domain`
+- [ ] Unknown `From-Mailbox` returns `ERR MAILBOX mailbox \`<name>\` not registered`
+- [ ] DKIM signing uses relaxed/relaxed canonicalization (preserving Sprint 25 fix); sign failure returns `ERR SIGN <detail>`
+- [ ] Delivery uses existing `LettreTransport`; MX resolution errors map to `Temp`, permanent rejects to `Delivery`
+- [ ] Response written to the UDS stream via `send_protocol::write_response`
+- [ ] Accept-loop task is spawned with `tokio::spawn` so one slow delivery doesn't block other sends
+- [ ] Unit tests mock `MailTransport`, exercise each error code path, and assert the right `SendResponse` variant
+- [ ] Integration test: `aimx serve` running in a tempdir with a mock transport; a raw UDS test client writes `AIMX/1 SEND` + valid body; test asserts `OK <message-id>` response AND the transport received the signed message AND the signature verifies against the public key
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 35 — `aimx send` Thin UDS Client + End-to-End (Days 97–99.5) [NOT STARTED]
+
+**Goal:** Rewrite `aimx send` as a thin UDS client that does no signing, owns no DKIM key access, and shells the full signing + delivery responsibility to `aimx serve`. Validate the full path: `aimx send` → UDS → `aimx serve` → DKIM-sign → MX delivery.
+
+**Dependencies:** Sprint 34 (wire protocol, UDS listener, daemon-side handler).
+
+**Design notes:**
+- After this sprint, `src/send.rs` is radically smaller — no `load_private_key()`, no `DkimSigner`, no `LettreTransport`. All of that now lives in `aimx serve`. The client composes the RFC 5322 message, opens the socket, writes one request frame, reads one response frame, exits with the status.
+- The `aimx` group membership requirement for non-root callers is enforced by filesystem permissions on the socket itself (`root:aimx 660` from Sprint 33–34). If the user isn't in `aimx`, `connect()` returns `EACCES` and the client prints a clear remediation message.
+- `aimx send` no longer needs root. In fact, it now refuses to run as root (consistent with `aimx agent-setup`'s pattern) so agents don't accidentally mint mail through the daemon they themselves supervise.
+
+#### S35-1: Rewrite `src/send.rs` as a UDS client
+
+**Context:** Strip `src/send.rs` to the bare composer + client role: compose the unsigned RFC 5322 message (subject, from, to, cc, bcc, body, attachments — existing `compose_message()` stays), open `UnixStream::connect(send_socket_path())`, write an `AIMX/1 SEND` request via `send_protocol::write_request` (new helper mirroring `write_response`), await the response, map each response variant to a stable CLI exit code + user-facing message. Delete: `load_private_key()` calls, `sign_and_deliver()`, `LettreTransport` construction, `resolve_mx()` — all of that now lives in `aimx serve`. Keep: `compose_message()` and its attachment/threading helpers. Preserve every existing CLI flag (`--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--attach`, `--in-reply-to`, `--references`). Exit codes: `0` on `OK`, `1` on any `ERR`, `2` on socket-missing, `3` on malformed response.
+
+**Priority:** P0
+
+- [ ] `send.rs` after rewrite is <150 lines excluding `compose_message()` (enforce via a comment-anchored line count if desired, or just review)
+- [ ] All DKIM-related code paths removed from `send.rs`; `cargo clippy --all-targets -- -D warnings` reports no unused imports
+- [ ] Socket-missing error prints exactly: `aimx daemon not running — check 'systemctl status aimx'` on stderr and exits with code `2`
+- [ ] Permission-denied on connect (`EACCES`) prints: `Permission denied connecting to aimx daemon. Your user must be a member of the 'aimx' group. Run 'sudo usermod -aG aimx $USER' and log out/in.` and exits with code `2`
+- [ ] Response `OK <message-id>` prints `Email sent.\nMessage-ID: <id>` (via `term::success`) and exits `0`
+- [ ] Each `ERR <code>` variant prints the reason prefixed with the code (e.g., `Error [DOMAIN]: sender domain does not match aimx domain`) and exits `1`
+- [ ] `aimx send` refuses to run as root with `agent-setup`-style message (`send is a per-user operation — run without sudo`) and exits `2`
+- [ ] CLI flags unchanged; CLI `--help` output reviewed for stale references (no mention of DKIM, signing, or MX resolution)
+- [ ] Unit tests mock the UDS server side (via `tokio_test::io::Builder` or a fake `UnixListener` in a tempdir) and exercise each exit-code path
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S35-2: End-to-end integration test (serve → UDS → signed delivery)
+
+**Context:** Add an integration test in `tests/integration.rs` that spawns `aimx serve` as a subprocess with `--data-dir` + `AIMX_CONFIG_DIR` + `AIMX_RUNTIME_DIR` all pointing at tempdirs, waits for the UDS to exist, then invokes `aimx send` via `assert_cmd` with test arguments, and asserts: (a) the client exited `0`, (b) the server logs include `peer_uid`/`peer_pid` for the accepted send, (c) a mock MX captured the delivered message, (d) the captured message has a valid DKIM signature against the test keypair. Use the existing test-MX pattern from Sprint 20 (the `MockMailTransport` or whatever the current name is). The test runs serialized with other integration tests via the existing serial-test mechanism if one exists — otherwise use a unique port/socket per run.
+
+**Priority:** P0
+
+- [ ] New integration test `send_uds_end_to_end_delivers_signed_message` in `tests/integration.rs`
+- [ ] Test spawns `aimx serve` as a subprocess and waits for the UDS to appear (bounded retry, max 5s)
+- [ ] Test invokes `aimx send --from test@example.com --to recipient@example.com --subject "Test" --body "Hello"`
+- [ ] Mock MX captures the delivered message; test asserts DKIM-Signature header present and valid against the test public key (reuse the cryptographic roundtrip helper from Sprint 25 S25-2)
+- [ ] Test asserts the `aimx send` exit code is `0` and stdout contains a message-ID
+- [ ] Test cleans up the spawned `aimx serve` process on both success and failure paths (drop guard or explicit teardown)
+- [ ] `cargo test --test integration send_uds` runs green in ≤10s on developer machines
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S35-3: Delete now-dead code paths + doc sweep
+
+**Context:** With `aimx send` stripped down, several things are dead: the Sprint 25 `private_key_has_restricted_permissions` test (replaced in S33-3), any helper in `dkim.rs` that existed only to support the client signing path, and the IPv4/IPv6 outbound logic in `send.rs` (the IPv6 logic is in `serve`-side delivery). Sweep `book/`, `CLAUDE.md`, and the repo `README.md` for stale text: "aimx send signs with DKIM" → "aimx send submits via UDS; aimx serve signs"; any instruction to `chown` the DKIM key readable by a user group; any mention of `sudo aimx send` (it's now per-user). `aimx verify` is not affected by this sprint but re-confirm its docs haven't drifted.
+
+**Priority:** P1
+
+- [ ] Dead code deleted from `src/send.rs` and `src/dkim.rs`; `cargo clippy --all-targets -- -D warnings` clean with no `#[allow(dead_code)]` additions
+- [ ] `book/getting-started.md`, `book/configuration.md`, `book/mailboxes.md` sweep — no more "aimx send loads DKIM key"
+- [ ] `CLAUDE.md` `send.rs` description rewritten to reflect the UDS-client shape
+- [ ] `README.md` agent-facing blurb about signing updated
+- [ ] Grep for `sudo aimx send` across the whole repo returns zero hits (it's never required in v0.2)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 36 — Datadir Reshape (Inbox/Sent Split, Slug, Bundles, Mailbox Lifecycle) (Days 99.5–102) [NOT STARTED]
+
+**Goal:** Ship the final on-disk layout: `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/`, deterministic `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, and mailbox-create that establishes both inbox + sent subdirectories. Inbound mail lands in the new layout after this sprint; outbound sent-items persistence still comes in Sprint 38.
+
+**Dependencies:** Sprint 35 (client rewrite) — lets this sprint change filesystem shape without worrying about `send.rs` consistency.
+
+**Design notes:**
+- Slug algorithm is deterministic; two messages with the same subject in the same second collide, resolved by `-2`, `-3`, … suffix before the `.md` (within a bundle folder, the stem is reused for the `.md` so `<stem>/` and `<stem>/<stem>.md` stay in sync).
+- Catchall is inbox-only (FR-9). `mailbox_list` surfaces it as a special entry or filters it — the PRD says either is acceptable; pick surfacing so agents can see it exists.
+- MCP tool signatures gain optional `folder: "inbox" | "sent"` parameters (default `"inbox"`) so agents can list sent mail.
+- Channel rules fire on inbound only (v1 behavior preserved); `channel.rs` paths are updated to read from `inbox/<mailbox>/` instead of `<mailbox>/`.
+
+#### S36-1: Slug algorithm + filename helper
+
+**Context:** Add `src/slug.rs` with `pub fn slugify(subject: &str) -> String` implementing the exact algorithm from FR-13b: MIME-decode → lowercase → replace every non-alphanumeric char with `-` → collapse runs of `-` → trim leading/trailing `-` → truncate to 20 chars → empty result becomes `no-subject`. MIME decoding uses `mail-parser`'s existing helper (whatever the current version exposes). Add `pub fn allocate_filename(dir: &Path, timestamp: DateTime<Utc>, slug: &str, has_attachments: bool) -> PathBuf` that returns the final path on disk (either `<dir>/<stem>.md` or `<dir>/<stem>/<stem>.md` inside a bundle), handling collisions with `-2`, `-3`, … suffixes. Both helpers are pure (no IO for `slugify`; `allocate_filename` only reads the directory to check collisions).
+
+**Priority:** P0
+
+- [ ] `src/slug.rs` created with `slugify()` and `allocate_filename()`
+- [ ] Unit tests cover: ASCII subject, unicode subject with MIME decoding, all-non-alphanumeric subject (→ `no-subject`), long subject truncation to 20 chars, collapsed dash runs, trimmed leading/trailing dashes
+- [ ] Collision tests: no collision → base stem; one collision → `<stem>-2`; two → `<stem>-3`; bundle collisions check the directory name (not the `.md` inside) when `has_attachments = true`
+- [ ] Timestamp format in the filename is UTC `YYYY-MM-DD-HHMMSS` (6-digit time, no separators between HH/MM/SS other than what's in the format); test asserts exact string for known timestamps
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S36-2: `aimx ingest` writes to `inbox/<mailbox>/` with new filenames + bundles
+
+**Context:** Rewrite the filesystem-write path in `src/ingest.rs`. Today it writes `<data_dir>/<mailbox>/YYYY-MM-DD-NNN.md` with a per-day counter, and dumps attachments to `<data_dir>/<mailbox>/attachments/`. After this story, ingest routes to `<data_dir>/inbox/<mailbox>/` (or `inbox/catchall/` for unknown local parts), calls `allocate_filename()` to get the final path, and — if attachments are present — writes the `.md` plus attachment files as siblings inside the bundle directory `<stem>/`. The per-day counter disappears (filenames now carry HHMMSS). The top-level `attachments/` per mailbox is gone. Channel rules that use `{filepath}` will now see the bundle path; confirm the channel-trigger integration test from Sprint 31 still passes (if it asserts a specific filename shape, update it to the new shape).
+
+**Priority:** P0
+
+- [ ] `ingest.rs` writes to `<data_dir>/inbox/<mailbox>/` by default; unknown local parts route to `<data_dir>/inbox/catchall/`
+- [ ] Zero-attachment emails produce a flat `<stem>.md`
+- [ ] One-or-more-attachment emails produce a bundle directory `<stem>/` containing `<stem>.md` and each attachment file as a sibling; attachment filenames preserved (with the existing Sprint 2.5 escaping applied)
+- [ ] `attachments/` subdirectory per mailbox is NOT created
+- [ ] `channel.rs` consumers updated: `{filepath}` now expands to the `.md` inside the bundle when attachments present; `book/channels.md` documents this
+- [ ] Sprint 31 integration test `channel_recipe_end_to_end_with_templated_args` still passes (update fixture assertions as needed)
+- [ ] Existing ingest integration tests in `tests/integration.rs` updated for the new layout
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S36-3: Mailbox lifecycle — create/list/delete both inbox + sent
+
+**Context:** Update `src/mailbox.rs` (and the matching MCP tool handlers in `src/mcp.rs`): `mailbox_create(name)` creates both `inbox/<name>/` and `sent/<name>/`; `mailbox_list()` scans `inbox/*/`, lists mailbox names with counts (counting bundle-directory-matches too, not just flat `.md` files), and includes `catchall` as a special row; `mailbox_delete(name)` removes BOTH `inbox/<name>/` and `sent/<name>/` after confirmation. The config.toml mailbox registration stays unchanged. Catchall cannot be deleted (existing v1 guard preserved). The MCP tools gain an optional `folder: "inbox" | "sent"` parameter on `email_list` / `email_read` / `email_mark_read` / `email_mark_unread` (default `"inbox"`); `email_send` / `email_reply` are unaffected.
+
+**Priority:** P0
+
+- [ ] `mailbox_create` creates both `inbox/<name>/` and `sent/<name>/` atomically (create one, then the other; if the second fails, the first is cleaned up)
+- [ ] `mailbox_list` scans `inbox/*/`, counts via a helper that handles both flat `.md` and bundle dirs, surfaces `catchall` explicitly
+- [ ] `mailbox_delete` removes both `inbox/<name>/` and `sent/<name>/`; refuses to delete `catchall` (preserved v1 guard, error message mentions catchall)
+- [ ] MCP tool signatures gain `folder: Option<String>` with default `"inbox"` on `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`
+- [ ] MCP tool handlers validate `folder` against `{"inbox", "sent"}`, returning a clear error for other values
+- [ ] CLI `aimx mailbox list` output shows the inbox count; sent count is deferred to Sprint 38 (when sent-items actually exist)
+- [ ] Tests cover: create creates both dirs; create is idempotent; delete removes both; delete refuses catchall; list surfaces catchall; MCP tool signatures include `folder` param; invalid folder value returns clean error
+- [ ] `book/mailboxes.md` updated for the new layout; `book/mcp.md` updated for the new `folder` parameter
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 102–104.5) [NOT STARTED]
+
+**Goal:** Land the full inbound frontmatter schema — new fields, section ordering, omission-vs-null discipline — and add DMARC verification alongside existing DKIM/SPF. Every inbound email written after this sprint carries the final v0.2 schema.
+
+**Dependencies:** Sprint 36 (datadir reshape).
+
+**Design notes:**
+- `thread_id` is deterministic: same thread always produces the same 16-char hex. Walk `In-Reply-To` and `References` back to the earliest resolvable `Message-ID`; fall back to the current message's own `Message-ID` when unresolvable. SHA-256 the result, take the first 16 hex chars.
+- `received_from_ip` is the SMTP client IP — the embedded SMTP listener already has this available at session time; thread it through to `ingest_email()` as a parameter.
+- DMARC verification uses the same `mail-auth` crate we already use for DKIM/SPF. Add it alongside the existing checks; it does its own lookup against the sender domain.
+- Field-omission rule: omit empty optional fields over writing `null`. Always-written exceptions: `dkim`, `spf`, `dmarc`, `trusted`, `read`, `delivery_status` (the latter is outbound-only, land in Sprint 38).
+
+#### S37-1: Frontmatter struct with sectioned ordering + omission rules
+
+**Context:** Today `src/ingest.rs` writes frontmatter via ad-hoc string formatting. Replace this with a `InboundFrontmatter` struct in `src/frontmatter.rs` (new module) using `serde` + the `toml` crate for serialization, with field ordering enforced by struct field declaration order: `id`, `message_id`, `thread_id`, `from`, `to`, `cc`, `reply_to`, `delivered_to`, `subject`, `date`, `received_at`, `received_from_ip`, `size_bytes`, `attachments`, `in_reply_to`, `references`, `list_id`, `auto_submitted`, `dkim`, `spf`, `dmarc`, `trusted`, `mailbox`, `read`, `labels`. Optional fields use `Option<T>` with `#[serde(skip_serializing_if = "Option::is_none")]`; empty collections use `Vec<T>` with `#[serde(skip_serializing_if = "Vec::is_empty")]`. `trusted` is added as a placeholder field in this sprint but always written as `"none"` — the real evaluation lands in Sprint 38. Between-section blank lines aren't preserved by TOML serializers; accept that and rely on the struct order to produce a stable, diffable output.
+
+**Priority:** P0
+
+- [ ] `src/frontmatter.rs` created with `InboundFrontmatter` struct; field order matches FR-13 exactly
+- [ ] Optional fields serialize via `skip_serializing_if`; empty vecs do NOT appear in output
+- [ ] Always-written fields (`dkim`, `spf`, `dmarc`, `trusted`, `read`): their serde attribute makes them NON-skippable even at default value
+- [ ] `trusted` field placeholder always emits `"none"` in this sprint (Sprint 38 wires real evaluation)
+- [ ] `ingest.rs` writes frontmatter via `toml::to_string(&frontmatter)?` between `+++` delimiters
+- [ ] Golden tests: ingest a known `.eml` fixture and assert byte-for-byte frontmatter output
+- [ ] Field order regression test: any reordering of struct fields changes golden output and fails the test
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S37-2: `thread_id` computation + population of new fields
+
+**Context:** In `src/ingest.rs`, populate the new fields from the parsed MIME message and session context: `thread_id` via a new `compute_thread_id(message_id, in_reply_to, references)` helper that walks backward to the earliest resolvable `Message-ID` and SHA-256s it (first 16 hex chars); `received_at` via `chrono::Utc::now().to_rfc3339()`; `received_from_ip` — this requires threading the SMTP client IP from `src/smtp/session.rs` through to `ingest_email()` (new parameter `received_from_ip: IpAddr`); `size_bytes` = raw message length in bytes; `delivered_to` = the actual RCPT TO (distinct from `to:` header for list mail); `list_id`, `auto_submitted` = extracted from headers if present, omitted otherwise; `labels` = always empty `Vec<String>` on ingest (agents apply labels later). `dmarc` is populated in S37-3.
+
+**Priority:** P0
+
+- [ ] `compute_thread_id` helper added; deterministic (same inputs → same output); SHA-256 truncated to 16 hex chars
+- [ ] Resolution order: walk `In-Reply-To` first; fall back to walking `References` earliest-first; fall back to the message's own `Message-ID`
+- [ ] `ingest_email()` signature gains `received_from_ip: IpAddr`; `src/smtp/session.rs` threads the peer IP through
+- [ ] Manual-stdin `aimx ingest` path (no SMTP session) passes `0.0.0.0` or a documented sentinel for `received_from_ip`
+- [ ] `list_id` populated from `List-ID:` header; `auto_submitted` from `Auto-Submitted:` header; both omitted when headers absent
+- [ ] `size_bytes` is the raw `.eml` byte length seen at ingest
+- [ ] Unit tests for `compute_thread_id`: direct reply chain, orphan message, cross-references, missing headers, header with multiple Message-IDs
+- [ ] Integration test: ingest an `.eml` with known headers; frontmatter contains expected `thread_id`, `received_from_ip`, `delivered_to`, `size_bytes`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S37-3: DMARC verification + always-written `dmarc` field
+
+**Context:** Extend the existing inbound auth-check flow (today: DKIM + SPF via `mail-auth`) to also run DMARC. `mail-auth`'s `Resolver` provides `verify_dmarc` (or the current API name — confirm at implementation time; the crate evolves). DMARC lookup requires the sender domain and both DKIM + SPF results as inputs — sequence accordingly. Values written to frontmatter: `"pass"` | `"fail"` | `"none"`. `"none"` means no DMARC record at the sender domain, not "check not performed"; a check that was genuinely not performed (network failure, lookup timeout) should also write `"none"` with a warning log. Keep auth results in a typed `AuthResults { dkim, spf, dmarc }` struct so Sprint 38's trust-evaluation logic has a clean input.
+
+**Priority:** P0
+
+- [ ] DMARC verification added to the ingest auth-check pipeline via `mail-auth`'s resolver
+- [ ] `AuthResults { dkim, spf, dmarc }` struct introduced; populated once per ingest and passed to frontmatter builder
+- [ ] `dmarc` value mapping: pass → `"pass"`, fail → `"fail"`, no record / lookup failure → `"none"` (failure logs at `warn` level with the lookup error)
+- [ ] Frontmatter `dmarc` field always written (never omitted)
+- [ ] Unit tests using `mail-auth` test fixtures: DMARC pass, DMARC fail, no DMARC record, lookup failure
+- [ ] Integration test: ingest an `.eml` with known DMARC outcome (use a captured fixture); frontmatter contains expected `dmarc` value
+- [ ] `book/configuration.md` documents DMARC verification alongside DKIM/SPF
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 104.5–107) [NOT STARTED]
+
+**Goal:** Evaluate per-mailbox trust at ingest time and surface the result in the always-written `trusted` frontmatter field. Persist every successfully delivered outbound message to `sent/<from-mailbox>/` with the full outbound frontmatter block.
+
+**Dependencies:** Sprint 37 (frontmatter struct, `AuthResults`), Sprint 34 (daemon-side send handler owns delivery).
+
+**Design notes:**
+- `trusted` computation (FR-37b) is explicit:
+    - mailbox's `trust` config is `none` (default) → `trusted = "none"` (no evaluation performed)
+    - mailbox's `trust` config is `verified`, sender matches `trusted_senders`, AND DKIM passed → `trusted = "true"`
+    - mailbox's `trust` config is `verified`, any other outcome → `trusted = "false"`
+  The v1 channel-trigger gating behavior is preserved verbatim; `trusted` is the surfaced result of that same evaluation, not a new policy.
+- Sent-items persistence runs inside `aimx serve`'s send handler (Sprint 34's `handle_send`), after successful delivery returns. The signed message is what gets persisted (not the unsigned client submission).
+- Filename allocation across concurrent sends requires a `Mutex<()>` around "check directory + create file" to avoid two sends racing to the same stem. The critical section is microseconds; the Mutex holds across at most one `fs::metadata` + one `fs::File::create` call.
+
+#### S38-1: `trusted` frontmatter field — compute + always-write
+
+**Context:** Add `fn evaluate_trust(mailbox: &MailboxConfig, auth: &AuthResults, from: &str) -> TrustedValue` in `src/ingest.rs` (or a new `src/trust.rs` module). `TrustedValue` is `enum { None, True, False }` serializing to `"none"`, `"true"`, `"false"`. Logic: `mailbox.trust == Trust::None` → `TrustedValue::None`; `mailbox.trust == Trust::Verified` AND `from` matches any glob in `mailbox.trusted_senders` AND `auth.dkim == DkimResult::Pass` → `TrustedValue::True`; `mailbox.trust == Trust::Verified` otherwise → `TrustedValue::False`. Note: the v1 `trusted_senders` behavior was "allowlisted senders skip verification" — that is a gate on trigger firing, preserved unchanged. The `trusted` field follows the PRD's FR-37b reading, which is stricter: `trusted == "true"` requires BOTH allowlisted AND DKIM-pass. The channel-trigger gate itself stays at v1 semantics (allowlisted OR DKIM-pass for `trust: verified`); it does NOT switch to reading the `trusted` field. This keeps the trigger gate's existing "allowlisted senders skip verification" affordance intact.
+
+**Priority:** P0
+
+- [ ] `TrustedValue` enum added with three variants, serializing to `"none"`, `"true"`, `"false"` lowercase
+- [ ] `evaluate_trust()` implements the three-value logic exactly as specified
+- [ ] Ingest pipeline calls `evaluate_trust()` and writes the result into the `trusted` frontmatter field
+- [ ] Channel-trigger gate logic remains at v1 semantics — `src/channel.rs` is NOT modified to read `trusted`; it continues to evaluate allowlist + DKIM independently. Inline comment in `channel.rs` points at `evaluate_trust()` for the rationale.
+- [ ] Unit tests cover every arm of `evaluate_trust()`: `trust: none` → `"none"`; `trust: verified` + allowlisted + DKIM pass → `"true"`; allowlisted + DKIM fail → `"false"`; not allowlisted + DKIM pass → `"false"`; not allowlisted + DKIM fail → `"false"`
+- [ ] Parity test: for a `trust: verified` mailbox, `trusted == "true"` IFF the channel-trigger gate would fire, confirming the two pieces of logic agree
+- [ ] `book/configuration.md` explains the `trusted` field semantics; `book/mcp.md` mentions it in the frontmatter reference
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S38-2: Outbound frontmatter block (`outbound`, `bcc`, `delivered_at`, `delivery_status`, `delivery_details`)
+
+**Context:** Define `OutboundFrontmatter` (or extend `InboundFrontmatter` with an optional outbound block — prefer a distinct struct so the required/optional split stays clean). Outbound-only fields per FR-19c: `outbound: bool` (always `true` on sent files), `bcc: Option<Vec<String>>` (only meaningful on sent copies), `delivered_at: Option<String>` (RFC 3339 UTC when remote MX accepted), `delivery_status: DeliveryStatus` (`"delivered"` | `"deferred"` | `"failed"` | `"pending"`, always written), `delivery_details: Option<String>` (last remote SMTP response). The outbound file is structurally identical to inbound (same inbound fields at top, outbound block at bottom) so a single reader can parse both by type-tagging on the presence of `outbound = true`.
+
+**Priority:** P0
+
+- [ ] `DeliveryStatus` enum serializes to the four lowercase strings
+- [ ] `OutboundFrontmatter` struct composes `InboundFrontmatter` (identity/parties/content/threading/auth/storage) + the outbound block (outbound/bcc/delivered_at/delivery_status/delivery_details)
+- [ ] Field ordering in the serialized output: inbound block first, outbound block at the end
+- [ ] `delivery_status` is ALWAYS written (never omitted); other outbound fields follow omission rules
+- [ ] Golden test: outbound fixture serializes byte-for-byte to the expected layout
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S38-3: Sent-items persistence in `aimx serve` send handler
+
+**Context:** Extend Sprint 34's `handle_send` to, after a successful delivery, write the signed message to `<data_dir>/sent/<from_mailbox>/<stem>.md` (or a bundle directory `<stem>/` when the outbound message has attachments). Filename uses the same algorithm as inbound (Sprint 36) with the send's UTC timestamp and the message's `Subject:`-derived slug. The write path: construct `OutboundFrontmatter` from the signed message + delivery result, compose the `.md` body (frontmatter + signed RFC 5322 message as the body), allocate the filename under a process-global `Mutex<()>` guarding "check directory + create file", then release the Mutex and do the actual file write outside the lock. On partial delivery failure (e.g., message was sent to some MX recipients but failed on others), write `delivery_status: "failed"` with the relevant detail — still persist the file so the operator has a record. On transient errors that the daemon retries internally (none today — v1 doesn't queue), skip persistence and return `TEMP` to the client.
+
+**Priority:** P0
+
+- [ ] Successful sends write `<data_dir>/sent/<from_mailbox>/<stem>.md` (or bundle directory) with `delivery_status: "delivered"` and `delivered_at` populated
+- [ ] Signed RFC 5322 bytes are the body of the `.md` file (below the `+++` frontmatter block); the exact DKIM-signed message delivered to the MX is what's persisted
+- [ ] `Mutex<()>` guards the filename allocation critical section only; the file-write IO happens outside the lock
+- [ ] Failed sends (permanent `DELIVERY` error): write the file with `delivery_status: "failed"` and `delivery_details` carrying the last remote SMTP response
+- [ ] `TEMP` errors: do NOT persist (the client will see the transient error and retry itself); inline comment documents why
+- [ ] `mailbox_list` CLI output now reports sent counts alongside inbox counts
+- [ ] Integration test: drive an end-to-end send via UDS; assert the sent file exists at the expected path, has the right frontmatter, and contains a DKIM signature that verifies against the public key
+- [ ] Integration test for permanent-failure persistence: inject a mock MX that always rejects; assert the `.md` is written with `delivery_status: "failed"`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 107–109.5) [NOT STARTED]
+
+**Goal:** Restructure the shared agent primer from a single file into a main body + `references/` layout (the anthropics/skills progressive-disclosure pattern), standardize author metadata across every agent package, and reverse the earlier storage-exposure redaction policy so the primer documents the datadir layout explicitly.
+
+**Dependencies:** Sprint 38 (frontmatter schema finalized — the primer documents it, so the primer can't ship before the schema is stable).
+
+**Design notes:**
+- Progressive disclosure is a file-layout convention, not a runtime behavior. Claude Code and Codex agents read the main `SKILL.md` by default and load `references/*.md` on demand when the main file points at them. Agents that take a single blob (Goose recipes, Gemini prompts) get only the main primer bundled — the install-time concat step decides per-platform.
+- The `install-time concat` extension in `agent_setup.rs` gains a `<platform-suffix>.footer` input (optional, new) and a `references/` copy step. Per-agent registry entries declare whether they support progressive disclosure.
+- Storage-exposure reversal (FR-50c): the primer documents the datadir layout plainly. There's no security boundary to protect by concealing it — the datadir is world-readable by design, and the real boundary (DKIM key, UDS socket) is enforced elsewhere.
+
+#### S39-1: Split `agents/common/aimx-primer.md` into main + `references/`
+
+**Context:** Today `agents/common/aimx-primer.md` is one file. Split it: the new main `aimx-primer.md` targets 300–500 lines and covers identity/purpose, the two access surfaces (MCP for writes + direct FS reads), quick-reference summaries of the 9 MCP tools with their signatures, the frontmatter fields agents most often check (`trusted`, `thread_id`, `list_id`, `auto_submitted`, `read`, `labels`), the 4–5 most common workflows inline (check inbox, send, reply, summarize a thread, handle auto-submitted mail), a short trust-model overview (per-mailbox `trust` + `trusted_senders` + the `trusted` frontmatter surface), pointers to `references/*.md`, a pointer to the runtime `/var/lib/aimx/README.md`, and a "what you must not do" safety list. Deep material moves into `agents/common/references/{mcp-tools,frontmatter,workflows,troubleshooting}.md`. `mcp-tools.md` carries full signatures, parameter types, and at least one worked example per tool; `frontmatter.md` carries every field with type + required/optional + notes + the outbound block; `workflows.md` carries 8–12 worked tasks (triage inbox, thread summarization, react to auto-submitted mail, handle attachments, reply-all, filter by list-id, ingest a bounce, mark all-read, etc.); `troubleshooting.md` carries the UDS-protocol error codes, common misconfigurations, and recovery steps.
+
+**Priority:** P0
+
+- [ ] `agents/common/aimx-primer.md` rewritten — 300–500 lines (soft cap; enforce via a line-count comment or PR review)
+- [ ] `agents/common/references/mcp-tools.md`, `frontmatter.md`, `workflows.md`, `troubleshooting.md` created with the content described above
+- [ ] Main primer explicitly links `references/` files and the runtime `/var/lib/aimx/README.md`
+- [ ] Main primer documents the storage layout plainly (FR-50c reversal); inline comment cites FR-50c
+- [ ] `trusted` field documented in the frontmatter quick-reference AND in `references/frontmatter.md` with the three values and the per-mailbox evaluation logic
+- [ ] All references to removed/renamed v1 paths purged (grep for `/var/lib/aimx/<mailbox>/` outside of `inbox/`/`sent/` context)
+- [ ] Byte-level test that asserts the main primer's line count stays within the target range (prevents future bloat)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S39-2: `agent_setup.rs` install-time concat — `<suffix>.footer` + `references/` copy
+
+**Context:** Extend `src/agent_setup.rs` to support two new concat inputs. First, an optional `<platform>.footer` file appended after the common primer body at install time (the existing `<platform>.header` is prepended — this sprint adds the symmetric suffix). Second, a per-agent registry flag `progressive_disclosure: bool`; when `true`, installer copies `agents/common/references/*.md` to `<destination>/references/*.md` verbatim; when `false`, installer skips the copy but may optionally inline selected reference snippets into the main primer at install time (Goose recipes are the motivating case, where context budget is tighter — for v0.2 we skip inlining and just ship the main primer; inlining is a future enhancement). Per-agent registry update:
+    - Claude Code, Codex, OpenClaw → `progressive_disclosure: true`
+    - Goose, Gemini, OpenCode → `progressive_disclosure: false`
+
+**Priority:** P0
+
+- [ ] `AgentSpec` registry struct gains `progressive_disclosure: bool` (and `suffix_filename: Option<&str>` if `.footer` is used)
+- [ ] Install flow: header + common primer + optional footer → SKILL.md; references copied only when `progressive_disclosure: true`
+- [ ] Per-agent `progressive_disclosure` assignments made per the design note above
+- [ ] Byte-level test for a progressive-disclosure agent: install lays down `SKILL.md` + `references/` tree, contents match fixtures
+- [ ] Byte-level test for a non-progressive-disclosure agent: install lays down single-blob output with references absent
+- [ ] `--print` mode emits both `SKILL.md` and `references/` files for progressive-disclosure agents; only `SKILL.md` for others
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S39-3: Author metadata standardization + repo-wide grep verification
+
+**Context:** Every shipped agent package carries an author field. Today several carry `"AIMX"` or a placeholder from an earlier draft. Standardize to `U-Zyn Chua <chua@uzyn.com>` across: `agents/claude-code/.claude-plugin/plugin.json`, `agents/codex/.codex-plugin/plugin.json`, `agents/goose/aimx.yaml.header` (if the Goose recipe schema carries an author field — confirm at implementation time; if not, skip), `agents/opencode/SKILL.md.header`, `agents/gemini/SKILL.md.header`, `agents/openclaw/SKILL.md.header`. A CI-runnable repo-wide grep asserts no `"AIMX"` author strings or placeholder emails remain under `agents/`.
+
+**Priority:** P1
+
+- [ ] All six agent packages carry `U-Zyn Chua <chua@uzyn.com>` in their author field
+- [ ] Goose: if the recipe schema supports `author`, it's populated; if not, inline comment in `agents/goose/aimx.yaml.header` notes the gap
+- [ ] `.github/workflows/ci.yml` gains a grep step that fails if `"AIMX"` or placeholder author strings appear under `agents/` (pattern: literal `"author": "AIMX"` and `<chua@example.com>` style placeholders)
+- [ ] Existing agent integration tests pass; install-layout assertions updated if they captured the author string
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 109.5–112) [NOT STARTED]
+
+**Goal:** Ship the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned, auto-refreshed on daemon startup), replace stale `/var/log/aimx.log` references with `journalctl` commands, and bring every affected `book/` chapter and `CLAUDE.md` up to date with the v0.2 reshape. Last sprint before launch.
+
+**Dependencies:** Sprint 39 (primer structure finalized — the datadir README references the same schema).
+
+**Design notes:**
+- Datadir README carries `<!-- aimx-readme-version: N -->` as the first line. Comparison is exact string match, not semver. Bump `N` by 1 whenever the template changes. Refresh triggers: `aimx setup` (always writes), `aimx serve` startup (writes only if the version line differs from the on-disk version line).
+- Book/ pass is a docs-only sprint from AIMX's perspective but touches many files. The intent is "no stale `/var/lib/aimx/<mailbox>/`-style references anywhere user-facing." Grep the whole `book/` tree and `README.md` after edits.
+- `CLAUDE.md` updates: new module descriptions for `src/send_protocol.rs`, `src/send_handler.rs`, `src/slug.rs`, `src/frontmatter.rs`, `src/datadir_readme.rs`; updated descriptions for `send.rs` (now thin UDS client) and `serve.rs` (now owns DKIM signing + send handler); updated storage conventions section.
+
+#### S40-1: `src/datadir_readme.rs` — template, write, version-gate refresh
+
+**Context:** New module `src/datadir_readme.rs` with: `pub const TEMPLATE: &str = include_str!("datadir_readme.md.tpl");`, `pub const VERSION: u32 = 1;`, `pub fn write(data_dir: &Path)` (writes unconditionally), `pub fn refresh_if_outdated(data_dir: &Path)` (reads existing file, parses the first-line version comment, writes only if differs from `VERSION`). The template file `src/datadir_readme.md.tpl` begins with `<!-- aimx-readme-version: 1 -->` and carries: what the directory is, read vs write access model, directory layout with the v0.2 tree, file naming rules, slug algorithm, bundle rule, frontmatter reference (link to the full spec in `agents/common/references/frontmatter.md` plus an inlined quick-reference), trust/DKIM/SPF/DMARC explanation, thread grouping, handling auto-submitted/list mail, attachments, the UDS send protocol summary, and a pointer to the `aimx` MCP server for all mutations. Top of the file states: "This file is regenerated on AIMX upgrade. User edits will be overwritten."
+
+**Priority:** P0
+
+- [ ] `src/datadir_readme.rs` and `src/datadir_readme.md.tpl` created
+- [ ] Version bump procedure documented in a `// VERSION BUMP:` comment at the top of `datadir_readme.rs`
+- [ ] `write()` writes the template verbatim to `<data_dir>/README.md` with mode `0o644`
+- [ ] `refresh_if_outdated()` parses the first line; if the version comment is missing, malformed, or differs from `VERSION`, overwrite; otherwise no-op
+- [ ] `aimx setup` calls `write()` at the end of setup
+- [ ] `aimx serve` startup calls `refresh_if_outdated()` before binding listeners
+- [ ] Unit tests: `write` creates the file; `refresh` no-op when version matches; `refresh` overwrites when version differs; `refresh` overwrites when first line is missing or malformed
+- [ ] Integration test: run `aimx serve` in a tempdir with a stale README; assert it's refreshed at startup
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S40-2: Journald documentation + `/var/log/aimx.log` purge
+
+**Context:** `book/troubleshooting.md` still has stale `tail -f /var/log/aimx.log` examples from before `aimx serve` landed — `aimx` has always logged to journald/OpenRC-logger, not to that path. Replace with `journalctl -u aimx -f`, `journalctl -u aimx --since today`, `journalctl -u aimx -n 200`. Add a "Where are the logs?" subsection explaining: systemd → journald; OpenRC → whatever the OpenRC init script configures (document the actual path written by `src/serve.rs`'s init script). `book/channel-recipes.md` has user-authored `/var/log/aimx/<agent>.log` paths in trigger examples — these are legitimate destinations the user chooses for their own trigger scripts, not aimx's own logs; add a header note clarifying this.
+
+**Priority:** P1
+
+- [ ] `book/troubleshooting.md`: every `/var/log/aimx.log` occurrence replaced with `journalctl -u aimx` commands
+- [ ] `book/troubleshooting.md`: new "Where are the logs?" subsection covering systemd + OpenRC
+- [ ] `book/channel-recipes.md`: header note distinguishing user-chosen trigger-log paths from aimx's own logs
+- [ ] Grep confirms `/var/log/aimx.log` appears nowhere under `book/`, `docs/`, or `README.md`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S40-3: Book/ v0.2 pass + `CLAUDE.md` rewrite
+
+**Context:** Sweep every `book/` chapter for v0.2 changes:
+    - `book/getting-started.md`: world-readable datadir security note (single-admin assumption), new directory paths, `aimx` group membership requirement for `aimx send`
+    - `book/configuration.md`: config now at `/etc/aimx/config.toml`; document DKIM key at `/etc/aimx/dkim/`; `[trust]` section is unchanged from v1 (still per-mailbox); point at `book/channels.md` for the trust model
+    - `book/setup.md`: `aimx` group creation step; `usermod -aG aimx <user>` instruction; re-run setup still re-entrant
+    - `book/mailboxes.md`: new `inbox/` + `sent/` layout; bundle rule; naming convention with UTC timestamp + slug; `mailbox list` now shows both inbox and sent counts
+    - `book/mcp.md`: new `folder: "inbox" | "sent"` parameter on read/list tools; updated frontmatter field reference; pointer to `agents/common/aimx-primer.md` and the datadir README
+    - `book/channels.md`: channel rules fire on inbound only; trust gate semantics unchanged from v1
+    - `book/agent-integration.md`: primer-as-skill-bundle note for per-platform pages; `references/` copy behavior for Claude Code + Codex + OpenClaw; single-blob behavior for Goose + Gemini + OpenCode
+
+`CLAUDE.md` updates: new module descriptions (`send_protocol`, `send_handler`, `slug`, `frontmatter`, `datadir_readme`); updated descriptions for `send.rs` (thin UDS client), `serve.rs` (binds UDS, owns signing), `ingest.rs` (new frontmatter schema, inbox/ routing, bundles); updated Key Conventions section.
+
+**Priority:** P0
+
+- [ ] Every `book/*.md` chapter listed above is updated with the v0.2 details
+- [ ] `CLAUDE.md` module descriptions regenerated — old ones removed, new ones added in the right order
+- [ ] Repo-wide grep for `/var/lib/aimx/<mailbox>/` (without `inbox/` or `sent/` prefix) returns zero hits in `book/`, `docs/`, `README.md`
+- [ ] Repo-wide grep for `aimx send` under `book/` never mentions `sudo aimx send` and always mentions the `aimx` group requirement in a nearby paragraph
+- [ ] `book/agent-integration.md` table of supported agents extended with a "progressive disclosure" column
+- [ ] Spot-check every `agents/<agent>/README.md` for drift against the new primer layout; update as needed
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -698,6 +1186,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Done |
 | 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Done |
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Done |
+| 33 | 92–94.5 | v0.2 Filesystem Split + `aimx` Group | `/etc/aimx/` for config + DKIM keys, `aimx` system group, `/run/aimx/` via `RuntimeDirectory=aimx`, DKIM private key back to `600` root-only | Not started |
+| 34 | 94.5–97 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock`, per-connection handler signs + delivers with `SO_PEERCRED` logging | Not started |
+| 35 | 97–99.5 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Not started |
+| 36 | 99.5–102 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Not started |
+| 37 | 102–104.5 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
+| 38 | 104.5–107 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
+| 39 | 107–109.5 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Not started |
+| 40 | 109.5–112 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Not started |
 
 ## Deferred to v2
 

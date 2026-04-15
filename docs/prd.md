@@ -70,28 +70,52 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.1 Setup Wizard (`aimx setup [domain]`)
 - FR-1: Require root. Exit with clear message if not running as root.
 - FR-1b: Detect port 25 conflict. If another process is listening on port 25, exit with process name and instructions to stop it.
-- FR-2: Generate systemd unit file (or OpenRC init script on Alpine), enable and start `aimx serve` as the SMTP listener with TLS.
+- FR-2: Generate systemd unit file (or OpenRC init script on Alpine), enable and start `aimx serve` as the SMTP listener with TLS. (v0.2) Unit declares `RuntimeDirectory=aimx` so `/run/aimx/` exists at start with `root:aimx 750`.
 - FR-3: Run port 25 checks after `aimx serve` is started: outbound (connect to check service port 25), inbound (check service performs EHLO handshake back to caller).
 - FR-4: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
 - FR-5: Check reverse DNS (PTR) and warn (non-blocking) if not set.
-- FR-6: Generate 2048-bit RSA DKIM keypair.
+- FR-6: Generate 2048-bit RSA DKIM keypair. (v0.2) Private key written to `/etc/aimx/dkim/private.key` with mode `600` and owner `root:root` — never readable by non-root. Public key written to `/etc/aimx/dkim/public.key` with mode `644`.
 - FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation. When `enable_ipv6 = true` is set in `config.toml`, also include the AAAA record and add `ip6:<server_ipv6>` to the SPF mechanism, and verify both alongside the IPv4 records. When the flag is unset or `false`, IPv6 records are neither advertised nor verified — existing AAAA records in DNS are left unchanged.
 - FR-8: Verify DNS records are correctly set.
-- FR-9: Create default `catchall` mailbox.
+- FR-9: Create default `catchall` inbox under `/var/lib/aimx/inbox/catchall/`. (v0.2) Catchall is inbox-only — no `sent/catchall/` is created (the catchall is a routing target for unknown local parts, not an identity that sends).
 - FR-10: Recommend `aimx agent-setup <agent>` for one-command per-agent integration. The wizard lists supported agents and their install commands rather than emitting a generic, copy-paste JSON snippet.
+- FR-1c: (v0.2) Write config to `/etc/aimx/config.toml` with mode `640`, owner `root:root`. `AIMX_CONFIG_DIR` env var overrides the location for tests and non-standard installs (alongside the existing `AIMX_DATA_DIR`).
+- FR-1d: (v0.2) Create the `aimx` system group at setup time. Group membership gates **only** access to `/run/aimx/send.sock` (i.e., running `aimx send`); reading mail under `/var/lib/aimx/` does not require group membership. Setup output prints the `usermod -aG aimx <user>` instruction the operator must run for each non-root account that needs to send mail.
+- FR-1e: (v0.2) Write `/var/lib/aimx/README.md` (agent-facing layout guide; see FR-50b) on initial setup. Re-running setup refreshes the README if the baked-in version string differs.
 
 ### 6.2 Email Delivery (`aimx ingest <rcpt>`)
 - FR-11: Accept raw email from the embedded SMTP listener (`aimx serve`) in-process, or from stdin for manual/pipe usage via `aimx ingest`.
 - FR-12: Parse MIME message: extract headers, body (prefer text/plain, fall back to text/html→plaintext), and attachments.
-- FR-13: Generate Markdown file with TOML frontmatter (id, message_id, from, to, subject, date, in_reply_to, references, attachments list, mailbox, read). Set `read: false` on ingest.
-- FR-14: Extract attachments to `attachments/` subdirectory within the mailbox folder.
-- FR-15: Route to correct mailbox directory based on RCPT TO local part. Unrecognized addresses go to `catchall`.
+- FR-13: (v0.2) Generate Markdown file with TOML frontmatter following the section ordering **Identity → Parties → Content → Threading → Auth → Storage → Outbound block (sent only)**. Required inbound fields: `id`, `message_id`, `thread_id`, `from`, `to`, `delivered_to`, `subject`, `date`, `received_at`, `received_from_ip`, `size_bytes`, `dkim`, `spf`, `dmarc`, `trusted`, `mailbox`, `read`. Optional inbound fields (omitted when empty rather than written as `null`): `cc`, `reply_to`, `attachments`, `in_reply_to`, `references`, `list_id`, `auto_submitted`, `labels`. Set `read = false` on ingest. `thread_id` is the first 16 hex chars of SHA-256 over the resolved thread root `Message-ID` (walk `In-Reply-To`/`References` backward; fall back to the message's own `Message-ID` when unresolvable). `received_at` is RFC 3339 UTC; `date` is sender-claimed RFC 3339. `received_from_ip` is the SMTP client IP. `delivered_to` is the actual RCPT TO (disambiguates list mail). `size_bytes` is the raw message size.
+- FR-13b: (v0.2) Inbound files use the filename format `YYYY-MM-DD-HHMMSS-<slug>.md` (UTC). Slug algorithm: MIME-decode `Subject:` → lowercase → replace every non-alphanumeric character with `-` → collapse runs of `-` → trim leading/trailing `-` → truncate to 20 characters → empty result becomes `no-subject`. On filename collision, append `-2`, `-3`, … to the slug segment until free.
+- FR-14: (v0.2) Attachment bundling — zero attachments produce a flat `<stem>.md`; one or more attachments produce a directory `<stem>/` containing `<stem>.md` plus all attachment files as siblings (Zola-style bundle). The previous mailbox-level `attachments/` directory is removed.
+- FR-15: (v0.2) Route to `/var/lib/aimx/inbox/<mailbox>/` based on RCPT TO local part. Unrecognized local parts go to `inbox/catchall/`.
 - FR-16: Execute matching channel rules after saving. Trigger failures are logged but do not block delivery.
 
 ### 6.3 Email Sending (`aimx send`)
 - FR-17: Compose RFC 5322 compliant email from provided parameters (from, to, subject, body, attachments).
-- FR-18: Sign message with DKIM (RSA-SHA256) using the domain's private key.
-- FR-19: Deliver signed message directly to the recipient's MX server via SMTP (MX resolution + lettre transport). Default to IPv4-only outbound to match the SPF record generated by `aimx setup`. Support IPv6 as an opt-in via the `enable_ipv6` config flag — when enabled, the OS chooses the address family and the user is responsible for adding AAAA + `ip6:` SPF records. Return delivery errors immediately — no background queue.
+- FR-18: (v0.2) `aimx send` is a thin client. It composes the unsigned RFC 5322 message, opens the Unix domain socket at `/run/aimx/send.sock`, writes a length-prefixed `AIMX/1 SEND` request, reads the response, and exits with the corresponding status. The DKIM private key is **not** read by the client — `aimx serve` owns signing. If the socket is absent, `aimx send` exits non-zero with `aimx daemon not running — check 'systemctl status aimx'`.
+- FR-18b: (v0.2) `aimx serve` binds `/run/aimx/send.sock` (`root:aimx 660`) alongside its SMTP listener. Each accept reads `SO_PEERCRED` and logs `peer_uid` / `peer_pid` to journald. The DKIM key is loaded once at startup into `Arc<DkimKey>` and shared across per-connection tasks. There is no send queue — concurrent sends are independent tokio tasks. Authorization is filesystem-permission only (the `aimx` group on the socket); no per-user ACLs or wire credentials in v0.2.
+- FR-18c: (v0.2) Wire protocol — length-prefixed and binary-safe.
+  ```
+  Client → Server:
+    AIMX/1 SEND\n
+    From-Mailbox: <name>\n
+    Content-Length: <n>\n
+    \n
+    <n bytes of RFC 5322 message, unsigned>
+
+  Server → Client:
+    AIMX/1 OK <message-id>\n
+  or
+    AIMX/1 ERR <code> <reason>\n
+      codes: MAILBOX | DOMAIN | SIGN | DELIVERY | TEMP | MALFORMED
+  ```
+- FR-18d: (v0.2) Domain validation — `aimx serve` parses the `From:` header from the submitted message. The sender domain (case-insensitive) must equal the primary domain in `/etc/aimx/config.toml`; any local part is accepted (users can send as `anything@mydomain`). Mismatch returns `ERR DOMAIN sender domain does not match aimx domain`.
+- FR-19: (v0.2) `aimx serve` DKIM-signs the message (RSA-SHA256, relaxed/relaxed canonicalization) using the root-only `/etc/aimx/dkim/private.key`, then delivers the signed message directly to the recipient's MX server via SMTP (MX resolution + lettre transport). Default to IPv4-only outbound to match the SPF record generated by `aimx setup`. Support IPv6 as an opt-in via the `enable_ipv6` config flag — when enabled, the OS chooses the address family and the user is responsible for adding AAAA + `ip6:` SPF records. Return delivery errors immediately to the UDS client — no background queue.
+- FR-19b: (v0.2) On successful delivery, `aimx serve` writes the **signed** message to `/var/lib/aimx/sent/<from-mailbox>/<stem>.md` (or a bundle folder when attachments are present), using the same filename format and slug algorithm as inbound (FR-13b). A single `Mutex<()>` guards the "allocate filename + create file" critical section to avoid stem collisions across concurrent sends.
+- FR-19c: (v0.2) Sent-file frontmatter follows the same ordering as inbound (FR-13) and adds an outbound block: `outbound = true` (always), `delivery_status` (`"delivered"` | `"deferred"` | `"failed"` | `"pending"`, always written), and the optional fields `bcc` (only meaningful on the sent copy), `delivered_at` (RFC 3339 UTC when remote MX accepted), and `delivery_details` (last remote SMTP response).
+- FR-19d: (v0.2) Field-omission rule — prefer omitting empty optional fields over writing `null`. Exceptions that are always written so "not evaluated" cannot be confused with "absent": `dkim`, `spf`, `dmarc`, `trusted`, `read`, `delivery_status`.
 - FR-20: Support file attachments by path.
 - FR-21: Set proper In-Reply-To and References headers when replying.
 
@@ -102,9 +126,9 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-25: Implement tools: `email_mark_read`, `email_mark_unread`.
 
 ### 6.5 Mailbox Management
-- FR-26: Create mailbox: create directory under `/var/lib/aimx/`, register address in `config.toml`. No mail server restart required.
-- FR-27: List mailboxes with message counts.
-- FR-28: Delete mailbox with confirmation.
+- FR-26: (v0.2) Create mailbox: create both `/var/lib/aimx/inbox/<name>/` and `/var/lib/aimx/sent/<name>/`, register address in `/etc/aimx/config.toml`. The mailbox is a full identity (inbox + sent), not just an inbox. No mail server restart required.
+- FR-27: (v0.2) List mailboxes by scanning `inbox/*/` (excluding `catchall`, or surfacing it as a distinct special entry), with message counts.
+- FR-28: (v0.2) Delete mailbox with confirmation — removes both `inbox/<name>/` and `sent/<name>/`.
 
 ### 6.6 Channel Manager
 - FR-29: Read trigger rules from `config.toml` per mailbox.
@@ -113,11 +137,16 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - FR-32: Execute triggers synchronously during delivery. Log failures, never block delivery.
 
 ### 6.7 Inbound Trust
-- FR-33: During `aimx ingest`, verify sender's DKIM signature and SPF record using `mail-auth` crate.
-- FR-34: Store verification results in frontmatter (`dkim: pass|fail|none`, `spf: pass|fail|none`).
-- FR-35: Support per-mailbox `trust` config: `none` (default, all triggers fire) or `verified` (triggers only fire on DKIM-pass).
+- FR-33: (v0.2) During `aimx ingest`, verify sender's DKIM signature, SPF record, and DMARC alignment using the `mail-auth` crate.
+- FR-34: (v0.2) Store verification results in frontmatter as always-written fields: `dkim` (`"pass"` | `"fail"` | `"none"`), `spf` (`"pass"` | `"fail"` | `"softfail"` | `"neutral"` | `"none"`), `dmarc` (`"pass"` | `"fail"` | `"none"`).
+- FR-35: Support per-mailbox `trust` config in `/etc/aimx/config.toml`: `none` (default, all triggers fire) or `verified` (triggers only fire on DKIM-pass).
 - FR-36: Support optional `trusted_senders` allowlist per mailbox (glob patterns). Allowlisted senders always trigger, skip verification.
 - FR-37: Mail is always stored regardless of trust result. Trust only gates trigger execution.
+- FR-37b: (v0.2) Surface the trust evaluation as an always-written `trusted` frontmatter field on every inbound email, so agents and operators can see the outcome without having to re-derive it. Values:
+    - `"none"` — mailbox `trust` is `none` (default). No trust evaluation performed.
+    - `"true"` — mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed.
+    - `"false"` — mailbox `trust` is `verified`, any other outcome (sender not in `trusted_senders`, OR DKIM failed/absent, OR both).
+  The frontmatter field is `trusted` (distinct from the mailbox config field `trust`) to reflect that the value is the result of the evaluation, not the policy itself. `trusted == "true"` is equivalent to "this email passed the trigger gate for this mailbox," so the channel manager's gating logic (FR-35/36/37) can be expressed as `if mailbox.trust == "verified" then require trusted == "true"`.
 
 ### 6.8 Verifier Service
 - FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
@@ -127,8 +156,21 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ### 6.10 Agent Integrations (`aimx agent-setup <agent>`)
 - FR-49: `aimx agent-setup <agent>` installs the AIMX plugin/skill/recipe for the named agent into that agent's standard per-user location (under `$HOME` / `$XDG_CONFIG_HOME`). Runs as the current user. Never mutates the agent's own primary config file. On success, prints the exact activation command (e.g., `claude plugin install ...`, `openclaw mcp set ...`) the user should run next.
-- FR-50: Supported agents in v1: Claude Code, Codex CLI, OpenCode (anomalyco), Gemini CLI, Goose, OpenClaw. Each shipped package contains both the MCP wiring and an instructions payload (`SKILL.md`, recipe `prompt`, or equivalent) describing AIMX's MCP tools, storage layout, frontmatter fields, and read/unread semantics so the agent can interact with AIMX without further prompting.
-- FR-51: Plugin sources live under `agents/<agent>/` in the AIMX repo and are bundled into the binary at compile time (e.g., via `include_dir!`) so `aimx agent-setup` works offline and is version-locked to the installed binary.
+- FR-50: Supported agents in v1: Claude Code, Codex CLI, OpenCode (anomalyco), Gemini CLI, Goose, OpenClaw. Each shipped package contains both the MCP wiring and an instructions payload (`SKILL.md`, recipe `prompt`, or equivalent) describing AIMX's MCP tools, storage layout, frontmatter fields, and read/unread semantics so the agent can interact with AIMX without further prompting. (v0.2) Each shipped package's author metadata is `U-Zyn Chua <chua@uzyn.com>`; a repo-wide grep verifies no `"AIMX"` author strings or other placeholders remain across `plugin.json`, `aimx.yaml.header`, and any future Gemini/OpenCode/OpenClaw manifests.
+- FR-50a: (v0.2) The shared agent-facing primer is restructured as a **progressive-disclosure skill bundle** under `agents/common/`, mirroring the [anthropics/skills](https://github.com/anthropics/skills) pattern:
+    ```
+    agents/common/
+    ├── aimx-primer.md                # main SKILL body (target 300–500 lines)
+    └── references/
+        ├── mcp-tools.md              # full MCP tool reference with examples
+        ├── frontmatter.md            # full frontmatter schema
+        ├── workflows.md              # worked examples for common tasks
+        └── troubleshooting.md        # error codes and recovery steps
+    ```
+  The main `aimx-primer.md` covers identity/purpose, the two access surfaces (MCP for writes/sends, direct filesystem for reads), quick-reference summaries of the 9+ MCP tools, the frontmatter fields agents most often check (`trusted`, `thread_id`, `list_id`, `auto_submitted`, `read`, `labels`), the 4–5 most common workflows inline (check inbox, send, reply, summarize a thread, handle auto-submitted mail), a short trust-model overview, pointers to `references/*.md` for depth, a pointer to `/var/lib/aimx/README.md` as the runtime authoritative layout reference, and a "what you must not do" safety list.
+- FR-50b: (v0.2) `aimx serve` maintains an always-present `/var/lib/aimx/README.md` agent-readable guide to the datadir. The README is baked into the binary via `include_str!`, written on `aimx setup`, and refreshed by `aimx serve` on startup if the baked-in version string (`<!-- aimx-readme-version: N -->` at top of file; exact string match, not semver) differs from the on-disk version. The file is deterministic and idempotent (same bytes for a given AIMX version), states at the top that user edits are overwritten on upgrade, and covers: directory purpose, read vs write access model, directory layout, file naming rules, slug algorithm, bundle rule, frontmatter reference, trust/DKIM/SPF/DMARC explanation, thread grouping, handling auto-submitted/list mail, attachments, and a pointer to the `aimx` MCP server for all mutations. Refresh on `aimx setup` re-run is also performed; out-of-band refresh (e.g., on every command) is out of scope for v0.2.
+- FR-50c: (v0.2) Storage-layout exposure policy — the agent primer **documents the datadir layout explicitly**. (Reverses an earlier draft that proposed redacting layout references for "security.") Rationale: `/var/lib/aimx/` is world-readable, agents already have filesystem access, and concealing the layout makes them less effective without making anything safer. The real security boundary is enforced elsewhere — writes require root + UDS, and DKIM keys live at `/etc/aimx/` root-only.
+- FR-51: (v0.2) Plugin sources live under `agents/<agent>/` and `agents/common/` in the AIMX repo and are bundled into the binary at compile time (e.g., via `include_dir!`) so `aimx agent-setup` works offline and is version-locked to the installed binary. Install-time concatenation in `src/agent_setup.rs` extends to support `<platform-prefix>.header → SKILL.md top`, `common primer body → SKILL.md middle`, `<platform-suffix>.footer → SKILL.md bottom` (suffix optional, new in v0.2), and `references/*.md → copied alongside SKILL.md, untouched`. Platforms that support progressive disclosure (Claude Code, Codex) get the full bundle including `references/`. Platforms that take a single blob (Goose recipes, Gemini prompts) receive the main primer only; references are inlined selectively per platform at install time if size permits, or omitted with a pointer to the repo.
 - FR-52: `aimx agent-setup --list` prints the registry of supported agents, their destination paths, and their activation commands. `--force` overwrites an existing destination without prompting; `--print` writes plugin contents to stdout instead of disk for dry-run / CI use.
 
 ### 6.9 CLI Commands
@@ -151,8 +193,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - **NFR-3: Permissive licensing.** All AIMX code and dependencies must use MIT, Apache-2.0, ISC, or BSD licenses. No GPL/AGPL.
 - **NFR-4: Cross-platform Unix.** Any Unix where Rust compiles and port 25 is available. CI tests Ubuntu, Alpine Linux (musl), and Fedora.
 - **NFR-5: Minimal resource usage.** `aimx ingest` must complete in < 1 second for typical emails (< 10MB).
-- **NFR-6: Secure defaults.** Self-signed TLS cert for STARTTLS (generated during setup, no Let's Encrypt needed), DKIM signing on all outbound, DMARC reject policy, SPF strict.
-- **NFR-7: Filesystem-based storage.** No database. Mailboxes are directories. Configuration is TOML.
+- **NFR-6: Secure defaults.** Self-signed TLS cert for STARTTLS (generated during setup, no Let's Encrypt needed), DKIM signing on all outbound, DMARC reject policy, SPF strict. (v0.2) DKIM private key lives at `/etc/aimx/dkim/private.key` (`root:root 600`) and is never readable by non-root processes; `aimx send` reaches the key only indirectly by speaking the UDS protocol to `aimx serve`. The `aimx` system group gates **only** access to `/run/aimx/send.sock` — reading mail under `/var/lib/aimx/` does not require group membership.
+- **NFR-7: Filesystem-based storage.** No database. Mailboxes are directories. Configuration is TOML. (v0.2) Configuration and secrets live under `/etc/aimx/` (root-owned); mail data lives under `/var/lib/aimx/` (world-readable). AIMX targets single-admin servers — on shared multi-tenant hosts mail is visible to any local user, and this is documented in `book/getting-started.md`. The runtime socket directory `/run/aimx/` is provided by systemd via `RuntimeDirectory=aimx`.
 
 ## 8. Technical Considerations
 
@@ -165,33 +207,46 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - **Outbound:** Direct SMTP delivery via `lettre`. Resolves recipient's MX records via `hickory-resolver`, connects to MX servers in priority order, negotiates STARTTLS, delivers DKIM-signed message. Synchronous delivery — errors returned immediately to caller (no background queue).
 - **TLS certificates** — Self-signed cert generated during `aimx setup`. Sufficient for STARTTLS on port 25 (MTAs don't validate certs for opportunistic encryption). No Let's Encrypt or certbot needed.
 
-### Storage Layout
+### Storage Layout (v0.2)
 ```
-/var/lib/aimx/
-├── config.toml
-├── dkim/
-│   ├── private.key
-│   └── public.key
-├── <mailbox>/
-│   ├── YYYY-MM-DD-NNN.md
-│   └── attachments/
-│       └── <filename>
-└── catchall/
-    └── ...
+/etc/aimx/                              # root-owned, 755
+├── config.toml                         # root:root 640 — main config
+└── dkim/
+    ├── private.key                     # root:root 600 — never readable by non-root
+    └── public.key                      # root:root 644 — publishable
+
+/var/lib/aimx/                          # root:root 755 — world-readable datadir
+├── README.md                           # agent-facing layout guide, regenerated on upgrade
+├── inbox/
+│   ├── <mailbox>/
+│   │   ├── 2026-04-15-143022-meeting-notes.md
+│   │   └── 2026-04-15-153300-invoice-march/        # Zola-style attachment bundle
+│   │       ├── 2026-04-15-153300-invoice-march.md
+│   │       ├── invoice.pdf
+│   │       └── receipt.png
+│   └── catchall/                       # unknown local parts
+│       └── ...
+└── sent/
+    └── <mailbox>/                      # one subdir per mailbox; no catchall
+        └── 2026-04-15-160145-re-meeting-notes.md
+
+/run/aimx/                              # root:aimx 750 — systemd RuntimeDirectory=aimx
+└── send.sock                           # root:aimx 660 — UDS for privileged send
 ```
 
 ### Architecture
-- `aimx serve` is the long-running SMTP daemon. It listens on port 25, accepts inbound email, and calls `ingest_email()` in-process.
+- `aimx serve` is the long-running SMTP daemon. It listens on port 25, accepts inbound email, and calls `ingest_email()` in-process. (v0.2) It also binds `/run/aimx/send.sock` and handles privileged outbound: parses the `From:` header, validates the sender domain, DKIM-signs with the root-only key, delivers to the recipient's MX, and persists the signed copy under `sent/<from-mailbox>/`.
 - `aimx ingest` remains available as a CLI command for manual/pipe usage (reads raw email from stdin).
-- `aimx send` delivers outbound email directly to recipient MX servers — no intermediate MTA.
+- (v0.2) `aimx send` is a thin UDS client. It composes the unsigned RFC 5322 message and submits it to `aimx serve` over `/run/aimx/send.sock`. The DKIM key never leaves the root-owned daemon process.
 - `aimx mcp` is a stdio process launched per MCP session.
 - All commands except `aimx serve` are short-lived processes.
 
 ### Integration Points
 - `aimx serve` SMTP listener (replaces OpenSMTPD MDA pipe)
+- (v0.2) `aimx serve` UDS send endpoint at `/run/aimx/send.sock`
 - MCP stdio transport (Claude Code, OpenClaw, any MCP client)
 - Channel manager triggers (arbitrary shell commands)
-- systemd/OpenRC service management for `aimx serve`
+- systemd/OpenRC service management for `aimx serve` (v0.2: systemd unit declares `RuntimeDirectory=aimx`)
 
 ## 9. Scope and Milestones
 
@@ -212,7 +267,26 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - Build from source (cargo install)
 - Prebuilt binary tarballs (Linux x86_64/aarch64, glibc + musl) attached to GitHub Releases on tag push; workflow-artifact builds on every main merge
 
+### Added in v0.2 (pre-launch reshape)
+- Privilege separation: DKIM private key root-only at `/etc/aimx/dkim/`, `aimx send` is a UDS client to `aimx serve`
+- Filesystem split: config and secrets at `/etc/aimx/`, data at `/var/lib/aimx/` (world-readable)
+- Datadir reshape: `inbox/<mailbox>/` and `sent/<mailbox>/`, Zola-style attachment bundles, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames
+- Expanded inbound frontmatter (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `trusted`, `labels`) and outbound block (`outbound`, `bcc`, `delivered_at`, `delivery_status`, `delivery_details`)
+- `trusted` frontmatter field surfacing per-mailbox trust evaluation as an always-written value
+- DMARC verification stored alongside DKIM/SPF
+- Versioned agent-facing `/var/lib/aimx/README.md` baked into the binary, refreshed on `aimx serve` startup and `aimx setup` re-run
+- Common primer restructured as a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`)
+- Plugin/extension author metadata standardized to `U-Zyn Chua <chua@uzyn.com>`
+
 ### Out of Scope (future consideration)
+- (v0.2) Config/data migration tooling — pre-launch, no existing installs to migrate
+- (v0.2) Per-user mailbox ACLs on send — `aimx` group membership gates send for the whole host
+- (v0.2) Multi-domain or subdomain aliasing in `aimx serve`'s send-side domain validation
+- (v0.2) Wildcard entries in `trusted_senders` beyond the existing glob pattern semantics
+- (v0.2) Archiving/starring/flagging beyond the existing `read` field and the new `labels` array
+- (v0.2) Write-back of triggered channel names onto email frontmatter
+- (v0.2) Automatic refresh of `/var/lib/aimx/README.md` outside of `aimx serve` startup and `aimx setup` re-run
+- (v0.2) Queueing, retry, or durable delivery state for outbound mail — current behavior (sync SMTP at send time) is preserved
 - Package manager distribution (apt/brew/nix)
 - `webhook` trigger type
 - Multi-tenant / hosted offering
@@ -260,4 +334,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
 6. **OpenSMTPD removal** — Replaced by embedded SMTP (`aimx serve` for inbound, direct delivery via lettre for outbound). Eliminates apt/debconf/systemd dependency chain. `aimx ingest` remains as a CLI command for manual/pipe usage.
 7. **Read/unread tracking** — `read = false` field in TOML frontmatter, set on ingest. `email_mark_read` updates to `read = true`. Self-contained, grepable, no extra files.
 8. **IPv4-only outbound by default** — `aimx send` defaults to IPv4-only delivery. IPv6 is opt-in via `enable_ipv6 = true` in `config.toml` (a hidden/advanced flag, not exposed via `aimx setup`). Rationale: most single-VPS deployments only set the `ip4:` SPF mechanism, and letting the OS pick IPv6 when AAAA/SPF aren't set up breaks SPF at major providers like Gmail. Opt-in keeps the default reliable and gives power users a single-line switch.
+9. **(v0.2) Privileged send via Unix domain socket** — `aimx send` no longer signs locally. The DKIM private key is root-owned (`/etc/aimx/dkim/private.key`, mode `600`) and never readable by non-root processes. `aimx send` writes a length-prefixed `AIMX/1 SEND` request to `/run/aimx/send.sock` (`root:aimx 660`); `aimx serve` parses the `From:`, validates the sender domain against the configured primary domain, signs, delivers to MX, and persists the signed copy to `sent/<from-mailbox>/`. Authorization is filesystem-permission only (the `aimx` system group on the socket); no per-user ACLs or wire credentials in v0.2. Rationale: shrinks the trust boundary so any non-root process that can read the datadir cannot also forge DKIM-signed mail.
+10. **(v0.2) Filesystem split — `/etc/aimx/` for config + secrets, `/var/lib/aimx/` for data** — Configuration and DKIM keys move to `/etc/aimx/` (root-owned). Data stays under `/var/lib/aimx/` and is world-readable. Rationale: matches Unix conventions, isolates secrets from agents that need filesystem read access to mail, and lets the datadir stay world-readable without leaking the DKIM key. AIMX targets single-admin servers — on shared multi-tenant hosts mail is visible to any local user, and this is documented in `book/getting-started.md`.
+11. **(v0.2) `trusted` frontmatter field, per-mailbox trust model preserved** — The v1 per-mailbox `trust: none|verified` + `trusted_senders` model and trigger-gating semantics are preserved unchanged. v0.2 adds an always-written `trusted` field to inbound frontmatter (`"none"` | `"true"` | `"false"`) so agents and operators can read the trust outcome directly per email instead of inferring it from "did a trigger fire." `trusted == "true"` is exactly the condition under which a `trust: verified` mailbox would fire its triggers. Rationale: the agent-facing payoff of trust evaluation should be visible at the email level, not buried in trigger behavior.
+12. **(v0.2) Pre-launch — no migration path** — There are no existing AIMX installs to migrate. `aimx setup` writes directly to the new locations; the v0.2 reshape ships in one cut without backwards-compatibility shims, dual-read code paths, or upgrade tooling. Future versions that ship after v0.2 launches must reintroduce a migration story; v0.2 itself does not.
 
