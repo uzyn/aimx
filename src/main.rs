@@ -9,6 +9,8 @@ mod mcp;
 mod mx;
 mod platform;
 mod send;
+mod send_handler;
+mod send_protocol;
 mod serve;
 mod setup;
 mod smtp;
