@@ -336,16 +336,17 @@ Precedence is **CLI flag > config > default** (`https://check.aimx.email`).
 | TXT | agent.yourdomain.com | v=spf1 ip4:YOUR_IP -all |
 | TXT | dkim._domainkey.agent.yourdomain.com | v=DKIM1; k=rsa; p=... |
 | TXT | _dmarc.agent.yourdomain.com | v=DMARC1; p=reject |
-| PTR | Your server IP | agent.yourdomain.com. (set at VPS provider) |
+
+Reverse DNS (PTR) is configured at your VPS provider's control panel. Setting a correct PTR record improves deliverability but is the operator's responsibility and is out of scope for `aimx setup`.
 
 ## Preventing spam classification
 
 To prevent emails from landing in spam:
 
-1. Ensure all DNS records are correctly set (DKIM, SPF, DMARC)
-2. Set a PTR record at your VPS provider
-3. In Gmail: Settings > Filters > Create filter for `*@yourdomain.com` > Never send to Spam
-4. Alternatively, reply to an email from the domain -- Gmail learns it is not spam
+1. Ensure all DNS records are correctly set (DKIM, SPF, DMARC).
+2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain.
+3. In Gmail: Settings > Filters > Create filter for `*@yourdomain.com` > Never send to Spam.
+4. Alternatively, reply to an email from the domain -- Gmail learns it is not spam.
 
 ## Data directory override
 

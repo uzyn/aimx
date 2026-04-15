@@ -26,7 +26,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` (see [verifying DNS](setup.md#verifying-dns-records)) |
 | `sudo aimx verify` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |
-| Emails landing in spam | Missing DNS records or no PTR | Add all [DNS records](setup.md#dns-configuration), set PTR, use Gmail filter |
+| Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all [DNS records](setup.md#dns-configuration), configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or not started | Check status and logs (see below) |
 | Emails not delivered to mailbox | `aimx serve` not running or misconfigured | Check service status with `systemctl status aimx` |
 | Channel triggers not firing | Trust policy blocking | Check `trust` setting and DKIM result (see [trust policies](channels.md#trust-policies)) |
@@ -110,8 +110,8 @@ Look at the `dkim` and `spf` fields -- they should show `pass` for properly auth
 
 If outbound emails land in spam:
 
-1. **Check all DNS records** -- DKIM, SPF, DMARC, and PTR must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
-2. **Set a PTR record** at your VPS provider's control panel. This is critical for deliverability.
+1. **Check all DNS records** -- DKIM, SPF, and DMARC must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
+2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for aimx, but is critical for deliverability with Gmail/Outlook.
 3. **Gmail filter workaround** -- In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
 4. **Reply trick** -- Reply to one email from the domain. Gmail learns it's not spam.
 

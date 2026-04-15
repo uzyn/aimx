@@ -70,17 +70,15 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.1 Setup Wizard (`aimx setup [domain]`)
 - FR-1: Require root. Exit with clear message if not running as root.
 - FR-1b: Detect port 25 conflict. If another process is listening on port 25, exit with process name and instructions to stop it.
-- FR-2: Generate systemd unit file (or OpenRC init script on Alpine), enable and start `aimx serve` as the SMTP listener with TLS. (v0.2) Unit declares `RuntimeDirectory=aimx` so `/run/aimx/` exists at start with `root:aimx 750`.
+- FR-2: Generate systemd unit file (or OpenRC init script on Alpine), enable and start `aimx serve` as the SMTP listener with TLS. (v0.2) Unit declares `RuntimeDirectory=aimx` so `/run/aimx/` exists at start with `root:root 0755`.
 - FR-3: Run port 25 checks after `aimx serve` is started: outbound (connect to check service port 25), inbound (check service performs EHLO handshake back to caller).
 - FR-4: Stop with clear error message if port 25 is blocked. List compatible VPS providers.
-- FR-5: Check reverse DNS (PTR) and warn (non-blocking) if not set.
 - FR-6: Generate 2048-bit RSA DKIM keypair. (v0.2) Private key written to `/etc/aimx/dkim/private.key` with mode `600` and owner `root:root` — never readable by non-root. Public key written to `/etc/aimx/dkim/public.key` with mode `644`.
-- FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC, PTR) and wait for user confirmation. When `enable_ipv6 = true` is set in `config.toml`, also include the AAAA record and add `ip6:<server_ipv6>` to the SPF mechanism, and verify both alongside the IPv4 records. When the flag is unset or `false`, IPv6 records are neither advertised nor verified — existing AAAA records in DNS are left unchanged.
+- FR-7: Display required DNS records (MX, A, SPF, DKIM, DMARC) and wait for user confirmation. Reverse DNS (PTR) is the operator's responsibility (configured with the VPS provider) and is out of scope for `aimx setup`. When `enable_ipv6 = true` is set in `config.toml`, also include the AAAA record and add `ip6:<server_ipv6>` to the SPF mechanism, and verify both alongside the IPv4 records. When the flag is unset or `false`, IPv6 records are neither advertised nor verified — existing AAAA records in DNS are left unchanged.
 - FR-8: Verify DNS records are correctly set.
 - FR-9: Create default `catchall` inbox under `/var/lib/aimx/inbox/catchall/`. (v0.2) Catchall is inbox-only — no `sent/catchall/` is created (the catchall is a routing target for unknown local parts, not an identity that sends).
 - FR-10: Recommend `aimx agent-setup <agent>` for one-command per-agent integration. The wizard lists supported agents and their install commands rather than emitting a generic, copy-paste JSON snippet.
 - FR-1c: (v0.2) Write config to `/etc/aimx/config.toml` with mode `640`, owner `root:root`. `AIMX_CONFIG_DIR` env var overrides the location for tests and non-standard installs (alongside the existing `AIMX_DATA_DIR`).
-- FR-1d: (v0.2) Create the `aimx` system group at setup time. Group membership gates **only** access to `/run/aimx/send.sock` (i.e., running `aimx send`); reading mail under `/var/lib/aimx/` does not require group membership. Setup output prints the `usermod -aG aimx <user>` instruction the operator must run for each non-root account that needs to send mail.
 - FR-1e: (v0.2) Write `/var/lib/aimx/README.md` (agent-facing layout guide; see FR-50b) on initial setup. Re-running setup refreshes the README if the baked-in version string differs.
 
 ### 6.2 Email Delivery (`aimx ingest <rcpt>`)
@@ -95,7 +93,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.3 Email Sending (`aimx send`)
 - FR-17: Compose RFC 5322 compliant email from provided parameters (from, to, subject, body, attachments).
 - FR-18: (v0.2) `aimx send` is a thin client. It composes the unsigned RFC 5322 message, opens the Unix domain socket at `/run/aimx/send.sock`, writes a length-prefixed `AIMX/1 SEND` request, reads the response, and exits with the corresponding status. The DKIM private key is **not** read by the client — `aimx serve` owns signing. If the socket is absent, `aimx send` exits non-zero with `aimx daemon not running — check 'systemctl status aimx'`.
-- FR-18b: (v0.2) `aimx serve` binds `/run/aimx/send.sock` (`root:aimx 660`) alongside its SMTP listener. Each accept reads `SO_PEERCRED` and logs `peer_uid` / `peer_pid` to journald. The DKIM key is loaded once at startup into `Arc<DkimKey>` and shared across per-connection tasks. There is no send queue — concurrent sends are independent tokio tasks. Authorization is filesystem-permission only (the `aimx` group on the socket); no per-user ACLs or wire credentials in v0.2.
+- FR-18b: (v0.2) `aimx serve` binds `/run/aimx/send.sock` (`root:root 0666`, world-writable) alongside its SMTP listener. Each accept reads `SO_PEERCRED` and logs `peer_uid` / `peer_pid` to journald for diagnostics only — they are not used for authorization. The DKIM key is loaded once at startup into `Arc<DkimKey>` and shared across per-connection tasks. There is no send queue — concurrent sends are independent tokio tasks. **Authorization is explicitly out of scope in v0.2:** any local user on the host can submit mail through the socket. Operators needing isolation should restrict host access by other means (OS user policy, container boundaries).
 - FR-18c: (v0.2) Wire protocol — length-prefixed and binary-safe.
   ```
   Client → Server:
@@ -230,8 +228,8 @@ All routes expose sensitive communications to third parties, which is absurd whe
     └── <mailbox>/                      # one subdir per mailbox; no catchall
         └── 2026-04-15-160145-re-meeting-notes.md
 
-/run/aimx/                              # root:aimx 750 — systemd RuntimeDirectory=aimx
-└── send.sock                           # root:aimx 660 — UDS for privileged send
+/run/aimx/                              # root:root 0755 — systemd RuntimeDirectory=aimx
+└── send.sock                           # root:root 0666 — world-writable UDS; any local user can submit
 ```
 
 ### Architecture
@@ -280,7 +278,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ### Out of Scope (future consideration)
 - (v0.2) Config/data migration tooling — pre-launch, no existing installs to migrate
-- (v0.2) Per-user mailbox ACLs on send — `aimx` group membership gates send for the whole host
+- (v0.2) Per-user mailbox ACLs on send — UDS socket is world-writable; any local user can submit
 - (v0.2) Multi-domain or subdomain aliasing in `aimx serve`'s send-side domain validation
 - (v0.2) Wildcard entries in `trusted_senders` beyond the existing glob pattern semantics
 - (v0.2) Archiving/starring/flagging beyond the existing `read` field and the new `labels` array
@@ -318,7 +316,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | Risk | Likelihood | Impact | Mitigation |
 |------|-----------|--------|------------|
 | Port 25 blocked on many cloud providers | High | Limits addressable market | Clear documentation of compatible providers. Preflight check catches this early. |
-| Outbound mail flagged as spam by Gmail/Outlook | Medium | Agent emails don't reach recipients | Proper DKIM/SPF/DMARC. PTR record guidance. Gmail filter whitelist instructions. |
+| Outbound mail flagged as spam by Gmail/Outlook | Medium | Agent emails don't reach recipients | Proper DKIM/SPF/DMARC. Gmail filter whitelist instructions. (Reverse DNS / PTR is the operator's responsibility — out of scope for aimx.) |
 | Embedded SMTP listener edge cases | Medium | Malformed input or protocol violations crash the listener | Connection hardening (timeouts, size limits, command limits), extensive unit tests, RFC 5321 compliance. Graceful error handling — ingest failures return 451 (retry), never crash the daemon. |
 | MIME parsing edge cases | Medium | Some emails render poorly as Markdown | Use battle-tested `mail-parser` crate. Accept that HTML-heavy emails may lose formatting. |
 | `mail-auth` crate license compatibility | Low | Can't use for DKIM signing | Verify license before development. Fallback: `mini-mail-auth` or implement RSA-SHA256 signing directly. |
@@ -334,7 +332,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 6. **OpenSMTPD removal** — Replaced by embedded SMTP (`aimx serve` for inbound, direct delivery via lettre for outbound). Eliminates apt/debconf/systemd dependency chain. `aimx ingest` remains as a CLI command for manual/pipe usage.
 7. **Read/unread tracking** — `read = false` field in TOML frontmatter, set on ingest. `email_mark_read` updates to `read = true`. Self-contained, grepable, no extra files.
 8. **IPv4-only outbound by default** — `aimx send` defaults to IPv4-only delivery. IPv6 is opt-in via `enable_ipv6 = true` in `config.toml` (a hidden/advanced flag, not exposed via `aimx setup`). Rationale: most single-VPS deployments only set the `ip4:` SPF mechanism, and letting the OS pick IPv6 when AAAA/SPF aren't set up breaks SPF at major providers like Gmail. Opt-in keeps the default reliable and gives power users a single-line switch.
-9. **(v0.2) Privileged send via Unix domain socket** — `aimx send` no longer signs locally. The DKIM private key is root-owned (`/etc/aimx/dkim/private.key`, mode `600`) and never readable by non-root processes. `aimx send` writes a length-prefixed `AIMX/1 SEND` request to `/run/aimx/send.sock` (`root:aimx 660`); `aimx serve` parses the `From:`, validates the sender domain against the configured primary domain, signs, delivers to MX, and persists the signed copy to `sent/<from-mailbox>/`. Authorization is filesystem-permission only (the `aimx` system group on the socket); no per-user ACLs or wire credentials in v0.2. Rationale: shrinks the trust boundary so any non-root process that can read the datadir cannot also forge DKIM-signed mail.
+9. **(v0.2) Privileged send via Unix domain socket** — `aimx send` no longer signs locally. The DKIM private key is root-owned (`/etc/aimx/dkim/private.key`, mode `600`) and never readable by non-root processes. `aimx send` writes a length-prefixed `AIMX/1 SEND` request to `/run/aimx/send.sock` (`root:root 0666`, world-writable); `aimx serve` parses the `From:`, validates the sender domain against the configured primary domain, signs, delivers to MX, and persists the signed copy to `sent/<from-mailbox>/`. **Authorization is explicitly out of scope in v0.2** — any local user can submit mail through the socket. `SO_PEERCRED` is logged for diagnostics but not enforced. Rationale: shrinks the trust boundary so any non-root process that can read the datadir cannot also forge DKIM-signed mail; per-user authorization on top of that is deferred until a real demand surfaces.
 10. **(v0.2) Filesystem split — `/etc/aimx/` for config + secrets, `/var/lib/aimx/` for data** — Configuration and DKIM keys move to `/etc/aimx/` (root-owned). Data stays under `/var/lib/aimx/` and is world-readable. Rationale: matches Unix conventions, isolates secrets from agents that need filesystem read access to mail, and lets the datadir stay world-readable without leaking the DKIM key. AIMX targets single-admin servers — on shared multi-tenant hosts mail is visible to any local user, and this is documented in `book/getting-started.md`.
 11. **(v0.2) `trusted` frontmatter field, per-mailbox trust model preserved** — The v1 per-mailbox `trust: none|verified` + `trusted_senders` model and trigger-gating semantics are preserved unchanged. v0.2 adds an always-written `trusted` field to inbound frontmatter (`"none"` | `"true"` | `"false"`) so agents and operators can read the trust outcome directly per email instead of inferring it from "did a trigger fire." `trusted == "true"` is exactly the condition under which a `trust: verified` mailbox would fire its triggers. Rationale: the agent-facing payoff of trust evaluation should be visible at the email level, not buried in trigger behavior.
 12. **(v0.2) Pre-launch — no migration path** — There are no existing AIMX installs to migrate. `aimx setup` writes directly to the new locations; the v0.2 reshape ships in one cut without backwards-compatibility shims, dual-read code paths, or upgrade tooling. Future versions that ship after v0.2 launches must reintroduce a migration story; v0.2 itself does not.

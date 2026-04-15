@@ -1,17 +1,12 @@
 use crate::config::Config;
 use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status, SystemOps};
 use crate::term;
-use std::path::Path;
 
-pub fn run(
-    data_dir: Option<&Path>,
-    verify_host: Option<&str>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    run_verify(data_dir, verify_host, &setup::RealSystemOps)
+pub fn run(verify_host: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    run_verify(verify_host, &setup::RealSystemOps)
 }
 
 pub(crate) fn run_verify(
-    data_dir: Option<&Path>,
     verify_host: Option<&str>,
     sys: &dyn SystemOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -19,7 +14,6 @@ pub(crate) fn run_verify(
         return Err("`aimx verify` requires root. Run with: sudo aimx verify".into());
     }
 
-    let _ = data_dir;
     let config = Config::load_resolved().ok();
 
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
@@ -163,7 +157,6 @@ pub fn run_with_net(
             eprintln!("  {msg}");
             all_pass = false;
         }
-        setup::PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     match port25 {
@@ -177,7 +170,6 @@ pub fn run_with_net(
                     eprintln!("  {msg}");
                     all_pass = false;
                 }
-                setup::PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
             }
 
             println!();
@@ -233,9 +225,6 @@ mod tests {
             self.ehlo_called.set(true);
             Ok(self.inbound)
         }
-        fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-            Ok(None)
-        }
         fn get_server_ips(
             &self,
         ) -> Result<
@@ -265,12 +254,12 @@ mod tests {
     impl SystemOps for MockSystemOps {
         fn write_file(
             &self,
-            _path: &Path,
+            _path: &std::path::Path,
             _content: &str,
         ) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
-        fn file_exists(&self, _path: &Path) -> bool {
+        fn file_exists(&self, _path: &std::path::Path) -> bool {
             false
         }
         fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -281,7 +270,7 @@ mod tests {
         }
         fn generate_tls_cert(
             &self,
-            _cert_dir: &Path,
+            _cert_dir: &std::path::Path,
             _domain: &str,
         ) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
@@ -295,18 +284,18 @@ mod tests {
         fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
             Ok(Port25Status::Free)
         }
-        fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        fn install_service_file(
+            &self,
+            _data_dir: &std::path::Path,
+        ) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
-        }
-        fn create_system_group(&self, _name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-            Ok(false)
         }
     }
 
     #[test]
     fn verify_requires_root() {
         let sys = MockSystemOps { is_root: false };
-        let result = run_verify(None, Some("https://check.example.com"), &sys);
+        let result = run_verify(Some("https://check.example.com"), &sys);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(

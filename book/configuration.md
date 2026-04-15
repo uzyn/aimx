@@ -79,8 +79,8 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
     ├── private.key          # RSA private key (mode 0600, root-only)
     └── public.key           # RSA public key (mode 0644)
 
-/run/aimx/                   # Runtime directory (mode 0750, root:aimx)
-└── send.sock                # (Sprint 34) local submission socket
+/run/aimx/                   # Runtime directory (mode 0755, root:root)
+└── send.sock                # (Sprint 34) world-writable UDS for aimx send
 
 /var/lib/aimx/               # Mailbox storage
 ├── catchall/                # Default mailbox

@@ -37,11 +37,7 @@ pub struct AttachmentMeta {
     pub path: String,
 }
 
-pub fn run(
-    rcpt: &str,
-    data_dir: Option<&std::path::Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_resolved_with_data_dir(data_dir)?;
+pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
     ingest_email(&config, rcpt, &raw)

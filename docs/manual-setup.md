@@ -295,7 +295,8 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | agent.yourdomain.com | `v=spf1 ip4:YOUR_IP -all` | Domain registrar |
 | TXT | dkim._domainkey.agent.yourdomain.com | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | _dmarc.agent.yourdomain.com | `v=DMARC1; p=reject; rua=mailto:postmaster@agent.yourdomain.com` | Domain registrar |
-| PTR | Your server IP | `agent.yourdomain.com.` | VPS provider panel |
+
+Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup`. A correct PTR for your server IP pointing to your mail domain improves deliverability but is the operator's responsibility as of Sprint 33.1.
 
 The DKIM public key value (`p=...`) is displayed by the setup wizard. If you need to retrieve it again:
 
@@ -331,10 +332,6 @@ dig +short TXT dkim._domainkey.agent.yourdomain.com
 # DMARC record
 dig +short TXT _dmarc.agent.yourdomain.com
 # Should include: v=DMARC1; p=reject
-
-# PTR record (reverse DNS)
-dig +short -x YOUR_SERVER_IP
-# Should return: agent.yourdomain.com.
 ```
 
 ### B8: End-to-End Verification
@@ -429,10 +426,10 @@ Available MCP tools: `mailbox_list`, `mailbox_create`, `mailbox_delete`, `email_
 
 **Prevent spam classification:**
 
-1. Ensure all 6 DNS records are correctly set (especially DKIM, SPF, DMARC)
-2. Set a PTR record at your VPS provider
-3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam
-4. Alternatively, reply to an email from the domain — Gmail learns it's not spam
+1. Ensure all DNS records are correctly set (especially DKIM, SPF, DMARC).
+2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain. This is the operator's responsibility — aimx does not check or manage PTR.
+3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
+4. Alternatively, reply to an email from the domain — Gmail learns it's not spam.
 
 **Firewall:**
 
@@ -461,7 +458,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` |
 | `sudo aimx verify` shows inbound FAIL | The verifier service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, `aimx serve` down, or DNS `A` record not yet resolving) | `sudo systemctl status aimx`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
-| Emails landing in spam | Missing DNS records or no PTR | Add all DNS records, set PTR, use Gmail filter |
+| Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all DNS records, configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or misconfigured | `sudo systemctl status aimx` and `journalctl -u aimx -e` |
 | Emails not being delivered to mailbox | Ingest misconfigured | Check config and mailbox setup with `aimx status` |
 
