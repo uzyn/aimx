@@ -24,7 +24,7 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 | OpenCode | Yes (`aimx agent-setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
 | Gemini CLI | Yes (`aimx agent-setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
 | Goose | Yes (`aimx agent-setup goose`) | `goose run -t "<prompt>"` | `--no-session` (optional; sessions default on) | `-t/--text` takes an inline prompt; `-i/--instructions` reads from a file. |
-| OpenClaw | Yes (`aimx agent-setup openclaw`) | See note below | N/A | OpenClaw is gateway-oriented; non-interactive CLI invocation suitable for channel triggers is not yet documented. See [OpenClaw](#openclaw) below. |
+| OpenClaw | Yes (`aimx agent-setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw; `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
 | Aider | No (no MCP server) | `aider --message "<prompt>"` | `--yes-always` | Aider is a code-editing agent; recipes below pattern it as "take email, apply patch, commit." |
 
 All six agents with an `aimx agent-setup <agent>` installer can ALSO be wired as channel triggers — MCP support and channel-trigger support are orthogonal. MCP gives the agent a way to read/send mail on demand; a channel trigger is AIMX pushing an email into the agent when it arrives.
@@ -181,11 +181,36 @@ From: {from}" \
 
 ## OpenClaw
 
-OpenClaw's v1 integration with AIMX is MCP-based: `aimx agent-setup openclaw` installs a skill and registers `aimx mcp` as an MCP server, so the agent can use AIMX's email tools on demand.
+- Docs: <https://docs.openclaw.ai/>
+- MCP server: `aimx agent-setup openclaw` emits an `openclaw mcp set aimx '<json>'` command you paste once to register AIMX's MCP tools with the OpenClaw gateway.
+- Non-interactive agent invocation: `openclaw agent --message "<prompt>" --deliver --json`.
+- Output: structured JSON when invoked with `--json`. `--deliver` routes the agent's reply back through OpenClaw's configured destination (useful when you want the reply to land in a channel the user already watches); omit it to just capture the reply locally.
 
-OpenClaw does not currently document a `run` / `exec` style non-interactive CLI suitable for channel triggers. The OpenClaw gateway is the runtime; the CLI exists primarily to configure the gateway. As a result, **there is no recommended OpenClaw channel-trigger recipe in this release.**
+### config.toml snippet
 
-If you want email to drive OpenClaw workflows today, the pragmatic path is to trigger a different agent CLI from the channel (e.g. `claude -p`), have that agent do the initial read, and let OpenClaw consume the result via its own event pipeline. Revisit OpenClaw's CLI docs at <https://docs.openclaw.ai/> when a non-interactive invocation mode ships.
+```toml
+[mailboxes.inbox]
+address = "inbox@agent.yourdomain.com"
+trust = "verified"
+trusted_senders = ["*@yourcompany.com"]
+
+[[mailboxes.inbox.on_receive]]
+type = "cmd"
+command = '''
+openclaw agent \
+    --message "An email arrived at $(basename {filepath}). Read it at {filepath}, summarize the sender's request, and respond via the aimx MCP tools if a reply is appropriate." \
+    --deliver \
+    --json \
+    >> /var/log/aimx/openclaw.log 2>&1
+'''
+```
+
+### Notes
+
+- OpenClaw's `agent` subcommand is the non-interactive entrypoint. Pair it with `--json` so the output envelope is stable for scripts/log analysis.
+- If you do not want OpenClaw to auto-send a reply, drop `--deliver` and inspect the JSON output yourself — the `outputs` field carries the agent's response.
+- `openclaw agent --local` bypasses the OpenClaw gateway and runs an embedded agent directly; useful on a server where the gateway is not running.
+- When a reply is appropriate, have the agent use AIMX's `email_reply` MCP tool (registered by `aimx agent-setup openclaw`) rather than shelling out to `aimx send` — the MCP tool handles threading automatically.
 
 ## Aider
 

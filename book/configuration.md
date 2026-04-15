@@ -6,7 +6,7 @@ AIMX uses a single TOML configuration file for all settings.
 
 The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`.
 
-Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and only the `aimx` system group needs access to the local submission socket.
+Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and inaccessible to non-root processes.
 
 ### Data directory override
 
@@ -79,8 +79,8 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
     ├── private.key          # RSA private key (mode 0600, root-only)
     └── public.key           # RSA public key (mode 0644)
 
-/run/aimx/                   # Runtime directory (mode 0750, root:aimx)
-└── send.sock                # (Sprint 34) local submission socket
+/run/aimx/                   # Runtime directory (mode 0755, root:root)
+└── send.sock                # (Sprint 34) world-writable UDS for aimx send
 
 /var/lib/aimx/               # Mailbox storage
 ├── catchall/                # Default mailbox

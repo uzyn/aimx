@@ -65,7 +65,7 @@ pub enum Command {
         tls_key: Option<String>,
     },
 
-    /// Check port 25 connectivity (outbound, inbound, PTR)
+    /// Check port 25 connectivity (outbound, inbound)
     Verify {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]

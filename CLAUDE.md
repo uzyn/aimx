@@ -65,7 +65,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 - `serve.rs` — `aimx serve`: starts the embedded SMTP daemon. Loads config, initializes TLS, runs the SMTP listener via tokio. Options: `--bind`, `--tls-cert`, `--tls-key`. Handles SIGTERM/SIGINT for graceful shutdown.
 - `smtp/` — embedded SMTP server module: `mod.rs` (listener accept loop), `session.rs` (per-connection SMTP state machine: EHLO, MAIL FROM, RCPT TO, DATA, STARTTLS, QUIT, RSET, NOOP), `tls.rs` (STARTTLS upgrade via tokio-rustls), `tests.rs` (unit tests).
 - `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
-- `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` for optional PTR/deliverability checks.
+- `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` which prints optional Gmail-whitelist instructions. Reverse DNS (PTR) is the operator's responsibility and is out of scope for aimx as of Sprint 33.1.
 
 ### Trait-based testing pattern
 
@@ -77,7 +77,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 - DKIM keys: `/etc/aimx/dkim/{private,public}.key` (private `0600` root-only, public `0644`). Loaded via `load_private_key(&config::dkim_dir())`.
 - Storage: Markdown files with TOML frontmatter (`+++` delimiters, not `---`). One `.md` file per email, `YYYY-MM-DD-NNN.md` naming, under `/var/lib/aimx/<mailbox>/`.
 - `--data-dir` / `AIMX_DATA_DIR` overrides the **storage** path (mailboxes only, v0.2). `AIMX_CONFIG_DIR` overrides the **config + DKIM** path.
-- Runtime dir: `/run/aimx/` (mode `0750`, owner `root:aimx`) — provided by systemd `RuntimeDirectory=aimx` or OpenRC `checkpath` in `start_pre`. Sprint 34 places `send.sock` here.
+- Runtime dir: `/run/aimx/` (mode `0755`, owner `root:root`) — provided by systemd `RuntimeDirectory=aimx` or OpenRC `checkpath` in `start_pre`. Sprint 34 places `send.sock` here as a world-writable UDS (`0o666`); authorization is out of scope for v0.2.
 - Tests use `tempfile::TempDir` plus `crate::config::test_env::ConfigDirOverride::set(&tmp)` (or the `AIMX_CONFIG_DIR` env var in integration tests) to isolate config + DKIM lookups.
 
 ### Email frontmatter format
