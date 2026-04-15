@@ -4,7 +4,7 @@
 
 **SMTP for agents. No middleman.**
 
-One command to give your AI agents their own email addresses -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, Codex CLI, OpenCode, Gemini CLI, and any MCP-capable agent that needs an email channel.
+One command to give your AI agents their own email addresses -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, and any MCP-capable agent that needs an email channel.
 
 ```bash
 aimx setup agent.mydomain.com
@@ -141,14 +141,16 @@ aimx send --from support@agent.yourdomain.com \
 aimx mcp
 ```
 
-Install AIMX into your agent with one command per agent:
+Install AIMX into your agent with one command:
 
-```bash
-aimx agent-setup claude-code    # Claude Code
-aimx agent-setup codex          # Codex CLI
-aimx agent-setup opencode       # OpenCode
-aimx agent-setup gemini         # Gemini CLI
-```
+| Agent | Install command | Activation |
+|-------|-----------------|------------|
+| Claude Code | `aimx agent-setup claude-code` | Restart Claude Code (auto-discovered from `~/.claude/plugins/`). |
+| Codex CLI | `aimx agent-setup codex` | Restart Codex CLI (auto-discovered from `~/.codex/plugins/`). |
+| OpenCode | `aimx agent-setup opencode` | Paste the printed JSONC block into `opencode.json`, then restart. |
+| Gemini CLI | `aimx agent-setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
+| Goose | `aimx agent-setup goose` | Run `goose run --recipe aimx`. |
+| OpenClaw | `aimx agent-setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
 
 Run `aimx agent-setup --list` to see every supported agent and its
 destination path. See [`book/agent-integration.md`](book/agent-integration.md)
