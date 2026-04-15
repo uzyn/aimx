@@ -6,8 +6,8 @@
 //! responsibility — this one deals only in parsed `SendRequest`s.
 //!
 //! The handler is deliberately testable: real MX delivery is abstracted
-//! behind the [`MailTransport`](crate::send::MailTransport) trait so tests
-//! can inject a mock.
+//! behind the [`MailTransport`](crate::transport::MailTransport) trait so
+//! tests can inject a mock.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
 use crate::dkim;
-use crate::send::MailTransport;
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
+use crate::transport::MailTransport;
 
 /// Context shared across every per-connection send.
 ///

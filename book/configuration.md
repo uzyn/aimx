@@ -95,7 +95,7 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
 
 ## IPv6 delivery (advanced)
 
-By default, `aimx send` delivers outbound email over IPv4 only. This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
+By default, `aimx serve` delivers outbound email over IPv4 only (submitted to it by `aimx send` via `/run/aimx/send.sock`). This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
 
 If your server has a global IPv6 address and you want outbound mail to use it:
 

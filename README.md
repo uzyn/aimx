@@ -20,7 +20,9 @@ Inbound:
                                              -> channel manager (triggers agent)
 
 Outbound:
-  MCP tool call -> aimx send -> DKIM sign -> direct SMTP to recipient MX
+  MCP tool call -> aimx send -> UDS (/run/aimx/send.sock) -> aimx serve
+                                                          -> DKIM sign
+                                                          -> direct SMTP to recipient MX
 ```
 
 - **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.
@@ -32,7 +34,7 @@ Outbound:
 
 - **Setup wizard** -- preflight checks, service file generation, DKIM keygen, DNS guidance, verification
 - **Email delivery** -- EML to Markdown with TOML frontmatter, attachment extraction, mailbox routing
-- **Email sending** -- RFC 5322 composition, DKIM signing (RSA-SHA256), threading support, attachments
+- **Email sending** -- RFC 5322 composition on the client, DKIM signing (RSA-SHA256) and MX delivery inside `aimx serve` (via `/run/aimx/send.sock`), threading support, attachments
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
 - **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
 - **Inbound trust** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists

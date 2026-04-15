@@ -1,9 +1,9 @@
 use crate::cli::SendArgs;
 use crate::config::Config;
-use crate::dkim;
 use crate::ingest::EmailMetadata;
 use crate::mailbox;
 use crate::send;
+use crate::send_protocol::SendRequest;
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -237,7 +237,7 @@ impl AimxMcpServer {
 
     #[tool(
         name = "email_send",
-        description = "Compose, DKIM-sign, and send an email"
+        description = "Submit an email for DKIM signing and delivery via the aimx daemon"
     )]
     fn email_send(
         &self,
@@ -267,21 +267,7 @@ impl AimxMcpServer {
             attachments: params.attachments.unwrap_or_default(),
         };
 
-        let private_key = load_dkim_key(&config)?;
-        let transport = send::LettreTransport::new(config.enable_ipv6);
-        let dkim_info = Some((
-            &private_key,
-            config.domain.as_str(),
-            config.dkim_selector.as_str(),
-        ));
-
-        let (message_id, server) =
-            send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
-
-        Ok(format!(
-            "Delivered to {server} for {}. Message-ID: {message_id}",
-            args.to
-        ))
+        submit_via_daemon(&args, &params.from_mailbox)
     }
 
     #[tool(
@@ -356,21 +342,55 @@ impl AimxMcpServer {
             attachments: vec![],
         };
 
-        let private_key = load_dkim_key(&config)?;
-        let transport = send::LettreTransport::new(config.enable_ipv6);
-        let dkim_info = Some((
-            &private_key,
-            config.domain.as_str(),
-            config.dkim_selector.as_str(),
-        ));
+        submit_via_daemon(&args, &params.mailbox)
+    }
+}
 
-        let (message_id, server) =
-            send::send_with_transport(&args, &transport, dkim_info).map_err(|e| e.to_string())?;
+/// Compose `args` into an `AIMX/1 SEND` request and submit it to
+/// `aimx serve` over the UDS. MCP, like `aimx send`, no longer signs or
+/// delivers mail directly — everything goes through the daemon.
+fn submit_via_daemon(args: &SendArgs, from_mailbox: &str) -> Result<String, String> {
+    let composed = send::compose_message(args).map_err(|e| e.to_string())?;
+    let request = SendRequest {
+        from_mailbox: from_mailbox.to_string(),
+        body: composed.message,
+    };
+    let socket = crate::serve::send_socket_path();
 
-        Ok(format!(
-            "Delivered to {server} for {}. Message-ID: {message_id}",
+    let rt = tokio::runtime::Handle::try_current();
+    let outcome = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(send::submit_request(&socket, &request)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+            rt.block_on(send::submit_request(&socket, &request))
+        }
+    };
+
+    let outcome = outcome.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "aimx daemon not running — check 'systemctl status aimx'".to_string()
+        } else {
+            format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            )
+        }
+    })?;
+
+    match outcome {
+        send::SubmitOutcome::Ok { message_id } => Ok(format!(
+            "Email sent to {}. Message-ID: {message_id}",
             args.to
-        ))
+        )),
+        send::SubmitOutcome::Err { code, reason } => Err(format!("[{}] {reason}", code.as_str())),
+        send::SubmitOutcome::Malformed(reason) => {
+            Err(format!("Malformed response from aimx daemon: {reason}"))
+        }
     }
 }
 
@@ -537,11 +557,6 @@ pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> 
     std::fs::write(&filepath, result).map_err(|e| format!("Failed to write email: {e}"))?;
 
     Ok(())
-}
-
-fn load_dkim_key(_config: &Config) -> Result<rsa::RsaPrivateKey, String> {
-    dkim::load_private_key(&crate::config::dkim_dir())
-        .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))
 }
 
 fn validate_email_id(id: &str) -> Result<(), String> {
@@ -930,67 +945,5 @@ mod tests {
         let result = set_read_status(&config, "alice", "../../etc/passwd", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));
-    }
-
-    #[test]
-    fn load_dkim_key_missing_returns_error() {
-        let tmp = TempDir::new().unwrap();
-        let config = test_config(tmp.path());
-        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        let result = load_dkim_key(&config);
-        assert!(result.is_err());
-        assert!(
-            result.as_ref().unwrap_err().contains("DKIM"),
-            "Error should mention DKIM: {}",
-            result.unwrap_err()
-        );
-    }
-
-    #[test]
-    fn load_dkim_key_present_returns_ok() {
-        let tmp = TempDir::new().unwrap();
-        let config = test_config(tmp.path());
-        // Point AIMX_CONFIG_DIR at `tmp` so `dkim_dir()` resolves there.
-        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        crate::dkim::generate_keypair(&crate::config::dkim_dir(), false).unwrap();
-        let result = load_dkim_key(&config);
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn send_error_propagates_through_mcp_mapping() {
-        use crate::cli::SendArgs;
-
-        struct FailTransport;
-        impl send::MailTransport for FailTransport {
-            fn send(
-                &self,
-                _sender: &str,
-                _recipient: &str,
-                _message: &[u8],
-            ) -> Result<String, Box<dyn std::error::Error>> {
-                Err("Connection refused by mx.example.com".into())
-            }
-        }
-
-        let args = SendArgs {
-            from: "alice@test.com".to_string(),
-            to: "bob@example.com".to_string(),
-            subject: "Test".to_string(),
-            body: "Body".to_string(),
-            reply_to: None,
-            references: None,
-            attachments: vec![],
-        };
-
-        let result =
-            send::send_with_transport(&args, &FailTransport, None).map_err(|e| e.to_string());
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(
-            err.contains("Connection refused"),
-            "MCP-style error mapping should preserve delivery failure details: {err}"
-        );
     }
 }
