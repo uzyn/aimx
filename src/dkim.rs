@@ -22,6 +22,10 @@ fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 /// v0.2 permissions (Sprint 33 S33-3):
 /// - Private key: `0o600` (root-only; `aimx serve` reads it in-process)
 /// - Public key:  `0o644` (world-readable — it's advertised via DNS)
+///
+/// On Unix the files are created atomically with their target mode via
+/// `OpenOptions::mode(...).create_new(true)` to avoid a brief window of
+/// umask-default permissions between `write` and `chmod`.
 pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (private_path, public_path) = dkim_paths(dkim_root);
 
@@ -31,28 +35,55 @@ pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std
 
     std::fs::create_dir_all(dkim_root)?;
 
+    // Force-overwrite path: remove pre-existing files so `create_new(true)`
+    // succeeds with the tightened mode. (Otherwise `OpenOptions` would
+    // fail with `AlreadyExists` and leave the old file at its old mode.)
+    if force {
+        for p in [&private_path, &public_path] {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+        }
+    }
+
     let mut rng = rsa::rand_core::OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, DKIM_KEY_BITS)?;
 
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
-    std::fs::write(&private_path, private_pem.as_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    write_file_with_mode(&private_path, private_pem.as_bytes(), 0o600)?;
 
     let public_key = RsaPublicKey::from(&private_key);
     let public_pem = public_key.to_public_key_pem(LineEnding::LF)?;
-    std::fs::write(&public_path, public_pem.as_bytes())?;
+    write_file_with_mode(&public_path, public_pem.as_bytes(), 0o644)?;
 
+    Ok(())
+}
+
+/// Create `path` with `bytes` as contents and the given Unix mode applied
+/// atomically at open time (no umask-default window between write and
+/// chmod). On non-Unix the mode is ignored and a plain `fs::write` is used.
+fn write_file_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&public_path, std::fs::Permissions::from_mode(0o644))?;
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
     }
-
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        std::fs::write(path, bytes)?;
+    }
     Ok(())
 }
 
@@ -273,6 +304,39 @@ mod tests {
         assert!(
             err.contains("private.key"),
             "Error should include the file path: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_private_key_permission_denied_surfaces_root_guidance() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip this test when running as root — `chmod 0o000` is bypassed
+        // by CAP_DAC_READ_SEARCH / euid 0, so we can't force PermissionDenied.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: test must run as non-root");
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let private_path = tmp.path().join("private.key");
+        std::fs::write(&private_path, b"fake pem").unwrap();
+        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_private_key(tmp.path());
+        // Always restore mode so TempDir cleanup can succeed.
+        let _ = std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600));
+
+        let err = result.expect_err("load_private_key should fail on 0o000 file");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("readable only by root"),
+            "PermissionDenied path must surface the root-only guidance: {msg}"
+        );
+        assert!(
+            msg.contains("aimx send"),
+            "PermissionDenied guidance must redirect non-root callers to `aimx send`: {msg}"
         );
     }
 

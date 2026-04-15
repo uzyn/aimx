@@ -237,10 +237,11 @@ pub fn format_status(info: &StatusInfo) -> String {
     out
 }
 
-pub fn run(_data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     // Config path is resolved via `config_path()` (default `/etc/aimx/`) —
-    // `--data-dir` no longer drives it post-filesystem-split (Sprint 33).
-    let config = Config::load_resolved()?;
+    // `--data-dir` no longer drives *config* location post-filesystem-split
+    // (Sprint 33), but still overrides `config.data_dir` for storage.
+    let config = Config::load_resolved_with_data_dir(data_dir)?;
 
     let info = gather_status(&config);
     print!("{}", format_status(&info));

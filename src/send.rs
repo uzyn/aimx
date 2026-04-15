@@ -423,8 +423,7 @@ pub fn run(
     args: SendArgs,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = data_dir;
-    let config = Config::load_resolved()
+    let config = Config::load_resolved_with_data_dir(data_dir)
         .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?;
     let transport = LettreTransport::new(config.enable_ipv6);
     let private_key = dkim::load_private_key(&crate::config::dkim_dir())
