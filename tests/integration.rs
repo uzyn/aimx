@@ -291,8 +291,9 @@ fn dkim_keygen_no_overwrite() {
         .arg(tmp.path())
         .arg("dkim-keygen")
         .assert()
-        .failure()
-        .stderr(predicate::str::contains("already exist"));
+        .success()
+        .stderr(predicate::str::contains("already exist"))
+        .stderr(predicate::str::contains("Warning:"));
 }
 
 #[test]

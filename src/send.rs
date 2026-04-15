@@ -1,6 +1,7 @@
 use crate::cli::SendArgs;
 use crate::config::Config;
 use crate::dkim;
+use crate::term;
 use base64::Engine;
 use chrono::Utc;
 use std::path::Path;
@@ -423,8 +424,11 @@ pub fn run(
 
     let (message_id, server) = send_with_transport(&args, &transport, dkim_info)?;
     eprintln!(
-        "Delivered to {server} for {}. Message-ID: {message_id}",
-        args.to
+        "{}",
+        term::success(&format!(
+            "Delivered to {server} for {}. Message-ID: {message_id}",
+            args.to
+        ))
     );
     Ok(())
 }
