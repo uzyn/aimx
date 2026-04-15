@@ -19,18 +19,128 @@ pub struct AgentSpec {
     pub source_subdir: &'static str,
     /// Destination template, with `$HOME` / `$XDG_CONFIG_HOME` placeholders.
     pub dest_template: &'static str,
-    /// Message printed to the user after a successful install.
-    pub activation_hint: &'static str,
+    /// Renders the post-install message. Receives the effective data
+    /// directory (when the user passed `--data-dir`) so agents that need
+    /// the user to paste a JSON/JSONC snippet can embed the right
+    /// `--data-dir` argument into that snippet.
+    pub activation_hint: fn(data_dir: Option<&Path>) -> String,
 }
 
 /// Static registry of supported agents.
+///
+/// Source-tree layout asymmetry by design: plugin-style agents
+/// (`claude-code`, `codex`) nest their skill under `skills/aimx/` because
+/// the plugin manifest lives at the package root and the skill is a
+/// sibling subdirectory. Skill-only agents (`opencode`, `gemini`) install
+/// directly into a skills directory, so their source tree is flat with
+/// `SKILL.md.header` at the top. `assemble_plugin_files` walks each
+/// source tree relative to its root and handles both shapes. Do not
+/// "normalize" the layout — the destination template determines the
+/// depth.
 pub fn registry() -> &'static [AgentSpec] {
-    &[AgentSpec {
-        name: "claude-code",
-        source_subdir: "claude-code",
-        dest_template: "$HOME/.claude/plugins/aimx",
-        activation_hint: "Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/).",
-    }]
+    &[
+        AgentSpec {
+            name: "claude-code",
+            source_subdir: "claude-code",
+            dest_template: "$HOME/.claude/plugins/aimx",
+            activation_hint: claude_code_hint,
+        },
+        AgentSpec {
+            name: "codex",
+            source_subdir: "codex",
+            dest_template: "$HOME/.codex/plugins/aimx",
+            activation_hint: codex_hint,
+        },
+        AgentSpec {
+            name: "opencode",
+            source_subdir: "opencode",
+            dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
+            activation_hint: opencode_hint,
+        },
+        AgentSpec {
+            name: "gemini",
+            source_subdir: "gemini",
+            dest_template: "$HOME/.gemini/skills/aimx",
+            activation_hint: gemini_hint,
+        },
+    ]
+}
+
+fn claude_code_hint(_data_dir: Option<&Path>) -> String {
+    "Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/).".to_string()
+}
+
+fn codex_hint(_data_dir: Option<&Path>) -> String {
+    // Codex CLI's canonical MCP wiring lives in `~/.codex/config.toml`
+    // under `[mcp_servers.*]`. This installer ships a `.codex-plugin/
+    // plugin.json` that mirrors Claude Code's plugin shape (camelCase
+    // `mcpServers`) on the assumption that plugin-managed MCP servers
+    // follow the same schema. That assumption has not been validated
+    // against a live Codex CLI (see deferred manual validation in
+    // docs/sprint.md for Sprint 29); revisit once Codex CLI is available
+    // in the sandbox.
+    "Plugin installed. Restart Codex CLI to pick it up (it is auto-discovered from ~/.codex/plugins/).".to_string()
+}
+
+fn opencode_hint(data_dir: Option<&Path>) -> String {
+    // Route the JSON snippet through serde_json so that a `--data-dir` path
+    // containing `"` or `\` is properly escaped. `format!`-based string
+    // building would produce an invalid snippet the user would copy into
+    // their OpenCode config.
+    let command: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "/usr/local/bin/aimx".to_string(),
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["/usr/local/bin/aimx".to_string(), "mcp".to_string()],
+    };
+    let snippet = serde_json::json!({
+        "mcp": {
+            "aimx": {
+                "command": command,
+            }
+        }
+    });
+    let snippet_text = serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
+    format!(
+        "Skill installed. Add the following block to the `mcp` object in \
+         your OpenCode config (~/.config/opencode/opencode.json or \
+         <repo>/opencode.json), then restart OpenCode:\n\
+         \n\
+         {snippet_text}"
+    )
+}
+
+fn gemini_hint(data_dir: Option<&Path>) -> String {
+    // Route the JSON snippet through serde_json (see opencode_hint).
+    let args: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
+    };
+    let snippet = serde_json::json!({
+        "mcpServers": {
+            "aimx": {
+                "command": "/usr/local/bin/aimx",
+                "args": args,
+            }
+        }
+    });
+    let snippet_text = serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
+    format!(
+        "Skill installed. Merge the following block into \
+         ~/.gemini/settings.json (create the file if it does not exist), \
+         then restart Gemini CLI:\n\
+         \n\
+         {snippet_text}"
+    )
 }
 
 pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
@@ -155,7 +265,14 @@ fn print_registry(env: &dyn AgentEnv) {
         println!("  {}", term::highlight(spec.name));
         println!("    destination: {}", dest.display());
         println!("    install:     aimx agent-setup {}", spec.name);
-        println!("    activation:  {}", spec.activation_hint);
+        let hint = (spec.activation_hint)(None);
+        let mut hint_lines = hint.lines();
+        if let Some(first) = hint_lines.next() {
+            println!("    activation:  {first}");
+            for line in hint_lines {
+                println!("                 {line}");
+            }
+        }
         println!();
     }
 }
@@ -165,6 +282,18 @@ fn install(
     opts: &InstallOptions,
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    install_to_writer(spec, opts, env, &mut io::stdout())
+}
+
+/// Testable core of `install`: writes user-facing output to `out` instead
+/// of stdout. Tests use this to assert that `--print` emits the activation
+/// snippet.
+fn install_to_writer(
+    spec: &AgentSpec,
+    opts: &InstallOptions,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
     let source = AGENTS_DIR.get_dir(spec.source_subdir).ok_or_else(|| {
         format!(
             "internal error: missing embedded source for '{}'",
@@ -173,27 +302,33 @@ fn install(
     })?;
 
     let files = assemble_plugin_files(source, opts.data_dir)?;
+    let hint = (spec.activation_hint)(opts.data_dir);
 
     if opts.print {
         for (rel, bytes) in &files {
-            println!("=== {} ===", rel.display());
+            writeln!(out, "=== {} ===", rel.display())?;
             match std::str::from_utf8(bytes) {
-                Ok(text) => println!("{text}"),
-                Err(_) => println!("<{} bytes of binary content>", bytes.len()),
+                Ok(text) => writeln!(out, "{text}")?,
+                Err(_) => writeln!(out, "<{} bytes of binary content>", bytes.len())?,
             }
         }
+        // `--print` also emits the activation hint so snippet-style agents
+        // (opencode, gemini) expose their MCP JSON block under dry-run.
+        writeln!(out, "=== activation ===")?;
+        writeln!(out, "{hint}")?;
         return Ok(());
     }
 
     let dest_root = resolve_dest(spec.dest_template, env)?;
     write_files(&dest_root, &files, opts.force, env)?;
 
-    println!(
+    writeln!(
+        out,
         "{} {}",
         term::success("Installed"),
         term::highlight(&dest_root.to_string_lossy())
-    );
-    println!("{}", spec.activation_hint);
+    )?;
+    writeln!(out, "{hint}")?;
 
     Ok(())
 }
@@ -496,7 +631,10 @@ mod tests {
 
         // plugin.json should have default args (no --data-dir).
         let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
-        assert!(plugin.contains("\"mcp\""));
+        assert!(
+            plugin.contains("\"mcpServers\""),
+            "claude-code plugin.json must declare `mcpServers`: {plugin}"
+        );
         assert!(!plugin.contains("--data-dir"));
     }
 
@@ -578,7 +716,7 @@ mod tests {
         let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
         assert!(plugin.contains("--data-dir"));
         assert!(plugin.contains("/custom/aimx-data"));
-        assert!(plugin.contains("\"mcp\""));
+        assert!(plugin.contains("\"mcpServers\""));
     }
 
     #[test]
@@ -665,6 +803,346 @@ mod tests {
             err.contains("plugin.json is not valid JSON"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn registry_contains_sprint_29_agents() {
+        for name in ["codex", "opencode", "gemini"] {
+            assert!(
+                find_agent(name).is_some(),
+                "registry missing sprint-29 agent: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn install_codex_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("codex".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".codex/plugins/aimx");
+        assert!(dest.join(".codex-plugin/plugin.json").exists());
+        assert!(dest.join("skills/aimx/SKILL.md").exists());
+        assert!(!dest.join("README.md").exists());
+        assert!(!dest.join("skills/aimx/SKILL.md.header").exists());
+
+        let skill = std::fs::read_to_string(dest.join("skills/aimx/SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\n"));
+        assert!(skill.contains("name: aimx"));
+        assert!(skill.contains("MCP tools"));
+        assert!(skill.contains("mailbox_create"));
+
+        let plugin = std::fs::read_to_string(dest.join(".codex-plugin/plugin.json")).unwrap();
+        // Assert on the exact schema key so a drift to snake_case
+        // (`mcp_servers`) or something else is caught, not silently passed
+        // by the substring `"mcp"` that lives inside `"mcpServers"`.
+        assert!(
+            plugin.contains("\"mcpServers\""),
+            "codex plugin.json must declare `mcpServers`: {plugin}"
+        );
+        assert!(!plugin.contains("--data-dir"));
+    }
+
+    #[test]
+    fn install_codex_with_custom_data_dir_rewrites_plugin_args() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let custom = PathBuf::from("/custom/aimx-data");
+
+        run_with_env(
+            Some("codex".into()),
+            false,
+            false,
+            false,
+            Some(&custom),
+            &env,
+        )
+        .unwrap();
+
+        let plugin = std::fs::read_to_string(
+            tmp.path()
+                .join(".codex/plugins/aimx/.codex-plugin/plugin.json"),
+        )
+        .unwrap();
+        assert!(plugin.contains("--data-dir"));
+        assert!(plugin.contains("/custom/aimx-data"));
+    }
+
+    #[test]
+    fn install_opencode_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("opencode".into()), false, false, false, None, &env).unwrap();
+
+        // XDG_CONFIG_HOME defaults to $HOME/.config when unset. OpenCode
+        // discovers skills from `~/.config/opencode/skills/<name>/`.
+        let dest = tmp.path().join(".config/opencode/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        // OpenCode ships a skill-only package; no plugin manifest on disk.
+        assert!(!dest.join("plugin.json").exists());
+        assert!(!dest.join("README.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\n"));
+        assert!(skill.contains("mailbox_create"));
+    }
+
+    #[test]
+    fn install_opencode_respects_xdg_config_home_override() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        let xdg = tmp.path().join("alt-xdg");
+        env.xdg = Some(xdg.clone());
+
+        run_with_env(Some("opencode".into()), false, false, false, None, &env).unwrap();
+
+        assert!(xdg.join("opencode/skills/aimx/SKILL.md").exists());
+    }
+
+    #[test]
+    fn install_gemini_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("gemini".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".gemini/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("plugin.json").exists());
+        assert!(!dest.join("README.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(skill.starts_with("---\n"));
+        assert!(skill.contains("mailbox_create"));
+    }
+
+    #[test]
+    fn claude_code_activation_hint_is_short_and_deterministic() {
+        let spec = find_agent("claude-code").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("Restart Claude Code"));
+        assert!(hint.contains("auto-discovered"));
+        // Data-dir override should not change Claude Code's hint — the MCP
+        // args are baked into plugin.json, not the hint.
+        assert_eq!(hint, (spec.activation_hint)(Some(Path::new("/x"))));
+    }
+
+    #[test]
+    fn codex_activation_hint_mentions_codex() {
+        let spec = find_agent("codex").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("Codex"));
+        assert!(hint.contains("auto-discovered"));
+    }
+
+    #[test]
+    fn opencode_activation_hint_embeds_jsonc_snippet() {
+        let spec = find_agent("opencode").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("\"mcp\""));
+        assert!(hint.contains("\"aimx\""));
+        assert!(hint.contains("\"command\""));
+        assert!(hint.contains("/usr/local/bin/aimx"));
+        assert!(hint.contains("opencode.json"));
+        // Default (no --data-dir) should not mention it.
+        assert!(!hint.contains("--data-dir"));
+
+        let hint_custom = (spec.activation_hint)(Some(Path::new("/custom/data")));
+        assert!(hint_custom.contains("--data-dir"));
+        assert!(hint_custom.contains("/custom/data"));
+    }
+
+    #[test]
+    fn gemini_activation_hint_embeds_mcp_servers_snippet() {
+        let spec = find_agent("gemini").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("\"mcpServers\""));
+        assert!(hint.contains("\"aimx\""));
+        assert!(hint.contains("settings.json"));
+        assert!(hint.contains("/usr/local/bin/aimx"));
+        assert!(!hint.contains("--data-dir"));
+
+        let hint_custom = (spec.activation_hint)(Some(Path::new("/var/aimx")));
+        assert!(hint_custom.contains("--data-dir"));
+        assert!(hint_custom.contains("/var/aimx"));
+    }
+
+    #[test]
+    fn opencode_print_emits_activation_snippet() {
+        // --print should dump both the file tree and the activation hint so
+        // snippet-style agents surface their JSON block under dry-run.
+        // Capture via install_to_writer so we can assert on the actual
+        // printed bytes — not just that no files were written.
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let spec = find_agent("opencode").unwrap();
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+
+        assert!(
+            printed.contains("=== activation ==="),
+            "printed output missing activation marker: {printed}"
+        );
+        assert!(
+            printed.contains("\"mcp\""),
+            "printed activation snippet missing `mcp` key: {printed}"
+        );
+        assert!(
+            printed.contains("\"aimx\""),
+            "printed activation snippet missing `aimx` key: {printed}"
+        );
+        assert!(
+            printed.contains("/usr/local/bin/aimx"),
+            "printed activation snippet missing aimx path: {printed}"
+        );
+        assert!(
+            !tmp.path().join(".config/opencode").exists(),
+            "--print must not write files"
+        );
+
+        // Gemini --print also emits its mcpServers snippet.
+        let spec = find_agent("gemini").unwrap();
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+        assert!(printed.contains("=== activation ==="));
+        assert!(
+            printed.contains("\"mcpServers\""),
+            "gemini activation snippet missing `mcpServers`: {printed}"
+        );
+        assert!(printed.contains("/usr/local/bin/aimx"));
+        assert!(!tmp.path().join(".gemini").exists());
+    }
+
+    #[test]
+    fn print_snippet_escapes_data_dir_with_special_chars() {
+        // A data-dir path containing a double-quote or backslash must not
+        // produce a broken JSON snippet — serde_json escapes it for us.
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let spec = find_agent("opencode").unwrap();
+        let weird = PathBuf::from("/tmp/has\"quote\\and-backslash");
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: Some(&weird),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+
+        // Extract the activation section and confirm it parses as JSON.
+        let (_, after) = printed.split_once("=== activation ===\n").unwrap();
+        let snippet = after
+            .lines()
+            .skip_while(|l| l.trim().is_empty() || l.starts_with("Skill installed"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let parsed: serde_json::Value = serde_json::from_str(snippet.trim())
+            .unwrap_or_else(|e| panic!("activation snippet not valid JSON: {e}\n{snippet}"));
+        let cmd = parsed
+            .pointer("/mcp/aimx/command")
+            .and_then(|v| v.as_array())
+            .expect("command array missing");
+        let last_path = cmd.get(2).and_then(|v| v.as_str()).unwrap();
+        assert_eq!(last_path, "/tmp/has\"quote\\and-backslash");
+    }
+
+    #[test]
+    fn assembled_opencode_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("opencode").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("opencode/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    #[test]
+    fn assembled_gemini_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("gemini").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("gemini/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    #[test]
+    fn assembled_codex_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("codex").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "skills/aimx/SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("codex/skills/aimx/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    #[test]
+    fn registry_lists_four_agents_in_canonical_order() {
+        let names: Vec<&str> = registry().iter().map(|s| s.name).collect();
+        assert_eq!(names, vec!["claude-code", "codex", "opencode", "gemini"]);
     }
 
     #[cfg(unix)]

@@ -49,9 +49,11 @@ grows as more agents are landed in subsequent sprints.
 | Agent | Install command | Destination | Activation |
 |-------|-----------------|-------------|------------|
 | Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Restart Claude Code; the plugin is auto-discovered from `~/.claude/plugins/`. |
+| Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. |
+| OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. |
+| Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. |
 
-More agents — Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw — land in
-Sprint 29 onward.
+More agents — Goose and OpenClaw — land in Sprint 30.
 
 ### Claude Code
 
@@ -79,6 +81,120 @@ aimx --data-dir /custom/path agent-setup claude-code
 
 The installer rewrites `mcpServers.aimx.args` to include
 `--data-dir /custom/path` before writing `plugin.json` to disk.
+
+### Codex CLI
+
+Codex CLI discovers plugins by scanning `~/.codex/plugins/`. The AIMX
+plugin ships two pieces:
+
+- `.codex-plugin/plugin.json` — manifest declaring the plugin and
+  registering `aimx mcp` as an MCP server.
+- `skills/aimx/SKILL.md` — the agent-facing skill (body = canonical AIMX
+  primer).
+
+Install:
+
+```bash
+aimx agent-setup codex
+```
+
+Custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup codex
+```
+
+Like Claude Code, the installer rewrites `mcpServers.aimx.args` in
+`plugin.json` to include `--data-dir /custom/path`.
+
+Verify the plugin format and destination path against the current Codex
+CLI documentation before relying on this in production — agent plugin
+formats drift between releases. See the per-agent
+[README](https://github.com/uzyn/aimx/tree/main/agents/codex) for the
+documentation link.
+
+### OpenCode
+
+OpenCode discovers skills from `~/.config/opencode/skills/<name>/` (user)
+or `<repo>/.opencode/skills/<name>/` (project). The AIMX package is
+skill-only — MCP servers in OpenCode are configured in `opencode.json`,
+not alongside the skill.
+
+Install:
+
+```bash
+aimx agent-setup opencode
+```
+
+The installer writes `~/.config/opencode/skills/aimx/SKILL.md` and prints
+a JSONC block. Paste that block into the `mcp` object in your
+`opencode.json` (user-level at `~/.config/opencode/opencode.json` or
+project-level at `<repo>/opencode.json`):
+
+```jsonc
+{
+  "mcp": {
+    "aimx": {
+      "command": ["/usr/local/bin/aimx", "mcp"]
+    }
+  }
+}
+```
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup opencode
+```
+
+The printed JSONC snippet will have `"--data-dir", "/custom/path"`
+inserted into the `command` array.
+
+Restart OpenCode (or reload its config) after editing `opencode.json`.
+See [`agents/opencode/README.md`](https://github.com/uzyn/aimx/tree/main/agents/opencode)
+for the schema reference.
+
+### Gemini CLI
+
+Gemini CLI picks up skills from `~/.gemini/skills/<name>/` and configures
+MCP servers in `~/.gemini/settings.json`. AIMX does not mutate
+`settings.json` directly (FR-49); instead the installer prints the exact
+JSON block to merge.
+
+Install:
+
+```bash
+aimx agent-setup gemini
+```
+
+The installer writes `~/.gemini/skills/aimx/SKILL.md` and prints:
+
+```json
+{
+  "mcpServers": {
+    "aimx": {
+      "command": "/usr/local/bin/aimx",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Merge that block into `~/.gemini/settings.json`. If the file does not
+exist, create it with the object above as its full contents. If
+`mcpServers` already exists, add the `aimx` key inside it.
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup gemini
+```
+
+The printed `args` array will include `"--data-dir", "/custom/path"`.
+
+Restart Gemini CLI after editing `settings.json`. See
+[`agents/gemini/README.md`](https://github.com/uzyn/aimx/tree/main/agents/gemini)
+for the schema reference.
 
 ## Manual MCP wiring
 
@@ -135,3 +251,18 @@ configuring.
 The plugin's MCP command defaults to `/var/lib/aimx/` for AIMX's data
 directory. If you set up AIMX with a different path, re-run with
 `aimx --data-dir <path> agent-setup <agent> --force`.
+
+### OpenCode: skill loads but MCP tools do not appear
+
+OpenCode loads skills from `~/.config/opencode/skills/` but MCP servers
+only activate when declared in `opencode.json`. Re-run `aimx agent-setup
+opencode`, copy the printed JSONC block into the `mcp` object in your
+`opencode.json`, and restart OpenCode.
+
+### Gemini: "unknown MCP server aimx"
+
+Gemini CLI requires the `mcpServers.aimx` block in
+`~/.gemini/settings.json`. Re-run `aimx agent-setup gemini` and merge
+the printed JSON block into `settings.json`. If the file did not exist
+before you ran the installer, create it with just the printed object as
+its contents.
