@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use crate::config::Config;
 use crate::dkim;
-use crate::send::{LettreTransport, MailTransport};
 use crate::send_handler::SendContext;
 use crate::send_protocol;
 use crate::smtp::SmtpServer;
 use crate::term;
+use crate::transport::{FileDropTransport, LettreTransport, MailTransport};
 
 const DEFAULT_BIND: &str = "0.0.0.0:25";
 const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
@@ -97,8 +97,26 @@ async fn run_serve(
     };
 
     // Build the SendContext shared across every per-connection UDS task.
-    let transport: Arc<dyn MailTransport + Send + Sync> =
-        Arc::new(LettreTransport::new(config.enable_ipv6));
+    //
+    // `AIMX_TEST_MAIL_DROP` (test-only) replaces the real MX transport with
+    // a file-drop transport so integration tests can observe the signed
+    // outbound message without reaching the network. In production this env
+    // var is never set — if it leaks in, emit a loud warning so the operator
+    // notices that outbound mail is being siloed to disk instead of delivered.
+    let transport: Arc<dyn MailTransport + Send + Sync> = match std::env::var_os(
+        "AIMX_TEST_MAIL_DROP",
+    ) {
+        Some(path) => {
+            let drop_path = PathBuf::from(&path);
+            eprintln!(
+                "{} AIMX_TEST_MAIL_DROP is set — outbound mail will be written to {} and NOT delivered to recipients. This must only be used in tests; unset the env var on production hosts.",
+                term::warn("Warning:"),
+                drop_path.display()
+            );
+            Arc::new(FileDropTransport::new(drop_path))
+        }
+        None => Arc::new(LettreTransport::new(config.enable_ipv6)),
+    };
     let send_ctx = Arc::new(SendContext {
         dkim_key,
         primary_domain: config.domain.clone(),

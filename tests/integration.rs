@@ -1990,3 +1990,257 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
         sock.display()
     );
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 35 — `aimx send` thin UDS client end-to-end.
+//
+// Spawns `aimx serve` with `AIMX_TEST_MAIL_DROP` pointing at a tempfile so
+// the daemon's outbound MX transport is replaced with a file-drop capture.
+// Then invokes `aimx send` via `assert_cmd` and asserts:
+//   * client exited 0
+//   * daemon logs include peer_uid=/peer_pid= for the accepted send
+//   * the captured (signed) message carries a DKIM-Signature header that
+//     verifies against the test public key using the same canonicalization
+//     helper from the Sprint 25 DKIM test.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn start_serve_with_mail_drop(
+    tmp: &Path,
+    port: u16,
+    mail_drop: &Path,
+) -> (std::process::Child, std::path::PathBuf) {
+    let runtime = tmp.join("run");
+    std::fs::create_dir_all(&runtime).ok();
+    let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp)
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_MAIL_DROP", mail_drop)
+        .arg("--data-dir")
+        .arg(tmp)
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let sock = runtime.join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    (child, sock)
+}
+
+#[cfg(unix)]
+fn extract_dkim_bh(signed: &[u8]) -> String {
+    let signed_str = String::from_utf8_lossy(signed).to_string();
+    let mut dkim_header = String::new();
+    let mut in_dkim = false;
+    for line in signed_str.lines() {
+        if line.starts_with("DKIM-Signature:") {
+            in_dkim = true;
+            dkim_header.push_str(line);
+        } else if in_dkim && (line.starts_with('\t') || line.starts_with(' ')) {
+            dkim_header.push_str(line);
+        } else if in_dkim {
+            break;
+        }
+    }
+    let bh_start = dkim_header.find("bh=").expect("bh= not found");
+    let bh_value = &dkim_header[bh_start + 3..];
+    let bh_end = bh_value.find(';').unwrap_or(bh_value.len());
+    bh_value[..bh_end].replace([' ', '\t'], "")
+}
+
+#[cfg(unix)]
+fn compute_relaxed_body_hash(signed: &[u8]) -> String {
+    use base64::Engine;
+    use sha2::{Digest, Sha256};
+
+    let signed_str = String::from_utf8_lossy(signed);
+    let body_start = signed_str.find("\r\n\r\n").expect("No body separator") + 4;
+    let body = &signed[body_start..];
+
+    let body_str = String::from_utf8_lossy(body);
+    let mut canonical_body = String::new();
+    for line in body_str.split("\r\n") {
+        let trimmed = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        let trimmed = trimmed.trim_end();
+        canonical_body.push_str(trimmed);
+        canonical_body.push_str("\r\n");
+    }
+    while canonical_body.ends_with("\r\n\r\n") {
+        canonical_body.truncate(canonical_body.len() - 2);
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_body.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+}
+
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_delivers_signed_message() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (mut child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    // Read daemon stderr concurrently so the test can later assert the
+    // peer_uid/peer_pid trace lines emitted by the UDS accept loop.
+    let stderr = child.stderr.take().expect("daemon stderr must be piped");
+    let captured_stderr: std::sync::Arc<std::sync::Mutex<String>> =
+        std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let captured_clone = std::sync::Arc::clone(&captured_stderr);
+    let reader_thread = std::thread::spawn(move || {
+        let mut reader = BufReader::new(stderr);
+        let mut line = String::new();
+        while let Ok(n) = reader.read_line(&mut line) {
+            if n == 0 {
+                break;
+            }
+            captured_clone.lock().unwrap().push_str(&line);
+            line.clear();
+        }
+    });
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("E2E Sprint 35")
+        .arg("--body")
+        .arg("Hello from Sprint 35")
+        .output()
+        .expect("aimx send failed to run");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr_out = String::from_utf8_lossy(&output.stderr).to_string();
+
+    assert!(
+        output.status.success(),
+        "aimx send should exit 0; status={:?}, stdout={stdout}, stderr={stderr_out}",
+        output.status
+    );
+    assert!(
+        stderr_out.contains("Email sent.") && stderr_out.contains("Message-ID:"),
+        "stderr should contain 'Email sent.' and 'Message-ID:', got {stderr_out}"
+    );
+    assert!(
+        !stdout.trim().is_empty(),
+        "stdout should echo the Message-ID"
+    );
+
+    // Give the daemon a moment to flush its stderr and the file-drop write.
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let signed = std::fs::read(&mail_drop).expect("mail drop file missing");
+    assert!(
+        signed.starts_with(b"----- AIMX TEST DROP -----\n"),
+        "mail drop should begin with the sentinel header"
+    );
+    let payload = &signed[b"----- AIMX TEST DROP -----\n".len()..];
+    let payload_str = String::from_utf8_lossy(payload);
+
+    assert!(
+        payload_str.contains("DKIM-Signature:"),
+        "captured message must contain DKIM-Signature; got:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("From: alice@agent.example.com"),
+        "captured message must echo the original From header"
+    );
+
+    // Cryptographic DKIM body-hash verification — reuses the same relaxed
+    // canonicalization the Sprint 25 unit test walks through.
+    let signed_header = extract_dkim_bh(payload);
+    let computed = compute_relaxed_body_hash(payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify: signed={signed_header}, computed={computed}"
+    );
+
+    // Stop the daemon cleanly and drain the stderr reader.
+    stop_serve(child);
+    let _ = reader_thread.join();
+
+    let logs = captured_stderr.lock().unwrap();
+    assert!(
+        logs.contains("[send] accepted: peer_uid="),
+        "daemon should log peer_uid for accepted UDS sends; logs:\n{logs}"
+    );
+    assert!(
+        logs.contains("peer_pid="),
+        "daemon should log peer_pid for accepted UDS sends; logs:\n{logs}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn send_without_daemon_reports_missing_socket() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
+    // No `aimx serve` spawned — the UDS will not exist.
+
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("nope")
+        .arg("--body")
+        .arg("nope")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        !output.status.success(),
+        "aimx send must fail when daemon is not running"
+    );
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "missing-socket exit code must be 2"
+    );
+    let stderr_out = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr_out.contains("aimx daemon not running"),
+        "stderr must carry the daemon-not-running message; got: {stderr_out}"
+    );
+}

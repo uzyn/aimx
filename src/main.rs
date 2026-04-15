@@ -16,6 +16,7 @@ mod setup;
 mod smtp;
 mod status;
 mod term;
+mod transport;
 mod verify;
 
 use clap::Parser;

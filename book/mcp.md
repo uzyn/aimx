@@ -111,7 +111,7 @@ Compose and send an email with DKIM signing.
 | `body` | string | yes | Email body text |
 | `attachments` | array of strings | no | File paths to attach |
 
-The email is composed as RFC 5322, DKIM-signed, and delivered directly to the recipient's MX server via SMTP.
+The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
 
 ---
 
