@@ -19,10 +19,8 @@ pub(crate) fn run_verify(
         return Err("`aimx verify` requires root. Run with: sudo aimx verify".into());
     }
 
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir).ok(),
-        None => Config::load_default().ok(),
-    };
+    let _ = data_dir;
+    let config = Config::load_resolved().ok();
 
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
     let net = setup::RealNetworkOps::from_verify_host(host)?;
@@ -299,6 +297,9 @@ mod tests {
         }
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
+        }
+        fn create_system_group(&self, _name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+            Ok(false)
         }
     }
 

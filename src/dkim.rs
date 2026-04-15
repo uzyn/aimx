@@ -7,38 +7,88 @@ use std::path::Path;
 
 const DKIM_KEY_BITS: usize = 2048;
 
-pub fn generate_keypair(data_dir: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
-    let dkim_dir = data_dir.join("dkim");
-    let private_path = dkim_dir.join("private.key");
-    let public_path = dkim_dir.join("public.key");
+/// Resolve `<dkim_root>/{private,public}.key`.
+///
+/// `dkim_root` is treated as the directory containing the DKIM keys
+/// themselves — callers should pass `config_dir().join("dkim")` for the
+/// v0.2 layout. The legacy `<data_dir>/dkim` layout is no longer written
+/// by any production path; only tests now supply arbitrary tempdir roots.
+fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    (dkim_root.join("private.key"), dkim_root.join("public.key"))
+}
+
+/// Generate a 2048-bit RSA DKIM keypair at `<dkim_root>/{private,public}.key`.
+///
+/// v0.2 permissions (Sprint 33 S33-3):
+/// - Private key: `0o600` (root-only; `aimx serve` reads it in-process)
+/// - Public key:  `0o644` (world-readable — it's advertised via DNS)
+///
+/// On Unix the files are created atomically with their target mode via
+/// `OpenOptions::mode(...).create_new(true)` to avoid a brief window of
+/// umask-default permissions between `write` and `chmod`.
+pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let (private_path, public_path) = dkim_paths(dkim_root);
 
     if private_path.exists() && !force {
         return Err("DKIM keys already exist. Use --force to overwrite.".into());
     }
 
-    std::fs::create_dir_all(&dkim_dir)?;
+    std::fs::create_dir_all(dkim_root)?;
+
+    // Force-overwrite path: remove pre-existing files so `create_new(true)`
+    // succeeds with the tightened mode. (Otherwise `OpenOptions` would
+    // fail with `AlreadyExists` and leave the old file at its old mode.)
+    if force {
+        for p in [&private_path, &public_path] {
+            if p.exists() {
+                std::fs::remove_file(p)?;
+            }
+        }
+    }
 
     let mut rng = rsa::rand_core::OsRng;
     let private_key = RsaPrivateKey::new(&mut rng, DKIM_KEY_BITS)?;
 
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
-    std::fs::write(&private_path, private_pem.as_bytes())?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o644))?;
-    }
+    write_file_with_mode(&private_path, private_pem.as_bytes(), 0o600)?;
 
     let public_key = RsaPublicKey::from(&private_key);
     let public_pem = public_key.to_public_key_pem(LineEnding::LF)?;
-    std::fs::write(&public_path, public_pem.as_bytes())?;
+    write_file_with_mode(&public_path, public_pem.as_bytes(), 0o644)?;
 
     Ok(())
 }
 
-pub fn dns_record_value(data_dir: &Path) -> Result<String, Box<dyn std::error::Error>> {
-    let public_path = data_dir.join("dkim/public.key");
+/// Create `path` with `bytes` as contents and the given Unix mode applied
+/// atomically at open time (no umask-default window between write and
+/// chmod). On non-Unix the mode is ignored and a plain `fs::write` is used.
+fn write_file_with_mode(
+    path: &Path,
+    bytes: &[u8],
+    mode: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(mode)
+            .open(path)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        std::fs::write(path, bytes)?;
+    }
+    Ok(())
+}
+
+pub fn dns_record_value(dkim_root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let (_, public_path) = dkim_paths(dkim_root);
     let pem = std::fs::read_to_string(&public_path)
         .map_err(|_| "DKIM public key not found. Run `aimx dkim-keygen` first.")?;
 
@@ -56,13 +106,30 @@ pub fn dns_record_value(data_dir: &Path) -> Result<String, Box<dyn std::error::E
     Ok(format!("v=DKIM1; k=rsa; p={b64}"))
 }
 
-pub fn load_private_key(data_dir: &Path) -> Result<RsaPrivateKey, Box<dyn std::error::Error>> {
-    let private_path = data_dir.join("dkim/private.key");
+/// Load the RSA DKIM private key from `<dkim_root>/private.key`.
+///
+/// v0.2 (Sprint 33 S33-3) tightened the private key to `0o600`. When a
+/// non-root process hits `PermissionDenied`, the error message steers
+/// the caller back to `aimx send` (which in Sprint 34 delegates to the
+/// `aimx serve` UDS socket for DKIM signing) rather than suggesting a
+/// permissions hack.
+pub fn load_private_key(dkim_root: &Path) -> Result<RsaPrivateKey, Box<dyn std::error::Error>> {
+    let (private_path, _) = dkim_paths(dkim_root);
     let pem = std::fs::read_to_string(&private_path).map_err(|e| {
-        format!(
-            "DKIM private key not found at {}: {e}. Run `aimx dkim-keygen` first.",
-            private_path.display()
-        )
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            format!(
+                "DKIM private key is readable only by root. \
+                 This command must be invoked by `aimx serve` (root) — \
+                 non-root processes must submit mail via `aimx send` instead. \
+                 (path: {})",
+                private_path.display()
+            )
+        } else {
+            format!(
+                "DKIM private key not found at {}: {e}. Run `aimx dkim-keygen` first.",
+                private_path.display()
+            )
+        }
     })?;
 
     let key = rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(&pem)?;
@@ -116,12 +183,12 @@ pub fn sign_message(
 }
 
 pub fn run_keygen(
-    data_dir: &Path,
+    dkim_root: &Path,
     domain: &str,
     selector: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let private_path = data_dir.join("dkim/private.key");
+    let (private_path, _) = dkim_paths(dkim_root);
     let already_existed = private_path.exists() && !force;
 
     if already_existed {
@@ -130,10 +197,10 @@ pub fn run_keygen(
             term::warn("Warning:")
         );
     } else {
-        generate_keypair(data_dir, force)?;
+        generate_keypair(dkim_root, force)?;
     }
 
-    let record = dns_record_value(data_dir)?;
+    let record = dns_record_value(dkim_root)?;
 
     if !already_existed {
         println!("{}", term::success("DKIM keypair generated successfully."));
@@ -161,8 +228,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         generate_keypair(tmp.path(), false).unwrap();
 
-        let private_pem = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
-        let public_pem = std::fs::read_to_string(tmp.path().join("dkim/public.key")).unwrap();
+        let private_pem = std::fs::read_to_string(tmp.path().join("private.key")).unwrap();
+        let public_pem = std::fs::read_to_string(tmp.path().join("public.key")).unwrap();
 
         let private_key: RsaPrivateKey =
             rsa::pkcs1::DecodeRsaPrivateKey::from_pkcs1_pem(&private_pem).unwrap();
@@ -188,11 +255,11 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         generate_keypair(tmp.path(), false).unwrap();
 
-        let original = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+        let original = std::fs::read_to_string(tmp.path().join("private.key")).unwrap();
 
         generate_keypair(tmp.path(), true).unwrap();
 
-        let new = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+        let new = std::fs::read_to_string(tmp.path().join("private.key")).unwrap();
 
         assert_ne!(original, new);
     }
@@ -235,8 +302,41 @@ mod tests {
             "Error should mention 'not found': {err}"
         );
         assert!(
-            err.contains("dkim/private.key"),
+            err.contains("private.key"),
             "Error should include the file path: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_private_key_permission_denied_surfaces_root_guidance() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip this test when running as root — `chmod 0o000` is bypassed
+        // by CAP_DAC_READ_SEARCH / euid 0, so we can't force PermissionDenied.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: test must run as non-root");
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let private_path = tmp.path().join("private.key");
+        std::fs::write(&private_path, b"fake pem").unwrap();
+        std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = load_private_key(tmp.path());
+        // Always restore mode so TempDir cleanup can succeed.
+        let _ = std::fs::set_permissions(&private_path, std::fs::Permissions::from_mode(0o600));
+
+        let err = result.expect_err("load_private_key should fail on 0o000 file");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("readable only by root"),
+            "PermissionDenied path must surface the root-only guidance: {msg}"
+        );
+        assert!(
+            msg.contains("aimx send"),
+            "PermissionDenied guidance must redirect non-root callers to `aimx send`: {msg}"
         );
     }
 
@@ -275,32 +375,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn private_key_has_readable_permissions() {
+    fn private_key_has_restricted_permissions() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
         generate_keypair(tmp.path(), false).unwrap();
 
-        let metadata = std::fs::metadata(tmp.path().join("dkim/private.key")).unwrap();
+        let metadata = std::fs::metadata(tmp.path().join("private.key")).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644);
+        assert_eq!(
+            mode, 0o600,
+            "v0.2: DKIM private key must be root-only (0o600) — \
+             Sprint 33 reverses the 0o644 relaxation from Sprint 25 \
+             because signing moves inside the `aimx serve` daemon."
+        );
     }
 
     #[cfg(unix)]
     #[test]
-    fn generate_keypair_sets_644_file_mode() {
+    fn public_key_is_world_readable() {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = TempDir::new().unwrap();
         generate_keypair(tmp.path(), false).unwrap();
 
-        let private_path = tmp.path().join("dkim/private.key");
-        assert!(private_path.exists());
-        let metadata = std::fs::metadata(&private_path).unwrap();
+        let public_path = tmp.path().join("public.key");
+        let metadata = std::fs::metadata(&public_path).unwrap();
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o644,
-            "DKIM private key should be globally readable (0o644)"
+            "DKIM public key is advertised via DNS and must stay world-readable"
         );
     }
 

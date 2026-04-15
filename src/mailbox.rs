@@ -8,10 +8,7 @@ pub fn run(
     cmd: MailboxCommand,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)?,
-        None => Config::load_default()?,
-    };
+    let config = Config::load_resolved_with_data_dir(data_dir)?;
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),
@@ -56,8 +53,7 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         },
     );
 
-    let config_path = Config::config_path(&config.data_dir);
-    config.save(&config_path)?;
+    config.save(&crate::config::config_path())?;
 
     Ok(())
 }
@@ -92,8 +88,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     let mut config = config.clone();
     config.mailboxes.remove(name);
 
-    let config_path = Config::config_path(&config.data_dir);
-    config.save(&config_path)?;
+    config.save(&crate::config::config_path())?;
 
     Ok(())
 }
@@ -164,6 +159,7 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_env::ConfigDirOverride;
     use crate::config::{Config, MailboxConfig};
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -189,22 +185,26 @@ mod tests {
         }
     }
 
-    fn setup_config_file(config: &Config) {
+    /// Point `AIMX_CONFIG_DIR` at `tmp`, create the storage dir, and write
+    /// `config.toml` to the resolved location. Returns the override guard
+    /// which must be kept alive for the duration of the test.
+    fn setup_config_file(tmp: &Path, config: &Config) -> ConfigDirOverride {
         std::fs::create_dir_all(&config.data_dir).unwrap();
-        let path = Config::config_path(&config.data_dir);
-        config.save(&path).unwrap();
+        let guard = ConfigDirOverride::set(tmp);
+        config.save(&crate::config::config_path()).unwrap();
+        guard
     }
 
     #[test]
     fn create_new_mailbox() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         create_mailbox(&config, "alice").unwrap();
 
         assert!(tmp.path().join("alice").is_dir());
-        let reloaded = Config::load_from_data_dir(tmp.path()).unwrap();
+        let reloaded = Config::load_resolved().unwrap();
         assert!(reloaded.mailboxes.contains_key("alice"));
         assert_eq!(reloaded.mailboxes["alice"].address, "alice@test.com");
     }
@@ -213,7 +213,7 @@ mod tests {
     fn create_duplicate_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = create_mailbox(&config, "catchall");
         assert!(result.is_err());
@@ -224,7 +224,7 @@ mod tests {
     fn list_shows_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
         std::fs::write(tmp.path().join("catchall/2025-01-01-001.md"), "test").unwrap();
@@ -240,16 +240,16 @@ mod tests {
     fn delete_mailbox_works() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         create_mailbox(&config, "alice").unwrap();
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
 
         delete_mailbox(&config, "alice").unwrap();
 
         assert!(!tmp.path().join("alice").exists());
-        let reloaded = Config::load_from_data_dir(tmp.path()).unwrap();
+        let reloaded = Config::load_resolved().unwrap();
         assert!(!reloaded.mailboxes.contains_key("alice"));
     }
 
@@ -257,7 +257,7 @@ mod tests {
     fn delete_catchall_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = delete_mailbox(&config, "catchall");
         assert!(result.is_err());
@@ -268,7 +268,7 @@ mod tests {
     fn delete_nonexistent_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = delete_mailbox(&config, "nonexistent");
         assert!(result.is_err());
@@ -288,7 +288,7 @@ mod tests {
     fn create_empty_name_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = create_mailbox(&config, "");
         assert!(result.is_err());
@@ -299,7 +299,7 @@ mod tests {
     fn create_path_traversal_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = create_mailbox(&config, "../etc");
         assert!(result.is_err());
@@ -310,7 +310,7 @@ mod tests {
     fn create_with_slash_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = create_mailbox(&config, "foo/bar");
         assert!(result.is_err());
@@ -321,7 +321,7 @@ mod tests {
     fn create_with_backslash_fails() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        setup_config_file(&config);
+        let _guard = setup_config_file(tmp.path(), &config);
 
         let result = create_mailbox(&config, "foo\\bar");
         assert!(result.is_err());
