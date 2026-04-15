@@ -35,8 +35,17 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' already exists").into());
     }
 
-    let mailbox_dir = config.mailbox_dir(name);
-    std::fs::create_dir_all(&mailbox_dir)?;
+    // Sprint 36: a mailbox lives in both `inbox/<name>/` and
+    // `sent/<name>/`. Create them atomically — if the second one fails,
+    // clean up the first so we never leave half a mailbox on disk.
+    let inbox = config.inbox_dir(name);
+    std::fs::create_dir_all(&inbox)?;
+
+    let sent = config.sent_dir(name);
+    if let Err(e) = std::fs::create_dir_all(&sent) {
+        let _ = std::fs::remove_dir_all(&inbox);
+        return Err(e.into());
+    }
 
     let mut config = config.clone();
     config.mailboxes.insert(
@@ -59,7 +68,7 @@ pub fn list_mailboxes(config: &Config) -> Vec<(String, usize)> {
         .mailboxes
         .keys()
         .map(|name| {
-            let count = count_messages(&config.mailbox_dir(name));
+            let count = count_messages(&config.inbox_dir(name));
             (name.clone(), count)
         })
         .collect();
@@ -76,9 +85,14 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
-    let mailbox_dir = config.mailbox_dir(name);
-    if mailbox_dir.exists() {
-        std::fs::remove_dir_all(&mailbox_dir)?;
+    // Sprint 36: remove both inbox and sent directories.
+    let inbox = config.inbox_dir(name);
+    if inbox.exists() {
+        std::fs::remove_dir_all(&inbox)?;
+    }
+    let sent = config.sent_dir(name);
+    if sent.exists() {
+        std::fs::remove_dir_all(&sent)?;
     }
 
     let mut config = config.clone();
@@ -89,15 +103,29 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-fn count_messages(dir: &Path) -> usize {
-    std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-                .count()
-        })
-        .unwrap_or(0)
+/// Count emails in a mailbox directory. Each flat `<stem>.md` counts as
+/// one, and each bundle directory containing `<stem>.md` counts as one.
+/// Stray files or non-bundle directories are ignored.
+pub fn count_messages(dir: &Path) -> usize {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return 0,
+    };
+
+    let mut total = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(stem) = path.file_name().and_then(|f| f.to_str())
+                && path.join(format!("{stem}.md")).exists()
+            {
+                total += 1;
+            }
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            total += 1;
+        }
+    }
+    total
 }
 
 fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -199,10 +227,31 @@ mod tests {
 
         create_mailbox(&config, "alice").unwrap();
 
-        assert!(tmp.path().join("alice").is_dir());
+        // Sprint 36: both `inbox/<name>/` and `sent/<name>/` exist.
+        assert!(tmp.path().join("inbox").join("alice").is_dir());
+        assert!(tmp.path().join("sent").join("alice").is_dir());
         let reloaded = Config::load_resolved().unwrap();
         assert!(reloaded.mailboxes.contains_key("alice"));
         assert_eq!(reloaded.mailboxes["alice"].address, "alice@test.com");
+    }
+
+    #[test]
+    fn create_mailbox_is_idempotent_for_dirs_when_config_race_prevented() {
+        // If the config-registration side-steps the duplicate check, the
+        // create_dir_all calls are idempotent. This is an internal contract
+        // test — callers should rely on `create_mailbox` itself to fail
+        // duplicate registrations via the HashMap check.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = setup_config_file(tmp.path(), &config);
+
+        create_mailbox(&config, "alice").unwrap();
+        // Re-creating via a fresh Config (as if registration rolled back)
+        // must not error — dir creation is idempotent.
+        let fresh = test_config(tmp.path());
+        create_mailbox(&fresh, "alice").unwrap();
+        assert!(tmp.path().join("inbox").join("alice").is_dir());
+        assert!(tmp.path().join("sent").join("alice").is_dir());
     }
 
     #[test]
@@ -222,14 +271,35 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
-        std::fs::write(tmp.path().join("catchall/2025-01-01-001.md"), "test").unwrap();
-        std::fs::write(tmp.path().join("catchall/2025-01-01-002.md"), "test").unwrap();
+        let inbox_catchall = tmp.path().join("inbox").join("catchall");
+        std::fs::create_dir_all(&inbox_catchall).unwrap();
+        std::fs::write(inbox_catchall.join("2025-01-01-120000-a.md"), "test").unwrap();
+        std::fs::write(inbox_catchall.join("2025-01-01-120001-b.md"), "test").unwrap();
 
         let result = list_mailboxes(&config);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "catchall");
         assert_eq!(result[0].1, 2);
+    }
+
+    #[test]
+    fn list_counts_bundle_directories() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = setup_config_file(tmp.path(), &config);
+
+        let inbox_catchall = tmp.path().join("inbox").join("catchall");
+        std::fs::create_dir_all(&inbox_catchall).unwrap();
+        // A flat email.
+        std::fs::write(inbox_catchall.join("2025-01-01-120000-flat.md"), "x").unwrap();
+        // A bundle email.
+        let bundle = inbox_catchall.join("2025-01-01-120001-bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("2025-01-01-120001-bundle.md"), "x").unwrap();
+        std::fs::write(bundle.join("att.txt"), "att").unwrap();
+
+        let result = list_mailboxes(&config);
+        assert_eq!(result[0].1, 2, "bundle and flat each count once");
     }
 
     #[test]
@@ -244,7 +314,9 @@ mod tests {
 
         delete_mailbox(&config, "alice").unwrap();
 
-        assert!(!tmp.path().join("alice").exists());
+        // Both inbox and sent directories must be gone.
+        assert!(!tmp.path().join("inbox").join("alice").exists());
+        assert!(!tmp.path().join("sent").join("alice").exists());
         let reloaded = Config::load_resolved().unwrap();
         assert!(!reloaded.mailboxes.contains_key("alice"));
     }
@@ -257,7 +329,12 @@ mod tests {
 
         let result = delete_mailbox(&config, "catchall");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Cannot delete"));
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Cannot delete"));
+        assert!(
+            err.contains("catchall"),
+            "error should mention catchall: {err}"
+        );
     }
 
     #[test]

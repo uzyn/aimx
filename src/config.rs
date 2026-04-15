@@ -133,8 +133,28 @@ impl Config {
         Ok(cfg)
     }
 
+    /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
+    ///
+    /// Since Sprint 36 the datadir splits inbound mail into `inbox/` and
+    /// outbound sent copies into `sent/`. `mailbox_dir` remains a shorthand
+    /// for the inbox path (which is what every legacy reader cared about);
+    /// callers that want the outbound side use [`Config::sent_dir`].
     pub fn mailbox_dir(&self, name: &str) -> PathBuf {
-        self.data_dir.join(name)
+        self.inbox_dir(name)
+    }
+
+    /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
+    pub fn inbox_dir(&self, name: &str) -> PathBuf {
+        self.data_dir.join("inbox").join(name)
+    }
+
+    /// Path to a mailbox's sent directory (`<data_dir>/sent/<name>/`).
+    ///
+    /// Sent storage is populated by `aimx serve` in Sprint 38; the directory
+    /// is still created on `mailbox create` so the layout is consistent
+    /// from day one.
+    pub fn sent_dir(&self, name: &str) -> PathBuf {
+        self.data_dir.join("sent").join(name)
     }
 
     pub fn resolve_mailbox(&self, local_part: &str) -> String {
@@ -330,7 +350,20 @@ address = "*@test.com"
         let config: Config = toml::from_str(sample_toml()).unwrap();
         assert_eq!(
             config.mailbox_dir("support"),
-            PathBuf::from("/tmp/aimx-test/support")
+            PathBuf::from("/tmp/aimx-test/inbox/support")
+        );
+    }
+
+    #[test]
+    fn inbox_and_sent_dirs() {
+        let config: Config = toml::from_str(sample_toml()).unwrap();
+        assert_eq!(
+            config.inbox_dir("support"),
+            PathBuf::from("/tmp/aimx-test/inbox/support")
+        );
+        assert_eq!(
+            config.sent_dir("support"),
+            PathBuf::from("/tmp/aimx-test/sent/support")
         );
     }
 

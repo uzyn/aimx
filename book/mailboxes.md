@@ -4,9 +4,25 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 
 ## Concepts
 
-- **Mailboxes are directories.** Creating a mailbox creates a folder and registers an address. No OS users, no passwords, no database.
-- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain.
+- **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
+- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only — no `sent/catchall/` directory is created.
 - **No restart required.** Mailbox changes take effect immediately -- `aimx ingest` reads the config on each invocation.
+
+### On-disk layout
+
+```
+/var/lib/aimx/
+├── inbox/              # inbound mail lives here
+│   ├── catchall/
+│   └── support/
+└── sent/               # outbound sent copies (populated in a future release)
+    └── support/
+```
+
+Each email is stored as either a flat `YYYY-MM-DD-HHMMSS-<slug>.md` file
+when it has zero attachments, or as a Zola-style bundle directory
+`YYYY-MM-DD-HHMMSS-<slug>/` containing `<stem>.md` plus every attachment
+as a sibling file when attachments are present.
 
 ### Routing logic
 
@@ -25,7 +41,10 @@ For example, with mailboxes `support` and `catchall` configured:
 aimx mailbox create support
 ```
 
-This creates `support@agent.yourdomain.com` and the directory `/var/lib/aimx/support/`.
+This creates `support@agent.yourdomain.com` and both directories:
+`/var/lib/aimx/inbox/support/` (for incoming mail) and
+`/var/lib/aimx/sent/support/` (for outbound copies). Deletion removes
+both; `catchall` cannot be deleted.
 
 ### List mailboxes
 
@@ -75,7 +94,7 @@ This format is designed to be agent-readable without parsing libraries. An agent
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | string | Unique email ID within the mailbox (e.g. `2025-01-15-001`) |
+| `id` | string | Unique email ID within the mailbox (the filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `message_id` | string | RFC 5322 Message-ID header |
 | `from` | string | Sender address with optional display name |
 | `to` | string | Recipient address |
@@ -97,12 +116,14 @@ This format is designed to be agent-readable without parsing libraries. An agent
 
 ## Attachments
 
-Attachments are extracted to an `attachments/` subdirectory within the mailbox folder:
+When an email carries one or more attachments, AIMX writes a Zola-style
+bundle directory whose name matches the `.md` file's stem:
 
 ```
-/var/lib/aimx/support/
-├── 2025-01-15-001.md
-└── attachments/
+/var/lib/aimx/inbox/support/
+├── 2025-01-15-103000-status-update.md         # flat: no attachments
+└── 2025-01-15-104500-quarterly-report/        # bundle: one or more attachments
+    ├── 2025-01-15-104500-quarterly-report.md
     ├── report.pdf
     └── image.png
 ```
@@ -114,15 +135,15 @@ Attachment metadata is stored in the email frontmatter:
 filename = "report.pdf"
 content_type = "application/pdf"
 size = 45230
-path = "attachments/report.pdf"
+path = "report.pdf"
 ```
 
 | Field | Description |
 |-------|-------------|
-| `filename` | Original filename |
+| `filename` | Original filename (path components stripped, duplicates suffixed `-1`, `-2`, …) |
 | `content_type` | MIME type |
 | `size` | File size in bytes |
-| `path` | Relative path from the mailbox directory |
+| `path` | Path relative to the bundle directory (no `attachments/` prefix in v0.2) |
 
 ## Read/unread tracking
 
@@ -177,7 +198,12 @@ The `email_reply` MCP tool handles threading automatically -- it reads the origi
 
 ## Email ID format
 
-Each email receives a unique ID within its mailbox in the format `YYYY-MM-DD-NNN` (e.g. `2025-01-15-001`). The counter increments atomically per mailbox to prevent collisions.
+Each email's `id` field is the filename stem
+`YYYY-MM-DD-HHMMSS-<slug>` in UTC. The slug is derived from the subject:
+lowercase, non-alphanumeric runs collapsed to `-`, trimmed, capped at 20
+characters, with `no-subject` as a fallback for empty results. Two emails
+with the same subject in the same UTC second have `-2`, `-3`, … appended
+to disambiguate.
 
 ---
 

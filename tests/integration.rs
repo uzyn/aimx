@@ -11,8 +11,9 @@ fn setup_test_env(tmp: &Path) -> String {
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n",
         tmp.display()
     );
-    std::fs::create_dir_all(tmp.join("catchall")).unwrap();
-    std::fs::create_dir_all(tmp.join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     // Sprint 34: `aimx serve` loads the DKIM private key at startup and
@@ -62,12 +63,49 @@ fn get_toml_str<'a>(table: &'a toml::Table, key: &str) -> &'a str {
 }
 
 fn find_md_files(dir: &Path) -> Vec<std::path::PathBuf> {
-    std::fs::read_dir(dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "md"))
-        .collect()
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            // Zola-style bundle: `<stem>/<stem>.md`.
+            if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
+                let md = path.join(format!("{stem}.md"));
+                if md.exists() {
+                    out.push(md);
+                }
+            }
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Resolve the inbox directory for a mailbox under a test tempdir.
+fn inbox(tmp: &Path, name: &str) -> std::path::PathBuf {
+    tmp.join("inbox").join(name)
+}
+
+/// Search every bundle directory under `mailbox_dir` for an attachment
+/// named `name`. Returns the first match — tests only create one email
+/// with attachments per setup.
+fn find_attachment(mailbox_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
+    let entries = std::fs::read_dir(mailbox_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let candidate = path.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
 }
 
 #[test]
@@ -114,7 +152,7 @@ fn ingest_plain_fixture_full_pipeline() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
@@ -144,7 +182,7 @@ fn ingest_html_fixture_full_pipeline() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
@@ -171,7 +209,7 @@ fn ingest_multipart_fixture_full_pipeline() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
     let content = std::fs::read_to_string(&md_files[0]).unwrap();
@@ -194,10 +232,11 @@ fn ingest_attachment_fixture_full_pipeline() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
-    let att_path = tmp.path().join("catchall/attachments/readme.txt");
+    let att_path = find_attachment(&inbox(tmp.path(), "catchall"), "readme.txt")
+        .expect("readme.txt attachment missing from bundle");
     assert!(att_path.exists());
     let att_content = std::fs::read_to_string(&att_path).unwrap();
     assert!(att_content.contains("This is the content of the attached file."));
@@ -208,6 +247,9 @@ fn ingest_attachment_fixture_full_pipeline() {
     assert_eq!(attachments.len(), 1);
     let att = attachments[0].as_table().unwrap();
     assert_eq!(att.get("filename").unwrap().as_str().unwrap(), "readme.txt");
+    // Bundle-relative path: attachment sits beside the `.md` with no
+    // `attachments/` prefix after Sprint 36.
+    assert_eq!(att.get("path").unwrap().as_str().unwrap(), "readme.txt");
 }
 
 #[test]
@@ -225,10 +267,10 @@ fn ingest_routes_to_named_mailbox() {
         .assert()
         .success();
 
-    let alice_files = find_md_files(&tmp.path().join("alice"));
+    let alice_files = find_md_files(&inbox(tmp.path(), "alice"));
     assert_eq!(alice_files.len(), 1);
 
-    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    let catchall_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(catchall_files.len(), 0);
 }
 
@@ -247,7 +289,7 @@ fn ingest_unknown_routes_to_catchall() {
         .assert()
         .success();
 
-    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    let catchall_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(catchall_files.len(), 1);
 }
 
@@ -265,7 +307,7 @@ fn ingest_via_env_var() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 }
 
@@ -524,7 +566,7 @@ fn mcp_mailbox_create_list_delete() {
         text.contains("created"),
         "Expected creation message, got: {text}"
     );
-    assert!(tmp.path().join("support").is_dir());
+    assert!(inbox(tmp.path(), "support").is_dir());
 
     let resp = client.call_tool("mailbox_list", serde_json::json!({}));
     let text = get_tool_text(&resp);
@@ -535,7 +577,7 @@ fn mcp_mailbox_create_list_delete() {
     let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
     let text = get_tool_text(&resp);
     assert!(text.contains("deleted"));
-    assert!(!tmp.path().join("support").exists());
+    assert!(!inbox(tmp.path(), "support").exists());
 
     client.shutdown();
 }
@@ -569,7 +611,7 @@ fn mcp_email_list_and_read() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     create_email_file(
         &alice_dir,
         "2025-06-01-001",
@@ -652,7 +694,7 @@ fn mcp_email_mark_read_unread() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     create_email_file(
         &alice_dir,
         "2025-06-01-001",
@@ -671,7 +713,8 @@ fn mcp_email_mark_read_unread() {
     let text = get_tool_text(&resp);
     assert!(text.contains("marked as read"));
 
-    let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+    let content =
+        std::fs::read_to_string(inbox(tmp.path(), "alice").join("2025-06-01-001.md")).unwrap();
     assert!(content.contains("read = true"));
 
     let resp = client.call_tool(
@@ -681,7 +724,8 @@ fn mcp_email_mark_read_unread() {
     let text = get_tool_text(&resp);
     assert!(text.contains("marked as unread"));
 
-    let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+    let content =
+        std::fs::read_to_string(inbox(tmp.path(), "alice").join("2025-06-01-001.md")).unwrap();
     assert!(content.contains("read = false"));
 
     client.shutdown();
@@ -762,7 +806,7 @@ command = "touch {}"
         tmp.display(),
         trigger_marker.display()
     );
-    std::fs::create_dir_all(tmp.join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     config_path.to_string_lossy().to_string()
@@ -784,7 +828,7 @@ fn ingest_trigger_executes_on_delivery() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
     assert!(
         marker.exists(),
@@ -808,7 +852,7 @@ command = "false"
 "#,
         tmp.path().display()
     );
-    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
@@ -822,7 +866,7 @@ command = "false"
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(
         md_files.len(),
         1,
@@ -849,7 +893,7 @@ command = "touch {}"
         tmp.path().display(),
         marker.display()
     );
-    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
@@ -863,7 +907,7 @@ command = "touch {}"
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1, "Email should still be saved");
     assert!(
         !marker.exists(),
@@ -890,7 +934,7 @@ command = "touch {}"
         tmp.path().display(),
         marker.display()
     );
-    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
@@ -904,7 +948,7 @@ command = "touch {}"
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
     assert!(
         marker.exists(),
@@ -927,7 +971,7 @@ fn ingest_frontmatter_contains_dkim_spf() {
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
     let parsed = read_frontmatter(&md_files[0]);
@@ -966,7 +1010,7 @@ command = "touch {}"
         tmp.path().display(),
         marker.display()
     );
-    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
@@ -980,7 +1024,7 @@ command = "touch {}"
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
     assert!(
         marker.exists(),
@@ -1017,7 +1061,7 @@ command = "false"
         data_dir = tmp.path().display(),
         marker = marker.display()
     );
-    std::fs::create_dir_all(tmp.path().join("catchall")).unwrap();
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
 
     let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
@@ -1031,7 +1075,7 @@ command = "false"
         .assert()
         .success();
 
-    let md_files = find_md_files(&tmp.path().join("catchall"));
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(
         md_files.len(),
         1,
@@ -1240,7 +1284,7 @@ fn serve_e2e_receive_email_and_shutdown() {
     // Allow ingest to complete
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     let md_files = find_md_files(&alice_dir);
     assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
 
@@ -1307,8 +1351,8 @@ fn serve_e2e_multi_recipient() {
 
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_files = find_md_files(&tmp.path().join("alice"));
-    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    let alice_files = find_md_files(&inbox(tmp.path(), "alice"));
+    let catchall_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
     assert_eq!(
         catchall_files.len(),
@@ -1377,9 +1421,11 @@ fn setup_test_env_with_bob(tmp: &Path) -> String {
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\n",
         tmp.display()
     );
-    std::fs::create_dir_all(tmp.join("catchall")).unwrap();
-    std::fs::create_dir_all(tmp.join("alice")).unwrap();
-    std::fs::create_dir_all(tmp.join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("bob")).unwrap();
+    std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("sent").join("bob")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     // Sprint 34: `aimx serve` requires the DKIM private key at startup.
@@ -1472,11 +1518,12 @@ fn serve_e2e_single_attachment() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     let md_files = find_md_files(&alice_dir);
     assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
 
-    let att_path = alice_dir.join("attachments").join("report.txt");
+    let att_path =
+        find_attachment(&alice_dir, "report.txt").expect("report.txt missing from bundle");
     assert!(att_path.exists(), "Attachment file should exist on disk");
     let att_content = std::fs::read_to_string(&att_path).unwrap();
     assert!(
@@ -1490,7 +1537,7 @@ fn serve_e2e_single_attachment() {
     assert_eq!(attachments.len(), 1, "Expected 1 attachment in frontmatter");
     let att = attachments[0].as_table().unwrap();
     assert_eq!(get_toml_str(att, "filename"), "report.txt");
-    assert_eq!(get_toml_str(att, "path"), "attachments/report.txt");
+    assert_eq!(get_toml_str(att, "path"), "report.txt");
     assert!(att.get("size").unwrap().as_integer().unwrap() > 0);
 
     let content = std::fs::read_to_string(&md_files[0]).unwrap();
@@ -1545,28 +1592,21 @@ fn serve_e2e_multiple_attachments() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     let md_files = find_md_files(&alice_dir);
     assert_eq!(md_files.len(), 1, "Expected 1 email in alice mailbox");
 
-    let att_dir = alice_dir.join("attachments");
-    assert!(
-        att_dir.join("notes.txt").exists(),
-        "notes.txt should exist on disk"
-    );
-    assert!(
-        att_dir.join("data.csv").exists(),
-        "data.csv should exist on disk"
-    );
-    assert!(
-        att_dir.join("image.png").exists(),
-        "image.png should exist on disk"
-    );
+    let notes_path = find_attachment(&alice_dir, "notes.txt").expect("notes.txt missing");
+    let csv_path = find_attachment(&alice_dir, "data.csv").expect("data.csv missing");
+    let image_path = find_attachment(&alice_dir, "image.png").expect("image.png missing");
+    assert!(notes_path.exists());
+    assert!(csv_path.exists());
+    assert!(image_path.exists());
 
-    let notes = std::fs::read_to_string(att_dir.join("notes.txt")).unwrap();
+    let notes = std::fs::read_to_string(&notes_path).unwrap();
     assert!(notes.contains("Meeting notes"));
 
-    let csv = std::fs::read_to_string(att_dir.join("data.csv")).unwrap();
+    let csv = std::fs::read_to_string(&csv_path).unwrap();
     assert!(csv.contains("alpha,1"));
 
     let fm = read_frontmatter(&md_files[0]);
@@ -1628,13 +1668,15 @@ fn serve_e2e_attachment_multi_recipient() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_dir = tmp.path().join("alice");
-    let catchall_dir = tmp.path().join("catchall");
+    let alice_dir = inbox(tmp.path(), "alice");
+    let catchall_dir = inbox(tmp.path(), "catchall");
     assert_eq!(find_md_files(&alice_dir).len(), 1);
     assert_eq!(find_md_files(&catchall_dir).len(), 1);
 
-    let alice_att = alice_dir.join("attachments").join("shared.txt");
-    let catchall_att = catchall_dir.join("attachments").join("shared.txt");
+    let alice_att =
+        find_attachment(&alice_dir, "shared.txt").expect("alice bundle missing shared.txt");
+    let catchall_att =
+        find_attachment(&catchall_dir, "shared.txt").expect("catchall bundle missing shared.txt");
     assert!(alice_att.exists(), "alice should have attachment");
     assert!(catchall_att.exists(), "catchall should have attachment");
 
@@ -1672,8 +1714,8 @@ fn serve_e2e_cc_recipients() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_files = find_md_files(&tmp.path().join("alice"));
-    let bob_files = find_md_files(&tmp.path().join("bob"));
+    let alice_files = find_md_files(&inbox(tmp.path(), "alice"));
+    let bob_files = find_md_files(&inbox(tmp.path(), "bob"));
     assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
     assert_eq!(bob_files.len(), 1, "Expected 1 email in bob mailbox");
 
@@ -1721,8 +1763,8 @@ fn serve_e2e_bcc_recipients() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_files = find_md_files(&tmp.path().join("alice"));
-    let bob_files = find_md_files(&tmp.path().join("bob"));
+    let alice_files = find_md_files(&inbox(tmp.path(), "alice"));
+    let bob_files = find_md_files(&inbox(tmp.path(), "bob"));
     assert_eq!(alice_files.len(), 1, "Expected 1 email in alice mailbox");
     assert_eq!(bob_files.len(), 1, "Expected 1 email in bob (BCC) mailbox");
 
@@ -1788,9 +1830,9 @@ fn serve_e2e_to_cc_bcc_combined() {
     );
     std::thread::sleep(std::time::Duration::from_millis(500));
 
-    let alice_files = find_md_files(&tmp.path().join("alice"));
-    let bob_files = find_md_files(&tmp.path().join("bob"));
-    let catchall_files = find_md_files(&tmp.path().join("catchall"));
+    let alice_files = find_md_files(&inbox(tmp.path(), "alice"));
+    let bob_files = find_md_files(&inbox(tmp.path(), "bob"));
+    let catchall_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(alice_files.len(), 1, "Expected 1 email in alice (To)");
     assert_eq!(bob_files.len(), 1, "Expected 1 email in bob (CC)");
     assert_eq!(

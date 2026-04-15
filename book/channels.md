@@ -55,15 +55,22 @@ The following variables are available in `command` strings:
 
 | Variable | Description | Example |
 |----------|-------------|---------|
-| `{filepath}` | Full path to the saved `.md` file | `/var/lib/aimx/support/2025-01-15-001.md` |
+| `{filepath}` | Full path to the saved `.md` file | `/var/lib/aimx/inbox/support/2025-01-15-103000-meeting.md` |
 | `{from}` | Sender email address | `alice@example.com` |
 | `{to}` | Recipient email address | `support@agent.yourdomain.com` |
 | `{subject}` | Email subject | `Meeting next Thursday` |
 | `{mailbox}` | Mailbox name | `support` |
-| `{id}` | Email ID | `2025-01-15-001` |
+| `{id}` | Email ID (filename stem) | `2025-01-15-103000-meeting` |
 | `{date}` | Email date | `2025-01-15T10:30:00Z` |
 
 Variable values are shell-escaped to prevent injection.
+
+When an email has attachments, `{filepath}` points at the `.md` file
+*inside* the Zola-style bundle directory
+(`/var/lib/aimx/inbox/<mailbox>/<stem>/<stem>.md`). Attachments live beside
+the `.md` as siblings inside the same directory; read the `attachments`
+array in the frontmatter to list them (each `path` is relative to the
+bundle directory).
 
 ## Match filters
 
