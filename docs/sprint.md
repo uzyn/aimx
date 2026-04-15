@@ -352,7 +352,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 28 — Agent Integration Framework + Claude Code (Days 79.5–82) [IN PROGRESS]
+## Sprint 28 — Agent Integration Framework + Claude Code (Days 79.5–82) [DONE]
 
 **Goal:** Stand up the `agents/` tree and the `aimx agent-setup <agent>` command, and ship the Claude Code integration end-to-end as the reference implementation. Establishes the pattern all subsequent agents plug into.
 
@@ -371,11 +371,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/common/aimx-primer.md` created with sections: Tools, Storage layout, Frontmatter, Mailboxes, Read/unread, Trust model
-- [ ] Each MCP tool documented with its parameter names and types, matching `src/mcp.rs` exactly (no drift)
-- [ ] Frontmatter section lists every field and its semantics; matches `ingest.rs` output
-- [ ] No forward references to unimplemented features; grep for "TODO" / "FIXME" returns nothing
-- [ ] Length < 300 lines (LLM context budget); reviewed for tone (instructional, not promotional)
+- [x] `agents/common/aimx-primer.md` created with sections: Tools, Storage layout, Frontmatter, Mailboxes, Read/unread, Trust model
+- [x] Each MCP tool documented with its parameter names and types, matching `src/mcp.rs` exactly (no drift)
+- [x] Frontmatter section lists every field and its semantics; matches `ingest.rs` output
+- [x] No forward references to unimplemented features; grep for "TODO" / "FIXME" returns nothing
+- [x] Length < 300 lines (LLM context budget); reviewed for tone (instructional, not promotional)
 
 #### S28-2: `agents/claude-code/` plugin package
 
@@ -383,11 +383,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/claude-code/.claude-plugin/plugin.json` exists with `name: "aimx"`, `description`, `version` (tracks binary version), `author`, and `mcpServers.aimx` entry (`command: "/usr/local/bin/aimx"`, `args: ["mcp"]`; honor `--data-dir` override when setup used a non-default path by allowing the user to re-run `aimx agent-setup claude-code --data-dir <path>`)
-- [ ] `agents/claude-code/skills/aimx/SKILL.md` exists with valid frontmatter (`name: aimx`, `description`) and body = `agents/common/aimx-primer.md` content (assembled at build time, not duplicated on disk; choose one of: build script concatenation, `include_str!` inside binary, or a pre-commit hook — pick simplest)
-- [ ] `agents/claude-code/README.md` is a short human-facing README pointing at `aimx agent-setup claude-code`
-- [ ] Plugin loads cleanly in Claude Code on a real machine (manual validation); MCP tools appear; the skill is discoverable
-- [ ] Plugin schema verified against current Claude Code plugin docs (link the doc URL in the README)
+- [x] `agents/claude-code/.claude-plugin/plugin.json` exists with `name: "aimx"`, `description`, `version`, `author`, and `mcpServers.aimx` entry; `--data-dir` rewrites `args` via `serde_json` round-trip
+- [x] `agents/claude-code/skills/aimx/SKILL.md` assembled at install time from a `SKILL.md.header` YAML header + the shared primer via `include_dir!`; byte-level test asserts exact concatenation
+- [x] `agents/claude-code/README.md` is a short human-facing README pointing at `aimx agent-setup claude-code`
+- [ ] Plugin loads cleanly in Claude Code on a real machine (manual validation); MCP tools appear; the skill is discoverable <!-- Partial: deferred — sandbox lacks Claude Code; schema verified against official docs and install-layout unit-tested. Tracked in Non-blocking Review Backlog (Sprint 28). -->
+- [x] Plugin schema verified against current Claude Code plugin docs (link the doc URL in the README)
 
 #### S28-3: `src/agent_setup.rs` + `aimx agent-setup` CLI command
 
@@ -395,16 +395,16 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/agent_setup.rs` created; `Cargo.toml` adds `include_dir` (verify license is MIT or Apache-2.0 before adding)
-- [ ] `AgentSpec` struct captures `name`, `source_subdir`, `dest_template` (with `$HOME`/`$XDG_CONFIG_HOME` placeholders), `activation_hint` (templated string)
-- [ ] CLI subcommand `aimx agent-setup <agent>` with flags `--list`, `--force`, `--print`, plus the inherited global `--data-dir`
-- [ ] `--list` prints agent name + destination + activation hint for every registered agent
-- [ ] Install writes files with mode `0o644`, directories `0o755`; refuses to overwrite existing files unless `--force`; prompts interactively if stdin is a TTY and `--force` not set
-- [ ] Unknown agent name returns non-zero exit with a clear "unknown agent; run `aimx agent-setup --list`" message
-- [ ] `--print` writes the plugin tree to stdout in a diffable format (e.g., `=== path ===\n<contents>\n`); no disk writes
-- [ ] Unit tests cover: Claude Code install to temp HOME lays out expected files; `--force` overwrites; `--print` writes no files; unknown agent errors; `--list` output is stable
-- [ ] Never requires root; refuses root with a clear message ("agent-setup is a per-user operation — run without sudo")
-- [ ] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/agent_setup.rs` created; `Cargo.toml` adds `include_dir = "0.7"` (MIT/Apache-2.0 dual licensed — verified)
+- [x] `AgentSpec` struct captures `name`, `source_subdir`, `dest_template`, and `activation_hint` (later refactored to `fn(Option<&Path>) -> String` in Sprint 29 to support snippet-style agents)
+- [x] CLI subcommand `aimx agent-setup <agent>` with flags `--list`, `--force`, `--print`, plus the inherited global `--data-dir`
+- [x] `--list` prints agent name + destination + activation hint for every registered agent
+- [x] Install writes files with mode `0o644`, directories `0o755`; refuses to overwrite existing files unless `--force`; prompts interactively if stdin is a TTY and `--force` not set
+- [x] Unknown agent name returns non-zero exit with a clear "unknown agent; run `aimx agent-setup --list`" message
+- [x] `--print` writes the plugin tree to stdout in a diffable format (`=== path ===\n<contents>\n`); no disk writes
+- [x] Unit tests (18 at Sprint 28) cover: Claude Code install to temp HOME lays out expected files; `--force` overwrites; `--print` writes no files; unknown agent errors; `--list` output is stable; file modes; HOME/XDG substitution; TTY prompt yes/no; byte-for-byte SKILL.md concatenation; malformed plugin.json rejection
+- [x] Never requires root; refuses root with a clear message ("agent-setup is a per-user operation — run without sudo")
+- [x] `cargo test`, `cargo clippy -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S28-4: Register Claude Code + simplify `aimx setup` MCP output
 
@@ -412,12 +412,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `claude-code` registered in the `agent_setup.rs` registry with verified destination + activation hint
-- [ ] `display_mcp_section()` in `src/setup.rs` no longer emits a generic `{"mcpServers": ...}` JSON snippet
-- [ ] `display_mcp_section()` lists supported agents and recommends `aimx agent-setup <agent>` (the list is pulled from the registry, not duplicated by hand)
-- [ ] Existing `mcp_config_snippet(data_dir)` helper in `src/setup.rs` is removed (or marked internal and kept only for tests if something else depends on it — audit call sites first)
-- [ ] Tests for `setup.rs` MCP-section output updated to assert the new text
-- [ ] Manual validation: `sudo aimx setup <domain>` output shows the new MCP section; running the printed `aimx agent-setup claude-code` lays the plugin down
+- [x] `claude-code` registered in the `agent_setup.rs` registry with destination `$HOME/.claude/plugins/aimx` + activation hint (restart Claude Code for plugin auto-discovery)
+- [x] `display_mcp_section()` in `src/setup.rs` no longer emits a generic `{"mcpServers": ...}` JSON snippet
+- [x] `display_mcp_section()` lists supported agents and recommends `aimx agent-setup <agent>` (the list is pulled from the registry via `mcp_section_lines`, not duplicated by hand)
+- [x] `mcp_config_snippet(data_dir)` helper in `src/setup.rs` removed; no remaining call sites
+- [x] Tests for `setup.rs` MCP-section output updated (3 new unit tests asserting default + custom `--data-dir` paths)
+- [ ] Manual validation: `sudo aimx setup <domain>` output shows the new MCP section; running the printed `aimx agent-setup claude-code` lays the plugin down <!-- Partial: setup-flow manual walkthrough deferred alongside the Claude Code plugin manual validation (same sandbox limitation). Tracked in Non-blocking Review Backlog (Sprint 28). -->
 
 #### S28-5: PRD update + `book/agent-integration.md`
 
@@ -425,17 +425,17 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `docs/prd.md` §5 adds the "aimx agent-setup" P0 user story (already in place from planning; re-verify in this sprint)
-- [ ] `docs/prd.md` §6 gains §6.10 Agent Integrations with FR-49, FR-50, FR-51, FR-52 (already in place from planning; re-verify)
-- [ ] `docs/prd.md` §6.1 FR-10 narrowed to point at `aimx agent-setup` (already in place from planning; re-verify)
-- [ ] `docs/prd.md` §9 In Scope / Out of Scope updated (already in place from planning; re-verify)
-- [ ] `book/agent-integration.md` created with: what `aimx agent-setup` does, supported agents table (Claude Code only in this sprint), per-agent activation steps, troubleshooting
-- [ ] `book/SUMMARY.md` (or equivalent mdbook index) links `agent-integration.md`
-- [ ] `book/mcp.md` adds a one-line pointer "To install AIMX into your agent, see [Agent Integration](agent-integration.md)" near the top
+- [x] `docs/prd.md` §5 adds the "aimx agent-setup" P0 user story (verified in place)
+- [x] `docs/prd.md` §6 gains §6.10 Agent Integrations with FR-49, FR-50, FR-51, FR-52 (verified in place)
+- [x] `docs/prd.md` §6.1 FR-10 narrowed to point at `aimx agent-setup` (verified in place)
+- [x] `docs/prd.md` §9 In Scope / Out of Scope updated (verified in place)
+- [x] `book/agent-integration.md` created with: what `aimx agent-setup` does, supported agents table (Claude Code only in this sprint), per-agent activation steps, troubleshooting
+- [x] `book/index.md` links `agent-integration.md` in both Key Capabilities and Guide Contents
+- [x] `book/mcp.md` adds a one-line pointer "To install AIMX into your agent, see [Agent Integration](agent-integration.md)" near the top
 
 ---
 
-## Sprint 29 — Codex CLI + OpenCode + Gemini CLI Integration (Days 82–84.5) [NOT STARTED]
+## Sprint 29 — Codex CLI + OpenCode + Gemini CLI Integration (Days 82–84.5) [DONE]
 
 **Goal:** Add Codex CLI, OpenCode, and Gemini CLI to the `aimx agent-setup` registry with full plugin/skill packages.
 
@@ -449,11 +449,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/codex/.codex-plugin/plugin.json` + `agents/codex/skills/aimx/SKILL.md` + `agents/codex/README.md` authored, re-using the common primer
-- [ ] `codex` registered in `agent_setup.rs` registry with verified destination + activation hint
-- [ ] Unit tests: `aimx agent-setup codex` against temp HOME lays out the expected tree; `--print` emits it to stdout
-- [ ] Plugin format and destination path verified against current Codex CLI docs (link in the README)
-- [ ] Manual validation on a machine with Codex CLI installed: plugin is picked up; MCP tools appear
+- [x] `agents/codex/.codex-plugin/plugin.json` + `agents/codex/skills/aimx/SKILL.md.header` + `agents/codex/README.md` authored, re-using the common primer via `include_dir!`
+- [x] `codex` registered in `agent_setup.rs` registry with destination `$HOME/.codex/plugins/aimx` + activation hint; `--data-dir` rewrites `mcpServers.aimx.args` in `plugin.json`
+- [x] Unit tests cover Codex install to temp HOME, `--print` emission, and `mcpServers` schema key (tightened from weak `"mcp"` substring to exact `"mcpServers"`)
+- [x] Plugin format documented against current Codex CLI docs (link in the README); inline code comment on `codex_hint` flags that the camelCase `mcpServers` shape mirrors Claude Code on an unvalidated assumption pending manual validation
+- [ ] Manual validation on a machine with Codex CLI installed: plugin is picked up; MCP tools appear <!-- Partial: deferred — sandbox lacks Codex CLI; schema assumption documented inline. Tracked in Non-blocking Review Backlog (Sprint 29). -->
 
 #### S29-2: `agents/opencode/` skill + registry entry
 
@@ -461,11 +461,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/opencode/skills/aimx/SKILL.md` authored, re-using the common primer
-- [ ] `agents/opencode/README.md` documents the MCP wiring step (printed JSONC snippet) and the skill install destination
-- [ ] `opencode` registered in `agent_setup.rs` registry; activation hint prints the JSONC snippet the user appends to `opencode.json`
-- [ ] Unit tests: install + `--print` behavior + activation-hint text stability
-- [ ] Canonical OpenCode skill destination verified against current OpenCode docs (link in README)
+- [x] `agents/opencode/SKILL.md.header` authored; assembled with the shared primer at install time (skill-only layout — header flat at the top of `agents/opencode/` because the destination path already ends in `skills/aimx/`)
+- [x] `agents/opencode/README.md` documents the MCP wiring step (printed JSONC snippet) and the skill install destination `$HOME/.config/opencode/skills/aimx/`
+- [x] `opencode` registered in `agent_setup.rs` registry; activation hint prints the JSONC snippet the user appends to `opencode.json`; `--data-dir` threads into the `command` array via `serde_json::json!` so paths with `"` or `\` escape correctly
+- [x] Unit tests cover install to temp HOME, `--print` emission of both skill tree AND activation snippet, `--data-dir` threading into the printed snippet, and special-character escaping regression test
+- [x] Canonical OpenCode skill destination verified against current OpenCode docs (link in README)
 
 #### S29-3: `agents/gemini/` skill + registry entry
 
@@ -473,12 +473,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/gemini/skills/aimx/SKILL.md` authored, re-using `agents/common/aimx-primer.md` content with Gemini-required frontmatter (`name`, `description`, plus any Gemini-specific fields identified during implementation)
-- [ ] `agents/gemini/README.md` documents the two-step activation: run `aimx agent-setup gemini` to install the skill, then paste the printed MCP entry into `~/.gemini/settings.json`
-- [ ] `gemini` registered in `src/agent_setup.rs` registry with verified destination + activation hint (prints the exact `mcpServers.aimx` JSON block to merge)
-- [ ] Unit tests: install lays out expected files at the temp-HOME destination; `--print` emits both the skill tree and the MCP JSON snippet to stdout
-- [ ] Skill destination, settings file path, and MCP schema verified against current Gemini CLI docs; URL linked from `agents/gemini/README.md`
-- [ ] Manual validation on a machine with Gemini CLI installed: `aimx agent-setup gemini` → merge printed JSON → Gemini sees `aimx` MCP tools and the skill is discoverable
+- [x] `agents/gemini/SKILL.md.header` authored (skill-only layout mirroring OpenCode); assembled with the shared primer at install time
+- [x] `agents/gemini/README.md` documents the two-step activation: run `aimx agent-setup gemini` to install the skill, then paste the printed MCP entry into `~/.gemini/settings.json`
+- [x] `gemini` registered in `src/agent_setup.rs` registry with destination `$HOME/.gemini/skills/aimx` + activation hint (prints exact `mcpServers.aimx` JSON block to merge); `--data-dir` threads into `args` via `serde_json::json!`
+- [x] Unit tests cover install to temp HOME and `--print` emission of both skill tree and MCP JSON snippet
+- [x] Skill destination, settings file path, and MCP schema verified against current Gemini CLI docs; URL linked from `agents/gemini/README.md`
+- [ ] Manual validation on a machine with Gemini CLI installed: `aimx agent-setup gemini` → merge printed JSON → Gemini sees `aimx` MCP tools and the skill is discoverable <!-- Partial: deferred — sandbox lacks Gemini CLI. Tracked in Non-blocking Review Backlog (Sprint 29). -->
 
 #### S29-4: Update `book/agent-integration.md` + `--list` output
 
@@ -486,14 +486,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `book/agent-integration.md` gains Codex, OpenCode, and Gemini sections (install command, activation step, troubleshooting quirks)
-- [ ] `aimx agent-setup --list` output snapshot updated; tests pass
-- [ ] Repo `README.md` lists all four agents in the agent-support section
-- [ ] Links between `book/agent-integration.md` and each agent's `agents/<agent>/README.md` resolve
+- [x] `book/agent-integration.md` gains Codex, OpenCode, and Gemini sections (install command, activation step, troubleshooting quirks)
+- [x] `aimx agent-setup --list` output automatically covers all four agents via the registry; tests pass
+- [x] Repo `README.md` lists all four agents (Claude Code, Codex, OpenCode, Gemini) in the agent-support section
+- [x] Links between `book/agent-integration.md` and each agent's `agents/<agent>/README.md` resolve
 
 ---
 
-## Sprint 30 — Goose + OpenClaw Integration (Days 84.5–87) [NOT STARTED]
+## Sprint 30 — Goose + OpenClaw Integration (Days 84.5–87) [IN PROGRESS]
 
 **Goal:** Add Goose (recipe-based) and OpenClaw (skill-based, JSON5 config) to `aimx agent-setup`, completing the v1 agent-integration roster.
 
@@ -690,9 +690,9 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 27 | 76–78.5 | Systemd Unit Hardening | Restart rate-limit, resource limits, network-online deps in generated systemd unit | Done |
 | 27.5 | 78.5–79 | CLI Color Consistency | `src/term.rs` semantic helpers, migrate setup.rs, apply across verify/status/mailbox/send/dkim/serve/main | Done |
 | 27.6 | — | CI Binary Releases | _Deferred to the Non-blocking Review Backlog — revisit when production-ready_ | Deferred |
-| 28 | 79.5–82 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | In Progress |
-| 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Not Started |
-| 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Not Started |
+| 28 | 79.5–82 | Agent Integration Framework + Claude Code | `agents/` tree, `aimx agent-setup` command, Claude Code plugin, PRD §6.10 | Done |
+| 29 | 82–84.5 | Codex CLI + OpenCode + Gemini CLI Integration | Codex plugin, OpenCode skill, Gemini skill, book/ updates | Done |
+| 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | In Progress |
 | 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Not Started |
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Not Started |
 
@@ -764,6 +764,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 24)** `docs/prd.md` NFR-5: "aimx ingest" in prose without backticks — _Fixed: added backticks_
 - [x] **(Sprint 26)** `get_server_ip()` and `get_server_ipv6()` each invoke `hostname -I` separately — _Triaged into Sprint 32 (S32-4)_
 - [x] **(Sprint 27)** `cargo clippy --all-targets -- -D warnings` pre-existing test-target lints + adopt `--all-targets` in CI — _Triaged into Sprint 32 (S32-5)_
+- [ ] **(Sprint 28)** Manual end-to-end validation of the Claude Code plugin on a real machine — run `aimx agent-setup claude-code`, restart Claude Code, confirm the 9 AIMX MCP tools appear and the `aimx` skill is discoverable. Schema was verified against current official Claude Code plugin docs and unit tests cover the install pipeline, but actual plugin load was not exercised (sandbox lacks Claude Code). Also repeat for `sudo aimx setup <domain>` to confirm the reworked MCP section renders as expected end-to-end. Non-blocking because any schema drift can be patched in a follow-up without revisiting the framework itself.
+- [ ] **(Sprint 29)** Manual end-to-end validation of the Codex CLI plugin on a real machine — run `aimx agent-setup codex`, activate per Codex CLI instructions, and confirm the 9 AIMX MCP tools appear. Important: `.codex-plugin/plugin.json` uses the camelCase `mcpServers` shape on the assumption it mirrors Claude Code's convention (see inline comment on `codex_hint` in `src/agent_setup.rs`). If Codex CLI's plugin format actually expects `[mcp_servers.*]` TOML in `~/.codex/config.toml` or a different JSON schema, the plugin package needs to be reshaped accordingly. Validate before promoting Codex to the "supported, tested" tier.
+- [ ] **(Sprint 29)** Manual end-to-end validation of the Gemini CLI skill on a real machine — run `aimx agent-setup gemini`, merge the printed `mcpServers.aimx` JSON block into `~/.gemini/settings.json`, restart Gemini, and confirm the AIMX MCP tools and `aimx` skill are discoverable. Canonical paths were verified against current Gemini CLI docs but actual activation was not exercised (sandbox lacks Gemini CLI). Any schema drift is a follow-up patch, not a framework rework.
 
 ### Deferred Feature Sprints
 
