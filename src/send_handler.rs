@@ -13,6 +13,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use rsa::RsaPrivateKey;
+use uuid::Uuid;
 
 use crate::dkim;
 use crate::send::MailTransport;
@@ -46,6 +47,20 @@ pub struct SendContext {
 /// DKIM-sign → deliver via MX. Every error path maps to a stable
 /// [`ErrCode`].
 pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
+    handle_send_with_signer(req, ctx, dkim::sign_message).await
+}
+
+/// Generic form of [`handle_send`] parameterized on the DKIM signer so tests
+/// can inject a failing signer without constructing a bad key. Production
+/// code always routes through [`handle_send`], which wires [`dkim::sign_message`].
+pub(crate) async fn handle_send_with_signer<F>(
+    req: SendRequest,
+    ctx: &SendContext,
+    signer: F,
+) -> SendResponse
+where
+    F: FnOnce(&[u8], &RsaPrivateKey, &str, &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>,
+{
     if !ctx.registered_mailboxes.contains(&req.from_mailbox) {
         return SendResponse::Err {
             code: ErrCode::Mailbox,
@@ -53,12 +68,14 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
         };
     }
 
-    let (message_id, from_header) = match parse_from_and_message_id(&req.body) {
-        Ok(v) => v,
-        Err(reason) => {
+    let headers = scan_headers(&req.body, &["From", "To", "Message-ID"]);
+
+    let from_header = match headers.get("From") {
+        Some(v) => v.clone(),
+        None => {
             return SendResponse::Err {
                 code: ErrCode::Malformed,
-                reason,
+                reason: "missing required header: From".to_string(),
             };
         }
     };
@@ -84,8 +101,8 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
         };
     }
 
-    let to_header = match header_value(&req.body, "To") {
-        Some(v) => v,
+    let to_header = match headers.get("To") {
+        Some(v) => v.clone(),
         None => {
             return SendResponse::Err {
                 code: ErrCode::Malformed,
@@ -94,8 +111,38 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
         }
     };
 
-    let signed = match dkim::sign_message(
-        &req.body,
+    // The submitted To: header may carry a display-name (`"Name"
+    // <user@host>`), a bare addr (`user@host`), or even angle-only
+    // (`<user@host>`). `lettre::Address::FromStr` only parses the bare form,
+    // so normalize to `user@host` before handing it to the transport. Any
+    // failure to extract a bare recipient is MALFORMED — not a delivery
+    // error — because nothing has been attempted over the wire.
+    let recipient_bare = match extract_bare_address(&to_header) {
+        Some(addr) => addr,
+        None => {
+            return SendResponse::Err {
+                code: ErrCode::Malformed,
+                reason: format!("could not extract recipient address from To: {to_header}"),
+            };
+        }
+    };
+
+    // If Message-ID is absent we synthesize one ourselves rather than
+    // erroring out: the sprint's error table never listed Message-ID as a
+    // required client header, and `AIMX/1 OK <message-id>` still needs
+    // something to echo. Using the configured primary domain matches the
+    // DKIM `d=` tag and avoids leaking a recipient-side hostname.
+    let (message_id, body_bytes) = match headers.get("Message-ID") {
+        Some(v) => (v.clone(), req.body.clone()),
+        None => {
+            let synthetic = format!("<{}@{}>", Uuid::new_v4(), ctx.primary_domain);
+            let injected = inject_message_id_header(&req.body, &synthetic);
+            (synthetic, injected)
+        }
+    };
+
+    let signed = match signer(
+        &body_bytes,
         &ctx.dkim_key,
         &ctx.primary_domain,
         &ctx.dkim_selector,
@@ -109,7 +156,7 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
         }
     };
 
-    match ctx.transport.send(&from_header, &to_header, &signed) {
+    match ctx.transport.send(&from_header, &recipient_bare, &signed) {
         Ok(_server) => SendResponse::Ok { message_id },
         Err(e) => {
             let msg = e.to_string();
@@ -119,35 +166,57 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
     }
 }
 
-/// Extract the `From:` header value and the `Message-ID:` header value from
-/// an RFC 5322 message. Returns `Err(reason)` if either is missing.
-fn parse_from_and_message_id(body: &[u8]) -> Result<(String, String), String> {
-    let message_id = header_value(body, "Message-ID")
-        .ok_or_else(|| "missing required header: Message-ID".to_string())?;
-    let from =
-        header_value(body, "From").ok_or_else(|| "missing required header: From".to_string())?;
-    Ok((message_id, from))
+/// Insert a `Message-ID:` header at the top of an RFC 5322 message body. The
+/// body's existing line-endings (CRLF or LF) are preserved by reusing the
+/// same terminator the first header uses.
+fn inject_message_id_header(body: &[u8], message_id: &str) -> Vec<u8> {
+    let terminator: &[u8] = if body.windows(2).take(1024).any(|w| w == b"\r\n") {
+        b"\r\n"
+    } else {
+        b"\n"
+    };
+    let mut out = Vec::with_capacity(body.len() + 32 + message_id.len());
+    out.extend_from_slice(b"Message-ID: ");
+    out.extend_from_slice(message_id.as_bytes());
+    out.extend_from_slice(terminator);
+    out.extend_from_slice(body);
+    out
 }
 
-/// Look up a header by case-insensitive name in an RFC 5322 message. Header
-/// lines are assumed to be CRLF-separated (SMTP-ready), but this helper
-/// tolerates lone LFs so it also works on locally-composed buffers. Stops
-/// at the first blank line (headers/body separator). Joins continuation
-/// lines (leading WSP).
-fn header_value(body: &[u8], name: &str) -> Option<String> {
-    let text = std::str::from_utf8(body).ok()?;
-    let mut lines = text.lines();
-    let mut current: Option<String> = None;
-
-    let commit = |current: &Option<String>| -> Option<(String, String)> {
-        let line = current.as_ref()?;
-        let (n, v) = line.split_once(':')?;
-        Some((n.trim().to_string(), v.trim().to_string()))
+/// Single-pass walk over an RFC 5322 header block, returning the values for
+/// each of `names` (case-insensitive, continuation-line folded). The returned
+/// map keys match the original `names` argument casing so callers can look
+/// up using the literal name they asked for.
+fn scan_headers(body: &[u8], names: &[&str]) -> std::collections::HashMap<String, String> {
+    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let text = match std::str::from_utf8(body) {
+        Ok(t) => t,
+        Err(_) => return out,
     };
 
-    let target = name.to_ascii_lowercase();
+    let lowercased: Vec<(String, &str)> =
+        names.iter().map(|n| (n.to_ascii_lowercase(), *n)).collect();
 
-    for line in lines.by_ref() {
+    let mut current: Option<String> = None;
+
+    let commit = |current: &Option<String>,
+                  out: &mut std::collections::HashMap<String, String>,
+                  lowercased: &[(String, &str)]| {
+        let Some(line) = current.as_ref() else {
+            return;
+        };
+        let Some((n, v)) = line.split_once(':') else {
+            return;
+        };
+        let n_lower = n.trim().to_ascii_lowercase();
+        for (target_lower, original) in lowercased {
+            if n_lower == *target_lower && !out.contains_key(*original) {
+                out.insert((*original).to_string(), v.trim().to_string());
+            }
+        }
+    };
+
+    for line in text.lines() {
         if line.is_empty() {
             break;
         }
@@ -158,35 +227,44 @@ fn header_value(body: &[u8], name: &str) -> Option<String> {
             }
             continue;
         }
-        if let Some((n, v)) = commit(&current)
-            && n.eq_ignore_ascii_case(&target)
-        {
-            return Some(v);
-        }
+        commit(&current, &mut out, &lowercased);
         current = Some(line.to_string());
     }
-
-    if let Some((n, v)) = commit(&current)
-        && n.eq_ignore_ascii_case(&target)
-    {
-        return Some(v);
-    }
-    None
+    commit(&current, &mut out, &lowercased);
+    out
 }
 
 /// Extract the bare-addr domain from an RFC 5322 `From:` header, handling
 /// both `"Name <user@host>"` and `"user@host"` forms. Returns `None` if no
 /// `@` is present.
 fn extract_domain(from: &str) -> Option<String> {
-    let addr = if let Some(start) = from.rfind('<') {
-        let tail = &from[start + 1..];
+    let addr = extract_bare_address(from)?;
+    let at = addr.rfind('@')?;
+    Some(addr[at + 1..].trim().to_string())
+}
+
+/// Extract the bare `local@host` form from a header value, accepting
+/// `"Name" <local@host>`, `local@host`, and angle-only `<local@host>`. For
+/// comma-separated header values only the first recipient is returned —
+/// v0.2 submissions are single-recipient and the daemon's envelope already
+/// only takes one address.
+fn extract_bare_address(value: &str) -> Option<String> {
+    let first = value.split(',').next().unwrap_or(value).trim();
+    if first.is_empty() {
+        return None;
+    }
+    let addr = if let Some(start) = first.rfind('<') {
+        let tail = &first[start + 1..];
         let end = tail.find('>').unwrap_or(tail.len());
         &tail[..end]
     } else {
-        from
+        first
     };
-    let at = addr.rfind('@')?;
-    Some(addr[at + 1..].trim().to_string())
+    let addr = addr.trim();
+    if addr.is_empty() || !addr.contains('@') {
+        return None;
+    }
+    Some(addr.to_string())
 }
 
 /// Map a transport error string to an `ErrCode`.
@@ -457,32 +535,171 @@ mod tests {
     }
 
     #[test]
-    fn header_value_simple() {
-        let body = b"From: alice@example.com\r\nTo: bob@x.com\r\n\r\nbody";
-        assert_eq!(
-            header_value(body, "From"),
-            Some("alice@example.com".to_string())
-        );
+    fn scan_headers_simple_multi() {
+        let body = b"From: alice@example.com\r\nTo: bob@x.com\r\nSubject: hi\r\n\r\nbody";
+        let h = scan_headers(body, &["From", "To", "Subject"]);
+        assert_eq!(h.get("From"), Some(&"alice@example.com".to_string()));
+        assert_eq!(h.get("To"), Some(&"bob@x.com".to_string()));
+        assert_eq!(h.get("Subject"), Some(&"hi".to_string()));
     }
 
     #[test]
-    fn header_value_case_insensitive() {
+    fn scan_headers_case_insensitive() {
         let body = b"fRoM: alice@example.com\r\n\r\n";
+        let h = scan_headers(body, &["FROM"]);
+        assert_eq!(h.get("FROM"), Some(&"alice@example.com".to_string()));
+    }
+
+    #[test]
+    fn scan_headers_continuation_line_joined() {
+        let body = b"Subject: one\r\n two\r\n\r\n";
+        let h = scan_headers(body, &["Subject"]);
+        assert_eq!(h.get("Subject"), Some(&"one two".to_string()));
+    }
+
+    #[test]
+    fn scan_headers_missing_is_absent() {
+        let body = b"From: a@b.com\r\n\r\n";
+        let h = scan_headers(body, &["X-Nope"]);
+        assert!(!h.contains_key("X-Nope"));
+    }
+
+    #[test]
+    fn extract_bare_address_display_name_form() {
         assert_eq!(
-            header_value(body, "FROM"),
+            extract_bare_address("Alice <alice@example.com>"),
             Some("alice@example.com".to_string())
         );
     }
 
     #[test]
-    fn header_value_continuation_line_joined() {
-        let body = b"Subject: one\r\n two\r\n\r\n";
-        assert_eq!(header_value(body, "Subject"), Some("one two".to_string()));
+    fn extract_bare_address_bare_form() {
+        assert_eq!(
+            extract_bare_address("alice@example.com"),
+            Some("alice@example.com".to_string())
+        );
     }
 
     #[test]
-    fn header_value_missing_returns_none() {
-        let body = b"From: a@b.com\r\n\r\n";
-        assert!(header_value(body, "X-Nope").is_none());
+    fn extract_bare_address_angle_only() {
+        assert_eq!(
+            extract_bare_address("<alice@example.com>"),
+            Some("alice@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_bare_address_takes_first_of_list() {
+        assert_eq!(
+            extract_bare_address("a@x.com, b@y.com"),
+            Some("a@x.com".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_bare_address_none_without_at() {
+        assert!(extract_bare_address("no-at-sign").is_none());
+        assert!(extract_bare_address("").is_none());
+    }
+
+    #[tokio::test]
+    async fn to_header_with_display_name_delivers_bare_address() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        // `To:` carries a display name. The handler must normalize to the
+        // bare addr before calling the transport — otherwise the lettre
+        // `Address::FromStr` parse at the transport layer would fail and
+        // we would have mapped an RFC 5322-valid header into `ERR DELIVERY`.
+        let body = b"From: alice@example.com\r\n\
+                     To: Bob <bob@gmail.com>\r\n\
+                     Subject: Hi\r\n\
+                     Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                     Message-ID: <abc@example.com>\r\n\
+                     \r\n\
+                     hello\r\n"
+            .to_vec();
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body,
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn missing_message_id_is_synthesized() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        let body = b"From: alice@example.com\r\n\
+                     To: user@gmail.com\r\n\
+                     Subject: Hi\r\n\
+                     Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                     \r\n\
+                     hello\r\n"
+            .to_vec();
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body,
+        };
+        let resp = handle_send(req, &ctx).await;
+        match resp {
+            SendResponse::Ok { message_id } => {
+                assert!(
+                    message_id.starts_with('<') && message_id.ends_with('>'),
+                    "message_id should be angle-bracketed: {message_id}"
+                );
+                assert!(
+                    message_id.contains("@example.com>"),
+                    "synthesized Message-ID must use primary domain: {message_id}"
+                );
+            }
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        // The delivered message should contain the synthesized header.
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(
+            delivered.contains("Message-ID: <"),
+            "synthesized Message-ID must be part of the signed message: {delivered}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sign_failure_returns_sign_error() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock);
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: body("alice@example.com"),
+        };
+        // Inject a signer that always fails, to exercise the `ERR SIGN`
+        // branch without needing a malformed RSA key.
+        let failing_signer = |_: &[u8],
+                              _: &RsaPrivateKey,
+                              _: &str,
+                              _: &str|
+         -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+            Err("simulated DKIM signing failure".into())
+        };
+        let resp = handle_send_with_signer(req, &ctx, failing_signer).await;
+        match resp {
+            SendResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Sign);
+                assert!(
+                    reason.contains("simulated DKIM signing failure"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected Err(SIGN), got {other:?}"),
+        }
     }
 }

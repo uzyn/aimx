@@ -933,13 +933,100 @@ mod tests {
             assert!(signed.starts_with("DKIM-Signature:"));
             assert!(signed.contains("d=example.com"));
             assert!(signed.contains("s=dkim"));
-            // The public key should non-trivially map to the signature —
-            // the full cryptographic verification is covered by the
-            // existing `sign_and_verify_roundtrip` test in dkim.rs.
-            assert!(pub_pem.contains("PUBLIC KEY"));
+
+            // Cryptographically verify the DKIM signature using our test
+            // public key. We feed the key to `mail-auth` through an
+            // in-memory TXT cache so no DNS lookup is performed.
+            verify_dkim_with_pubkey(&signed_bytes, &pub_pem, "example.com", "dkim").await;
 
             shutdown_tx.send(true).unwrap();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         });
+    }
+
+    /// Crypto-verify a DKIM-signed message against a specific public key by
+    /// populating a `mail-auth` TXT cache with a synthetic DKIM1 record and
+    /// running the verifier. Panics on any verification failure — used by
+    /// the S34-3 integration test.
+    async fn verify_dkim_with_pubkey(signed: &[u8], pub_pem: &str, domain: &str, selector: &str) {
+        use base64::Engine;
+        use mail_auth::{
+            AuthenticatedMessage, DkimResult, MessageAuthenticator, Parameters, ResolverCache, Txt,
+            common::{parse::TxtRecordParser, verify::DomainKey},
+        };
+        use rsa::{RsaPublicKey, pkcs8::DecodePublicKey, pkcs8::EncodePublicKey};
+        use std::borrow::Borrow;
+        use std::collections::HashMap;
+        use std::hash::Hash;
+        use std::sync::Mutex;
+        use std::time::Instant;
+
+        // Convert the stored public PEM into a DKIM1 TXT-record string.
+        let pk = RsaPublicKey::from_public_key_pem(pub_pem).expect("parse public PEM");
+        let spki_der = pk.to_public_key_der().expect("encode SPKI");
+        let b64 = base64::engine::general_purpose::STANDARD.encode(spki_der.as_ref());
+        let txt_record = format!("v=DKIM1; k=rsa; p={b64}");
+
+        // Build a cache that returns the DomainKey for the selector + domain.
+        struct InMemCache<K, V>(Mutex<HashMap<K, V>>);
+        impl<K: Hash + Eq, V: Clone> ResolverCache<K, V> for InMemCache<K, V> {
+            fn get<Q>(&self, key: &Q) -> Option<V>
+            where
+                K: Borrow<Q>,
+                Q: Hash + Eq + ?Sized,
+            {
+                self.0.lock().unwrap().get(key).cloned()
+            }
+            fn remove<Q>(&self, key: &Q) -> Option<V>
+            where
+                K: Borrow<Q>,
+                Q: Hash + Eq + ?Sized,
+            {
+                self.0.lock().unwrap().remove(key)
+            }
+            fn insert(&self, key: K, value: V, _: Instant) {
+                self.0.lock().unwrap().insert(key, value);
+            }
+        }
+
+        let dk = DomainKey::parse(txt_record.as_bytes()).expect("parse DKIM1 record");
+        let txt_cache: InMemCache<String, Txt> = InMemCache(Mutex::new(HashMap::new()));
+        // mail-auth's `IntoFqdn` normalizes to `<selector>._domainkey.<domain>.`
+        // with a trailing dot — match it.
+        let key = format!("{selector}._domainkey.{domain}.");
+        txt_cache.0.lock().unwrap().insert(
+            key,
+            Txt::DomainKey(std::sync::Arc::new(dk)),
+            // valid_until is unused by the Insert impl; any Instant works.
+        );
+
+        let authenticator = MessageAuthenticator::new_system_conf()
+            .or_else(|_| MessageAuthenticator::new_cloudflare())
+            .expect("build MessageAuthenticator (DNS-independent here; cache short-circuits)");
+
+        let auth_msg = AuthenticatedMessage::parse(signed)
+            .expect("parse AuthenticatedMessage from signed bytes");
+        assert!(
+            !auth_msg.dkim_headers.is_empty(),
+            "signed message must carry at least one DKIM-Signature header"
+        );
+
+        let params = Parameters::new(&auth_msg).with_txt_cache(&txt_cache);
+        let outputs = authenticator.verify_dkim(params).await;
+        assert!(
+            !outputs.is_empty(),
+            "verifier returned no outputs; header parse probably failed"
+        );
+        let pass = outputs
+            .iter()
+            .any(|o| matches!(o.result(), DkimResult::Pass));
+        assert!(
+            pass,
+            "DKIM signature failed to verify against the test public key; outputs: {:?}",
+            outputs
+                .iter()
+                .map(|o| o.result().clone())
+                .collect::<Vec<_>>()
+        );
     }
 }
