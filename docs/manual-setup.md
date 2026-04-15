@@ -412,33 +412,16 @@ Trust policies:
 
 ### B10: MCP Integration
 
-To give AI agents access to the email system, add the MCP server to your agent's configuration.
+To give AI agents access to the email system, install the per-agent
+integration with one command:
 
-For Claude Code (`~/.claude/settings.json`):
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw
 ```
 
-If using a custom data directory:
-
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["--data-dir", "/custom/path", "mcp"]
-    }
-  }
-}
-```
+Run `aimx agent-setup --list` to see every supported agent and its
+destination path. See [`book/agent-integration.md`](../book/agent-integration.md)
+for per-agent activation steps and manual MCP wiring.
 
 Available MCP tools: `mailbox_list`, `mailbox_create`, `mailbox_delete`, `email_list`, `email_read`, `email_send`, `email_reply`, `email_mark_read`, `email_mark_unread`.
 

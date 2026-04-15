@@ -93,18 +93,15 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ## Connect your AI agent
 
-Add AIMX as an MCP server in your MCP-compatible AI agent (Claude Code, OpenClaw, Codex, OpenCode, etc.):
+Install AIMX into your agent with one command:
 
-```json
-{
-  "mcpServers": {
-    "email": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["mcp"]
-    }
-  }
-}
+```bash
+aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw
 ```
+
+Run `aimx agent-setup --list` to see every supported agent and its
+destination path, and see the [Agent Integration](agent-integration.md)
+chapter for per-agent activation steps.
 
 Your agent can now list, read, send, and reply to email. See the [MCP Server](mcp.md) guide for all available tools.
 

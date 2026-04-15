@@ -1,0 +1,7 @@
+---
+name: aimx
+description: Self-hosted email for AI agents. Send, read, reply to, and manage email via AIMX MCP tools. Invoke when the user asks about sending mail, checking an inbox, replying to a message, or managing mailboxes, or when the conversation references AIMX.
+version: 1.0.0
+metadata: {"openclaw": {"requires": {"bins": ["aimx"]}}}
+---
+
