@@ -27,6 +27,7 @@ Outbound:
 - **[Setup wizard](setup.md)** -- interactive setup, service file generation, DKIM key generation, colorized DNS/MCP/deliverability output, re-entrant verification
 - **[Markdown email](mailboxes.md)** -- incoming email parsed to Markdown with TOML frontmatter, attachment extraction, per-mailbox routing
 - **[MCP Server](mcp.md)** -- stdio transport for Claude Code, OpenClaw, Codex, OpenCode, and any MCP-compatible agent: list, read, send, reply, manage mailboxes
+- **[Agent Integration](agent-integration.md)** -- one-command `aimx agent-setup <agent>` installer for per-agent plugin/skill packages
 - **[Channel rules](channels.md)** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
 - **[DKIM signing](setup.md#dkim-key-management)** -- native RSA-SHA256 signing for outbound mail
 - **[Inbound trust](channels.md#trust-policies)** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
@@ -58,4 +59,5 @@ See the full [Getting Started](getting-started.md) guide for details.
 | [Mailboxes & Email](mailboxes.md) | Mailbox management, email format, sending, attachments, threading |
 | [Channel Rules & Trust](channels.md) | Trigger commands on incoming mail, match filters, trust policies |
 | [MCP Server](mcp.md) | Agent integration via Model Context Protocol, all 9 MCP tools |
+| [Agent Integration](agent-integration.md) | `aimx agent-setup <agent>` installer and per-agent plugin packages |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |

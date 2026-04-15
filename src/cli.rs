@@ -72,6 +72,24 @@ pub enum Command {
         verify_host: Option<String>,
     },
 
+    /// Install AIMX plugin/skill for an AI agent into the current user's config
+    AgentSetup {
+        /// Agent short name (e.g. claude-code). Omit with --list.
+        agent: Option<String>,
+
+        /// List supported agents with destinations and activation hints
+        #[arg(long)]
+        list: bool,
+
+        /// Overwrite existing destination files without prompting
+        #[arg(long)]
+        force: bool,
+
+        /// Print plugin contents to stdout instead of writing to disk
+        #[arg(long)]
+        print: bool,
+    },
+
     /// Generate DKIM keypair for email signing
     DkimKeygen {
         /// DKIM selector name
