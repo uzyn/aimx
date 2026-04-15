@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::ingest::EmailMetadata;
+use crate::term;
 use std::path::Path;
 
 pub struct StatusInfo {
@@ -170,30 +171,34 @@ fn extract_frontmatter(content: &str) -> Option<String> {
 pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
+    out.push_str(&format!("{}\n", term::header("Configuration")));
     out.push_str(&format!("Domain:           {}\n", info.domain));
     out.push_str(&format!("Data directory:   {}\n", info.data_dir));
     out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
     out.push_str(&format!(
         "DKIM key:         {}\n",
         if info.dkim_key_present {
-            "present"
+            term::success("present")
         } else {
-            "MISSING - run `aimx dkim-keygen`"
+            term::warn("MISSING - run `aimx dkim-keygen`")
         }
     ));
+
+    out.push_str(&format!("\n{}\n", term::header("Service")));
     out.push_str(&format!(
         "SMTP server:      {}\n",
         if info.smtp_running {
-            "running"
+            term::success("running")
         } else {
-            "not running"
+            term::warn("not running")
         }
     ));
 
     let total_msgs: usize = info.mailboxes.iter().map(|m| m.total).sum();
     let total_unread: usize = info.mailboxes.iter().map(|m| m.unread).sum();
+    out.push_str(&format!("\n{}\n", term::header("Mailboxes")));
     out.push_str(&format!(
-        "Mailboxes:        {} ({} messages, {} unread)\n",
+        "Total:            {} ({} messages, {} unread)\n",
         info.mailboxes.len(),
         total_msgs,
         total_unread,
@@ -206,15 +211,21 @@ pub fn format_status(info: &StatusInfo) -> String {
             "MAILBOX", "ADDRESS", "TOTAL", "UNREAD"
         ));
         for mb in &info.mailboxes {
+            let name_pad = 20usize.saturating_sub(mb.name.chars().count());
             out.push_str(&format!(
-                "  {:<20} {:<30} {:>8} {:>8}\n",
-                mb.name, mb.address, mb.total, mb.unread,
+                "  {}{:pad$} {:<30} {:>8} {:>8}\n",
+                term::highlight(&mb.name),
+                "",
+                mb.address,
+                mb.total,
+                mb.unread,
+                pad = name_pad,
             ));
         }
     }
 
     if !info.recent_activity.is_empty() {
-        out.push_str("\nRecent activity:\n");
+        out.push_str(&format!("\n{}\n", term::header("Recent activity:")));
         for email in &info.recent_activity {
             out.push_str(&format!(
                 "  [{}] {} {} - {} ({})\n",
@@ -293,6 +304,85 @@ mod tests {
         assert!(output.contains("MAILBOX"));
         assert!(output.contains("TOTAL"));
         assert!(output.contains("UNREAD"));
+    }
+
+    #[test]
+    fn mailbox_table_columns_align_regardless_of_color() {
+        let info = StatusInfo {
+            domain: "ex.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            mailboxes: vec![
+                MailboxStatus {
+                    name: "ops".to_string(),
+                    address: "ops@ex.com".to_string(),
+                    total: 1,
+                    unread: 0,
+                },
+                MailboxStatus {
+                    name: "catchall".to_string(),
+                    address: "*@ex.com".to_string(),
+                    total: 2,
+                    unread: 1,
+                },
+            ],
+            recent_activity: vec![],
+        };
+
+        // Returns the visible column where the ADDRESS field starts on each
+        // mailbox data row (the second non-whitespace token after the two-space indent).
+        fn address_column(output: &str) -> Vec<usize> {
+            let ansi = regex_like_strip(output);
+            ansi.lines()
+                .filter(|l| l.contains("@ex.com"))
+                .map(|l| {
+                    let trimmed = l.trim_start();
+                    let name_end = trimmed.find(char::is_whitespace).unwrap_or(0);
+                    let rest = &trimmed[name_end..];
+                    let addr_start_in_rest = rest.len() - rest.trim_start().len();
+                    (l.len() - trimmed.len()) + name_end + addr_start_in_rest
+                })
+                .collect()
+        }
+
+        // Force color on so ANSI escapes land in the formatted output; then
+        // strip them and check that the visible address column still aligns.
+        // The bug this guards: Rust's width formatter counts escape bytes as
+        // visible chars, so colored `{:<20}` padding misaligns.
+        colored::control::set_override(true);
+        let colored_out = format_status(&info);
+        colored::control::unset_override();
+
+        let cols = address_column(&colored_out);
+        assert_eq!(cols.len(), 2, "expected two mailbox rows, got {cols:?}");
+        assert_eq!(
+            cols[0], cols[1],
+            "mailbox rows must share a common visible address column after ANSI strip"
+        );
+    }
+
+    // Minimal ANSI-strip helper for test assertions (avoid a new dep).
+    fn regex_like_strip(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
     }
 
     #[test]

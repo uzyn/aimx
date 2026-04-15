@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status, SystemOps};
+use crate::term;
 use std::path::Path;
 
 pub fn run(
@@ -147,7 +148,10 @@ pub fn run_with_net(
     net: &dyn NetworkOps,
     port25: &Port25Status,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    println!("AIMX verify - Port 25 connectivity check\n");
+    println!(
+        "{}\n",
+        term::header("AIMX verify - Port 25 connectivity check")
+    );
 
     let mut all_pass = true;
 
@@ -155,13 +159,13 @@ pub fn run_with_net(
     print!("  Outbound port 25... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_outbound(net) {
-        setup::PreflightResult::Pass(_) => println!("PASS"),
+        setup::PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
         setup::PreflightResult::Fail(msg) => {
-            println!("FAIL");
+            println!("{}", term::fail_badge());
             eprintln!("  {msg}");
             all_pass = false;
         }
-        setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+        setup::PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     match port25 {
@@ -169,20 +173,24 @@ pub fn run_with_net(
             print!("  Inbound port 25... ");
             std::io::Write::flush(&mut std::io::stdout())?;
             match setup::check_inbound(net) {
-                setup::PreflightResult::Pass(_) => println!("PASS"),
+                setup::PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
                 setup::PreflightResult::Fail(msg) => {
-                    println!("FAIL");
+                    println!("{}", term::fail_badge());
                     eprintln!("  {msg}");
                     all_pass = false;
                 }
-                setup::PreflightResult::Warn(msg) => println!("WARN: {msg}"),
+                setup::PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
             }
 
             println!();
             if all_pass {
                 println!(
-                    "All checks passed. Port 25 is reachable. Your system is good for AIMX setup.\nRun `sudo aimx setup` to begin."
+                    "{}",
+                    term::success(
+                        "All checks passed. Port 25 is reachable. Your system is good for AIMX setup."
+                    )
                 );
+                println!("Run `sudo aimx setup` to begin.");
                 Ok(())
             } else {
                 Err("Some checks failed. See details above.".into())

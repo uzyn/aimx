@@ -1,3 +1,4 @@
+use crate::term;
 use base64::Engine;
 use rsa::pkcs1::EncodeRsaPrivateKey;
 use rsa::pkcs8::{EncodePublicKey, LineEnding};
@@ -120,14 +121,29 @@ pub fn run_keygen(
     selector: &str,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    generate_keypair(data_dir, force)?;
+    let private_path = data_dir.join("dkim/private.key");
+    let already_existed = private_path.exists() && !force;
+
+    if already_existed {
+        eprintln!(
+            "{} DKIM keys already exist. Use --force to overwrite.",
+            term::warn("Warning:")
+        );
+    } else {
+        generate_keypair(data_dir, force)?;
+    }
 
     let record = dns_record_value(data_dir)?;
 
-    println!("DKIM keypair generated successfully.");
-    println!();
+    if !already_existed {
+        println!("{}", term::success("DKIM keypair generated successfully."));
+        println!();
+    }
     println!("Add this DNS TXT record:");
-    println!("  {selector}._domainkey.{domain}");
+    println!(
+        "  {}",
+        term::highlight(&format!("{selector}._domainkey.{domain}"))
+    );
     println!("  {record}");
     println!();
 

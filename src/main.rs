@@ -11,6 +11,7 @@ mod serve;
 mod setup;
 mod smtp;
 mod status;
+mod term;
 mod verify;
 
 use clap::Parser;
@@ -20,7 +21,7 @@ use std::path::Path;
 fn main() {
     let cli = Cli::parse();
     if let Err(e) = dispatch(cli) {
-        eprintln!("Error: {e}");
+        eprintln!("{} {e}", term::error("Error:"));
         std::process::exit(1);
     }
 }
@@ -34,7 +35,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let config = match load_config(cli.data_dir.as_deref()) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("Error loading config: {e}");
+                    eprintln!("{} loading config: {e}", term::error("Error:"));
                     std::process::exit(1);
                 }
             };
