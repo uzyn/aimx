@@ -1,10 +1,37 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
 use crate::config::Config;
+use crate::dkim;
+use crate::send::{LettreTransport, MailTransport};
+use crate::send_handler::SendContext;
+use crate::send_protocol;
 use crate::smtp::SmtpServer;
 use crate::term;
 
 const DEFAULT_BIND: &str = "0.0.0.0:25";
 const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
 const DEFAULT_TLS_KEY: &str = "/etc/ssl/aimx/key.pem";
+const DEFAULT_RUNTIME_DIR: &str = "/run/aimx";
+const RUNTIME_DIR_ENV: &str = "AIMX_RUNTIME_DIR";
+const SEND_SOCKET_NAME: &str = "send.sock";
+
+/// Resolve the runtime directory that holds `/run/aimx/send.sock`.
+///
+/// Precedence:
+/// 1. `AIMX_RUNTIME_DIR` env var (tests and non-standard installs)
+/// 2. `/run/aimx/` default (provided by systemd `RuntimeDirectory=aimx`
+///    or the OpenRC `start_pre` `checkpath` hook)
+pub fn runtime_dir() -> PathBuf {
+    std::env::var_os(RUNTIME_DIR_ENV)
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_DIR))
+}
+
+/// Path to the world-writable `AIMX/1 SEND` UDS.
+pub fn send_socket_path() -> PathBuf {
+    runtime_dir().join(SEND_SOCKET_NAME)
+}
 
 pub fn run(
     bind: Option<&str>,
@@ -52,6 +79,34 @@ async fn run_serve(
         );
     }
 
+    // Load DKIM key once at startup — every accepted UDS send reuses this
+    // in-memory key. A failure here is fatal: the daemon cannot sign
+    // outbound mail without it.
+    let dkim_root = crate::config::dkim_dir();
+    let dkim_key = match dkim::load_private_key(&dkim_root) {
+        Ok(k) => Arc::new(k),
+        Err(e) => {
+            return Err(format!(
+                "Failed to load DKIM private key from {}: {e}. \
+                 `aimx serve` requires a readable DKIM private key \
+                 (generate with `aimx setup` or `aimx dkim-keygen`).",
+                dkim_root.join("private.key").display()
+            )
+            .into());
+        }
+    };
+
+    // Build the SendContext shared across every per-connection UDS task.
+    let transport: Arc<dyn MailTransport + Send + Sync> =
+        Arc::new(LettreTransport::new(config.enable_ipv6));
+    let send_ctx = Arc::new(SendContext {
+        dkim_key,
+        primary_domain: config.domain.clone(),
+        dkim_selector: config.dkim_selector.clone(),
+        registered_mailboxes: config.mailboxes.keys().cloned().collect(),
+        transport,
+    });
+
     let server = SmtpServer::new(config);
     let server = if tls_available {
         server.with_tls(cert, key)?
@@ -75,6 +130,21 @@ async fn run_serve(
         }
     );
 
+    // Bind the UDS send socket. Fatal on failure.
+    let socket_path = send_socket_path();
+    let uds_listener =
+        bind_send_socket(&socket_path).map_err(|e| -> Box<dyn std::error::Error> {
+            format!(
+                "Failed to bind UDS send socket at {}: {e}",
+                socket_path.display()
+            )
+            .into()
+        })?;
+    eprintln!(
+        "  send:  {} (mode 0o666, world-writable)",
+        term::highlight(&socket_path.display().to_string())
+    );
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     tokio::spawn(async move {
@@ -90,11 +160,176 @@ async fn run_serve(
         let _ = shutdown_tx.send(true);
     });
 
+    // Run the SMTP server and UDS listener concurrently. Both observe the
+    // same shutdown watch — a SIGTERM drains both accept loops.
+    let uds_shutdown = shutdown_rx.clone();
+    let uds_socket_path = socket_path.clone();
+    let uds_handle = tokio::spawn(async move {
+        run_send_listener(uds_listener, send_ctx, uds_shutdown).await;
+        // Clean up the socket file on clean shutdown so the next start does
+        // not trip the "stale socket" fallback path.
+        let _ = std::fs::remove_file(&uds_socket_path);
+    });
+
     let in_flight_msg = server.run(listener, shutdown_rx).await;
+
+    // Wait for the UDS listener to drain too so we don't leak its task.
+    let _ = uds_handle.await;
 
     eprintln!("{}", term::info("AIMX SMTP listener shut down"));
 
     in_flight_msg
+}
+
+/// Bind the UDS send socket at `path` with mode `0o666`.
+///
+/// Handles the stale-socket-after-crash case: if the path already refers to
+/// a socket, unlink it and retry once. A second failure is fatal.
+pub fn bind_send_socket(path: &Path) -> std::io::Result<tokio::net::UnixListener> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let listener = match tokio::net::UnixListener::bind(path) {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            // Stale socket from a prior crash. Unlink and retry once.
+            std::fs::remove_file(path)?;
+            tokio::net::UnixListener::bind(path)?
+        }
+        Err(e) => return Err(e),
+    };
+    set_socket_mode(path, 0o666)?;
+    Ok(listener)
+}
+
+#[cfg(unix)]
+fn set_socket_mode(path: &Path, mode: u32) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn set_socket_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
+    Ok(())
+}
+
+async fn run_send_listener(
+    listener: tokio::net::UnixListener,
+    ctx: Arc<SendContext>,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
+    loop {
+        tokio::select! {
+            accept = listener.accept() => {
+                match accept {
+                    Ok((stream, _addr)) => {
+                        let peer = peer_credentials(&stream);
+                        eprintln!(
+                            "[send] accepted: peer_uid={} peer_pid={}",
+                            peer.uid_str(),
+                            peer.pid_str()
+                        );
+                        let ctx = Arc::clone(&ctx);
+                        tokio::spawn(async move {
+                            handle_send_connection(stream, ctx).await;
+                        });
+                    }
+                    Err(e) => {
+                        eprintln!("[send] accept error: {e}");
+                        // Transient — do not kill the listener.
+                        continue;
+                    }
+                }
+            }
+            _ = shutdown.changed() => {
+                break;
+            }
+        }
+    }
+    eprintln!("[send] UDS accept loop drained");
+}
+
+async fn handle_send_connection(stream: tokio::net::UnixStream, ctx: Arc<SendContext>) {
+    let (mut reader, mut writer) = stream.into_split();
+    let (response, parse_failed) = match send_protocol::parse_request(&mut reader).await {
+        Ok(req) => (crate::send_handler::handle_send(req, &ctx).await, false),
+        Err(send_protocol::ParseError::ClosedBeforeRequest) => {
+            // Client connected and closed without sending anything. No
+            // response to write — just drop the connection.
+            return;
+        }
+        Err(e) => (
+            send_protocol::SendResponse::Err {
+                code: send_protocol::ErrCode::Malformed,
+                reason: e.to_string(),
+            },
+            true,
+        ),
+    };
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // When the parser rejects the request (typically on the first line of
+    // a malformed frame), the client may still have bytes in flight that
+    // the kernel has queued on our receive side. If we close with unread
+    // bytes the kernel issues an abortive close and the client's pending
+    // `read` races the teardown and sees `ECONNRESET` instead of the
+    // framed reply we are about to write. Drain here — but only on parse
+    // failure, because a well-formed request has already been consumed up
+    // through `Content-Length`, and further `read` would block on the
+    // peer, deadlocking well-behaved clients that keep the write half
+    // open until they have read our response.
+    if parse_failed {
+        let mut sink = [0u8; 1024];
+        loop {
+            match tokio::time::timeout(std::time::Duration::from_millis(50), reader.read(&mut sink))
+                .await
+            {
+                Ok(Ok(0)) | Err(_) => break,
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => break,
+            }
+        }
+    }
+
+    if let Err(e) = send_protocol::write_response(&mut writer, &response).await {
+        eprintln!("[send] failed to write response: {e}");
+    }
+    let _ = writer.shutdown().await;
+}
+
+/// Peer-credential snapshot for logging. `None` on platforms/errors where
+/// the kernel could not supply credentials — e.g. the client closed before
+/// we asked. Used only for journald diagnostics (FR-18b) — never for
+/// authorization.
+struct PeerCred {
+    uid: Option<u32>,
+    pid: Option<i32>,
+}
+
+impl PeerCred {
+    fn uid_str(&self) -> String {
+        self.uid
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into())
+    }
+    fn pid_str(&self) -> String {
+        self.pid
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into())
+    }
+}
+
+fn peer_credentials(stream: &tokio::net::UnixStream) -> PeerCred {
+    match stream.peer_cred() {
+        Ok(c) => PeerCred {
+            uid: Some(c.uid()),
+            pid: c.pid(),
+        },
+        Err(_) => PeerCred {
+            uid: None,
+            pid: None,
+        },
+    }
 }
 
 fn can_read_tls(cert: &std::path::Path, key: &std::path::Path) -> bool {
@@ -231,6 +466,7 @@ pub mod service {
 #[cfg(test)]
 mod tests {
     use super::service::*;
+    use super::*;
 
     #[test]
     fn systemd_unit_contains_required_fields() {
@@ -447,6 +683,263 @@ mod tests {
                 stream.is_err(),
                 "Connection should be refused after shutdown"
             );
+        });
+    }
+
+    #[test]
+    fn runtime_dir_env_override_takes_precedence() {
+        // Serialized via the same lock shape that `config::test_env` uses
+        // would be ideal, but AIMX_RUNTIME_DIR is only touched in tests,
+        // and these tests are all in this module, so a simple guard is
+        // sufficient. See note in the body.
+        use std::sync::Mutex;
+        static GUARD: Mutex<()> = Mutex::new(());
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev = std::env::var_os(RUNTIME_DIR_ENV);
+        // SAFETY: serialized by `GUARD`; test restores the previous value
+        // before returning.
+        unsafe {
+            std::env::set_var(RUNTIME_DIR_ENV, "/tmp/some-override");
+        }
+        assert_eq!(
+            runtime_dir(),
+            std::path::PathBuf::from("/tmp/some-override")
+        );
+        assert_eq!(
+            send_socket_path(),
+            std::path::PathBuf::from("/tmp/some-override/send.sock")
+        );
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(RUNTIME_DIR_ENV, v),
+                None => std::env::remove_var(RUNTIME_DIR_ENV),
+            }
+        }
+    }
+
+    #[test]
+    fn runtime_dir_default_when_env_unset() {
+        use std::sync::Mutex;
+        static GUARD: Mutex<()> = Mutex::new(());
+        let _g = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prev = std::env::var_os(RUNTIME_DIR_ENV);
+        unsafe {
+            std::env::remove_var(RUNTIME_DIR_ENV);
+        }
+        assert_eq!(runtime_dir(), std::path::PathBuf::from("/run/aimx"));
+        assert_eq!(
+            send_socket_path(),
+            std::path::PathBuf::from("/run/aimx/send.sock")
+        );
+        unsafe {
+            if let Some(v) = prev {
+                std::env::set_var(RUNTIME_DIR_ENV, v);
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_send_socket_sets_world_writable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("send.sock");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let _listener = bind_send_socket(&sock).unwrap();
+            let mode = std::fs::metadata(&sock).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o666,
+                "UDS send socket must be world-writable (0o666); got {mode:o}"
+            );
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bind_send_socket_reclaims_stale_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("send.sock");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            // Bind once, drop the listener — the file persists on disk,
+            // simulating the "daemon crashed with no cleanup" case.
+            {
+                let _l = bind_send_socket(&sock).unwrap();
+            }
+            assert!(sock.exists(), "stale socket should remain");
+
+            // Bind again — must succeed by unlinking + retry.
+            let _l2 = bind_send_socket(&sock).unwrap();
+            assert!(sock.exists());
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uds_accept_reads_peer_credentials() {
+        use std::collections::HashSet;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("send.sock");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = bind_send_socket(&sock).unwrap();
+
+            // Build a throwaway SendContext. Key generation is the slow
+            // step so we use a tempdir-backed one.
+            let dkim_tmp = tempfile::TempDir::new().unwrap();
+            crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
+            let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+            let mut mboxes = HashSet::new();
+            mboxes.insert("catchall".to_string());
+            let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
+            let ctx = Arc::new(crate::send_handler::SendContext {
+                dkim_key: Arc::new(key),
+                primary_domain: "example.com".to_string(),
+                dkim_selector: "dkim".to_string(),
+                registered_mailboxes: mboxes,
+                transport,
+            });
+
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let handle = tokio::spawn(async move {
+                run_send_listener(listener, ctx, shutdown_rx).await;
+            });
+
+            // Connect from the same process.
+            let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+            // Assert the client stream has peer credentials for the server
+            // side too (mirrors the server-side read).
+            let cred = client
+                .peer_cred()
+                .expect("peer_cred should succeed on local UDS");
+            assert_eq!(cred.uid(), unsafe { libc::geteuid() });
+
+            // Close without sending anything — server handler should fall
+            // back to the "ClosedBeforeRequest" branch and drop cleanly.
+            use tokio::io::AsyncWriteExt;
+            let _ = client.shutdown().await;
+            drop(client);
+
+            // Shut down the listener.
+            shutdown_tx.send(true).unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        });
+    }
+
+    struct NoopTransport;
+    impl MailTransport for NoopTransport {
+        fn send(&self, _: &str, _: &str, _: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+            Ok("noop".into())
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uds_end_to_end_signed_delivery() {
+        use std::collections::HashSet;
+        use std::sync::Mutex;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("send.sock");
+
+        // Transport that captures whatever is delivered.
+        struct CapturingTransport {
+            captured: Mutex<Vec<Vec<u8>>>,
+        }
+        impl MailTransport for CapturingTransport {
+            fn send(
+                &self,
+                _: &str,
+                _: &str,
+                message: &[u8],
+            ) -> Result<String, Box<dyn std::error::Error>> {
+                self.captured.lock().unwrap().push(message.to_vec());
+                Ok("mock-mx".into())
+            }
+        }
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = bind_send_socket(&sock).unwrap();
+
+            let dkim_tmp = tempfile::TempDir::new().unwrap();
+            crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
+            let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+            let pub_pem = std::fs::read_to_string(dkim_tmp.path().join("public.key")).unwrap();
+
+            let captor = Arc::new(CapturingTransport {
+                captured: Mutex::new(vec![]),
+            });
+            let transport: Arc<dyn MailTransport + Send + Sync> = captor.clone();
+
+            let mut mboxes = HashSet::new();
+            mboxes.insert("alice".to_string());
+            let ctx = Arc::new(crate::send_handler::SendContext {
+                dkim_key: Arc::new(key),
+                primary_domain: "example.com".to_string(),
+                dkim_selector: "dkim".to_string(),
+                registered_mailboxes: mboxes,
+                transport,
+            });
+
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let handle = tokio::spawn(async move {
+                run_send_listener(listener, ctx, shutdown_rx).await;
+            });
+
+            // Build a minimal RFC 5322 body.
+            let body = b"From: alice@example.com\r\n\
+                         To: user@gmail.com\r\n\
+                         Subject: Hi\r\n\
+                         Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                         Message-ID: <abc@example.com>\r\n\
+                         \r\n\
+                         hello\r\n";
+            let req = crate::send_protocol::SendRequest {
+                from_mailbox: "alice".to_string(),
+                body: body.to_vec(),
+            };
+
+            let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+            let (mut r, mut w) = client.split();
+            crate::send_protocol::write_request(&mut w, &req)
+                .await
+                .unwrap();
+            use tokio::io::AsyncReadExt;
+            let mut resp = String::new();
+            r.read_to_string(&mut resp).await.unwrap();
+            assert!(
+                resp.starts_with("AIMX/1 OK <abc@example.com>"),
+                "unexpected response: {resp:?}"
+            );
+
+            // Verify the transport received a DKIM-signed message. Clone
+            // the captured bytes out of the guard so we can drop the lock
+            // before any further `.await` (clippy::await-holding-lock).
+            let signed_bytes = {
+                let captured = captor.captured.lock().unwrap();
+                assert_eq!(captured.len(), 1);
+                captured[0].clone()
+            };
+            let signed = String::from_utf8_lossy(&signed_bytes);
+            assert!(signed.starts_with("DKIM-Signature:"));
+            assert!(signed.contains("d=example.com"));
+            assert!(signed.contains("s=dkim"));
+            // The public key should non-trivially map to the signature —
+            // the full cryptographic verification is covered by the
+            // existing `sign_and_verify_roundtrip` test in dkim.rs.
+            assert!(pub_pem.contains("PUBLIC KEY"));
+
+            shutdown_tx.send(true).unwrap();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         });
     }
 }
