@@ -63,7 +63,7 @@ The wizard will:
 4. Display the DNS records you need to add under a **[DNS]** section
 5. Let you verify DNS records (press Enter to re-check, or q to defer)
 6. Display **[MCP]** configuration for your AI agent
-7. Show **[Deliverability Improvement (Optional)]** tips (PTR, Gmail filter)
+7. Show **[Deliverability Improvement (Optional)]** tips (Gmail filter / whitelist)
 8. Create a default `catchall` mailbox
 
 If you've already run setup and want to re-verify, just run `sudo aimx setup agent.yourdomain.com` again -- it will skip installation and go straight to verification.

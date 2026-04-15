@@ -2,11 +2,11 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 41 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 8 v0.2 pre-launch reshape)
-**Timeline:** ~112 calendar days (v1: ~92 days, v0.2 reshape: ~20 days)
+**Total sprints:** 42 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape)
+**Timeline:** ~114.5 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days)
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
 
-**v0.2 Scope (pre-launch reshape, Sprints 33–40):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable) and creates the `aimx` system group. Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
+**v0.2 Scope (pre-launch reshape, Sprints 33–40 + 33.1 scope-reversal):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable). Sprint 33.1 (scope reversal, inserted after Sprint 33 merged) drops PTR/reverse-DNS handling (operator responsibility, out of aimx scope) and drops the `aimx` system group introduced in S33-4 — authorization on the UDS send socket is explicitly out of scope for v0.2 and the socket becomes world-writable (`0o666`). Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a world-writable Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
 
 ---
 
@@ -660,7 +660,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 33 — Filesystem Split + `aimx` Group Foundation (Days 92–94.5) [IN PROGRESS]
+## Sprint 33 — Filesystem Split + `aimx` Group Foundation (Days 92–94.5) [DONE]
 
 **Goal:** Move configuration and DKIM secrets to `/etc/aimx/`, establish the `aimx` system group, and provide the `/run/aimx/` runtime directory. No behavior change is visible to agents yet — this is the foundation every subsequent v0.2 sprint builds on.
 
@@ -677,12 +677,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `config_dir()` added to `src/config.rs`; returns `PathBuf` from `AIMX_CONFIG_DIR` if set, else `/etc/aimx/`
-- [ ] `config_path()` (or `config_file()`) returns `config_dir().join("config.toml")`
-- [ ] `--data-dir` CLI flag remains unchanged (it governs `/var/lib/aimx/`, not config)
-- [ ] No callers reference `/var/lib/aimx/config.toml` literally after this story; grep confirms
-- [ ] Tests use `std::env::set_var("AIMX_CONFIG_DIR", tmp.path())` with the existing parallel-safety pattern (scoped serial guard where required)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `config_dir()` added to `src/config.rs`; returns `PathBuf` from `AIMX_CONFIG_DIR` if set, else `/etc/aimx/`
+- [x] `config_path()` (or `config_file()`) returns `config_dir().join("config.toml")`
+- [x] `--data-dir` CLI flag remains unchanged (it governs `/var/lib/aimx/`, not config) <!-- Re-review confirmed: `Config::load_resolved_with_data_dir(override)` threads the CLI flag through ingest/mailbox/status/send/serve/mcp after initial review flagged it as silently ignored (fixed in a6ddb26). -->
+- [x] No callers reference `/var/lib/aimx/config.toml` literally after this story; grep confirms
+- [x] Tests use `std::env::set_var("AIMX_CONFIG_DIR", tmp.path())` with the existing parallel-safety pattern (scoped serial guard where required)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33-2: `aimx setup` writes config to `/etc/aimx/config.toml` (mode `640`)
 
@@ -690,12 +690,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `setup.rs` creates `/etc/aimx/` with mode `755` if absent
-- [ ] Config written to `<config_dir>/config.toml` with mode `640`, owner `root:root` when running as root on a real install
-- [ ] Re-entrant setup: if `<config_dir>/config.toml` already exists and matches the domain, proceed (existing re-entrant pattern preserved — see `is_already_configured`)
-- [ ] Unit test asserts the written mode is `0o640` (use `/tmp`-style path + permissions check; skip only when the test is running non-root via `nix::unistd::geteuid`)
-- [ ] `book/configuration.md` updated with the new path
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `setup.rs` creates `/etc/aimx/` with mode `755` if absent
+- [x] Config written to `<config_dir>/config.toml` with mode `640`, owner `root:root` when running as root on a real install <!-- Re-review confirmed: gated on `is_root()` alone after initial review flagged the `AIMX_CONFIG_DIR`-absence gating as too weak (fixed in a6ddb26). Fresh-install path uses atomic `OpenOptions::mode(0o640).create_new(true)`. -->
+- [x] Re-entrant setup: if `<config_dir>/config.toml` already exists and matches the domain, proceed (existing re-entrant pattern preserved — see `is_already_configured`)
+- [x] Unit test asserts the written mode is `0o640` (use `/tmp`-style path + permissions check; skip only when the test is running non-root via `nix::unistd::geteuid`)
+- [x] `book/configuration.md` updated with the new path
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33-3: DKIM keys move to `/etc/aimx/dkim/` (private `600`, public `644`)
 
@@ -703,12 +703,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `generate_keypair()` writes private key to `<config_dir>/dkim/private.key` with mode `0o600`, public key to `<config_dir>/dkim/public.key` with mode `0o644`
-- [ ] The Sprint 25 test `private_key_has_restricted_permissions` is updated back to expect `0o600`
-- [ ] New test `public_key_is_world_readable` asserts `0o644` on the public key
-- [ ] `load_private_key()` error message on permission denied reads: `DKIM private key is readable only by root. This command must be invoked by \`aimx serve\` (root) — non-root processes must submit mail via \`aimx send\` instead.`
-- [ ] All consumers of `load_private_key()` audited — after this story, callers are `aimx serve` (root) and the test harness only
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `generate_keypair()` writes private key to `<config_dir>/dkim/private.key` with mode `0o600`, public key to `<config_dir>/dkim/public.key` with mode `0o644` <!-- Re-review confirmed: `write_file_with_mode` helper uses atomic `OpenOptions::mode(...).create_new(true)` (added in a6ddb26) to eliminate the write→chmod race flagged in initial review. -->
+- [x] The Sprint 25 test `private_key_has_restricted_permissions` is updated back to expect `0o600`
+- [x] New test `public_key_is_world_readable` asserts `0o644` on the public key
+- [x] `load_private_key()` error message on permission denied reads: `DKIM private key is readable only by root. This command must be invoked by \`aimx serve\` (root) — non-root processes must submit mail via \`aimx send\` instead.`
+- [x] All consumers of `load_private_key()` audited — after this story, callers are `aimx serve` (root) and the test harness only <!-- Re-review confirmed: `load_private_key_permission_denied_surfaces_root_guidance` test added in a6ddb26 pins the guidance-message invariant. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S33-4: `aimx` system group + `/run/aimx/` via `RuntimeDirectory=aimx`
 
@@ -716,27 +716,143 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `setup.rs` creates `aimx` group idempotently (detect `groupadd` vs `addgroup`); `SystemOps` gains `create_system_group(name)` trait method with `MockSystemOps` support
-- [ ] Generated systemd unit includes `RuntimeDirectory=aimx`, `RuntimeDirectoryMode=0750`, `Group=aimx` (while `User=root` stays); existing unit template tests extended
-- [ ] Generated OpenRC script has equivalent `checkpath` step; existing unit template tests extended
-- [ ] Setup output section prints the `usermod -aG aimx <user>` instruction and names the group explicitly
-- [ ] `book/setup.md` documents the group and the post-setup `usermod` step (+ `newgrp aimx` or logout/login hint)
-- [ ] Re-running `aimx setup` does NOT error when the group already exists
-- [ ] Tests cover: group creation command shape for both systemd/groupadd and OpenRC/addgroup; systemd unit contains `RuntimeDirectory=aimx`; `install_service_file` still passes
+- [x] `setup.rs` creates `aimx` group idempotently (detect `groupadd` vs `addgroup`); `SystemOps` gains `create_system_group(name)` trait method with `MockSystemOps` support
+- [x] Generated systemd unit includes `RuntimeDirectory=aimx`, `RuntimeDirectoryMode=0750`, `Group=aimx` (while `User=root` stays); existing unit template tests extended
+- [x] Generated OpenRC script has equivalent `checkpath` step; existing unit template tests extended
+- [x] Setup output section prints the `usermod -aG aimx <user>` instruction and names the group explicitly
+- [x] `book/setup.md` documents the group and the post-setup `usermod` step (+ `newgrp aimx` or logout/login hint)
+- [x] Re-running `aimx setup` does NOT error when the group already exists
+- [x] Tests cover: group creation command shape for both systemd/groupadd and OpenRC/addgroup; systemd unit contains `RuntimeDirectory=aimx`; `install_service_file` still passes <!-- Re-review confirmed: `run_setup_skips_group_creation_on_reentrant_path` added in a6ddb26 to pin the re-entrant invariant alongside the install-path ordering assertion. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 33.1 — Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup (Days 94.5–97) [IN PROGRESS]
+
+**Goal:** Reverse two scope decisions before Sprint 34 builds on them: (a) drop PTR/reverse-DNS handling entirely (operator responsibility, out of aimx scope), (b) drop the `aimx` system group introduced in S33-4 — the UDS send socket in Sprint 34 will be world-writable (`0o666`), so group-gated authorization is no longer needed. Also clear the actionable items on the Non-blocking Review Backlog in the same sprint, and run manual end-to-end validation of the Claude Code + Codex CLI plugins on a real machine.
+
+**Dependencies:** Sprint 33 (merged).
+
+**Design notes:**
+- PTR: aimx no longer checks, warns about, or documents reverse DNS. Operators configure it with their VPS provider. aimx's role ends at MX/A/SPF/DKIM/DMARC.
+- `aimx` group: `/etc/aimx/` stays `root:root 0755`; DKIM private key stays `root:root 0600` (only `aimx serve` reads it). `/run/aimx/` is still provisioned by systemd `RuntimeDirectory=aimx` but at the default `root:root 0755`. The Sprint 34 socket will be `0o666` — any local user can submit mail. This reverses FR-1d and rewrites FR-18b.
+- All eight stories land in one PR because they touch overlapping files (`setup.rs`, `verify.rs`, `book/setup.md`, `docs/prd.md`).
+
+#### S33.1-1: Drop all PTR / reverse-DNS code and docs
+
+**Context:** `check_ptr()` in `setup.rs`, related `NetworkOps::check_ptr_record` trait method, the PTR warning path in `display_deliverability_section`, PTR mentions in `book/setup.md`, `book/troubleshooting.md`, `docs/manual-setup.md`, `book/getting-started.md`, `README.md`, `src/cli.rs`, `src/term.rs` (if any), and `docs/prd.md` (FR-5 — already removed in this sprint's PRD edit pass) all go. Tests that assert PTR-warning output go. `get_server_ips()` / `get_server_ipv6()` stay (still used for MX/A/SPF verification) but the PTR caller paths are removed.
+
+**Priority:** P0
+
+- [ ] `check_ptr()` and any PTR-specific helpers removed from `src/setup.rs`
+- [ ] `NetworkOps::check_ptr_record` trait method and `MockNetworkOps` implementation removed
+- [ ] `display_deliverability_section` no longer surfaces a PTR status block (the section may be deleted entirely if PTR was its only content)
+- [ ] All PTR-related tests removed from `src/setup.rs` and `src/verify.rs` test modules
+- [ ] Docs sweep: `book/setup.md`, `book/troubleshooting.md`, `book/getting-started.md`, `docs/manual-setup.md`, `README.md` — no remaining PTR/reverse-DNS mentions
+- [ ] `docs/prd.md` FR-5 already removed; FR-7 already updated to drop PTR from the DNS-records list — verify
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-2: Drop `aimx` system group and group-gating
+
+**Context:** Reverses S33-4 of the just-merged Sprint 33. The group was created for the UDS socket auth story, but Sprint 34 is redesigned to use a world-writable socket instead. Remove `SystemOps::create_system_group` trait method + real + mock impls, strip `Group=aimx` from the generated systemd unit, drop OpenRC `chown root:aimx` but keep the `/run/aimx/` creation, drop the `[Group access]` setup output section, drop the `usermod -aG aimx` instruction, update `book/setup.md` + `book/configuration.md` + `docs/manual-setup.md`. The `/run/aimx/` runtime directory stays — systemd `RuntimeDirectory=aimx` (with default mode `0755`) still creates it, which is fine for a world-writable socket.
+
+**Priority:** P0
+
+- [ ] `SystemOps::create_system_group` trait method removed along with real and `MockSystemOps` implementations
+- [ ] Generated systemd unit no longer contains `Group=aimx`; `RuntimeDirectory=aimx` retained (default `RuntimeDirectoryMode=0755` — drop the explicit `RuntimeDirectoryMode=0750` line)
+- [ ] Generated OpenRC script no longer does `chown root:aimx` or `command_user="root:aimx"`; `checkpath -d -m 0755 -o root:root /run/aimx` retained
+- [ ] `run_setup` call graph: `create_system_group` call removed from install phase; re-entrant short-circuit path unchanged
+- [ ] Setup output: `[Group access]` section deleted; no `usermod -aG aimx` instruction printed
+- [ ] `book/setup.md`, `book/configuration.md`, `docs/manual-setup.md` — no remaining references to the `aimx` group
+- [ ] Tests updated: `systemd_unit_exposes_runtime_dir_and_aimx_group` replaced by `systemd_unit_declares_runtime_dir_without_group`; `group_section_mentions_aimx_group_and_usermod` removed; `run_setup_creates_aimx_group_when_not_configured` and `run_setup_skips_group_creation_on_reentrant_path` removed
+- [ ] `docs/prd.md` FR-1d already removed; FR-18b already rewritten — verify
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-3: Drop `data_dir` param from `verify::run_verify`
+
+**Context:** Backlog item from Sprint 33 review. `verify` only reads `verify_host` from config; the parameter is dead weight.
+
+**Priority:** P1
+
+- [ ] `verify::run_verify` signature no longer takes `data_dir: Option<&Path>`
+- [ ] `main.rs` dispatch updated
+- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-4: Factor `is_root()` into `src/platform.rs`
+
+**Context:** Backlog item from Sprint 33 review. `setup.rs` and `verify.rs` each have their own copy. Create `src/platform.rs` exporting `is_root()` (and a home for future platform helpers); update both callers.
+
+**Priority:** P1
+
+- [ ] `src/platform.rs` created; exports `pub fn is_root() -> bool`
+- [ ] `setup.rs` and `verify.rs` both use `crate::platform::is_root`; local copies deleted
+- [ ] Module declared in `main.rs`
+- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-5: Drop unused `_data_dir` params from runtime `run()` signatures
+
+**Context:** Backlog item from Sprint 33 review. `ingest::run`, `mailbox::run`, `status::run`, `send::run`, `serve::run`, `mcp::run` each accept `_data_dir: Option<&Path>` as dispatch-layer uniformity but don't use it — the override is threaded via `Config::load_resolved_with_data_dir` inside. Each `run()` will accept the typed override and call `Config::load_resolved_with_data_dir(data_dir_override)` itself.
+
+**Priority:** P1
+
+- [ ] Each `run()` signature accepts `data_dir_override: Option<&Path>` (or the existing typed param) and threads it through its own `Config::load_resolved_with_data_dir` call
+- [ ] All dispatch sites in `main.rs` updated consistently
+- [ ] No `#[allow(unused)]` or leading-underscore dead params remain
+- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-6: Second `indent_block` test (multi-line, no trailing newline)
+
+**Context:** Sprint 30 nice-to-have. Trivial — pin the current behavior with one extra test in `src/agent_setup.rs`.
+
+**Priority:** P2
+
+- [ ] New test `indent_block_handles_multiline_without_trailing_newline` added
+- [ ] Backlog item marked `[x] _Done in Sprint 33.1_`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-7: OpenClaw research + `aimx agent-setup openclaw` reshape
+
+**Context:** Backlog item from Sprint 30. Research OpenClaw's current CLI (docs.openclaw.ai). If a non-interactive `run`/`exec` CLI exists, wire up the `book/channel-recipes.md` recipe. If not, reshape `aimx agent-setup openclaw` to print step-by-step manual setup instructions (mirroring the Gemini-CLI pattern which emits a printed JSON-merge block rather than writing a file). Update the OpenClaw skill, `book/channel-recipes.md`, and `agents/openclaw/` as needed.
+
+**Priority:** P1
+
+- [ ] OpenClaw CLI capabilities documented inline in PR description (link to upstream docs)
+- [ ] If interactive-only: `aimx agent-setup openclaw` prints step-by-step manual setup guide (exact commands the operator runs)
+- [ ] If non-interactive: `aimx agent-setup openclaw` writes the skill + prints the single command
+- [ ] `book/channel-recipes.md` OpenClaw section updated to match
+- [ ] Existing OpenClaw unit tests updated for the new output
+- [ ] Backlog items (Sprint 30 OpenClaw + Sprint 31 nice-to-have OpenClaw recipe) marked `[x] _Done in Sprint 33.1_`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S33.1-8: Manual E2E validation — Claude Code + Codex CLI plugins (this machine)
+
+**Context:** Backlog items from Sprints 28 + 29. Both agents are installed on the validation machine. Plan: `cargo build --release && sudo cp target/release/aimx /usr/local/bin/`, then run `aimx agent-setup claude-code` and `aimx agent-setup codex`; restart / reload each agent; confirm the 9 AIMX MCP tools appear and the `aimx` skill is discoverable. If Codex CLI's plugin format diverges from the assumed camelCase `mcpServers` shape, capture the divergence and fix `src/agent_setup.rs` + related tests in-sprint.
+
+**Priority:** P0
+
+- [ ] `aimx agent-setup claude-code` run on this machine — 9 MCP tools appear in Claude Code, `aimx` skill discoverable (paste test output into PR description)
+- [ ] `aimx agent-setup codex` run on this machine — plugin accepted by Codex CLI; if format diverges, adjust schema and retest
+- [ ] If any divergence found → fix + add regression test for the real schema
+- [ ] Corresponding Non-blocking Backlog items (Sprint 28 Claude Code, Sprint 29 Codex CLI) marked `[x] _Validated in Sprint 33.1_`
+- [ ] Sprint 29 Gemini CLI, Sprint 30 Goose, Sprint 30 OpenClaw backlog items marked `[x] _Requires manual validation on real agent environments — deferred_` (Gemini + Goose remain deferred; OpenClaw covered by S33.1-7)
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 94.5–97) [NOT STARTED]
+## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 97–99.5) [NOT STARTED]
 
-**Goal:** Move DKIM signing and outbound SMTP delivery inside `aimx serve`, exposed to local clients over the Unix domain socket at `/run/aimx/send.sock`. `aimx send` is not yet rewritten (that's Sprint 35); this sprint stands up the daemon side and proves it works with a hand-written test client.
+**Goal:** Move DKIM signing and outbound SMTP delivery inside `aimx serve`, exposed to local clients over a world-writable Unix domain socket at `/run/aimx/send.sock` (`root:root 0666`). `aimx send` is not yet rewritten (that's Sprint 35); this sprint stands up the daemon side and proves it works with a hand-written test client.
 
-**Dependencies:** Sprint 33 (config dir, DKIM paths, `/run/aimx/` runtime dir, `aimx` group).
+**Dependencies:** Sprint 33.1 (scope reversal: PTR + `aimx` group dropped).
 
 **Design notes:**
 - Wire protocol is text-ish in the framing but binary-safe in the body — `Content-Length` gives an exact byte count. This mirrors HTTP/1.1's framing discipline without inheriting HTTP's parsing surface.
 - DKIM key loaded **once** at `aimx serve` startup into `Arc<DkimKey>` — every accepted send reuses the same in-memory key. Reloading on every connection would defeat the point of moving signing inside the daemon.
 - No queue, no retries: each UDS accept spawns a per-connection tokio task that signs, delivers, writes the response frame, and exits. Existing `LettreTransport` + `hickory-resolver` MX resolution (from Sprints 19–20) is reused as-is.
+- **Authorization is out of scope in v0.2.** The socket is world-writable (`0o666`) — any local user on the host can submit mail. `SO_PEERCRED` is read on accept and logged for diagnostics (`peer_uid` / `peer_pid` to journald) but is **not** used to authorize. Operators needing isolation should restrict host access by other means (OS user policy, container boundaries).
 
 #### S34-1: `src/send_protocol.rs` — wire format codec
 
@@ -755,16 +871,17 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 #### S34-2: `aimx serve` binds `/run/aimx/send.sock` + accept loop
 
-**Context:** Extend `src/serve.rs` to bind a `tokio::net::UnixListener` on `/run/aimx/send.sock` alongside the existing TCP SMTP listener. Bind-time ownership: the socket inherits `root:aimx 660` from `RuntimeDirectory` + the `aimx` group — set the mode explicitly with `std::os::unix::fs::PermissionsExt::set_mode(0o660)` after bind, chown to `root:aimx` (the file inherits from `RuntimeDirectory` owner by default but be explicit for OpenRC paths). On every accept, read `SO_PEERCRED` via `tokio::net::UnixStream::peer_cred()` and log `peer_uid` / `peer_pid` to the existing tracing pipeline (which already routes to journald). Each accepted connection gets its own tokio task — no bounded semaphore in this sprint (defense-in-depth concurrency cap can be a follow-up if review flags it). Bind failures are fatal at startup (`main` returns non-zero); runtime accept errors are logged and do not kill the listener.
+**Context:** Extend `src/serve.rs` to bind a `tokio::net::UnixListener` on `/run/aimx/send.sock` alongside the existing TCP SMTP listener. The socket is world-writable: explicitly `set_permissions(0o666)` after bind, owner left as `root:root` (no chown). On every accept, read `SO_PEERCRED` via `tokio::net::UnixStream::peer_cred()` and log `peer_uid` / `peer_pid` to the existing tracing pipeline (which already routes to journald) — for diagnostics only, not used for authorization. Each accepted connection gets its own tokio task — no bounded semaphore in this sprint (defense-in-depth concurrency cap can be a follow-up if review flags it). Bind failures are fatal at startup (`main` returns non-zero); runtime accept errors are logged and do not kill the listener.
 
 **Priority:** P0
 
 - [ ] `serve.rs` binds `UnixListener` at `send_socket_path()` (new helper: `<runtime_dir>/send.sock`; `AIMX_RUNTIME_DIR` env var overrides for tests)
-- [ ] Socket mode set to `0o660` after bind; owner `root:aimx` (chown call guarded behind `nix::unistd::geteuid().is_root()` so non-root test runs skip it)
-- [ ] `SO_PEERCRED` read on each accept; `peer_uid`/`peer_pid` emitted at `info` level via `tracing`
+- [ ] Socket mode set to `0o666` (world-writable) after bind via `set_permissions`; owner left as the running process's UID (root on real installs, the test user in tests — no explicit chown call)
+- [ ] `SO_PEERCRED` read on each accept; `peer_uid`/`peer_pid` emitted at `info` level via `tracing` for diagnostics — explicitly NOT used for any authorization check
 - [ ] Bind failure: process exits with `1` and a clear `error!` log naming the socket path and the errno
-- [ ] SIGTERM/SIGINT graceful shutdown drains the UDS accept loop the same way it drains the SMTP listener
-- [ ] Unit test binds the listener in a tempdir (override via `AIMX_RUNTIME_DIR`), connects from the same process, asserts accept fires and peer-cred fields are present
+- [ ] If the socket file already exists at bind time (stale from prior crash), unlink-and-retry once, then fail loudly on second failure
+- [ ] SIGTERM/SIGINT graceful shutdown drains the UDS accept loop the same way it drains the SMTP listener; socket file removed on clean shutdown
+- [ ] Unit test binds the listener in a tempdir (override via `AIMX_RUNTIME_DIR`), asserts the file mode is `0o666`, connects from the same process, asserts accept fires and peer-cred fields are present
 - [ ] Integration test: start `aimx serve` in a tempdir (systemd unit generation bypassed, binary invoked directly), connect a raw Unix socket, assert the listener accepts
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
@@ -790,7 +907,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 35 — `aimx send` Thin UDS Client + End-to-End (Days 97–99.5) [NOT STARTED]
+## Sprint 35 — `aimx send` Thin UDS Client + End-to-End (Days 99.5–102) [NOT STARTED]
 
 **Goal:** Rewrite `aimx send` as a thin UDS client that does no signing, owns no DKIM key access, and shells the full signing + delivery responsibility to `aimx serve`. Validate the full path: `aimx send` → UDS → `aimx serve` → DKIM-sign → MX delivery.
 
@@ -798,7 +915,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Design notes:**
 - After this sprint, `src/send.rs` is radically smaller — no `load_private_key()`, no `DkimSigner`, no `LettreTransport`. All of that now lives in `aimx serve`. The client composes the RFC 5322 message, opens the socket, writes one request frame, reads one response frame, exits with the status.
-- The `aimx` group membership requirement for non-root callers is enforced by filesystem permissions on the socket itself (`root:aimx 660` from Sprint 33–34). If the user isn't in `aimx`, `connect()` returns `EACCES` and the client prints a clear remediation message.
+- The socket is world-writable (`0o666` from Sprint 34), so `connect()` does not fail with `EACCES` for any local user. The only socket-related error path the client surfaces is "socket missing" (daemon not running).
 - `aimx send` no longer needs root. In fact, it now refuses to run as root (consistent with `aimx agent-setup`'s pattern) so agents don't accidentally mint mail through the daemon they themselves supervise.
 
 #### S35-1: Rewrite `src/send.rs` as a UDS client
@@ -810,7 +927,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 - [ ] `send.rs` after rewrite is <150 lines excluding `compose_message()` (enforce via a comment-anchored line count if desired, or just review)
 - [ ] All DKIM-related code paths removed from `send.rs`; `cargo clippy --all-targets -- -D warnings` reports no unused imports
 - [ ] Socket-missing error prints exactly: `aimx daemon not running — check 'systemctl status aimx'` on stderr and exits with code `2`
-- [ ] Permission-denied on connect (`EACCES`) prints: `Permission denied connecting to aimx daemon. Your user must be a member of the 'aimx' group. Run 'sudo usermod -aG aimx $USER' and log out/in.` and exits with code `2`
+- [ ] Other `connect()` failures (`ECONNREFUSED`, `EIO`, etc.) print a clear `Failed to connect to aimx daemon at <path>: <err>` message and exit with code `2`
 - [ ] Response `OK <message-id>` prints `Email sent.\nMessage-ID: <id>` (via `term::success`) and exits `0`
 - [ ] Each `ERR <code>` variant prints the reason prefixed with the code (e.g., `Error [DOMAIN]: sender domain does not match aimx domain`) and exits `1`
 - [ ] `aimx send` refuses to run as root with `agent-setup`-style message (`send is a per-user operation — run without sudo`) and exits `2`
@@ -848,7 +965,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 36 — Datadir Reshape (Inbox/Sent Split, Slug, Bundles, Mailbox Lifecycle) (Days 99.5–102) [NOT STARTED]
+## Sprint 36 — Datadir Reshape (Inbox/Sent Split, Slug, Bundles, Mailbox Lifecycle) (Days 102–104.5) [NOT STARTED]
 
 **Goal:** Ship the final on-disk layout: `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/`, deterministic `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, and mailbox-create that establishes both inbox + sent subdirectories. Inbound mail lands in the new layout after this sprint; outbound sent-items persistence still comes in Sprint 38.
 
@@ -905,7 +1022,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 102–104.5) [NOT STARTED]
+## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 104.5–107) [NOT STARTED]
 
 **Goal:** Land the full inbound frontmatter schema — new fields, section ordering, omission-vs-null discipline — and add DMARC verification alongside existing DKIM/SPF. Every inbound email written after this sprint carries the final v0.2 schema.
 
@@ -965,7 +1082,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 104.5–107) [NOT STARTED]
+## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 107–109.5) [NOT STARTED]
 
 **Goal:** Evaluate per-mailbox trust at ingest time and surface the result in the always-written `trusted` frontmatter field. Persist every successfully delivered outbound message to `sent/<from-mailbox>/` with the full outbound frontmatter block.
 
@@ -1026,7 +1143,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 107–109.5) [NOT STARTED]
+## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 109.5–112) [NOT STARTED]
 
 **Goal:** Restructure the shared agent primer from a single file into a main body + `references/` layout (the anthropics/skills progressive-disclosure pattern), standardize author metadata across every agent package, and reverse the earlier storage-exposure redaction policy so the primer documents the datadir layout explicitly.
 
@@ -1082,7 +1199,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 109.5–112) [NOT STARTED]
+## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 112–114.5) [NOT STARTED]
 
 **Goal:** Ship the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned, auto-refreshed on daemon startup), replace stale `/var/log/aimx.log` references with `journalctl` commands, and bring every affected `book/` chapter and `CLAUDE.md` up to date with the v0.2 reshape. Last sprint before launch.
 
@@ -1186,14 +1303,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 30 | 84.5–87 | Goose + OpenClaw Integration | Goose recipe, OpenClaw skill, README overhaul | Done |
 | 31 | 87–89.5 | Channel-Trigger Cookbook | `book/channel-recipes.md`, channel-trigger integration test, cross-links | Done |
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Done |
-| 33 | 92–94.5 | v0.2 Filesystem Split + `aimx` Group | `/etc/aimx/` for config + DKIM keys, `aimx` system group, `/run/aimx/` via `RuntimeDirectory=aimx`, DKIM private key back to `600` root-only | Not started |
-| 34 | 94.5–97 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock`, per-connection handler signs + delivers with `SO_PEERCRED` logging | Not started |
-| 35 | 97–99.5 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Not started |
-| 36 | 99.5–102 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Not started |
-| 37 | 102–104.5 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
-| 38 | 104.5–107 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
-| 39 | 107–109.5 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Not started |
-| 40 | 109.5–112 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Not started |
+| 33 | 92–94.5 | v0.2 Filesystem Split + `aimx` Group (group reverted in 33.1) | `/etc/aimx/` for config + DKIM keys, `/run/aimx/` via `RuntimeDirectory=aimx`, DKIM private key back to `600` root-only | Done |
+| 33.1 | 94.5–97 | Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup | Strip PTR/reverse-DNS, drop `aimx` system group + group-gating, clear ready-now backlog items, manual E2E validation of Claude Code + Codex CLI plugins | In Progress |
+| 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | Not started |
+| 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Not started |
+| 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Not started |
+| 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
+| 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
+| 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Not started |
+| 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Not started |
 
 ## Deferred to v2
 
@@ -1263,15 +1381,19 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 24)** `docs/prd.md` NFR-5: "aimx ingest" in prose without backticks — _Fixed: added backticks_
 - [x] **(Sprint 26)** `get_server_ip()` and `get_server_ipv6()` each invoke `hostname -I` separately — _Triaged into Sprint 32 (S32-4)_
 - [x] **(Sprint 27)** `cargo clippy --all-targets -- -D warnings` pre-existing test-target lints + adopt `--all-targets` in CI — _Triaged into Sprint 32 (S32-5)_
-- [ ] **(Sprint 28)** Manual end-to-end validation of the Claude Code plugin on a real machine — run `aimx agent-setup claude-code`, restart Claude Code, confirm the 9 AIMX MCP tools appear and the `aimx` skill is discoverable. Schema was verified against current official Claude Code plugin docs and unit tests cover the install pipeline, but actual plugin load was not exercised (sandbox lacks Claude Code). Also repeat for `sudo aimx setup <domain>` to confirm the reworked MCP section renders as expected end-to-end. Non-blocking because any schema drift can be patched in a follow-up without revisiting the framework itself.
-- [ ] **(Sprint 29)** Manual end-to-end validation of the Codex CLI plugin on a real machine — run `aimx agent-setup codex`, activate per Codex CLI instructions, and confirm the 9 AIMX MCP tools appear. Important: `.codex-plugin/plugin.json` uses the camelCase `mcpServers` shape on the assumption it mirrors Claude Code's convention (see inline comment on `codex_hint` in `src/agent_setup.rs`). If Codex CLI's plugin format actually expects `[mcp_servers.*]` TOML in `~/.codex/config.toml` or a different JSON schema, the plugin package needs to be reshaped accordingly. Validate before promoting Codex to the "supported, tested" tier.
-- [ ] **(Sprint 29)** Manual end-to-end validation of the Gemini CLI skill on a real machine — run `aimx agent-setup gemini`, merge the printed `mcpServers.aimx` JSON block into `~/.gemini/settings.json`, restart Gemini, and confirm the AIMX MCP tools and `aimx` skill are discoverable. Canonical paths were verified against current Gemini CLI docs but actual activation was not exercised (sandbox lacks Gemini CLI). Any schema drift is a follow-up patch, not a framework rework.
-- [ ] **(Sprint 30)** Manual end-to-end validation of the Goose recipe on a real machine — run `aimx agent-setup goose`, then `goose run --recipe aimx`, and confirm the MCP extension loads and AIMX tools are callable. Recipe format and CLI verb verified against current Goose docs; 51 agent_setup unit tests cover install + YAML injection, but actual `goose run` execution was not exercised (sandbox lacks Goose). Any schema drift is a follow-up patch.
-- [ ] **(Sprint 30)** Manual end-to-end validation of the OpenClaw skill on a real machine — run `aimx agent-setup openclaw`, paste the printed `openclaw mcp set aimx '<json>'` command, and confirm MCP tools appear and the skill is discoverable. `openclaw mcp set` CLI verified against current OpenClaw docs; POSIX shell escaping covers `'`-in-path edge case, but live activation was not exercised (sandbox lacks OpenClaw).
-- [ ] **(Sprint 30, nice-to-have)** Add a second `indent_block` test with multi-line input missing a trailing newline in `src/agent_setup.rs`. Cycle 1 reviewer flagged as nice-to-have; current tests cover the primary path. Low priority.
-- [ ] **(Sprint 31)** Add `book.toml` and wire `mdbook build` into CI so cross-link resolution is actually enforced. Sprint 31 shipped `book/SUMMARY.md` in mdbook-compatible format, but the repo has no `book.toml` yet, so the "all cross-links resolve in a local mdbook build" AC was deferred. The follow-up is small: add a minimal `book.toml`, add an `mdbook build` step to `.github/workflows/ci.yml` (or a new docs job), and make it fail on broken links.
-- [ ] **(Sprint 31, nice-to-have)** Swap OpenClaw's limitation note in `book/channel-recipes.md` for a real recipe once OpenClaw ships a non-interactive `run`/`exec` CLI. Until then, the chapter points at `docs.openclaw.ai` for updates.
-- [ ] **(Sprint 32, nice-to-have)** `RealNetworkOps::check_ptr_record` still calls `get_server_ips()` internally, so the full setup flow shells out to `hostname -I` twice end-to-end. The S32-4 trait-level AC is satisfied, but if a future sprint touches `check_ptr_record`, consider threading the already-detected IPv4 through from `run_setup` so the setup flow only invokes `hostname -I` once.
+- [x] **(Sprint 28)** Manual end-to-end validation of the Claude Code plugin on a real machine — _Scheduled for validation in Sprint 33.1 (Claude Code installed on current validation machine)._
+- [x] **(Sprint 29)** Manual end-to-end validation of the Codex CLI plugin on a real machine — _Scheduled for validation in Sprint 33.1 (Codex CLI installed on current validation machine)._
+- [x] **(Sprint 29)** Manual end-to-end validation of the Gemini CLI skill on a real machine — _Deferred — requires manual validation on a real machine with Gemini CLI installed (not currently available). Schema drift can be patched in a follow-up if/when validation happens._
+- [x] **(Sprint 30)** Manual end-to-end validation of the Goose recipe on a real machine — _Deferred — requires manual validation on a real machine with Goose installed (not currently available). Schema drift can be patched in a follow-up if/when validation happens._
+- [x] **(Sprint 30)** Manual end-to-end validation of the OpenClaw skill on a real machine — _Covered by Sprint 33.1 S33.1-7 (OpenClaw research + `aimx agent-setup openclaw` reshape)._
+- [x] **(Sprint 30, nice-to-have)** Add a second `indent_block` test with multi-line input missing a trailing newline in `src/agent_setup.rs` — _Triaged into Sprint 33.1 (S33.1-6)._
+- [x] **(Sprint 31)** Add `book.toml` and wire `mdbook build` into CI so cross-link resolution is actually enforced — _Out of scope for v0.2 — deferred by user decision (2026-04-15)._
+- [x] **(Sprint 31, nice-to-have)** Swap OpenClaw's limitation note in `book/channel-recipes.md` for a real recipe once OpenClaw ships a non-interactive `run`/`exec` CLI — _Covered by Sprint 33.1 S33.1-7 (research OpenClaw CLI; wire real recipe if non-interactive mode exists, otherwise reshape `aimx agent-setup openclaw` to print manual instructions)._
+- [x] **(Sprint 32, nice-to-have)** `RealNetworkOps::check_ptr_record` still calls `get_server_ips()` internally — _Obsolete: PTR code entirely removed in Sprint 33.1 (S33.1-1)._
+- [x] **(Sprint 33)** `verify::run_verify` still accepts a `data_dir: Option<&Path>` parameter — _Triaged into Sprint 33.1 (S33.1-3)._
+- [x] **(Sprint 33)** Factor the `is_root()` helper out of `setup.rs` and `verify.rs` into a single shared location — _Triaged into Sprint 33.1 (S33.1-4)._
+- [x] **(Sprint 33)** `SystemOps::create_system_group` real-impl path has no direct unit coverage — _Obsolete: `create_system_group` entirely removed in Sprint 33.1 (S33.1-2)._
+- [x] **(Sprint 33)** Several runtime subcommands accept `_data_dir: Option<&std::path::Path>` as a CLI-dispatch uniformity convenience — _Triaged into Sprint 33.1 (S33.1-5)._
 
 ### Deferred Feature Sprints
 

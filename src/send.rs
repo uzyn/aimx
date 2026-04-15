@@ -419,12 +419,7 @@ pub fn send_with_transport(
     Ok((composed.message_id, server))
 }
 
-pub fn run(
-    args: SendArgs,
-    data_dir: Option<&std::path::Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_resolved_with_data_dir(data_dir)
-        .map_err(|e| format!("Failed to load config for DKIM signing: {e}"))?;
+pub fn run(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let transport = LettreTransport::new(config.enable_ipv6);
     let private_key = dkim::load_private_key(&crate::config::dkim_dir())
         .map_err(|e| format!("DKIM signing required but private key could not be loaded: {e}"))?;
@@ -1041,29 +1036,14 @@ mod tests {
             verify_host: None,
             enable_ipv6: false,
         };
-        config.save(&crate::config::config_path()).unwrap();
 
         let args = test_args();
-        let result = run(args, Some(tmp.path()));
+        let result = run(args, config);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
             err.contains("DKIM") || err.contains("private key"),
             "Error should mention DKIM key: {err}"
-        );
-    }
-
-    #[test]
-    fn run_with_missing_config_returns_error() {
-        let tmp = tempfile::TempDir::new().unwrap();
-
-        let args = test_args();
-        let result = run(args, Some(tmp.path()));
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("config") || err.contains("DKIM"),
-            "Error should mention config loading: {err}"
         );
     }
 

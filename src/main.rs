@@ -7,6 +7,7 @@ mod ingest;
 mod mailbox;
 mod mcp;
 mod mx;
+mod platform;
 mod send;
 mod serve;
 mod setup;
@@ -17,7 +18,6 @@ mod verify;
 
 use clap::Parser;
 use cli::{Cli, Command};
-use std::path::Path;
 
 fn main() {
     let cli = Cli::parse();
@@ -29,31 +29,49 @@ fn main() {
 
 fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::Ingest { rcpt } => ingest::run(&rcpt, cli.data_dir.as_deref()),
-        Command::Send(args) => send::run(args, cli.data_dir.as_deref()),
-        Command::Mailbox(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
-        Command::DkimKeygen { selector, force } => {
-            let config = match load_config(cli.data_dir.as_deref()) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("{} loading config: {e}", term::error("Error:"));
-                    std::process::exit(1);
-                }
-            };
-            dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
-        }
-        Command::Mcp => {
-            let rt = tokio::runtime::Runtime::new()
-                .map_err(|e| format!("Failed to create runtime: {e}"))?;
-            rt.block_on(mcp::run(cli.data_dir.as_deref()))
-        }
+        // Setup runs pre-install: config may not exist yet.
         Command::Setup {
             domain,
             verify_host,
         } => {
             let sys = setup::RealSystemOps;
-            let net = build_network_ops(verify_host.as_deref(), cli.data_dir.as_deref())?;
+            let net = build_network_ops(verify_host.as_deref())?;
             setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
+        }
+        // Verify does not read config for storage — only `verify_host`.
+        Command::Verify { verify_host } => verify::run(verify_host.as_deref()),
+        // MCP server reloads config on each tool call; pass the override through.
+        Command::Mcp => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| format!("Failed to create runtime: {e}"))?;
+            rt.block_on(mcp::run(cli.data_dir.as_deref()))
+        }
+        // agent-setup uses data_dir as an install-path override for emitted
+        // MCP configs, not a config-loading override.
+        Command::AgentSetup {
+            agent,
+            list,
+            force,
+            print,
+        } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
+        // Everything else loads Config once here and takes it by value.
+        other => {
+            let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
+            dispatch_with_config(other, config)
+        }
+    }
+}
+
+fn dispatch_with_config(
+    cmd: Command,
+    config: config::Config,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match cmd {
+        Command::Ingest { rcpt } => ingest::run(&rcpt, config),
+        Command::Send(args) => send::run(args, config),
+        Command::Mailbox(cmd) => mailbox::run(cmd, config),
+        Command::DkimKeygen { selector, force } => {
+            dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }
         Command::Serve {
             bind,
@@ -63,32 +81,20 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             Some(bind.as_str()),
             tls_cert.as_deref(),
             tls_key.as_deref(),
-            cli.data_dir.as_deref(),
+            config,
         ),
-        Command::Status => status::run(cli.data_dir.as_deref()),
-        Command::Verify { verify_host } => {
-            verify::run(cli.data_dir.as_deref(), verify_host.as_deref())
-        }
-        Command::AgentSetup {
-            agent,
-            list,
-            force,
-            print,
-        } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
+        Command::Status => status::run(config),
+        Command::Setup { .. }
+        | Command::Verify { .. }
+        | Command::Mcp
+        | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
     }
-}
-
-fn load_config(_data_dir: Option<&Path>) -> Result<config::Config, Box<dyn std::error::Error>> {
-    // Config lives at `config_path()` (default `/etc/aimx/config.toml`) —
-    // `--data-dir` no longer governs config location (v0.2 filesystem split).
-    config::Config::load_resolved()
 }
 
 fn build_network_ops(
     cli_override: Option<&str>,
-    data_dir: Option<&Path>,
 ) -> Result<setup::RealNetworkOps, Box<dyn std::error::Error>> {
-    let config = load_config(data_dir).ok();
+    let config = config::Config::load_resolved().ok();
     let host =
         verify::resolve_verify_host(cli_override, config.as_ref(), setup::DEFAULT_VERIFY_HOST);
     setup::RealNetworkOps::from_verify_host(host)

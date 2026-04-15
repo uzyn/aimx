@@ -35,13 +35,17 @@ pub struct AgentSpec {
 /// the destination template determines the depth.
 ///
 /// Source-tree shapes:
-/// - Plugin-with-skill (`claude-code`, `codex`): `plugin.json` at the
-///   package root with the skill nested under `skills/aimx/`, so the
-///   installed tree mirrors the plugin-manifest convention for those
-///   agents.
-/// - Flat skill (`opencode`, `gemini`, `openclaw`): `SKILL.md.header` at
-///   the source root; the destination template points directly at the
-///   skill directory so no intermediate plugin manifest is needed.
+/// - Plugin-with-skill (`claude-code`): `plugin.json` at the package
+///   root with the skill nested under `skills/aimx/`, so the installed
+///   tree mirrors Claude Code's plugin-manifest convention. Claude Code
+///   auto-discovers plugins under `~/.claude/plugins/`.
+/// - Flat skill (`codex`, `opencode`, `gemini`, `openclaw`):
+///   `SKILL.md.header` at the source root; the destination template
+///   points directly at the skill directory. No plugin manifest is
+///   written. Codex CLI specifically does NOT scan a plugins directory
+///   for MCP servers — its MCP wiring lives in `~/.codex/config.toml`
+///   (managed via `codex mcp add`), so the activation hint prints the
+///   canonical `codex mcp add aimx -- ...` command for the user.
 /// - Flat recipe (`goose`): `aimx.yaml.header` at the source root; the
 ///   installer concatenates `<name>.yaml.header` with the indented common
 ///   primer to produce a single `<name>.yaml` file under the Goose
@@ -57,7 +61,7 @@ pub fn registry() -> &'static [AgentSpec] {
         AgentSpec {
             name: "codex",
             source_subdir: "codex",
-            dest_template: "$HOME/.codex/plugins/aimx",
+            dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
         },
         AgentSpec {
@@ -96,16 +100,27 @@ fn claude_code_hint(_data_dir: Option<&Path>) -> String {
     "Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/).".to_string()
 }
 
-fn codex_hint(_data_dir: Option<&Path>) -> String {
-    // Codex CLI's canonical MCP wiring lives in `~/.codex/config.toml`
-    // under `[mcp_servers.*]`. This installer ships a `.codex-plugin/
-    // plugin.json` that mirrors Claude Code's plugin shape (camelCase
-    // `mcpServers`) on the assumption that plugin-managed MCP servers
-    // follow the same schema. That assumption has not been validated
-    // against a live Codex CLI (see deferred manual validation in
-    // docs/sprint.md for Sprint 29); revisit once Codex CLI is available
-    // in the sandbox.
-    "Plugin installed. Restart Codex CLI to pick it up (it is auto-discovered from ~/.codex/plugins/).".to_string()
+fn codex_hint(data_dir: Option<&Path>) -> String {
+    // Codex CLI's only MCP wiring path is `~/.codex/config.toml` under
+    // `[mcp_servers.<name>]`, managed via `codex mcp add`. It does NOT
+    // auto-discover plugins under `~/.codex/plugins/` — validated
+    // against Codex CLI 0.117.0 in Sprint 33.1. We install the skill
+    // file, then print the canonical `codex mcp add` command for the
+    // user to run once.
+    let extra_args = match data_dir {
+        Some(dd) => format!(" --data-dir {}", posix_single_quote(&dd.to_string_lossy())),
+        None => String::new(),
+    };
+    format!(
+        "Skill installed at ~/.codex/skills/aimx/. Register the AIMX MCP \
+         server with Codex CLI by running this command once:\n\
+         \n\
+         \x20\x20codex mcp add aimx -- /usr/local/bin/aimx{extra_args} mcp\n\
+         \n\
+         Restart Codex CLI after registration so the new server is \
+         loaded. (Codex CLI reads MCP servers from ~/.codex/config.toml — \
+         this command updates that file for you.)"
+    )
 }
 
 fn opencode_hint(data_dir: Option<&Path>) -> String {
@@ -1025,57 +1040,70 @@ mod tests {
 
     #[test]
     fn install_codex_lays_out_expected_files() {
+        // Sprint 33.1: Codex CLI does not auto-discover plugins under
+        // `~/.codex/plugins/`. Its MCP wiring lives in `~/.codex/config.toml`,
+        // managed via `codex mcp add`. The installer therefore ships a flat
+        // skill at `~/.codex/skills/aimx/SKILL.md` (same shape as Gemini and
+        // OpenCode) and emits a `codex mcp add` command in the activation
+        // hint for the user to run once. No plugin manifest is written.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
 
         run_with_env(Some("codex".into()), false, false, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".codex/plugins/aimx");
-        assert!(dest.join(".codex-plugin/plugin.json").exists());
-        assert!(dest.join("skills/aimx/SKILL.md").exists());
+        let dest = tmp.path().join(".codex/skills/aimx");
+        assert!(
+            dest.join("SKILL.md").exists(),
+            "skill must be installed as a flat `SKILL.md` under ~/.codex/skills/aimx/"
+        );
+        assert!(!dest.join(".codex-plugin").exists(), "no plugin manifest");
+        assert!(!dest.join("plugin.json").exists());
         assert!(!dest.join("README.md").exists());
-        assert!(!dest.join("skills/aimx/SKILL.md.header").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+        assert!(
+            !tmp.path().join(".codex/plugins").exists(),
+            "no plugin dir is written — Codex CLI does not scan ~/.codex/plugins/"
+        );
 
-        let skill = std::fs::read_to_string(dest.join("skills/aimx/SKILL.md")).unwrap();
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\n"));
         assert!(skill.contains("name: aimx"));
         assert!(skill.contains("MCP tools"));
         assert!(skill.contains("mailbox_create"));
-
-        let plugin = std::fs::read_to_string(dest.join(".codex-plugin/plugin.json")).unwrap();
-        // Assert on the exact schema key so a drift to snake_case
-        // (`mcp_servers`) or something else is caught, not silently passed
-        // by the substring `"mcp"` that lives inside `"mcpServers"`.
-        assert!(
-            plugin.contains("\"mcpServers\""),
-            "codex plugin.json must declare `mcpServers`: {plugin}"
-        );
-        assert!(!plugin.contains("--data-dir"));
     }
 
     #[test]
-    fn install_codex_with_custom_data_dir_rewrites_plugin_args() {
-        let tmp = TempDir::new().unwrap();
-        let env = MockEnv::new(tmp.path().to_path_buf());
+    fn codex_activation_hint_includes_codex_mcp_add_command() {
+        // Regression guard for the Sprint 33.1 reshape: the hint must
+        // instruct the user to run the canonical Codex MCP registration
+        // command, not (as before) just say "restart Codex".
+        let spec = find_agent("codex").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("codex mcp add aimx"));
+        assert!(hint.contains("/usr/local/bin/aimx"));
+        assert!(hint.contains(" mcp"));
+    }
+
+    #[test]
+    fn codex_activation_hint_with_data_dir_includes_flag() {
+        let spec = find_agent("codex").unwrap();
         let custom = PathBuf::from("/custom/aimx-data");
+        let hint = (spec.activation_hint)(Some(&custom));
+        assert!(hint.contains("--data-dir"));
+        assert!(hint.contains("/custom/aimx-data"));
+    }
 
-        run_with_env(
-            Some("codex".into()),
-            false,
-            false,
-            false,
-            Some(&custom),
-            &env,
-        )
-        .unwrap();
-
-        let plugin = std::fs::read_to_string(
-            tmp.path()
-                .join(".codex/plugins/aimx/.codex-plugin/plugin.json"),
-        )
-        .unwrap();
-        assert!(plugin.contains("--data-dir"));
-        assert!(plugin.contains("/custom/aimx-data"));
+    #[test]
+    fn codex_activation_hint_shell_escapes_single_quote_in_data_dir() {
+        let spec = find_agent("codex").unwrap();
+        let quoted = PathBuf::from("/tmp/o'hare/aimx");
+        let hint = (spec.activation_hint)(Some(&quoted));
+        // `posix_single_quote` expands `'` into `'\''` so the resulting
+        // shell token is safe to paste.
+        assert!(
+            hint.contains(r"'/tmp/o'\''hare/aimx'"),
+            "expected shell-escaped path, got hint:\n{hint}"
+        );
     }
 
     #[test]
@@ -1145,7 +1173,10 @@ mod tests {
         let spec = find_agent("codex").unwrap();
         let hint = (spec.activation_hint)(None);
         assert!(hint.contains("Codex"));
-        assert!(hint.contains("auto-discovered"));
+        assert!(
+            hint.contains("~/.codex/config.toml"),
+            "hint should name the actual MCP-config file so users aren't misled into looking at ~/.codex/plugins/"
+        );
     }
 
     #[test]
@@ -1323,16 +1354,19 @@ mod tests {
 
     #[test]
     fn assembled_codex_skill_is_header_plus_primer_byte_for_byte() {
+        // Sprint 33.1: Codex ships as a flat skill now (no plugin
+        // manifest), so the assembled file is at the package root as
+        // `SKILL.md`, not nested under `skills/aimx/`.
         let source = AGENTS_DIR.get_dir("codex").unwrap();
         let files = assemble_plugin_files(source, None).unwrap();
 
         let (_, skill_bytes) = files
             .iter()
-            .find(|(rel, _)| rel.to_string_lossy() == "skills/aimx/SKILL.md")
-            .expect("assembled SKILL.md should be present");
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present at the source root");
 
         let header = AGENTS_DIR
-            .get_file("codex/skills/aimx/SKILL.md.header")
+            .get_file("codex/SKILL.md.header")
             .unwrap()
             .contents();
         let primer = AGENTS_DIR
@@ -1677,6 +1711,17 @@ mod tests {
         let input = "first\n\nthird\n";
         let got = indent_block(input, "  ");
         assert_eq!(got, "  first\n\n  third\n");
+    }
+
+    #[test]
+    fn indent_block_handles_multiline_without_trailing_newline() {
+        // When the final line is unterminated, the prefix must still be
+        // applied and the absence of the trailing newline preserved — so
+        // callers that append this block to a larger document don't get a
+        // spurious blank line.
+        let input = "first\nsecond";
+        let got = indent_block(input, "  ");
+        assert_eq!(got, "  first\n  second");
     }
 
     #[test]

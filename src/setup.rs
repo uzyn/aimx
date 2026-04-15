@@ -1,5 +1,6 @@
 use crate::config::{Config, MailboxConfig};
 use crate::dkim;
+use crate::platform::is_root;
 use crate::term;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
@@ -27,12 +28,6 @@ pub trait SystemOps {
     fn check_root(&self) -> bool;
     fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
-    /// Create an OS-level system group idempotently.
-    ///
-    /// Returns `Ok(true)` when the group was newly created, `Ok(false)` when
-    /// it already existed. Implementations detect `groupadd` (systemd/Linux)
-    /// vs `addgroup` (Alpine/BusyBox) and pick the right tool.
-    fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>>;
 }
 
 pub trait NetworkOps {
@@ -40,7 +35,6 @@ pub trait NetworkOps {
     /// Full SMTP EHLO handshake via `{verify_host}/probe`.
     /// Used by `aimx setup` (post-install) and `aimx verify`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
-    fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>>;
     /// Return the server's IPv4 and IPv6 addresses in a single call.
     ///
     /// Consolidated in Sprint 32 (S32-4): both families are derived from a
@@ -146,45 +140,6 @@ impl SystemOps for RealSystemOps {
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_port25_status(&stdout)
-    }
-
-    fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-        // Idempotent: `getent group <name>` returns exit code 2 when absent.
-        let exists = std::process::Command::new("getent")
-            .args(["group", name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if exists {
-            return Ok(false);
-        }
-
-        // Prefer groupadd (util-linux) but fall back to addgroup (BusyBox/Alpine).
-        let groupadd = std::process::Command::new("groupadd")
-            .args(["--system", name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        if let Ok(status) = groupadd
-            && status.success()
-        {
-            return Ok(true);
-        }
-
-        let addgroup = std::process::Command::new("addgroup")
-            .args(["-S", name])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()?;
-        if !addgroup.success() {
-            return Err(format!(
-                "Failed to create system group '{name}'. Tried groupadd and addgroup."
-            )
-            .into());
-        }
-        Ok(true)
     }
 
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -433,22 +388,6 @@ impl NetworkOps for RealNetworkOps {
         self.curl_probe()
     }
 
-    fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let (ipv4, _) = self.get_server_ips()?;
-        let ip = ipv4.ok_or::<Box<dyn std::error::Error>>(
-            "Could not determine server IPv4 address".into(),
-        )?;
-        let output = std::process::Command::new("dig")
-            .args(["+short", "-x", &ip.to_string()])
-            .output()?;
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if result.is_empty() || result == "." {
-            Ok(None)
-        } else {
-            Ok(Some(result))
-        }
-    }
-
     fn get_server_ips(
         &self,
     ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>> {
@@ -518,10 +457,9 @@ pub const COMPATIBLE_PROVIDERS: &[&str] = &[
 
 #[derive(Debug, PartialEq)]
 pub enum PreflightResult {
-    /// Check passed. Optional detail string (e.g. PTR value) is displayed inline.
+    /// Check passed. Optional detail string is displayed inline.
     Pass(Option<String>),
     Fail(String),
-    Warn(String),
 }
 
 pub fn check_outbound(net: &dyn NetworkOps) -> PreflightResult {
@@ -548,18 +486,6 @@ fn inbound_result(res: Result<bool, Box<dyn std::error::Error>>) -> PreflightRes
 /// Full SMTP EHLO handshake via `/probe`.
 pub fn check_inbound(net: &dyn NetworkOps) -> PreflightResult {
     inbound_result(net.check_inbound_port25())
-}
-
-pub fn check_ptr(net: &dyn NetworkOps) -> PreflightResult {
-    match net.check_ptr_record() {
-        Ok(Some(ptr)) => PreflightResult::Pass(Some(ptr)),
-        Ok(None) => PreflightResult::Warn(
-            "No PTR (reverse DNS) record found. Set a PTR record at your VPS provider \
-             pointing to your domain. This improves deliverability but is not required."
-                .into(),
-        ),
-        Err(e) => PreflightResult::Warn(format!("PTR record check failed: {e}")),
-    }
 }
 
 #[derive(Debug)]
@@ -616,11 +542,6 @@ pub fn generate_dns_records(
             name: format!("_dmarc.{domain}"),
             value: "v=DMARC1; p=reject; rua=mailto:postmaster@{domain}".replace("{domain}", domain),
         },
-        DnsRecord {
-            record_type: "PTR".into(),
-            name: server_ip.into(),
-            value: format!("{domain}."),
-        },
     ]);
 
     records
@@ -646,12 +567,11 @@ pub fn display_dns_guidance(
     dkim_selector: &str,
 ) {
     let records = generate_dns_records(domain, server_ip, server_ipv6, dkim_value, dkim_selector);
-    let dns_records: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
     println!("\n{}", term::header("[DNS]"));
     println!("Add the following DNS records at your domain registrar:\n");
     println!("  TYPE NAME                                          VALUE");
     println!("  ---- --------------------------------------------- -----");
-    for r in &dns_records {
+    for r in &records {
         println!("  {:4} {:<45} {}", r.record_type, r.name, r.value);
     }
 }
@@ -953,30 +873,11 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     lines
 }
 
-pub fn display_deliverability_section(domain: &str, net: &dyn NetworkOps) {
+pub fn display_deliverability_section(domain: &str) {
     println!(
         "\n{}",
         term::header("[Deliverability Improvement (Optional)]")
     );
-
-    print!("  PTR record... ");
-    io::stdout().flush().ok();
-    match check_ptr(net) {
-        PreflightResult::Pass(Some(ptr)) => {
-            println!("{} ({ptr})", term::pass_badge());
-        }
-        PreflightResult::Pass(None) => {
-            println!("{}", term::pass_badge());
-        }
-        PreflightResult::Fail(msg) => {
-            println!("{}: {msg}", term::fail_badge());
-        }
-        PreflightResult::Warn(msg) => {
-            println!("{}", term::warn_badge());
-            println!("  {msg}");
-        }
-    }
-
     println!();
     println!("{}", gmail_whitelist_instructions(domain));
     println!();
@@ -1151,17 +1052,6 @@ pub(crate) fn apply_config_file_mode(path: &Path) -> Result<(), Box<dyn std::err
     Ok(())
 }
 
-fn is_root() -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        false
-    }
-}
-
 fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     if domain.is_empty() {
         return Err("Domain must not be empty".into());
@@ -1314,23 +1204,6 @@ pub fn run_setup(
             println!("TLS certificate already exists.");
         }
 
-        // Step 3b (S33-4): create the `aimx` system group before installing
-        // the service so the unit's `Group=aimx` directive resolves.
-        match sys.create_system_group(crate::serve::service::AIMX_GROUP) {
-            Ok(true) => println!(
-                "{}",
-                term::success("Created `aimx` system group (grants access to /run/aimx/).")
-            ),
-            Ok(false) => println!("`aimx` system group already exists."),
-            Err(e) => {
-                return Err(format!(
-                    "Failed to create `aimx` system group: {e}. \
-                     Create it manually with `sudo groupadd --system aimx` and re-run setup."
-                )
-                .into());
-            }
-        }
-
         println!("Installing AIMX service...");
         sys.install_service_file(data_dir)?;
         println!("{}", term::success("`aimx serve` started."));
@@ -1352,7 +1225,6 @@ pub fn run_setup(
             }
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     print!("  Inbound port 25... ");
@@ -1364,7 +1236,6 @@ pub fn run_setup(
             eprintln!("\n  {msg}");
             port_failed = true;
         }
-        PreflightResult::Warn(msg) => println!("{}: {msg}", term::warn_badge()),
     }
 
     if port_failed {
@@ -1450,50 +1321,13 @@ pub fn run_setup(
         }
     }
 
-    // Section [Group access]
-    display_group_section();
-
     // Section [MCP]
     display_mcp_section(data_dir);
 
     // Section [Deliverability Improvement (Optional)]
-    display_deliverability_section(&domain, net);
+    display_deliverability_section(&domain);
 
     Ok(())
-}
-
-/// Render the `[Group access]` setup section. Extracted into its own
-/// function so `display_group_section_lines` can be unit-tested without
-/// touching stdout.
-pub fn display_group_section() {
-    for line in display_group_section_lines() {
-        println!("{line}");
-    }
-}
-
-pub fn display_group_section_lines() -> Vec<String> {
-    vec![
-        String::new(),
-        term::header("[Group access]").to_string(),
-        format!(
-            "  To let an agent user submit mail via `aimx send`, add them to the `{}` group:",
-            crate::serve::service::AIMX_GROUP
-        ),
-        String::new(),
-        format!(
-            "    {}",
-            term::highlight(&format!(
-                "sudo usermod -aG {} <user>",
-                crate::serve::service::AIMX_GROUP
-            ))
-        ),
-        String::new(),
-        "  The user must then log out and back in (or run `newgrp aimx`) for the new group to take effect.".to_string(),
-        format!(
-            "  Group membership gates access to `/run/{}/send.sock`, the local submission socket.",
-            crate::serve::service::AIMX_GROUP
-        ),
-    ]
 }
 
 #[cfg(test)]
@@ -1507,7 +1341,6 @@ mod tests {
     struct MockNetworkOps {
         outbound_port25: bool,
         inbound_port25: bool,
-        ptr_record: Option<String>,
         server_ipv4: Option<Ipv4Addr>,
         server_ipv6: Option<Ipv6Addr>,
         mx_records: HashMap<String, Vec<String>>,
@@ -1522,7 +1355,6 @@ mod tests {
             Self {
                 outbound_port25: true,
                 inbound_port25: true,
-                ptr_record: Some("mail.example.com.".into()),
                 server_ipv4: Some("1.2.3.4".parse().unwrap()),
                 server_ipv6: None,
                 mx_records: HashMap::new(),
@@ -1540,9 +1372,6 @@ mod tests {
         }
         fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
             Ok(self.inbound_port25)
-        }
-        fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-            Ok(self.ptr_record.clone())
         }
         fn get_server_ips(
             &self,
@@ -1573,8 +1402,6 @@ mod tests {
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
-        existing_groups: RefCell<std::collections::HashSet<String>>,
-        created_groups: RefCell<Vec<String>>,
     }
 
     impl Default for MockSystemOps {
@@ -1587,8 +1414,6 @@ mod tests {
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
-                existing_groups: RefCell::new(std::collections::HashSet::new()),
-                created_groups: RefCell::new(vec![]),
             }
         }
     }
@@ -1635,14 +1460,6 @@ mod tests {
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
             Ok(())
-        }
-        fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
-            if self.existing_groups.borrow().contains(name) {
-                return Ok(false);
-            }
-            self.existing_groups.borrow_mut().insert(name.to_string());
-            self.created_groups.borrow_mut().push(name.to_string());
-            Ok(true)
         }
     }
 
@@ -1737,30 +1554,6 @@ mod tests {
     }
 
     #[test]
-    fn ptr_pass() {
-        let net = MockNetworkOps {
-            ptr_record: Some("mail.example.com.".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            check_ptr(&net),
-            PreflightResult::Pass(Some("mail.example.com.".into()))
-        );
-    }
-
-    #[test]
-    fn ptr_warn_when_missing() {
-        let net = MockNetworkOps {
-            ptr_record: None,
-            ..Default::default()
-        };
-        match check_ptr(&net) {
-            PreflightResult::Warn(msg) => assert!(msg.contains("PTR")),
-            other => panic!("Expected Warn, got {:?}", other),
-        }
-    }
-
-    #[test]
     fn dns_record_generation() {
         let records = generate_dns_records(
             "agent.example.com",
@@ -1769,7 +1562,7 @@ mod tests {
             "v=DKIM1; k=rsa; p=ABC123",
             "dkim",
         );
-        assert_eq!(records.len(), 6);
+        assert_eq!(records.len(), 5);
 
         assert_eq!(records[0].record_type, "A");
         assert_eq!(records[0].name, "agent.example.com");
@@ -1792,9 +1585,10 @@ mod tests {
         assert!(records[4].value.contains("v=DMARC1"));
         assert!(records[4].value.contains("p=reject"));
 
-        assert_eq!(records[5].record_type, "PTR");
-        assert_eq!(records[5].name, "1.2.3.4");
-        assert_eq!(records[5].value, "agent.example.com.");
+        assert!(
+            !records.iter().any(|r| r.record_type == "PTR"),
+            "Sprint 33.1 dropped PTR — generate_dns_records must not emit PTR records"
+        );
     }
 
     #[test]
@@ -1805,7 +1599,7 @@ mod tests {
         assert!(formatted.contains("A"));
         assert!(formatted.contains("MX"));
         assert!(formatted.contains("TXT"));
-        assert!(formatted.contains("PTR"));
+        assert!(!formatted.contains("PTR"));
         assert!(formatted.contains("test.com"));
         assert!(formatted.contains("5.6.7.8"));
     }
@@ -2144,83 +1938,9 @@ mod tests {
     }
 
     #[test]
-    fn group_section_mentions_aimx_group_and_usermod() {
-        let lines = display_group_section_lines();
-        let joined = lines.join("\n");
-        assert!(
-            joined.contains("sudo usermod -aG aimx"),
-            "group section must print the exact usermod command: {joined}"
-        );
-        assert!(
-            joined.contains("newgrp aimx") || joined.contains("log out"),
-            "group section must mention either `newgrp aimx` or the \
-             logout/login step so the group membership takes effect: {joined}"
-        );
-        assert!(
-            joined.contains("send.sock"),
-            "group section must name the UDS socket so users connect the \
-             group to the access it gates: {joined}"
-        );
-    }
-
-    #[test]
-    fn mock_create_system_group_is_idempotent() {
-        let sys = MockSystemOps::default();
-        assert!(
-            sys.create_system_group("aimx").unwrap(),
-            "first call creates"
-        );
-        assert!(
-            !sys.create_system_group("aimx").unwrap(),
-            "second call must be a no-op (Ok(false))"
-        );
-        assert_eq!(
-            sys.created_groups.borrow().as_slice(),
-            &["aimx".to_string()],
-            "mock must only record one creation even after two calls"
-        );
-    }
-
-    #[test]
-    fn run_setup_creates_aimx_group_when_not_configured() {
-        let tmp = TempDir::new().unwrap();
-        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        let sys = MockSystemOps {
-            // inbound port will pass so run_setup proceeds past port checks
-            // into finalize_setup + DNS loop; the DNS loop blocks on stdin,
-            // so stop short by failing outbound.
-            ..Default::default()
-        };
-        let net = MockNetworkOps {
-            outbound_port25: false,
-            ..Default::default()
-        };
-        // run_setup will fail at the port-25 outbound check, which is AFTER
-        // the `create_system_group` call — so the group should be recorded.
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
-        assert!(
-            sys.created_groups.borrow().contains(&"aimx".to_string()),
-            "run_setup must create the aimx group during the install phase"
-        );
-
-        // Ordering invariant: the group is created before the service file
-        // is installed, because the systemd/OpenRC units the service file
-        // embeds reference `Group=aimx` (and OpenRC's `start_pre` chowns
-        // `/run/aimx/` to `root:aimx`). If the service file were written
-        // before the group exists, re-running `aimx setup` after an abort
-        // would install a unit that refers to a non-existent group.
-        if *sys.service_file_installed.borrow() {
-            assert!(
-                sys.created_groups.borrow().iter().any(|g| g == "aimx"),
-                "group must be created whenever a service file is installed"
-            );
-        }
-    }
-
-    #[test]
-    fn run_setup_skips_group_creation_on_reentrant_path() {
+    fn run_setup_skips_install_on_reentrant_path() {
         // When `is_already_configured` returns true, the entire install
-        // block is skipped — so `create_system_group` must NOT be called.
+        // block is skipped — so `install_service_file` must NOT be called.
         // Guards against a future refactor that drops the re-entrant shortcut.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
@@ -2244,11 +1964,6 @@ mod tests {
 
         let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
 
-        assert!(
-            sys.created_groups.borrow().is_empty(),
-            "re-entrant setup must skip `create_system_group` — found: {:?}",
-            sys.created_groups.borrow()
-        );
         assert!(
             !*sys.service_file_installed.borrow(),
             "re-entrant setup must skip `install_service_file`"
@@ -2562,20 +2277,6 @@ mod tests {
         let _ = &net as &dyn NetworkOps;
     }
 
-    // PTR check function tests (check_ptr still exists, used in deliverability section)
-
-    #[test]
-    fn ptr_pass_carries_value() {
-        let net = MockNetworkOps {
-            ptr_record: Some("vps-198f7320.vps.ovh.net.".into()),
-            ..Default::default()
-        };
-        assert_eq!(
-            check_ptr(&net),
-            PreflightResult::Pass(Some("vps-198f7320.vps.ovh.net.".into()))
-        );
-    }
-
     // S18.1 — Interactive domain prompt tests
 
     #[test]
@@ -2706,17 +2407,6 @@ mod tests {
         );
     }
 
-    // S18.3 — Colorized output tests
-
-    #[test]
-    fn dns_guidance_excludes_ptr() {
-        let records =
-            generate_dns_records("test.com", "1.2.3.4", None, "v=DKIM1; k=rsa; p=ABC", "dkim");
-        let dns_only: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
-        assert_eq!(dns_only.len(), 5);
-        assert!(dns_only.iter().all(|r| r.record_type != "PTR"));
-    }
-
     // S18.4 — Re-entrant setup tests
 
     #[test]
@@ -2784,7 +2474,7 @@ mod tests {
             "v=DKIM1; k=rsa; p=ABC123",
             "dkim",
         );
-        assert_eq!(records.len(), 7);
+        assert_eq!(records.len(), 6);
 
         assert_eq!(records[0].record_type, "A");
         assert_eq!(records[0].value, "1.2.3.4");
@@ -2797,6 +2487,11 @@ mod tests {
 
         assert_eq!(records[3].record_type, "TXT");
         assert_eq!(records[3].value, "v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all");
+
+        assert!(
+            !records.iter().any(|r| r.record_type == "PTR"),
+            "Sprint 33.1 dropped PTR"
+        );
     }
 
     #[test]
@@ -2826,9 +2521,12 @@ mod tests {
             "v=DKIM1; k=rsa; p=ABC",
             "dkim",
         );
-        let dns_only: Vec<&DnsRecord> = records.iter().filter(|r| r.record_type != "PTR").collect();
-        assert_eq!(dns_only.len(), 6);
-        assert!(dns_only.iter().any(|r| r.record_type == "AAAA"));
+        assert_eq!(records.len(), 6);
+        assert!(records.iter().any(|r| r.record_type == "AAAA"));
+        assert!(
+            !records.iter().any(|r| r.record_type == "PTR"),
+            "Sprint 33.1 dropped PTR"
+        );
     }
 
     // S26-3 — ip6: SPF verification tests

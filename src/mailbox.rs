@@ -4,11 +4,7 @@ use crate::term;
 use std::io::{self, Write};
 use std::path::Path;
 
-pub fn run(
-    cmd: MailboxCommand,
-    data_dir: Option<&std::path::Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let config = Config::load_resolved_with_data_dir(data_dir)?;
+pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),
