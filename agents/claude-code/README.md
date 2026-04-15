@@ -34,6 +34,14 @@ aimx --data-dir /custom/path agent-setup claude-code
 The installer rewrites the plugin's `mcpServers.aimx.args` to include
 `--data-dir /custom/path` before writing `plugin.json` to disk.
 
+## Channel-trigger recipes
+
+Installing the plugin gives Claude Code MCP access to AIMX. To wire it
+the other way — have AIMX invoke `claude -p` automatically on inbound
+email — see the
+[Channel Recipes](../../book/channel-recipes.md#claude-code) chapter,
+which has a copy-paste `config.toml` snippet and flag references.
+
 ## Schema reference
 
 The plugin manifest follows the Claude Code plugin schema documented at

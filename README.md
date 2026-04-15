@@ -154,7 +154,10 @@ Install AIMX into your agent with one command:
 
 Run `aimx agent-setup --list` to see every supported agent and its
 destination path. See [`book/agent-integration.md`](book/agent-integration.md)
-for per-agent activation steps and manual MCP wiring.
+for per-agent activation steps and manual MCP wiring, and
+[`book/channel-recipes.md`](book/channel-recipes.md) for copy-paste
+channel-trigger recipes (email-driven agent invocation) covering every
+supported agent plus Aider.
 
 Available MCP tools:
 - `mailbox_list` -- list all mailboxes with message counts

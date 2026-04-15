@@ -2,6 +2,8 @@
 
 Channel rules trigger shell commands when emails arrive at specific mailboxes. Combined with trust policies, they let you build secure, automated workflows around incoming email.
 
+> For copy-paste agent-specific invocations (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Aider), see [Channel Recipes](channel-recipes.md).
+
 ## How channels work
 
 When an email is ingested:
@@ -186,4 +188,4 @@ subject = "invoice"
 
 ---
 
-Next: [MCP Server](mcp.md) | [Configuration](configuration.md) | [Troubleshooting](troubleshooting.md)
+Next: [Channel Recipes](channel-recipes.md) | [MCP Server](mcp.md) | [Configuration](configuration.md) | [Troubleshooting](troubleshooting.md)
