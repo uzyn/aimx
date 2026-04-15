@@ -78,16 +78,30 @@ When run without a domain argument, setup will prompt you to enter the domain an
 2. **Domain prompt** -- asks for domain if not provided as argument
 3. **Port 25 conflict detection** -- checks for another process on port 25
 4. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
-5. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/var/lib/aimx/dkim/`
-6. **Config creation** -- writes `/var/lib/aimx/config.toml` with a catchall mailbox
-7. **Service installation** -- generates a systemd unit file (or OpenRC init script on Alpine) and starts `aimx serve`
-8. **Port 25 checks** -- verifies outbound and inbound port 25 connectivity
+5. **`aimx` system group** -- created via `groupadd --system aimx` (falls back to `addgroup -S aimx` on Alpine/BusyBox). Idempotent.
+6. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
+7. **Config creation** -- writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
+8. **Service installation** -- generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx` + `Group=aimx`, and starts `aimx serve`
+9. **Port 25 checks** -- verifies outbound and inbound port 25 connectivity
 
-After initial setup, the wizard displays three clearly labeled sections:
+After initial setup, the wizard displays four clearly labeled sections:
 
 - **[DNS]** -- the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
+- **[Group access]** -- the `sudo usermod -aG aimx <user>` command you run once to let an agent user submit mail via `aimx send` (see [Group access](#group-access) below)
 - **[MCP]** -- configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
 - **[Deliverability Improvement (Optional)]** -- PTR record guidance and Gmail filter/whitelist instructions
+
+### Group access
+
+Starting with v0.2, AIMX creates an `aimx` system group during setup. Membership in this group will (Sprint 34) gate access to `/run/aimx/send.sock`, the local submission socket used by `aimx send`. Add any agent user who should be able to send mail:
+
+```bash
+sudo usermod -aG aimx alice
+```
+
+The new group takes effect at the next login — or run `newgrp aimx` in the current shell to pick it up immediately. Only users in the `aimx` group (or root) will be able to write to `/run/aimx/send.sock`; no other users can submit mail even if they have a copy of the aimx binary.
+
+Re-running `aimx setup` is idempotent: if the group already exists, the wizard reports that and moves on.
 
 ### Re-running setup
 
@@ -125,7 +139,7 @@ The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx 
 The DKIM public key value (`p=...`) is displayed by the setup wizard. To retrieve it again:
 
 ```bash
-cat /var/lib/aimx/dkim/public.key
+cat /etc/aimx/dkim/public.key
 ```
 
 DNS propagation typically takes minutes but can take up to 48 hours.
@@ -215,8 +229,8 @@ aimx dkim-keygen --selector mykey
 ```
 
 Keys are stored at:
-- Private key: `/var/lib/aimx/dkim/private.key` (mode `0600`)
-- Public key: `/var/lib/aimx/dkim/public.key`
+- Private key: `/etc/aimx/dkim/private.key` (mode `0600`, root-only)
+- Public key: `/etc/aimx/dkim/public.key` (mode `0644`)
 
 After regenerating keys, update the DKIM DNS record with the new public key.
 
@@ -235,16 +249,16 @@ Only port 25 needs to be open for SMTP. No other ports are required by AIMX.
 
 ### File permissions
 
-The DKIM private key is created with mode `0600` (owner read/write only). Verify:
+The DKIM private key is created with mode `0600` (root-only). Verify:
 
 ```bash
-ls -la /var/lib/aimx/dkim/private.key
+ls -la /etc/aimx/dkim/private.key
 # Should show: -rw-------
 ```
 
 ### Backups
 
-Back up `/var/lib/aimx/` -- it contains everything: config, DKIM keys, all mailboxes and emails.
+Back up both `/etc/aimx/` (config + DKIM keys) and `/var/lib/aimx/` (mailboxes and emails). `/run/aimx/` is runtime-only and does not need backup.
 
 ## Verifier service
 

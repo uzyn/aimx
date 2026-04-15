@@ -41,10 +41,7 @@ pub fn run(
     rcpt: &str,
     data_dir: Option<&std::path::Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let config = match data_dir {
-        Some(dir) => Config::load_from_data_dir(dir)?,
-        None => Config::load_default()?,
-    };
+    let config = Config::load_resolved_with_data_dir(data_dir)?;
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
     ingest_email(&config, rcpt, &raw)

@@ -27,6 +27,12 @@ pub trait SystemOps {
     fn check_root(&self) -> bool;
     fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
+    /// Create an OS-level system group idempotently.
+    ///
+    /// Returns `Ok(true)` when the group was newly created, `Ok(false)` when
+    /// it already existed. Implementations detect `groupadd` (systemd/Linux)
+    /// vs `addgroup` (Alpine/BusyBox) and pick the right tool.
+    fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>>;
 }
 
 pub trait NetworkOps {
@@ -140,6 +146,45 @@ impl SystemOps for RealSystemOps {
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_port25_status(&stdout)
+    }
+
+    fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        // Idempotent: `getent group <name>` returns exit code 2 when absent.
+        let exists = std::process::Command::new("getent")
+            .args(["group", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if exists {
+            return Ok(false);
+        }
+
+        // Prefer groupadd (util-linux) but fall back to addgroup (BusyBox/Alpine).
+        let groupadd = std::process::Command::new("groupadd")
+            .args(["--system", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+        if let Ok(status) = groupadd
+            && status.success()
+        {
+            return Ok(true);
+        }
+
+        let addgroup = std::process::Command::new("addgroup")
+            .args(["-S", name])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()?;
+        if !addgroup.success() {
+            return Err(format!(
+                "Failed to create system group '{name}'. Tried groupadd and addgroup."
+            )
+            .into());
+        }
+        Ok(true)
     }
 
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -958,8 +1003,9 @@ pub fn finalize_setup(
     dkim_selector: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
+    install_config_dir()?;
 
-    let config_path = Config::config_path(data_dir);
+    let config_path = crate::config::config_path();
     let _config = if config_path.exists() {
         let mut cfg = Config::load(&config_path)?;
         if cfg.domain != domain {
@@ -974,7 +1020,7 @@ pub fn finalize_setup(
                     mailbox.address = format!("{local_part}@{domain}");
                 }
             }
-            cfg.save(&config_path)?;
+            install_config_file(&cfg, &config_path)?;
         }
         if !cfg.mailboxes.contains_key("catchall") {
             cfg.mailboxes.insert(
@@ -986,7 +1032,7 @@ pub fn finalize_setup(
                     trusted_senders: vec![],
                 },
             );
-            cfg.save(&config_path)?;
+            install_config_file(&cfg, &config_path)?;
         }
         cfg
     } else {
@@ -1008,17 +1054,18 @@ pub fn finalize_setup(
             verify_host: None,
             enable_ipv6: false,
         };
-        cfg.save(&config_path)?;
+        install_config_file(&cfg, &config_path)?;
         cfg
     };
 
     let catchall_dir = data_dir.join("catchall");
     std::fs::create_dir_all(&catchall_dir)?;
 
-    let dkim_private = data_dir.join("dkim/private.key");
+    let dkim_root = crate::config::dkim_dir();
+    let dkim_private = dkim_root.join("private.key");
     if !dkim_private.exists() {
         println!("Generating DKIM keypair...");
-        dkim::generate_keypair(data_dir, false)?;
+        dkim::generate_keypair(&dkim_root, false)?;
         println!("DKIM keypair generated.");
     } else {
         println!("DKIM keypair already exists.");
@@ -1030,6 +1077,89 @@ pub fn finalize_setup(
     );
 
     Ok(())
+}
+
+/// Create the config dir (default `/etc/aimx`, or `AIMX_CONFIG_DIR` override)
+/// with mode `0o755`. Idempotent — a pre-existing directory is left as-is.
+fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = crate::config::config_dir();
+    std::fs::create_dir_all(&dir)?;
+
+    // Gate mode enforcement on `is_root()` alone: an operator who happens
+    // to have `AIMX_CONFIG_DIR` exported on a real install still gets
+    // tightened perms. Tests run as a non-root user so the branch is
+    // skipped for their tempdir — `apply_config_file_mode_sets_640`
+    // covers the real-install invariant directly.
+    if is_root() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write `config.toml` and (on real installs) tighten its mode to `0o640`,
+/// owner `root:root`. Non-root invocations leave the mode at the OS default
+/// — the dedicated [`tests::apply_config_file_mode_sets_640`] test covers
+/// the real-install invariant directly via [`apply_config_file_mode`].
+///
+/// When the file does not yet exist and we are running as root, it is
+/// created atomically with mode `0o640` via `OpenOptions::mode(...)
+/// .create_new(true)` so there is no brief window of umask-default
+/// permissions between write and chmod. The rewrite path (re-entrant
+/// setup) falls back to `Config::save` + `apply_config_file_mode`.
+fn install_config_file(cfg: &Config, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let is_root = is_root();
+    if is_root && !path.exists() {
+        #[cfg(unix)]
+        {
+            use std::io::Write as _;
+            use std::os::unix::fs::OpenOptionsExt;
+            let content = toml::to_string_pretty(cfg)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o640)
+                .open(path)?;
+            f.write_all(content.as_bytes())?;
+            f.sync_all()?;
+            return Ok(());
+        }
+    }
+    cfg.save(path)?;
+    if is_root {
+        apply_config_file_mode(path)?;
+    }
+    Ok(())
+}
+
+/// Set `config.toml` to mode `0o640`. Factored out of [`install_config_file`]
+/// so the mode-enforcement path is unit-testable without actually running
+/// as root on a real install.
+pub(crate) fn apply_config_file_mode(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o640))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+    }
+    Ok(())
+}
+
+fn is_root() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -1083,9 +1213,9 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
     Ok(domain)
 }
 
-pub fn is_already_configured(sys: &dyn SystemOps, data_dir: &Path) -> bool {
+pub fn is_already_configured(sys: &dyn SystemOps, _data_dir: &Path) -> bool {
     let tls_cert = Path::new("/etc/ssl/aimx/cert.pem");
-    let dkim_key = data_dir.join("dkim/private.key");
+    let dkim_key = crate::config::dkim_dir().join("private.key");
 
     let service_running = sys.is_service_running("aimx");
     let cert_exists = sys.file_exists(tls_cert);
@@ -1136,8 +1266,9 @@ pub fn run_setup(
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
+    install_config_dir()?;
 
-    let config_path = Config::config_path(data_dir);
+    let config_path = crate::config::config_path();
     let (dkim_selector, enable_ipv6) = if config_path.exists() {
         match Config::load(&config_path) {
             Ok(c) => (c.dkim_selector, c.enable_ipv6),
@@ -1181,6 +1312,23 @@ pub fn run_setup(
             println!("TLS certificate generated in /etc/ssl/aimx/");
         } else {
             println!("TLS certificate already exists.");
+        }
+
+        // Step 3b (S33-4): create the `aimx` system group before installing
+        // the service so the unit's `Group=aimx` directive resolves.
+        match sys.create_system_group(crate::serve::service::AIMX_GROUP) {
+            Ok(true) => println!(
+                "{}",
+                term::success("Created `aimx` system group (grants access to /run/aimx/).")
+            ),
+            Ok(false) => println!("`aimx` system group already exists."),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to create `aimx` system group: {e}. \
+                     Create it manually with `sudo groupadd --system aimx` and re-run setup."
+                )
+                .into());
+            }
         }
 
         println!("Installing AIMX service...");
@@ -1239,7 +1387,7 @@ pub fn run_setup(
     let server_ipv6 = detect_server_ipv6(enable_ipv6, ipv6_detected);
     let server_ip: IpAddr = IpAddr::V4(server_ipv4);
     let server_ipv6_ip: Option<IpAddr> = server_ipv6.map(IpAddr::V6);
-    let dkim_value = dkim::dns_record_value(data_dir)?;
+    let dkim_value = dkim::dns_record_value(&crate::config::dkim_dir())?;
 
     let local_dkim_pubkey = dkim_value
         .strip_prefix("v=DKIM1; k=rsa; p=")
@@ -1302,6 +1450,9 @@ pub fn run_setup(
         }
     }
 
+    // Section [Group access]
+    display_group_section();
+
     // Section [MCP]
     display_mcp_section(data_dir);
 
@@ -1309,6 +1460,40 @@ pub fn run_setup(
     display_deliverability_section(&domain, net);
 
     Ok(())
+}
+
+/// Render the `[Group access]` setup section. Extracted into its own
+/// function so `display_group_section_lines` can be unit-tested without
+/// touching stdout.
+pub fn display_group_section() {
+    for line in display_group_section_lines() {
+        println!("{line}");
+    }
+}
+
+pub fn display_group_section_lines() -> Vec<String> {
+    vec![
+        String::new(),
+        term::header("[Group access]").to_string(),
+        format!(
+            "  To let an agent user submit mail via `aimx send`, add them to the `{}` group:",
+            crate::serve::service::AIMX_GROUP
+        ),
+        String::new(),
+        format!(
+            "    {}",
+            term::highlight(&format!(
+                "sudo usermod -aG {} <user>",
+                crate::serve::service::AIMX_GROUP
+            ))
+        ),
+        String::new(),
+        "  The user must then log out and back in (or run `newgrp aimx`) for the new group to take effect.".to_string(),
+        format!(
+            "  Group membership gates access to `/run/{}/send.sock`, the local submission socket.",
+            crate::serve::service::AIMX_GROUP
+        ),
+    ]
 }
 
 #[cfg(test)]
@@ -1388,6 +1573,8 @@ mod tests {
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
+        existing_groups: RefCell<std::collections::HashSet<String>>,
+        created_groups: RefCell<Vec<String>>,
     }
 
     impl Default for MockSystemOps {
@@ -1400,6 +1587,8 @@ mod tests {
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
+                existing_groups: RefCell::new(std::collections::HashSet::new()),
+                created_groups: RefCell::new(vec![]),
             }
         }
     }
@@ -1446,6 +1635,14 @@ mod tests {
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
             Ok(())
+        }
+        fn create_system_group(&self, name: &str) -> Result<bool, Box<dyn std::error::Error>> {
+            if self.existing_groups.borrow().contains(name) {
+                return Ok(false);
+            }
+            self.existing_groups.borrow_mut().insert(name.to_string());
+            self.created_groups.borrow_mut().push(name.to_string());
+            Ok(true)
         }
     }
 
@@ -1947,16 +2144,161 @@ mod tests {
     }
 
     #[test]
+    fn group_section_mentions_aimx_group_and_usermod() {
+        let lines = display_group_section_lines();
+        let joined = lines.join("\n");
+        assert!(
+            joined.contains("sudo usermod -aG aimx"),
+            "group section must print the exact usermod command: {joined}"
+        );
+        assert!(
+            joined.contains("newgrp aimx") || joined.contains("log out"),
+            "group section must mention either `newgrp aimx` or the \
+             logout/login step so the group membership takes effect: {joined}"
+        );
+        assert!(
+            joined.contains("send.sock"),
+            "group section must name the UDS socket so users connect the \
+             group to the access it gates: {joined}"
+        );
+    }
+
+    #[test]
+    fn mock_create_system_group_is_idempotent() {
+        let sys = MockSystemOps::default();
+        assert!(
+            sys.create_system_group("aimx").unwrap(),
+            "first call creates"
+        );
+        assert!(
+            !sys.create_system_group("aimx").unwrap(),
+            "second call must be a no-op (Ok(false))"
+        );
+        assert_eq!(
+            sys.created_groups.borrow().as_slice(),
+            &["aimx".to_string()],
+            "mock must only record one creation even after two calls"
+        );
+    }
+
+    #[test]
+    fn run_setup_creates_aimx_group_when_not_configured() {
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let sys = MockSystemOps {
+            // inbound port will pass so run_setup proceeds past port checks
+            // into finalize_setup + DNS loop; the DNS loop blocks on stdin,
+            // so stop short by failing outbound.
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+        // run_setup will fail at the port-25 outbound check, which is AFTER
+        // the `create_system_group` call — so the group should be recorded.
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        assert!(
+            sys.created_groups.borrow().contains(&"aimx".to_string()),
+            "run_setup must create the aimx group during the install phase"
+        );
+
+        // Ordering invariant: the group is created before the service file
+        // is installed, because the systemd/OpenRC units the service file
+        // embeds reference `Group=aimx` (and OpenRC's `start_pre` chowns
+        // `/run/aimx/` to `root:aimx`). If the service file were written
+        // before the group exists, re-running `aimx setup` after an abort
+        // would install a unit that refers to a non-existent group.
+        if *sys.service_file_installed.borrow() {
+            assert!(
+                sys.created_groups.borrow().iter().any(|g| g == "aimx"),
+                "group must be created whenever a service file is installed"
+            );
+        }
+    }
+
+    #[test]
+    fn run_setup_skips_group_creation_on_reentrant_path() {
+        // When `is_already_configured` returns true, the entire install
+        // block is skipped — so `create_system_group` must NOT be called.
+        // Guards against a future refactor that drops the re-entrant shortcut.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            crate::config::dkim_dir().join("private.key"),
+            "key".to_string(),
+        );
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: true,
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            sys.created_groups.borrow().is_empty(),
+            "re-entrant setup must skip `create_system_group` — found: {:?}",
+            sys.created_groups.borrow()
+        );
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "re-entrant setup must skip `install_service_file`"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_config_file_mode_sets_640() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, "domain = \"test.example.com\"\n").unwrap();
+        // Give it an obviously-wrong mode first so we can see the change.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+
+        apply_config_file_mode(&path).unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o640,
+            "install_config_file must tighten config.toml to 0o640"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_exists_after_finalize() {
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(tmp.path(), "mode.example.com", "dkim").unwrap();
+
+        // Config file resolved via AIMX_CONFIG_DIR lives inside tmp.
+        let cfg_path = crate::config::config_path();
+        assert!(cfg_path.exists(), "config.toml must be created by finalize");
+    }
+
+    #[test]
     fn finalize_creates_data_dir_and_config() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
 
-        assert!(Config::config_path(tmp.path()).exists());
+        assert!(crate::config::config_path().exists());
         assert!(tmp.path().join("catchall").exists());
         assert!(tmp.path().join("dkim/private.key").exists());
         assert!(tmp.path().join("dkim/public.key").exists());
 
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
         assert_eq!(config.mailboxes["catchall"].address, "*@test.example.com");
@@ -1965,6 +2307,7 @@ mod tests {
     #[test]
     fn finalize_is_idempotent() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
 
         let key1 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
@@ -1974,7 +2317,7 @@ mod tests {
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
 
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
     }
@@ -1982,14 +2325,15 @@ mod tests {
     #[test]
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
 
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
         finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
 
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
         assert!(config.mailboxes.contains_key("catchall"));
     }
@@ -1997,11 +2341,12 @@ mod tests {
     #[test]
     fn finalize_updates_domain_if_changed() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "old.example.com", "dkim").unwrap();
 
         finalize_setup(tmp.path(), "new.example.com", "dkim").unwrap();
 
-        let config = Config::load_from_data_dir(tmp.path()).unwrap();
+        let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "new.example.com");
         let catchall = config.mailboxes.get("catchall").unwrap();
         assert_eq!(catchall.address, "*@new.example.com");
@@ -2064,6 +2409,7 @@ mod tests {
     #[test]
     fn other_process_detected_exits_with_error() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let sys = MockSystemOps {
             port25_status: Port25Status::OtherProcess("postfix".to_string()),
             ..Default::default()
@@ -2345,6 +2691,7 @@ mod tests {
     #[test]
     fn setup_with_domain_arg_skips_prompt() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let sys = MockSystemOps::default();
         let net = MockNetworkOps {
             inbound_port25: false,
@@ -2375,10 +2722,14 @@ mod tests {
     #[test]
     fn is_already_configured_all_present() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
-        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
+        existing.insert(
+            crate::config::dkim_dir().join("private.key"),
+            "key".to_string(),
+        );
 
         let sys = MockSystemOps {
             existing_files: existing,
@@ -2391,9 +2742,13 @@ mod tests {
     #[test]
     fn is_already_configured_service_not_running() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
-        existing.insert(tmp.path().join("dkim/private.key"), "key".to_string());
+        existing.insert(
+            crate::config::dkim_dir().join("private.key"),
+            "key".to_string(),
+        );
 
         let sys = MockSystemOps {
             existing_files: existing,
@@ -2406,6 +2761,7 @@ mod tests {
     #[test]
     fn is_already_configured_missing_dkim() {
         let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let mut existing = HashMap::new();
         existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
 

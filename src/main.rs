@@ -40,7 +40,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     std::process::exit(1);
                 }
             };
-            dkim::run_keygen(&config.data_dir, &config.domain, &selector, force)
+            dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }
         Command::Mcp => {
             let rt = tokio::runtime::Runtime::new()
@@ -78,11 +78,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn load_config(data_dir: Option<&Path>) -> Result<config::Config, Box<dyn std::error::Error>> {
-    match data_dir {
-        Some(dir) => config::Config::load_from_data_dir(dir),
-        None => config::Config::load_default(),
-    }
+fn load_config(_data_dir: Option<&Path>) -> Result<config::Config, Box<dyn std::error::Error>> {
+    // Config lives at `config_path()` (default `/etc/aimx/config.toml`) —
+    // `--data-dir` no longer governs config location (v0.2 filesystem split).
+    config::Config::load_resolved()
 }
 
 fn build_network_ops(

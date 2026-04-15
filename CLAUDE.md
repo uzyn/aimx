@@ -73,10 +73,12 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 ### Config and storage
 
-- Config: `/var/lib/aimx/config.toml` — parsed via `serde` + `toml` crate into `Config` struct in `config.rs`.
-- Storage: Markdown files with TOML frontmatter (`+++` delimiters, not `---`). One `.md` file per email, `YYYY-MM-DD-NNN.md` naming.
-- `--data-dir` / `AIMX_DATA_DIR` overrides the default path globally.
-- Tests use `tempfile::TempDir` for isolated data directories.
+- Config: `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) — parsed via `serde` + `toml` into `Config` struct in `config.rs`. Resolved via `config_path()` which honors `AIMX_CONFIG_DIR` for tests / non-standard installs.
+- DKIM keys: `/etc/aimx/dkim/{private,public}.key` (private `0600` root-only, public `0644`). Loaded via `load_private_key(&config::dkim_dir())`.
+- Storage: Markdown files with TOML frontmatter (`+++` delimiters, not `---`). One `.md` file per email, `YYYY-MM-DD-NNN.md` naming, under `/var/lib/aimx/<mailbox>/`.
+- `--data-dir` / `AIMX_DATA_DIR` overrides the **storage** path (mailboxes only, v0.2). `AIMX_CONFIG_DIR` overrides the **config + DKIM** path.
+- Runtime dir: `/run/aimx/` (mode `0750`, owner `root:aimx`) — provided by systemd `RuntimeDirectory=aimx` or OpenRC `checkpath` in `start_pre`. Sprint 34 places `send.sock` here.
+- Tests use `tempfile::TempDir` plus `crate::config::test_env::ConfigDirOverride::set(&tmp)` (or the `AIMX_CONFIG_DIR` env var in integration tests) to isolate config + DKIM lookups.
 
 ### Email frontmatter format
 
