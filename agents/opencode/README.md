@@ -52,6 +52,12 @@ aimx --data-dir /custom/path agent-setup opencode
 The printed JSONC snippet will include `--data-dir /custom/path` in the
 `command` array.
 
+## Channel-trigger recipes
+
+To have AIMX invoke `opencode run` automatically when an email arrives,
+see the [Channel Recipes](../../book/channel-recipes.md#opencode)
+chapter.
+
 ## Schema reference
 
 OpenCode's skill and MCP conventions are documented at

@@ -51,6 +51,14 @@ aimx --data-dir /custom/path agent-setup openclaw
 The printed `openclaw mcp set` command's JSON will include
 `--data-dir /custom/path` in the `args` array.
 
+## Channel-trigger recipes
+
+OpenClaw does not currently ship a non-interactive `run` / `exec` CLI
+suitable for channel triggers. See the
+[Channel Recipes](../../book/channel-recipes.md#openclaw) chapter for
+the current recommendation (wire a different agent as the trigger and
+let OpenClaw consume the result via its own pipeline).
+
 ## Schema reference
 
 OpenClaw's skill format is documented at
