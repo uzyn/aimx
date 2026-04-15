@@ -336,7 +336,7 @@ mod tests {
             .expect("bh= not found in DKIM-Signature");
         let bh_value = &dkim_header[bh_start + 3..];
         let bh_end = bh_value.find(';').unwrap_or(bh_value.len());
-        let bh_b64 = bh_value[..bh_end].replace(' ', "").replace('\t', "");
+        let bh_b64 = bh_value[..bh_end].replace([' ', '\t'], "");
 
         let body_start = signed_str.find("\r\n\r\n").expect("No body separator") + 4;
         let body = &signed.as_slice()[body_start..];
@@ -432,7 +432,7 @@ mod tests {
         let b_start = dkim_header.find(" b=").expect("b= not found");
         let b_value = &dkim_header[b_start + 3..];
         let b_end = b_value.find(';').unwrap_or(b_value.len());
-        let b_b64 = b_value[..b_end].replace(' ', "").replace('\t', "");
+        let b_b64 = b_value[..b_end].replace([' ', '\t'], "");
         let sig_bytes = base64::engine::general_purpose::STANDARD
             .decode(&b_b64)
             .expect("b= value must be valid base64");

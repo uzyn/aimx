@@ -238,11 +238,13 @@ mod tests {
         fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
             Ok(None)
         }
-        fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
-            Ok("1.2.3.4".parse().unwrap())
-        }
-        fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
-            Ok(None)
+        fn get_server_ips(
+            &self,
+        ) -> Result<
+            (Option<std::net::Ipv4Addr>, Option<std::net::Ipv6Addr>),
+            Box<dyn std::error::Error>,
+        > {
+            Ok((Some("1.2.3.4".parse().unwrap()), None))
         }
         fn resolve_mx(&self, _domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(vec![])

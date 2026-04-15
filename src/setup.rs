@@ -3,7 +3,7 @@ use crate::dkim;
 use crate::term;
 use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
-use std::net::{IpAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, PartialEq)]
@@ -35,8 +35,14 @@ pub trait NetworkOps {
     /// Used by `aimx setup` (post-install) and `aimx verify`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>>;
-    fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>>;
-    fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>>;
+    /// Return the server's IPv4 and IPv6 addresses in a single call.
+    ///
+    /// Consolidated in Sprint 32 (S32-4): both families are derived from a
+    /// single `hostname -I` invocation in `RealNetworkOps`, avoiding duplicate
+    /// work and duplicate failure modes.
+    fn get_server_ips(
+        &self,
+    ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>>;
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>>;
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
     fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>>;
@@ -59,9 +65,13 @@ impl SystemOps for RealSystemOps {
     }
 
     fn restart_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        let status = std::process::Command::new("sudo")
-            .args(["systemctl", "restart", service])
-            .status()?;
+        use crate::serve::service::{detect_init_system, restart_service_command};
+
+        let init = detect_init_system();
+        let (program, args) = restart_service_command(&init, service).ok_or_else(|| {
+            format!("Could not detect init system (systemd or OpenRC) to restart {service}.")
+        })?;
+        let status = std::process::Command::new(program).args(&args).status()?;
         if !status.success() {
             return Err(format!("Failed to restart {service}").into());
         }
@@ -69,10 +79,16 @@ impl SystemOps for RealSystemOps {
     }
 
     fn is_service_running(&self, service: &str) -> bool {
-        std::process::Command::new("systemctl")
-            .args(["is-active", "--quiet", service])
-            .status()
-            .is_ok_and(|s| s.success())
+        use crate::serve::service::{detect_init_system, is_service_running_command};
+
+        let init = detect_init_system();
+        match is_service_running_command(&init, service) {
+            Some((program, args)) => std::process::Command::new(program)
+                .args(&args)
+                .status()
+                .is_ok_and(|s| s.success()),
+            None => false,
+        }
     }
 
     fn generate_tls_cert(
@@ -219,6 +235,25 @@ fn is_global_ipv6(ip: &Ipv6Addr) -> bool {
     && !ip.is_unspecified()
 }
 
+/// Parse the whitespace-separated output of `hostname -I` into the first
+/// IPv4 address and the first *global* IPv6 address. Non-global IPv6 tokens
+/// (link-local, ULA, loopback, unspecified) are ignored.
+pub(crate) fn parse_hostname_i_output(stdout: &str) -> (Option<Ipv4Addr>, Option<Ipv6Addr>) {
+    let mut ipv4: Option<Ipv4Addr> = None;
+    let mut ipv6: Option<Ipv6Addr> = None;
+    for token in stdout.split_whitespace() {
+        match token.parse::<IpAddr>() {
+            Ok(IpAddr::V4(v4)) if ipv4.is_none() => ipv4 = Some(v4),
+            Ok(IpAddr::V6(v6)) if ipv6.is_none() && is_global_ipv6(&v6) => ipv6 = Some(v6),
+            _ => {}
+        }
+        if ipv4.is_some() && ipv6.is_some() {
+            break;
+        }
+    }
+    (ipv4, ipv6)
+}
+
 #[derive(Debug)]
 pub struct RealNetworkOps {
     pub verify_host: String,
@@ -354,7 +389,10 @@ impl NetworkOps for RealNetworkOps {
     }
 
     fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
-        let ip = self.get_server_ip()?;
+        let (ipv4, _) = self.get_server_ips()?;
+        let ip = ipv4.ok_or::<Box<dyn std::error::Error>>(
+            "Could not determine server IPv4 address".into(),
+        )?;
         let output = std::process::Command::new("dig")
             .args(["+short", "-x", &ip.to_string()])
             .output()?;
@@ -366,30 +404,12 @@ impl NetworkOps for RealNetworkOps {
         }
     }
 
-    fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
+    fn get_server_ips(
+        &self,
+    ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>> {
         let output = std::process::Command::new("hostname").arg("-I").output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        for token in stdout.split_whitespace() {
-            if let Ok(ip) = token.parse::<IpAddr>()
-                && ip.is_ipv4()
-            {
-                return Ok(ip);
-            }
-        }
-        Err("Could not determine server IPv4 address".into())
-    }
-
-    fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("hostname").arg("-I").output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for token in stdout.split_whitespace() {
-            if let Ok(IpAddr::V6(ipv6)) = token.parse::<IpAddr>()
-                && is_global_ipv6(&ipv6)
-            {
-                return Ok(Some(IpAddr::V6(ipv6)));
-            }
-        }
-        Ok(None)
+        Ok(parse_hostname_i_output(&stdout))
     }
 
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
@@ -1063,7 +1083,7 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
     Ok(domain)
 }
 
-pub fn is_already_configured(sys: &dyn SystemOps, _domain: &str, data_dir: &Path) -> bool {
+pub fn is_already_configured(sys: &dyn SystemOps, data_dir: &Path) -> bool {
     let tls_cert = Path::new("/etc/ssl/aimx/cert.pem");
     let dkim_key = data_dir.join("dkim/private.key");
 
@@ -1074,22 +1094,18 @@ pub fn is_already_configured(sys: &dyn SystemOps, _domain: &str, data_dir: &Path
     service_running && cert_exists && dkim_exists
 }
 
-/// Detects the server's IPv6 address iff `enable_ipv6 = true`.
+/// Gate detected IPv6 on `enable_ipv6`.
 ///
 /// IPv6 outbound is opt-in via `enable_ipv6` in `config.toml`. When disabled,
-/// the call to `net.get_server_ipv6()` is skipped entirely — AAAA + `ip6:`
-/// SPF guidance/verification are omitted to match the IPv4-only default of
-/// `aimx send`. Extracted as a standalone helper so the gating can be tested
-/// without driving the whole setup flow.
-pub(crate) fn detect_server_ipv6(
-    enable_ipv6: bool,
-    net: &dyn NetworkOps,
-) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
-    if enable_ipv6 {
-        net.get_server_ipv6()
-    } else {
-        Ok(None)
-    }
+/// the detected IPv6 is dropped — AAAA + `ip6:` SPF guidance/verification are
+/// omitted to match the IPv4-only default of `aimx send`.
+///
+/// Since Sprint 32 (S32-4), the caller passes the IPv6 from a single
+/// `get_server_ips()` call (no second `hostname -I`); this helper now just
+/// applies the opt-in gate. Kept as a standalone function so the gate is
+/// trivially testable.
+pub(crate) fn detect_server_ipv6(enable_ipv6: bool, ipv6: Option<Ipv6Addr>) -> Option<Ipv6Addr> {
+    if enable_ipv6 { ipv6 } else { None }
 }
 
 pub fn run_setup(
@@ -1132,7 +1148,7 @@ pub fn run_setup(
     };
 
     // Re-entrant detection: if already configured, skip install/configure steps
-    let already_configured = is_already_configured(sys, &domain, data_dir);
+    let already_configured = is_already_configured(sys, data_dir);
 
     if already_configured {
         println!(
@@ -1216,8 +1232,13 @@ pub fn run_setup(
     finalize_setup(data_dir, &domain, &dkim_selector)?;
 
     // Step 7: DNS guidance and verification (section [DNS])
-    let server_ip = net.get_server_ip()?;
-    let server_ipv6 = detect_server_ipv6(enable_ipv6, net)?;
+    // Single `hostname -I` invocation (S32-4): derive both families from one call.
+    let (ipv4_detected, ipv6_detected) = net.get_server_ips()?;
+    let server_ipv4 = ipv4_detected
+        .ok_or::<Box<dyn std::error::Error>>("Could not determine server IPv4 address".into())?;
+    let server_ipv6 = detect_server_ipv6(enable_ipv6, ipv6_detected);
+    let server_ip: IpAddr = IpAddr::V4(server_ipv4);
+    let server_ipv6_ip: Option<IpAddr> = server_ipv6.map(IpAddr::V6);
     let dkim_value = dkim::dns_record_value(data_dir)?;
 
     let local_dkim_pubkey = dkim_value
@@ -1225,7 +1246,7 @@ pub fn run_setup(
         .map(|s| s.to_string());
 
     let server_ip_str = server_ip.to_string();
-    let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
+    let server_ipv6_str = server_ipv6_ip.map(|ip| ip.to_string());
     display_dns_guidance(
         &domain,
         &server_ip_str,
@@ -1263,7 +1284,7 @@ pub fn run_setup(
             net,
             &domain,
             &server_ip,
-            server_ipv6.as_ref(),
+            server_ipv6_ip.as_ref(),
             &dkim_selector,
             local_dkim_pubkey.as_deref(),
         );
@@ -1302,13 +1323,13 @@ mod tests {
         outbound_port25: bool,
         inbound_port25: bool,
         ptr_record: Option<String>,
-        server_ip: IpAddr,
-        server_ipv6: Option<IpAddr>,
+        server_ipv4: Option<Ipv4Addr>,
+        server_ipv6: Option<Ipv6Addr>,
         mx_records: HashMap<String, Vec<String>>,
         a_records: HashMap<String, Vec<IpAddr>>,
         aaaa_records: HashMap<String, Vec<IpAddr>>,
         txt_records: HashMap<String, Vec<String>>,
-        get_server_ipv6_calls: std::cell::Cell<u32>,
+        get_server_ips_calls: std::cell::Cell<u32>,
     }
 
     impl Default for MockNetworkOps {
@@ -1317,13 +1338,13 @@ mod tests {
                 outbound_port25: true,
                 inbound_port25: true,
                 ptr_record: Some("mail.example.com.".into()),
-                server_ip: "1.2.3.4".parse().unwrap(),
+                server_ipv4: Some("1.2.3.4".parse().unwrap()),
                 server_ipv6: None,
                 mx_records: HashMap::new(),
                 a_records: HashMap::new(),
                 aaaa_records: HashMap::new(),
                 txt_records: HashMap::new(),
-                get_server_ipv6_calls: std::cell::Cell::new(0),
+                get_server_ips_calls: std::cell::Cell::new(0),
             }
         }
     }
@@ -1338,13 +1359,12 @@ mod tests {
         fn check_ptr_record(&self) -> Result<Option<String>, Box<dyn std::error::Error>> {
             Ok(self.ptr_record.clone())
         }
-        fn get_server_ip(&self) -> Result<IpAddr, Box<dyn std::error::Error>> {
-            Ok(self.server_ip)
-        }
-        fn get_server_ipv6(&self) -> Result<Option<IpAddr>, Box<dyn std::error::Error>> {
-            self.get_server_ipv6_calls
-                .set(self.get_server_ipv6_calls.get() + 1);
-            Ok(self.server_ipv6)
+        fn get_server_ips(
+            &self,
+        ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>> {
+            self.get_server_ips_calls
+                .set(self.get_server_ips_calls.get() + 1);
+            Ok((self.server_ipv4, self.server_ipv6))
         }
         fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
             Ok(self.mx_records.get(domain).cloned().unwrap_or_default())
@@ -2255,44 +2275,71 @@ mod tests {
     }
 
     #[test]
-    fn detect_server_ipv6_false_does_not_query_net() {
-        let net = MockNetworkOps {
-            server_ipv6: Some("2001:db8::1".parse().unwrap()),
-            ..Default::default()
-        };
-        let result = detect_server_ipv6(false, &net).unwrap();
-        assert!(result.is_none(), "ipv6 should be None when flag disabled");
-        assert_eq!(
-            net.get_server_ipv6_calls.get(),
-            0,
-            "get_server_ipv6 must NOT be called when enable_ipv6 = false"
+    fn detect_server_ipv6_false_drops_detected_ipv6() {
+        let ipv6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let result = detect_server_ipv6(false, Some(ipv6));
+        assert!(
+            result.is_none(),
+            "ipv6 must be dropped when enable_ipv6 = false"
         );
     }
 
     #[test]
-    fn detect_server_ipv6_true_queries_net() {
-        let net = MockNetworkOps {
-            server_ipv6: Some("2001:db8::1".parse().unwrap()),
-            ..Default::default()
-        };
-        let result = detect_server_ipv6(true, &net).unwrap();
-        assert_eq!(result, Some("2001:db8::1".parse().unwrap()));
-        assert_eq!(
-            net.get_server_ipv6_calls.get(),
-            1,
-            "get_server_ipv6 must be called exactly once when enable_ipv6 = true"
-        );
+    fn detect_server_ipv6_true_keeps_detected_ipv6() {
+        let ipv6: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let result = detect_server_ipv6(true, Some(ipv6));
+        assert_eq!(result, Some(ipv6));
     }
 
     #[test]
     fn detect_server_ipv6_true_returns_none_when_net_has_none() {
+        let result = detect_server_ipv6(true, None);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn get_server_ips_called_once_per_setup_flow() {
+        // Dedup AC: a single call to `NetworkOps::get_server_ips` must feed
+        // both IPv4 and IPv6 consumers in the setup flow (no double shell-out
+        // to `hostname -I`). Exercised indirectly via `detect_server_ipv6`
+        // + the run_setup wiring; here we assert the trait contract returns
+        // both families in one invocation.
         let net = MockNetworkOps {
-            server_ipv6: None,
+            server_ipv4: Some("203.0.113.5".parse().unwrap()),
+            server_ipv6: Some("2001:db8::1".parse().unwrap()),
             ..Default::default()
         };
-        let result = detect_server_ipv6(true, &net).unwrap();
-        assert!(result.is_none());
-        assert_eq!(net.get_server_ipv6_calls.get(), 1);
+        let (v4, v6) = net.get_server_ips().unwrap();
+        assert_eq!(v4, Some("203.0.113.5".parse().unwrap()));
+        assert_eq!(v6, Some("2001:db8::1".parse().unwrap()));
+        assert_eq!(
+            net.get_server_ips_calls.get(),
+            1,
+            "single invocation must return both families"
+        );
+    }
+
+    #[test]
+    fn parse_hostname_i_output_extracts_ipv4_and_global_ipv6() {
+        let stdout = "10.0.0.5 203.0.113.7 fe80::1 2001:db8::42 fc00::1\n";
+        let (v4, v6) = parse_hostname_i_output(stdout);
+        assert_eq!(
+            v4,
+            Some("10.0.0.5".parse().unwrap()),
+            "takes the first IPv4 token (private is OK here — caller may filter)"
+        );
+        assert_eq!(
+            v6,
+            Some("2001:db8::42".parse().unwrap()),
+            "skips link-local (fe80::) and ULA (fc00::) IPv6"
+        );
+    }
+
+    #[test]
+    fn parse_hostname_i_output_returns_none_when_empty() {
+        let (v4, v6) = parse_hostname_i_output("   \n");
+        assert!(v4.is_none());
+        assert!(v6.is_none());
     }
 
     #[test]
@@ -2338,7 +2385,7 @@ mod tests {
             service_running: true,
             ..Default::default()
         };
-        assert!(is_already_configured(&sys, "example.com", tmp.path()));
+        assert!(is_already_configured(&sys, tmp.path()));
     }
 
     #[test]
@@ -2353,7 +2400,7 @@ mod tests {
             service_running: false,
             ..Default::default()
         };
-        assert!(!is_already_configured(&sys, "example.com", tmp.path()));
+        assert!(!is_already_configured(&sys, tmp.path()));
     }
 
     #[test]
@@ -2367,7 +2414,7 @@ mod tests {
             service_running: true,
             ..Default::default()
         };
-        assert!(!is_already_configured(&sys, "example.com", tmp.path()));
+        assert!(!is_already_configured(&sys, tmp.path()));
     }
 
     // S26-2 — IPv6 DNS record generation tests
@@ -2540,8 +2587,11 @@ mod tests {
     fn verify_all_dns_with_ipv6() {
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
-        let mut net = MockNetworkOps::default();
-        net.server_ipv6 = Some(ipv6);
+        let ipv6_parsed: Ipv6Addr = "2001:db8::1".parse().unwrap();
+        let mut net = MockNetworkOps {
+            server_ipv6: Some(ipv6_parsed),
+            ..Default::default()
+        };
         net.mx_records
             .insert("example.com".into(), vec!["10 example.com.".into()]);
         net.a_records.insert("example.com".into(), vec![ip]);

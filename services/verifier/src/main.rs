@@ -8,9 +8,11 @@ use axum::{
 };
 use serde::Serialize;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 const CLIENT_IP_HEADER: &str = "X-AIMX-Client-IP";
 const SMTP_HOSTNAME: &str = "check.aimx.email";
@@ -22,6 +24,11 @@ const SMTP_LINE_TIMEOUT: Duration = Duration::from_secs(10);
 /// DoS where a peer streams megabytes into a growing `String` buffer before
 /// the per-line timeout fires.
 const SMTP_MAX_LINE_BYTES: u64 = 1024;
+/// Default cap on concurrent SMTP connections. Each per-connection session is
+/// already tightly bounded (30s wall clock, 10s per-line, 1 KiB per-line), so
+/// this is defense-in-depth against a distributed flood exhausting the tokio
+/// runtime or file descriptors. Tunable via `SMTP_MAX_CONCURRENT` env var.
+const SMTP_DEFAULT_MAX_CONCURRENT: usize = 128;
 const PROBE_EHLO_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Serialize)]
@@ -301,17 +308,19 @@ async fn run_smtp_listener() {
         .await
         .expect("Failed to bind SMTP listener");
 
-    tracing::info!("SMTP listener on {bind_addr}");
+    let max_concurrent = std::env::var("SMTP_MAX_CONCURRENT")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(SMTP_DEFAULT_MAX_CONCURRENT);
+    let gate = Arc::new(Semaphore::new(max_concurrent));
 
-    // Concurrency is currently unbounded. With `SMTP_CONNECTION_TIMEOUT = 30s`
-    // and `SMTP_MAX_LINE_BYTES = 1 KiB` per line, a single client is tightly
-    // bounded, but a distributed flood could still saturate the tokio
-    // runtime. A bounded semaphore would be defense-in-depth DoS hardening;
-    // Sprint 14 is strictly a request-logging sprint so this stays deferred.
+    tracing::info!("SMTP listener on {bind_addr} (max_concurrent={max_concurrent})");
+
     loop {
         match listener.accept().await {
             Ok((stream, peer)) => {
-                tokio::spawn(spawn_smtp_connection(stream, peer));
+                dispatch_smtp_connection(stream, peer, Arc::clone(&gate), max_concurrent);
             }
             Err(e) => {
                 tracing::warn!("SMTP accept error: {e}");
@@ -320,10 +329,41 @@ async fn run_smtp_listener() {
     }
 }
 
+/// Non-blocking gate: if all permits are in use, drop the new connection
+/// cleanly rather than blocking the accept loop. The OS TCP backlog absorbs
+/// short bursts; sustained floods see a fast close without runtime
+/// exhaustion. Returns `true` when a task was spawned, `false` when the
+/// connection was dropped.
+fn dispatch_smtp_connection(
+    stream: TcpStream,
+    peer: SocketAddr,
+    gate: Arc<Semaphore>,
+    max_concurrent: usize,
+) -> bool {
+    match gate.try_acquire_owned() {
+        Ok(permit) => {
+            tokio::spawn(spawn_smtp_connection(stream, peer, permit));
+            true
+        }
+        Err(_) => {
+            tracing::warn!(
+                peer_ip = %peer.ip(),
+                max_concurrent,
+                "smtp connection dropped: concurrency gate saturated"
+            );
+            drop(stream);
+            false
+        }
+    }
+}
+
 /// Per-connection body shared by the real accept loop and the logging test
 /// so the test exercises the exact production code path instead of an
 /// inlined copy that could drift.
-async fn spawn_smtp_connection(stream: TcpStream, peer: SocketAddr) {
+///
+/// The `_permit` argument holds a slot in the concurrency gate for the
+/// lifetime of this task; dropping it when the task returns releases the slot.
+async fn spawn_smtp_connection(stream: TcpStream, peer: SocketAddr, _permit: OwnedSemaphorePermit) {
     let start = Instant::now();
     let peer_ip = peer.ip();
     tracing::info!(peer_ip = %peer_ip, "smtp connection accepted");
@@ -358,9 +398,8 @@ async fn smtp_session<S>(stream: S) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite,
 {
-    let (reader, writer) = tokio::io::split(stream);
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = BufReader::new(reader);
-    let mut writer = writer;
 
     let banner = format!("220 {SMTP_HOSTNAME} SMTP aimx-verifier\r\n");
     writer.write_all(banner.as_bytes()).await?;
@@ -1280,9 +1319,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
+        let gate = Arc::new(Semaphore::new(1));
         let server = tokio::spawn(async move {
             let (stream, peer) = listener.accept().await.unwrap();
-            spawn_smtp_connection(stream, peer).await;
+            let permit = gate.try_acquire_owned().unwrap();
+            spawn_smtp_connection(stream, peer, permit).await;
         });
 
         let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
@@ -1309,5 +1350,54 @@ mod tests {
             logs.contains("peer_ip=127.0.0.1"),
             "expected peer_ip=127.0.0.1 in logs, got: {logs}"
         );
+    }
+
+    /// Verifies `dispatch_smtp_connection` honours its upper bound: the first
+    /// N connections spawn tasks (consuming permits), and the (N+1)-th is
+    /// dropped without spawning. This exercises the production accept-loop
+    /// body directly.
+    #[tokio::test]
+    async fn smtp_listener_concurrency_gate_drops_excess() {
+        let writer = BufWriter::new();
+        let _guard = test_subscriber(writer.clone());
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let gate = Arc::new(Semaphore::new(1));
+
+        // First connection: acquires the only permit. We do NOT send QUIT so
+        // the session sits inside its read-line timeout, holding the permit
+        // for the duration of the test.
+        let conn1 = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let (stream1, peer1) = listener.accept().await.unwrap();
+        assert!(
+            dispatch_smtp_connection(stream1, peer1, Arc::clone(&gate), 1),
+            "first connection must acquire a permit and spawn"
+        );
+
+        // Second connection: gate saturated. `dispatch_smtp_connection` must
+        // return false and log the drop event.
+        let conn2 = TcpStream::connect(format!("127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        let (stream2, peer2) = listener.accept().await.unwrap();
+        assert!(
+            !dispatch_smtp_connection(stream2, peer2, Arc::clone(&gate), 1),
+            "second connection must be dropped when gate is saturated"
+        );
+
+        // Give the tracing layer a moment to flush the drop event.
+        tokio::task::yield_now().await;
+
+        let logs = writer.contents();
+        assert!(
+            logs.contains("smtp connection dropped: concurrency gate saturated"),
+            "expected drop log, got: {logs}"
+        );
+
+        drop(conn1);
+        drop(conn2);
     }
 }
