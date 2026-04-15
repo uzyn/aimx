@@ -842,7 +842,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 97–99.5) [IN PROGRESS]
+## Sprint 34 — UDS Wire Protocol + `aimx serve` Send Listener (Days 97–99.5) [DONE]
 
 **Goal:** Move DKIM signing and outbound SMTP delivery inside `aimx serve`, exposed to local clients over a world-writable Unix domain socket at `/run/aimx/send.sock` (`root:root 0666`). `aimx send` is not yet rewritten (that's Sprint 35); this sprint stands up the daemon side and proves it works with a hand-written test client.
 
@@ -860,14 +860,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/send_protocol.rs` added; exports `SendRequest`, `SendResponse`, `ErrCode`, `parse_request`, `write_response`
-- [ ] `parse_request` reads the leading `AIMX/1 SEND\n` line, then headers until blank line, then `Content-Length` bytes
-- [ ] Required headers: `From-Mailbox`, `Content-Length`. Unknown headers ignored for forward-compat
-- [ ] Rejects: wrong leading line → `Malformed`; missing required header → `Malformed`; `Content-Length` not parseable or exceeds cap → `Malformed`; body truncated → `Malformed`
-- [ ] `write_response` emits `AIMX/1 OK <message-id>\n` or `AIMX/1 ERR <code> <reason>\n` (codes rendered as `MAILBOX`, `DOMAIN`, `SIGN`, `DELIVERY`, `TEMP`, `MALFORMED`)
-- [ ] Round-trip unit tests for every response variant; `tokio-test::io::Builder` used for controlled async streams
-- [ ] Parser fuzzed lightly with: truncated body, oversized body, CRLF vs LF, header case-insensitivity on names, duplicate `Content-Length`, missing blank line, empty body, body containing the literal `AIMX/1 SEND\n` (must NOT be misparsed as a second request)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/send_protocol.rs` added; exports `SendRequest`, `SendResponse`, `ErrCode`, `parse_request`, `write_response`
+- [x] `parse_request` reads the leading `AIMX/1 SEND\n` line, then headers until blank line, then `Content-Length` bytes
+- [x] Required headers: `From-Mailbox`, `Content-Length`. Unknown headers ignored for forward-compat
+- [x] Rejects: wrong leading line → `Malformed`; missing required header → `Malformed`; `Content-Length` not parseable or exceeds cap → `Malformed`; body truncated → `Malformed`
+- [x] `write_response` emits `AIMX/1 OK <message-id>\n` or `AIMX/1 ERR <code> <reason>\n` (codes rendered as `MAILBOX`, `DOMAIN`, `SIGN`, `DELIVERY`, `TEMP`, `MALFORMED`)
+- [x] Round-trip unit tests for every response variant; `tokio-test::io::Builder` used for controlled async streams
+- [x] Parser fuzzed lightly with: truncated body, oversized body, CRLF vs LF, header case-insensitivity on names, duplicate `Content-Length`, missing blank line, empty body, body containing the literal `AIMX/1 SEND\n` (must NOT be misparsed as a second request)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S34-2: `aimx serve` binds `/run/aimx/send.sock` + accept loop
 
@@ -875,15 +875,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `serve.rs` binds `UnixListener` at `send_socket_path()` (new helper: `<runtime_dir>/send.sock`; `AIMX_RUNTIME_DIR` env var overrides for tests)
-- [ ] Socket mode set to `0o666` (world-writable) after bind via `set_permissions`; owner left as the running process's UID (root on real installs, the test user in tests — no explicit chown call)
-- [ ] `SO_PEERCRED` read on each accept; `peer_uid`/`peer_pid` emitted at `info` level via `tracing` for diagnostics — explicitly NOT used for any authorization check
-- [ ] Bind failure: process exits with `1` and a clear `error!` log naming the socket path and the errno
-- [ ] If the socket file already exists at bind time (stale from prior crash), unlink-and-retry once, then fail loudly on second failure
-- [ ] SIGTERM/SIGINT graceful shutdown drains the UDS accept loop the same way it drains the SMTP listener; socket file removed on clean shutdown
-- [ ] Unit test binds the listener in a tempdir (override via `AIMX_RUNTIME_DIR`), asserts the file mode is `0o666`, connects from the same process, asserts accept fires and peer-cred fields are present
-- [ ] Integration test: start `aimx serve` in a tempdir (systemd unit generation bypassed, binary invoked directly), connect a raw Unix socket, assert the listener accepts
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `serve.rs` binds `UnixListener` at `send_socket_path()` (new helper: `<runtime_dir>/send.sock`; `AIMX_RUNTIME_DIR` env var overrides for tests)
+- [x] Socket mode set to `0o666` (world-writable) after bind via `set_permissions`; owner left as the running process's UID (root on real installs, the test user in tests — no explicit chown call)
+- [x] `SO_PEERCRED` read on each accept; `peer_uid`/`peer_pid` emitted at `info` level via `tracing` for diagnostics — explicitly NOT used for any authorization check
+- [x] Bind failure: process exits with `1` and a clear `error!` log naming the socket path and the errno
+- [x] If the socket file already exists at bind time (stale from prior crash), unlink-and-retry once, then fail loudly on second failure
+- [x] SIGTERM/SIGINT graceful shutdown drains the UDS accept loop the same way it drains the SMTP listener; socket file removed on clean shutdown
+- [x] Unit test binds the listener in a tempdir (override via `AIMX_RUNTIME_DIR`), asserts the file mode is `0o666`, connects from the same process, asserts accept fires and peer-cred fields are present
+- [x] Integration test: start `aimx serve` in a tempdir (systemd unit generation bypassed, binary invoked directly), connect a raw Unix socket, assert the listener accepts
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S34-3: Daemon-side send handler — domain validation, DKIM sign, deliver
 
@@ -891,23 +891,25 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/send_handler.rs` created; `async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse`
-- [ ] `SendContext` holds `Arc<DkimKey>`, primary domain, registered mailboxes, and an `Arc<dyn MailTransport>` for injection in tests
-- [ ] `serve.rs::main` loads DKIM key once at startup; start failure is fatal with a clear message naming `/etc/aimx/dkim/private.key`
-- [ ] `From:` parsing extracts local@domain; domain compare is case-insensitive; any local part accepted
-- [ ] Domain mismatch returns `ERR DOMAIN sender domain does not match aimx domain`
-- [ ] Unknown `From-Mailbox` returns `ERR MAILBOX mailbox \`<name>\` not registered`
-- [ ] DKIM signing uses relaxed/relaxed canonicalization (preserving Sprint 25 fix); sign failure returns `ERR SIGN <detail>`
-- [ ] Delivery uses existing `LettreTransport`; MX resolution errors map to `Temp`, permanent rejects to `Delivery`
-- [ ] Response written to the UDS stream via `send_protocol::write_response`
-- [ ] Accept-loop task is spawned with `tokio::spawn` so one slow delivery doesn't block other sends
-- [ ] Unit tests mock `MailTransport`, exercise each error code path, and assert the right `SendResponse` variant
-- [ ] Integration test: `aimx serve` running in a tempdir with a mock transport; a raw UDS test client writes `AIMX/1 SEND` + valid body; test asserts `OK <message-id>` response AND the transport received the signed message AND the signature verifies against the public key
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/send_handler.rs` created; `async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse`
+- [x] `SendContext` holds `Arc<DkimKey>`, primary domain, registered mailboxes, and an `Arc<dyn MailTransport>` for injection in tests
+- [x] `serve.rs::main` loads DKIM key once at startup; start failure is fatal with a clear message naming `/etc/aimx/dkim/private.key`
+- [x] `From:` parsing extracts local@domain; domain compare is case-insensitive; any local part accepted
+- [x] Domain mismatch returns `ERR DOMAIN sender domain does not match aimx domain`
+- [x] Unknown `From-Mailbox` returns `ERR MAILBOX mailbox \`<name>\` not registered`
+- [x] DKIM signing uses relaxed/relaxed canonicalization (preserving Sprint 25 fix); sign failure returns `ERR SIGN <detail>` <!-- Cycle 2: added `handle_send_with_signer<F>` seam + `sign_failure_returns_sign_error` test -->
+- [x] Delivery uses existing `LettreTransport`; MX resolution errors map to `Temp`, permanent rejects to `Delivery`
+- [x] Response written to the UDS stream via `send_protocol::write_response`
+- [x] Accept-loop task is spawned with `tokio::spawn` so one slow delivery doesn't block other sends
+- [x] Unit tests mock `MailTransport`, exercise each error code path, and assert the right `SendResponse` variant
+- [x] Integration test: `aimx serve` running in a tempdir with a mock transport; a raw UDS test client writes `AIMX/1 SEND` + valid body; test asserts `OK <message-id>` response AND the transport received the signed message AND the signature verifies against the public key <!-- Cycle 2: `uds_end_to_end_signed_delivery` now uses `mail-auth`'s `MessageAuthenticator::verify_dkim` with an in-memory resolver cache seeded from the test public key; asserts `DkimResult::Pass` -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+**Cycle 2 additions beyond spec:** To-header normalized to bare address via `extract_bare_address` helper (so display-name and comma-list `To:` headers parse correctly in lettre); missing `Message-ID` synthesized on the server as `<{uuid}@{primary_domain}>` and signed into the message (rather than classified as `Malformed`); single-pass `scan_headers` replaces three `header_value` walks.
 
 ---
 
-## Sprint 35 — `aimx send` Thin UDS Client + End-to-End (Days 99.5–102) [NOT STARTED]
+## Sprint 35 — `aimx send` Thin UDS Client + End-to-End (Days 99.5–102) [IN PROGRESS]
 
 **Goal:** Rewrite `aimx send` as a thin UDS client that does no signing, owns no DKIM key access, and shells the full signing + delivery responsibility to `aimx serve`. Validate the full path: `aimx send` → UDS → `aimx serve` → DKIM-sign → MX delivery.
 
@@ -1305,8 +1307,8 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 32 | 89.5–92 | Non-blocking Cleanup | Verifier concurrency bound, outbound DATA sharing + multi-MX errors, TLS/service consistency, NetworkOps dedup, clippy `--all-targets`, cosmetics | Done |
 | 33 | 92–94.5 | v0.2 Filesystem Split + `aimx` Group (group reverted in 33.1) | `/etc/aimx/` for config + DKIM keys, `/run/aimx/` via `RuntimeDirectory=aimx`, DKIM private key back to `600` root-only | Done |
 | 33.1 | 94.5–97 | Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup | Strip PTR/reverse-DNS, drop `aimx` system group + group-gating, clear ready-now backlog items, manual E2E validation of Claude Code + Codex CLI plugins | Done |
-| 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | In Progress |
-| 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Not started |
+| 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | Done |
+| 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | In Progress |
 | 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Not started |
 | 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
 | 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
@@ -1394,6 +1396,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 33)** Factor the `is_root()` helper out of `setup.rs` and `verify.rs` into a single shared location — _Triaged into Sprint 33.1 (S33.1-4)._
 - [x] **(Sprint 33)** `SystemOps::create_system_group` real-impl path has no direct unit coverage — _Obsolete: `create_system_group` entirely removed in Sprint 33.1 (S33.1-2)._
 - [x] **(Sprint 33)** Several runtime subcommands accept `_data_dir: Option<&std::path::Path>` as a CLI-dispatch uniformity convenience — _Triaged into Sprint 33.1 (S33.1-5)._
+- [ ] **(Sprint 34)** Add a per-read idle timeout inside `send_protocol::parse_request` to bound slow-loris exposure on the world-writable UDS socket. Any local process can announce a 25 MB `Content-Length` and then stall, parking a 25 MB `Vec<u8>` + tokio task indefinitely. A short (e.g. 30s) `tokio::time::timeout` around the reads is cheaper than a full concurrency semaphore and closes the primary abuse vector.
+- [ ] **(Sprint 34)** Replace the substring-based `send_handler::classify_transport_error` with a typed error surface on `MailTransport`. The current classifier pattern-matches on lowercased substrings (`"unreachable"`, `"timed out"`, `"connection refused"`) emitted by `LettreTransport::try_deliver` — any future refactor of those error strings will silently re-classify `Temp` vs `Delivery`. A thin enum (`TransportError { Temp(String), Permanent(String) }`) on the trait return would be durable.
+- [ ] **(Sprint 34)** Cache the test DKIM keypair across integration tests via `once_cell` + a process-scoped `TempDir` rather than re-shelling `aimx dkim-keygen` per test. Each 2048-bit RSA generation costs ~200ms and the Sprint 34 integration suite now spawns `aimx serve` in many tests. A sharable keypair cache would cut ~10-15s off the integration run.
 
 ### Deferred Feature Sprints
 
