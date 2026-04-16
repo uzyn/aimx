@@ -1,3 +1,5 @@
+# author: U-Zyn Chua <chua@uzyn.com>
+# (Goose recipe schema does not support an author field)
 version: "1.0.0"
 title: "AIMX Email"
 description: >

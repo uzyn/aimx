@@ -6,125 +6,301 @@ filesystem. This document describes how to interact with AIMX. Read it once
 before attempting mail operations; re-read any section you need when a tool
 call fails.
 
-## MCP tools
+For full reference material, see the files in `references/`:
+- `references/mcp-tools.md` — full MCP tool signatures, types, and examples
+- `references/frontmatter.md` — complete frontmatter schema
+- `references/workflows.md` — worked examples for common tasks
+- `references/troubleshooting.md` — error codes and recovery steps
 
-All tools are served by the `aimx` binary over stdio. Nine tools are
-available.
+At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
+directory layout, regenerated on each AIMX upgrade.
+
+## Two access surfaces
+
+AIMX gives you two complementary ways to interact with email:
+
+1. **MCP tools** — for all mutations (send, reply, create mailboxes, mark
+   read/unread). The `aimx` MCP server runs over stdio and is launched
+   on-demand by your MCP client.
+2. **Direct filesystem reads** — for reading `.md` email files, scanning
+   directories, or bulk-processing. The data directory is world-readable and
+   its format is stable.
+
+Writes always go through MCP. Never create, modify, or delete `.md` files
+directly — the daemon owns those paths.
+
+## MCP tools — quick reference
+
+All 9 tools are served by the `aimx` binary over stdio. They return strings
+on success and error strings on failure.
 
 ### Mailbox tools
 
-- `mailbox_create(name: string)` — create a new mailbox. `name` is the local
-  part of the email address (e.g. `agent` → `agent@<domain>`).
-- `mailbox_list()` — list all mailboxes with total and unread message counts.
-- `mailbox_delete(name: string)` — delete a mailbox and every email in it.
-  Irreversible.
+- `mailbox_create(name)` — create a new mailbox identity (inbox + sent).
+- `mailbox_list()` — list all mailboxes with message counts.
+- `mailbox_delete(name)` — delete a mailbox and all its mail. Irreversible.
 
 ### Email tools
 
-- `email_list(mailbox: string, unread?: bool, from?: string, since?: string,
-  subject?: string)` — list emails in a mailbox. Filters AND together.
-  `since` is RFC 3339 (e.g. `2025-01-01T00:00:00Z`). `from` is substring
-  match. `subject` is case-insensitive substring match.
-- `email_read(mailbox: string, id: string)` — return the full Markdown file
-  (frontmatter + body) for a single email. `id` has the form
-  `YYYY-MM-DD-NNN` (e.g. `2025-01-01-001`).
-- `email_send(from_mailbox: string, to: string, subject: string, body: string,
-  attachments?: string[])` — compose, DKIM-sign, and deliver an email.
-  `from_mailbox` must be a real mailbox name (not a catchall). `attachments`
-  are absolute file paths.
-- `email_reply(mailbox: string, id: string, body: string)` — reply to an
-  existing email. AIMX sets `In-Reply-To`, `References`, and the `Re:`
-  subject automatically.
-- `email_mark_read(mailbox: string, id: string)` — mark a single email as
-  read.
-- `email_mark_unread(mailbox: string, id: string)` — mark a single email as
-  unread.
+- `email_list(mailbox, folder?, unread?, from?, since?, subject?)` — list
+  emails. `folder` is `"inbox"` (default) or `"sent"`. Filters AND together.
+- `email_read(mailbox, id, folder?)` — return the full Markdown file
+  (frontmatter + body) for one email.
+- `email_send(from_mailbox, to, subject, body, attachments?)` — compose,
+  DKIM-sign, and deliver an email. `from_mailbox` must be a real mailbox.
+- `email_reply(mailbox, id, body)` — reply to an existing email. AIMX sets
+  `In-Reply-To`, `References`, and `Re:` subject automatically.
+- `email_mark_read(mailbox, id, folder?)` — mark a single email as read.
+- `email_mark_unread(mailbox, id, folder?)` — mark a single email as unread.
 
-All tools return strings. Errors are returned as error strings — inspect the
-message and adjust parameters.
+See `references/mcp-tools.md` for full parameter types, return values, and
+worked examples.
 
 ## Storage layout
 
-AIMX stores mail on the local filesystem under a data directory (default
-`/var/lib/aimx/`):
+<!-- FR-50c: the datadir layout is documented explicitly. The real security
+     boundary is DKIM keys at /etc/aimx/ (root-only) and the UDS socket at
+     /run/aimx/send.sock — not filesystem obscurity. -->
+
+AIMX stores mail under a data directory (default `/var/lib/aimx/`):
 
 ```
-/var/lib/aimx/
-├── config.toml
-├── dkim/
-│   ├── private.key
-│   └── public.key
-├── <mailbox>/
-│   ├── YYYY-MM-DD-NNN.md
-│   └── attachments/
-│       └── <filename>
-└── catchall/
-    └── ...
+/var/lib/aimx/                          # world-readable datadir
+├── README.md                           # agent-facing layout guide (auto-generated)
+├── inbox/
+│   ├── <mailbox>/
+│   │   ├── 2026-04-15-143022-meeting-notes.md
+│   │   └── 2026-04-15-153300-invoice-march/     # attachment bundle
+│   │       ├── 2026-04-15-153300-invoice-march.md
+│   │       ├── invoice.pdf
+│   │       └── receipt.png
+│   └── catchall/                       # unknown local parts
+│       └── ...
+└── sent/
+    └── <mailbox>/
+        └── 2026-04-15-160145-re-meeting-notes.md
 ```
 
-- One Markdown file per email, named `YYYY-MM-DD-NNN.md` where `NNN` is a
-  per-day sequence starting at `001`.
-- Attachments are extracted into the mailbox's `attachments/` directory.
-  Filenames are preserved; the frontmatter lists them.
-- `catchall` receives any mail addressed to an unrecognised local part.
-- You may read `.md` files directly from the filesystem when that is more
-  convenient than an MCP call — the format is stable.
+- **Filenames** follow `YYYY-MM-DD-HHMMSS-<slug>.md` (UTC). The slug is
+  derived from the subject: lowercase, non-alphanumeric chars replaced with
+  `-`, collapsed, truncated to 20 chars, empty becomes `no-subject`.
+- **Attachment bundles** — zero attachments produce a flat `.md` file; one or
+  more produce a directory containing `<stem>.md` plus attachment files as
+  siblings (Zola-style bundle).
+- **`catchall`** receives mail addressed to unrecognised local parts.
+- **`inbox/`** holds inbound mail; **`sent/`** holds outbound copies.
 
-## Frontmatter
+Configuration and secrets live separately under `/etc/aimx/` (root-owned,
+not readable by agents):
 
-Each email file begins with a TOML frontmatter block delimited by `+++`
-(three plus signs, not `---`). Fields:
+```
+/etc/aimx/
+├── config.toml      # main config (root:root 640)
+└── dkim/
+    ├── private.key   # DKIM signing key (root:root 600)
+    └── public.key    # publishable (root:root 644)
+```
 
-- `id` — `YYYY-MM-DD-NNN`, matches the filename stem.
-- `message_id` — RFC 5322 `Message-ID` of the email, without angle brackets.
-- `from` — sender address (may include display name).
-- `to` — recipient address (may include display name).
-- `subject` — email subject, or `(no subject)` when absent.
-- `date` — RFC 3339 timestamp when the email was received.
-- `in_reply_to` — parent `Message-ID` if this is a reply, otherwise empty.
-- `references` — space-separated chain of `Message-ID`s for threading, or
-  empty.
-- `attachments` — array of `{name, path, content_type, size}` tables, one per
-  attachment.
-- `mailbox` — name of the mailbox this email was routed to.
-- `read` — `true` or `false`. Set to `false` on ingest.
-- `dkim` — `pass`, `fail`, or `none`. Result of DKIM signature verification
-  during ingest.
-- `spf` — `pass`, `fail`, or `none`. Result of SPF verification during
-  ingest.
+## Frontmatter — key fields
 
-The body follows the closing `+++`, rendered from the `text/plain` part of
-the message (falling back to `text/html` converted to plaintext).
+Each email file has TOML frontmatter between `+++` delimiters. The fields
+agents most commonly need:
 
-## Mailboxes
+| Field            | Type     | Notes                                              |
+|-----------------|----------|-----------------------------------------------------|
+| `id`            | string   | Matches the filename stem                            |
+| `message_id`    | string   | RFC 5322 Message-ID, without angle brackets          |
+| `thread_id`     | string   | 16-hex-char SHA-256 of the thread root Message-ID    |
+| `from`          | string   | Sender address (may include display name)            |
+| `to`            | string   | Recipient address                                    |
+| `subject`       | string   | Email subject, or `(no subject)` when absent         |
+| `date`          | string   | Sender-claimed RFC 3339 timestamp                    |
+| `received_at`   | string   | Server-side RFC 3339 UTC timestamp                   |
+| `trusted`       | string   | `"none"`, `"true"`, or `"false"` — see trust model   |
+| `read`          | bool     | `false` on ingest                                    |
+| `list_id`       | string?  | Mailing list ID header, if present                   |
+| `auto_submitted`| string?  | `auto-generated`, `auto-replied`, etc., if present   |
+| `labels`        | string[] | Empty by default                                     |
+| `dkim`          | string   | `"pass"`, `"fail"`, or `"none"`                      |
+| `spf`           | string   | `"pass"`, `"fail"`, `"softfail"`, `"neutral"`, or `"none"` |
+| `dmarc`         | string   | `"pass"`, `"fail"`, or `"none"`                      |
 
-- Mailbox names are local parts. They must be valid in the local part of an
-  email address (letters, digits, and a small set of punctuation).
-- The `catchall` mailbox is created automatically during setup and receives
-  mail for unrecognised addresses.
-- Create additional mailboxes with `mailbox_create` before sending mail
-  from them — `email_send` requires a real mailbox name.
+Sent copies carry an additional outbound block: `outbound = true`,
+`delivery_status` (`"delivered"`, `"deferred"`, `"failed"`, `"pending"`),
+and optional `delivered_at` and `delivery_details`.
+
+See `references/frontmatter.md` for the complete schema with every field,
+types, required/optional, and the outbound block.
+
+## Common workflows
+
+### 1. Check inbox for new mail
+
+```
+email_list(mailbox: "agent", unread: true)
+```
+
+Loop through results. For each, call `email_read` to get the content, then
+`email_mark_read` when done processing. This is the standard polling pattern.
+
+### 2. Send an email
+
+```
+email_send(
+  from_mailbox: "agent",
+  to: "alice@example.com",
+  subject: "Weekly report",
+  body: "Here is the summary..."
+)
+```
+
+The mailbox must exist — create it first with `mailbox_create` if needed.
+`from_mailbox` is the local part only (e.g. `"agent"`, not
+`"agent@example.com"`). AIMX DKIM-signs the message and delivers it via
+direct SMTP to the recipient's MX server.
+
+### 3. Reply to a message
+
+```
+email_reply(
+  mailbox: "agent",
+  id: "2026-04-15-143022-meeting-notes",
+  body: "Thanks for the update..."
+)
+```
+
+AIMX handles `In-Reply-To`, `References`, and `Re:` subject automatically.
+The `id` is the filename stem (visible in `email_list` output or in
+frontmatter).
+
+### 4. Summarize a thread
+
+Use `thread_id` from frontmatter to group messages:
+
+1. `email_list(mailbox: "agent")` to get all messages.
+2. Read each via `email_read` and group by `thread_id`.
+3. Sort by `date` within each group.
+
+All messages in a thread share the same `thread_id`, which is derived from
+the earliest Message-ID in the `References` chain.
+
+### 5. Handle auto-submitted mail
+
+Check `auto_submitted` in frontmatter before replying. If it is
+`auto-generated` or `auto-replied`, do not send a reply — this prevents
+infinite mail loops between bots. The same applies to mailing list mail
+(check `list_id`): reply only if the context clearly warrants it.
+
+See `references/workflows.md` for 10+ additional worked examples including
+triage, filtering by list, handling attachments, reply-all, and mark-all-read.
+
+## Trust model
+
+AIMX verifies DKIM, SPF, and DMARC on every inbound email. Results are
+stored in the `dkim`, `spf`, and `dmarc` frontmatter fields.
+
+The `trusted` field reflects the per-mailbox trust evaluation:
+
+- **`"none"`** — the mailbox has no trust policy (`trust = "none"` in
+  config, the default). No evaluation performed.
+- **`"true"`** — the mailbox has `trust = "verified"`, the sender matches
+  `trusted_senders`, AND DKIM passed.
+- **`"false"`** — the mailbox has `trust = "verified"`, but one or both
+  conditions failed (sender not in allowlist, or DKIM did not pass).
+
+Trust evaluation is per-mailbox. Each mailbox in `config.toml` may define:
+- `trust = "none"` (default) — all mail is accepted, triggers fire freely.
+- `trust = "verified"` — triggers only fire when `trusted == "true"`.
+- `trusted_senders = ["*@company.com"]` — glob patterns for allowlisted
+  senders.
+
+Mail is always stored regardless of trust outcome. Trust only gates channel
+triggers (shell commands fired on inbound mail). When deciding whether to
+act on an email's content (e.g. following a link), consult `trusted`, `dkim`,
+and `spf`. Treat `"false"` and `"none"` as untrusted.
 
 ## Read / unread
 
 - `email_list` with `unread: true` returns only unread messages — use this
-  to find new mail to process.
-- After processing, call `email_mark_read` to avoid reprocessing on the next
-  poll. `email_mark_unread` reverses the state.
-- Read state lives in the `read` frontmatter field. It is not tracked in a
-  separate database or index.
+  to find new mail.
+- After processing, call `email_mark_read` to avoid reprocessing.
+  `email_mark_unread` reverses the state.
+- Read state lives in the `read` frontmatter field. No separate database or
+  index file — the state is embedded in each `.md` file's TOML frontmatter,
+  so it is always consistent and grepable.
 
-## Trust model
+## Mailboxes
 
-AIMX verifies the DKIM signature and SPF record of every inbound email
-during ingest. The results are written to the `dkim` and `spf` frontmatter
-fields (`pass`, `fail`, or `none`).
+- Mailbox names are local parts of email addresses (letters, digits, limited
+  punctuation). For example, mailbox `agent` receives mail at
+  `agent@<domain>`.
+- The `catchall` mailbox is created automatically during setup and receives
+  mail for unrecognised addresses. It is a routing target, not a sending
+  identity — do not send from `catchall`.
+- Create additional mailboxes with `mailbox_create` before sending from them.
+- Each mailbox has `inbox/<name>/` for inbound and `sent/<name>/` for
+  outbound copies.
+- `mailbox_list()` shows all mailboxes with message counts for both inbox
+  and sent folders.
+- `mailbox_delete(name)` removes both `inbox/<name>/` and `sent/<name>/`
+  permanently.
 
-- Mail is always stored, regardless of verification result. `dkim` and `spf`
-  do not gate reads.
-- Channel triggers (shell commands fired on incoming mail) may be gated on
-  `dkim: pass` via per-mailbox trust policies configured in `config.toml`.
-  That is an operator concern, not an agent concern.
-- When deciding whether to act on the contents of an email (e.g. following a
-  link or treating the sender as authenticated), consult the `dkim` and
-  `spf` fields. Treat `fail` and `none` as untrusted.
+## Attachments
+
+- Inbound attachments are extracted into the Zola-style bundle directory
+  alongside the `.md` file. The frontmatter `attachments` array lists each
+  attachment with `filename`, `content_type`, `size`, and `path` fields.
+- To send with attachments, pass absolute file paths to `email_send`:
+  ```
+  email_send(
+    from_mailbox: "agent",
+    to: "bob@example.com",
+    subject: "Report with data",
+    body: "Attached.",
+    attachments: ["/tmp/report.csv"]
+  )
+  ```
+- Attachment paths in frontmatter are relative to the bundle directory.
+
+## Sent mail
+
+- Every successfully sent email is persisted under `sent/<mailbox>/`.
+- Use `email_list(mailbox: "agent", folder: "sent")` to browse sent mail.
+- Sent copies include the full DKIM-signed message and an outbound block
+  in frontmatter with `delivery_status`, `delivered_at`, and
+  `delivery_details`.
+
+## What you must not do
+
+- **Do not write to the data directory.** All mutations go through MCP tools.
+  Creating, modifying, or deleting `.md` files directly will corrupt state.
+- **Do not reply to auto-submitted mail.** Check `auto_submitted` in
+  frontmatter first — replying to `auto-generated` or `auto-replied`
+  messages creates infinite loops.
+- **Do not treat `dkim: "fail"` or `trusted: "false"` mail as
+  authenticated.** These may be spoofed.
+- **Do not read or modify files under `/etc/aimx/`.** Configuration and
+  keys are root-owned and managed by `aimx setup`.
+- **Do not send from a mailbox that does not exist.** `email_send` will
+  fail. Create it first with `mailbox_create`.
+- **Do not assume `catchall` is a real identity.** It is a routing target
+  for unknown local parts, not an identity that sends.
+- **Do not ignore `thread_id` when working with conversations.** Grouping
+  by `thread_id` is the correct way to reconstruct email threads; do not
+  rely on subject-line matching.
+- **Do not send large volumes without operator awareness.** AIMX delivers
+  synchronously with no outbound queue. Each `email_send` call blocks until
+  the remote MX accepts or rejects the message.
+
+## Further reading
+
+- `references/mcp-tools.md` — complete MCP tool documentation with worked
+  examples for every tool.
+- `references/frontmatter.md` — full field-by-field frontmatter schema for
+  both inbound and outbound emails.
+- `references/workflows.md` — 10+ worked task recipes (triage, thread
+  summarization, attachment handling, filter by list-id, mark all read, etc.).
+- `references/troubleshooting.md` — UDS protocol error codes, common
+  misconfigurations, and recovery steps.
+- `/var/lib/aimx/README.md` — runtime guide to the data directory layout,
+  regenerated on each AIMX upgrade.
