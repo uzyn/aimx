@@ -300,7 +300,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
-## Sprint 42 — CLI UX: Config Error Messages + Setup Port-Check Race + Version Hash (Days 118–120.5) [IN PROGRESS]
+## Sprint 42 — CLI UX: Config Error Messages + Setup Port-Check Race + Version Hash (Days 118–120.5) [DONE]
 
 **Goal:** Fix P0 UX issues that block first-time setup and improve build traceability: (1) commands that require config give a cryptic "os error 2" instead of pointing the user to `aimx setup`, (2) `aimx setup` fails the inbound port 25 check because it races against `aimx serve` startup, and (3) `aimx --version` includes the git commit hash so pre-release builds are distinguishable.
 
@@ -396,7 +396,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
-| 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | In Progress |
+| 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Done |
 
 ## Deferred to v2
 
