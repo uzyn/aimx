@@ -56,18 +56,22 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 `main.rs` parses CLI via clap and dispatches to module-level `run()` functions. Each `src/*.rs` module owns one subcommand:
 
-- `setup.rs` — `aimx setup [domain]`: interactive setup wizard. Prompts for domain when omitted, generates TLS cert + DKIM keys, installs systemd/OpenRC service file for `aimx serve`, displays colorized [DNS]/[MCP]/[Deliverability] sections, DNS retry loop, re-entrant detection. Requires root.
-- `ingest.rs` — `aimx ingest`: reads raw `.eml` from stdin (called by `aimx serve` in-process, or via stdin for manual use), parses MIME, writes Markdown with TOML frontmatter (`+++` delimiters), extracts attachments, fires channel triggers.
-- `send.rs` — `aimx send`: thin UDS client. Composes an unsigned RFC 5322 message and submits it to `aimx serve` over `/run/aimx/send.sock` as one `AIMX/1 SEND` request frame. Signing (DKIM) and MX delivery live in `aimx serve`; this module no longer touches the DKIM key or the network. Refuses to run as root. Exit codes: `0` OK, `1` daemon ERR, `2` socket-missing / connect failure / root, `3` malformed response.
-- `send_protocol.rs` / `send_handler.rs` — `AIMX/1 SEND` wire codec and daemon-side signing + delivery handler (Sprint 34).
+- `setup.rs` — `aimx setup [domain]`: interactive setup wizard. Prompts for domain when omitted, generates TLS cert + DKIM keys, installs systemd/OpenRC service file for `aimx serve`, displays colorized [DNS]/[MCP]/[Deliverability] sections, DNS retry loop, re-entrant detection. Writes the datadir README on completion. Requires root.
+- `ingest.rs` — `aimx ingest`: reads raw `.eml` from stdin (called by `aimx serve` in-process, or via stdin for manual use), parses MIME via `mail-parser`, writes Markdown with TOML frontmatter (`+++` delimiters) using `InboundFrontmatter` (section-ordered: Identity → Parties → Content → Threading → Auth → Storage), routes to `inbox/<mailbox>/`, extracts attachments into Zola-style bundles, fires channel triggers.
+- `send.rs` — `aimx send`: thin UDS client. Composes an unsigned RFC 5322 message and submits it to `aimx serve` over `/run/aimx/send.sock` as one `AIMX/1 SEND` request frame. Signing (DKIM) and MX delivery live in `aimx serve`; this module never touches the DKIM key or the network. Refuses to run as root. Exit codes: `0` OK, `1` daemon ERR, `2` socket-missing / connect failure / root, `3` malformed response.
+- `send_protocol.rs` — `AIMX/1 SEND` wire protocol codec. Length-prefixed, binary-safe framing (`AIMX/1 SEND\n`, `From-Mailbox:` header, `Content-Length:` header, body). Parses requests and writes responses. Pure async I/O — no filesystem or network.
+- `send_handler.rs` — daemon-side handler for `AIMX/1 SEND` UDS requests. Domain validation, DKIM signing via shared `Arc<DkimKey>`, delivery via `MailTransport` trait, sent-items persistence to `sent/<mailbox>/` with `OutboundFrontmatter`.
 - `transport.rs` — daemon-side `MailTransport` trait, `LettreTransport` (real MX delivery), `FileDropTransport` (test-only, triggered by `AIMX_TEST_MAIL_DROP`).
 - `mx.rs` — MX resolution: resolves recipient domain to MX hostnames via `hickory-resolver`, falls back to A record per RFC 5321.
-- `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations.
-- `channel.rs` — channel manager: match filters + shell command triggers on ingest.
-- `serve.rs` — `aimx serve`: starts the embedded SMTP daemon. Loads config, initializes TLS, runs the SMTP listener via tokio. Options: `--bind`, `--tls-cert`, `--tls-key`. Handles SIGTERM/SIGINT for graceful shutdown.
+- `mcp.rs` — `aimx mcp`: MCP server over stdio using `rmcp` crate. 9 tools for mailbox/email operations. `folder` parameter on read/list tools selects `"inbox"` (default) or `"sent"`.
+- `channel.rs` — channel manager: match filters + shell command triggers on ingest. Fires on inbound only.
+- `serve.rs` — `aimx serve`: starts the embedded SMTP daemon. Loads config, refreshes the datadir README if outdated, initializes TLS, loads the DKIM key into `Arc`, runs the SMTP listener and UDS send listener via tokio. Binds `/run/aimx/send.sock` (mode `0o666`, world-writable). Options: `--bind`, `--tls-cert`, `--tls-key`. Handles SIGTERM/SIGINT for graceful shutdown.
+- `slug.rs` — slug algorithm and filename allocation (Sprint 36 / FR-13b). `slugify()` transforms subjects into filesystem-safe stems; `allocate_filename()` resolves collisions and decides flat vs. bundle layout.
+- `frontmatter.rs` — `InboundFrontmatter` and `OutboundFrontmatter` structs with section-ordered serialization. `compute_thread_id()` derives the 16-hex-char thread root hash. `format_outbound_frontmatter()` for sent copies.
+- `datadir_readme.rs` — baked-in `/var/lib/aimx/README.md` template with version-gated refresh. `write()` (unconditional, called by setup), `refresh_if_outdated()` (called by serve startup).
 - `smtp/` — embedded SMTP server module: `mod.rs` (listener accept loop), `session.rs` (per-connection SMTP state machine: EHLO, MAIL FROM, RCPT TO, DATA, STARTTLS, QUIT, RSET, NOOP), `tls.rs` (STARTTLS upgrade via tokio-rustls), `tests.rs` (unit tests).
 - `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
-- `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` which prints optional Gmail-whitelist instructions. Reverse DNS (PTR) is the operator's responsibility and is out of scope for aimx as of Sprint 33.1.
+- `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` which prints optional Gmail-whitelist instructions. Reverse DNS (PTR) is the operator's responsibility and is out of scope for aimx.
 
 ### Trait-based testing pattern
 
@@ -84,7 +88,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 
 ### Email frontmatter format
 
-TOML frontmatter between `+++` delimiters. Fields: `id`, `message_id`, `from`, `to`, `subject`, `date`, `in_reply_to`, `references`, `attachments`, `mailbox`, `read`, `dkim`, `spf`.
+TOML frontmatter between `+++` delimiters. Inbound fields follow section ordering: Identity (`id`, `message_id`, `thread_id`) → Parties (`from`, `to`, `cc`, `reply_to`, `delivered_to`) → Content (`subject`, `date`, `received_at`, `received_from_ip`, `size_bytes`, `attachments`) → Threading (`in_reply_to`, `references`, `list_id`, `auto_submitted`) → Auth (`dkim`, `spf`, `dmarc`, `trusted`) → Storage (`mailbox`, `read`, `labels`). Optional fields are omitted when empty rather than written as `null`. Auth and storage fields are always written. Outbound (sent) copies add an Outbound block: `outbound`, `delivery_status`, `bcc`, `delivered_at`, `delivery_details`.
 
 ### MCP server
 
@@ -98,13 +102,16 @@ Axum HTTP server with `/probe` (EHLO handshake) and `/health` endpoints. Runs a 
 
 - Error handling: `Result<(), Box<dyn std::error::Error>>` for all public `run()` functions. Propagate with `?`.
 - `aimx serve` is the SMTP daemon (long-running process managed by systemd/OpenRC). All other commands are short-lived.
-- `aimx setup` requires root.
+- `aimx setup` requires root. `aimx send` refuses root (it is a thin UDS client that does not need privilege).
 - Integration tests (`tests/integration.rs`) use `assert_cmd` to test the binary as a subprocess with `--data-dir` pointing at temp directories.
 - Test fixtures in `tests/fixtures/` (`.eml` files for ingest testing).
+- Agent-facing plugins live under `agents/<agent>/` and are embedded at compile time. The canonical primer is `agents/common/aimx-primer.md` with reference docs in `agents/common/references/`. The datadir README template is `src/datadir_readme.md.tpl`.
 
 ## Documentation
 
-User-facing guide lives in `book/` (index, getting-started, setup, configuration, mailboxes, channels, mcp, troubleshooting). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
+User-facing guide lives in `book/` (index, getting-started, setup, configuration, mailboxes, channels, channel-recipes, mcp, agent-integration, troubleshooting). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
 
 - `docs/prd.md` — product requirements document
 - `docs/sprint.md` — sprint plan (do not modify `[DONE]` or `[IN PROGRESS]` sprints)
+- `agents/common/aimx-primer.md` — canonical agent-facing primer (bundled into all agent plugins)
+- `agents/common/references/` — detailed reference docs (frontmatter schema, MCP tools, workflows, troubleshooting)

@@ -1327,6 +1327,9 @@ pub fn run_setup(
     // Section [Deliverability Improvement (Optional)]
     display_deliverability_section(&domain);
 
+    // Write (or refresh) the agent-facing README inside the data directory.
+    crate::datadir_readme::write(data_dir)?;
+
     Ok(())
 }
 

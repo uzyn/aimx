@@ -12,6 +12,9 @@ installed by `aimx agent-setup openclaw`.
   primer (`agents/common/aimx-primer.md`); the installer assembles the
   final `SKILL.md` from a YAML header plus that primer so there is one
   source of truth.
+- `skills/aimx/references/` — detailed reference docs (MCP tool signatures,
+  frontmatter schema, workflows, troubleshooting) copied from
+  `agents/common/references/`.
 
 OpenClaw's MCP configuration lives in `~/.openclaw/openclaw.json` (a
 JSON5 file) under the `mcpServers` key. The installer does **not**

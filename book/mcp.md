@@ -182,6 +182,13 @@ Every email stored by AIMX carries a TOML frontmatter block between `+++` delimi
 
 Outbound (sent) emails additionally carry `outbound = true`, `delivery_status`, and optionally `delivered_at` and `delivery_details`.
 
+## Agent-facing documentation
+
+Two reference documents help agents understand AIMX:
+
+- **`agents/common/aimx-primer.md`** — the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, and common workflows.
+- **`/var/lib/aimx/README.md`** — the runtime datadir guide, regenerated on each AIMX upgrade. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
+
 ## Compatible agent frameworks
 
 | Framework | Integration method |

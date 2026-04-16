@@ -1,5 +1,7 @@
 # Channel Recipes
 
+> **Note on log paths.** The `/var/log/aimx/<agent>.log` paths in the recipes below are user-chosen destinations for trigger script output — they are NOT AIMX's own logs. AIMX itself logs to journald (systemd) or the system logger (OpenRC); see [Troubleshooting — Where are the logs?](troubleshooting.md#where-are-the-logs) for details.
+
 This chapter is the canonical cookbook for wiring AIMX's channel triggers to every supported AI agent. Each section shows a copy-paste `config.toml` snippet, the agent-specific CLI flags that matter for non-interactive invocation, and notes on exit codes, logs, and gotchas.
 
 For the underlying mechanics (match filters, template variables, trust policies), see [Channel Rules & Trust](channels.md). For installing the AIMX plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).

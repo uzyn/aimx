@@ -1,6 +1,6 @@
 # Channel Rules & Trust
 
-Channel rules trigger shell commands when emails arrive at specific mailboxes. Combined with trust policies, they let you build secure, automated workflows around incoming email.
+Channel rules trigger shell commands when inbound emails arrive at specific mailboxes. They fire on ingest only — outbound (sent) mail does not trigger channel rules. Combined with trust policies, they let you build secure, automated workflows around incoming email.
 
 > For copy-paste agent-specific invocations (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Aider), see [Channel Recipes](channel-recipes.md).
 
