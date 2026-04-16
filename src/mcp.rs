@@ -38,6 +38,8 @@ pub struct MailboxDeleteParams {
 pub struct EmailListParams {
     #[schemars(description = "Mailbox name to list emails from")]
     pub mailbox: String,
+    #[schemars(description = "Which folder to read: \"inbox\" (default) or \"sent\"")]
+    pub folder: Option<String>,
     #[schemars(description = "Filter to only unread emails")]
     pub unread: Option<bool>,
     #[schemars(description = "Filter by sender address (substring match)")]
@@ -52,16 +54,20 @@ pub struct EmailListParams {
 pub struct EmailReadParams {
     #[schemars(description = "Mailbox name")]
     pub mailbox: String,
-    #[schemars(description = "Email ID (e.g. 2025-01-01-001)")]
+    #[schemars(description = "Email ID (e.g. 2025-06-15-120000-hello)")]
     pub id: String,
+    #[schemars(description = "Which folder to read: \"inbox\" (default) or \"sent\"")]
+    pub folder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct EmailMarkParams {
     #[schemars(description = "Mailbox name")]
     pub mailbox: String,
-    #[schemars(description = "Email ID (e.g. 2025-01-01-001)")]
+    #[schemars(description = "Email ID (e.g. 2025-06-15-120000-hello)")]
     pub id: String,
+    #[schemars(description = "Which folder to target: \"inbox\" (default) or \"sent\"")]
+    pub folder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -128,7 +134,10 @@ impl AimxMcpServer {
 
         let result: Vec<String> = mailboxes
             .iter()
-            .map(|(name, total, unread)| format!("{name}: {total} messages ({unread} unread)"))
+            .map(|(name, total, unread, registered)| {
+                let suffix = if *registered { "" } else { " (unregistered)" };
+                format!("{name}: {total} messages ({unread} unread){suffix}")
+            })
             .collect();
         Ok(result.join("\n"))
     }
@@ -160,7 +169,8 @@ impl AimxMcpServer {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
 
-        let mailbox_dir = config.mailbox_dir(&params.mailbox);
+        let folder = resolve_folder(params.folder.as_deref())?;
+        let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
         let emails = list_emails(&mailbox_dir).map_err(|e| e.to_string())?;
 
         let filtered = filter_emails(
@@ -200,15 +210,14 @@ impl AimxMcpServer {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
 
-        let mailbox_dir = config.mailbox_dir(&params.mailbox);
-        let filepath = mailbox_dir.join(format!("{}.md", params.id));
-
-        if !filepath.exists() {
-            return Err(format!(
+        let folder = resolve_folder(params.folder.as_deref())?;
+        let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
+        let filepath = resolve_email_path(&mailbox_dir, &params.id).ok_or_else(|| {
+            format!(
                 "Email '{}' not found in mailbox '{}'.",
                 params.id, params.mailbox
-            ));
-        }
+            )
+        })?;
 
         std::fs::read_to_string(&filepath).map_err(|e| format!("Failed to read email: {e}"))
     }
@@ -220,7 +229,8 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
         let config = self.load_config()?;
-        set_read_status(&config, &params.mailbox, &params.id, true)?;
+        let folder = resolve_folder(params.folder.as_deref())?;
+        set_read_status(&config, &params.mailbox, folder, &params.id, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
 
@@ -231,7 +241,8 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
         let config = self.load_config()?;
-        set_read_status(&config, &params.mailbox, &params.id, false)?;
+        let folder = resolve_folder(params.folder.as_deref())?;
+        set_read_status(&config, &params.mailbox, folder, &params.id, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
     }
 
@@ -285,15 +296,13 @@ impl AimxMcpServer {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
 
-        let mailbox_dir = config.mailbox_dir(&params.mailbox);
-        let filepath = mailbox_dir.join(format!("{}.md", params.id));
-
-        if !filepath.exists() {
-            return Err(format!(
+        let mailbox_dir = config.inbox_dir(&params.mailbox);
+        let filepath = resolve_email_path(&mailbox_dir, &params.id).ok_or_else(|| {
+            format!(
                 "Email '{}' not found in mailbox '{}'.",
                 params.id, params.mailbox
-            ));
-        }
+            )
+        })?;
 
         let content =
             std::fs::read_to_string(&filepath).map_err(|e| format!("Failed to read email: {e}"))?;
@@ -415,22 +424,28 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize)> {
-    let mut result: Vec<(String, usize, usize)> = config
-        .mailboxes
-        .keys()
+/// Return `(name, total, unread, registered)` for every mailbox the
+/// daemon knows about — both registered ones in `config.mailboxes` and
+/// stray `inbox/<name>/` directories left by backup restores or
+/// out-of-band tooling. Sorted by name.
+fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, bool)> {
+    let mut result: Vec<(String, usize, usize, bool)> = mailbox::discover_mailbox_names(config)
+        .into_iter()
         .map(|name| {
-            let dir = config.mailbox_dir(name);
+            let dir = config.inbox_dir(&name);
             let emails = list_emails(&dir).unwrap_or_default();
             let total = emails.len();
             let unread = emails.iter().filter(|e| !e.read).count();
-            (name.clone(), total, unread)
+            let registered = mailbox::is_registered(config, &name);
+            (name, total, unread, registered)
         })
         .collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
 }
 
+/// List the emails in a single folder. Handles both flat `<stem>.md`
+/// entries and Zola-style bundle directories containing `<stem>.md`.
 pub fn list_emails(
     mailbox_dir: &std::path::Path,
 ) -> Result<Vec<EmailMetadata>, Box<dyn std::error::Error>> {
@@ -443,7 +458,18 @@ pub fn list_emails(
 
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "md") {
+        if path.is_dir() {
+            // Bundle: read the `<stem>/<stem>.md` inside.
+            if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
+                let md = path.join(format!("{stem}.md"));
+                if md.exists() {
+                    let content = std::fs::read_to_string(&md)?;
+                    if let Some(meta) = parse_frontmatter(&content) {
+                        emails.push(meta);
+                    }
+                }
+            }
+        } else if path.extension().is_some_and(|ext| ext == "md") {
             let content = std::fs::read_to_string(&path)?;
             if let Some(meta) = parse_frontmatter(&content) {
                 emails.push(meta);
@@ -453,6 +479,46 @@ pub fn list_emails(
 
     emails.sort_by(|a, b| a.date.cmp(&b.date));
     Ok(emails)
+}
+
+/// Resolve the on-disk path for an email by ID. Returns `Some(path)` when
+/// the email exists either as a flat `<id>.md` or as a bundle
+/// `<id>/<id>.md` inside `mailbox_dir`.
+pub fn resolve_email_path(mailbox_dir: &std::path::Path, id: &str) -> Option<PathBuf> {
+    let flat = mailbox_dir.join(format!("{id}.md"));
+    if flat.exists() {
+        return Some(flat);
+    }
+    let bundle_md = mailbox_dir.join(id).join(format!("{id}.md"));
+    if bundle_md.exists() {
+        return Some(bundle_md);
+    }
+    None
+}
+
+/// Inbound/outbound folder selector for MCP tools.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Folder {
+    Inbox,
+    Sent,
+}
+
+/// Parse an MCP `folder` argument. Default is `inbox`.
+pub fn resolve_folder(raw: Option<&str>) -> Result<Folder, String> {
+    match raw {
+        None | Some("inbox") => Ok(Folder::Inbox),
+        Some("sent") => Ok(Folder::Sent),
+        Some(other) => Err(format!(
+            "Invalid folder '{other}': expected \"inbox\" or \"sent\"."
+        )),
+    }
+}
+
+fn folder_dir(config: &Config, mailbox: &str, folder: Folder) -> PathBuf {
+    match folder {
+        Folder::Inbox => config.inbox_dir(mailbox),
+        Folder::Sent => config.sent_dir(mailbox),
+    }
 }
 
 pub fn parse_frontmatter(content: &str) -> Option<EmailMetadata> {
@@ -516,19 +582,22 @@ pub fn filter_emails(
     Ok(result)
 }
 
-pub fn set_read_status(config: &Config, mailbox: &str, id: &str, read: bool) -> Result<(), String> {
+pub fn set_read_status(
+    config: &Config,
+    mailbox: &str,
+    folder: Folder,
+    id: &str,
+    read: bool,
+) -> Result<(), String> {
     validate_email_id(id)?;
 
     if !config.mailboxes.contains_key(mailbox) {
         return Err(format!("Mailbox '{mailbox}' does not exist."));
     }
 
-    let mailbox_dir = config.mailbox_dir(mailbox);
-    let filepath = mailbox_dir.join(format!("{id}.md"));
-
-    if !filepath.exists() {
-        return Err(format!("Email '{id}' not found in mailbox '{mailbox}'."));
-    }
+    let mailbox_dir = folder_dir(config, mailbox, folder);
+    let filepath = resolve_email_path(&mailbox_dir, id)
+        .ok_or_else(|| format!("Email '{id}' not found in mailbox '{mailbox}'."))?;
 
     let content =
         std::fs::read_to_string(&filepath).map_err(|e| format!("Failed to read email: {e}"))?;
@@ -795,6 +864,10 @@ mod tests {
         assert_eq!(filtered.len(), 2);
     }
 
+    fn inbox_of(tmp: &std::path::Path, name: &str) -> std::path::PathBuf {
+        tmp.join("inbox").join(name)
+    }
+
     #[test]
     fn set_read_status_marks_read() {
         let tmp = TempDir::new().unwrap();
@@ -802,11 +875,13 @@ mod tests {
         let _cfg_guard = setup_config(&config);
 
         let meta = sample_meta("2025-06-01-001", "sender@test.com", "Test", false);
-        create_test_email(&tmp.path().join("alice"), "2025-06-01-001", &meta);
+        create_test_email(&inbox_of(tmp.path(), "alice"), "2025-06-01-001", &meta);
 
-        set_read_status(&config, "alice", "2025-06-01-001", true).unwrap();
+        set_read_status(&config, "alice", Folder::Inbox, "2025-06-01-001", true).unwrap();
 
-        let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+        let content =
+            std::fs::read_to_string(inbox_of(tmp.path(), "alice").join("2025-06-01-001.md"))
+                .unwrap();
         let parsed = parse_frontmatter(&content).unwrap();
         assert!(parsed.read);
     }
@@ -818,11 +893,13 @@ mod tests {
         let _cfg_guard = setup_config(&config);
 
         let meta = sample_meta("2025-06-01-001", "sender@test.com", "Test", true);
-        create_test_email(&tmp.path().join("alice"), "2025-06-01-001", &meta);
+        create_test_email(&inbox_of(tmp.path(), "alice"), "2025-06-01-001", &meta);
 
-        set_read_status(&config, "alice", "2025-06-01-001", false).unwrap();
+        set_read_status(&config, "alice", Folder::Inbox, "2025-06-01-001", false).unwrap();
 
-        let content = std::fs::read_to_string(tmp.path().join("alice/2025-06-01-001.md")).unwrap();
+        let content =
+            std::fs::read_to_string(inbox_of(tmp.path(), "alice").join("2025-06-01-001.md"))
+                .unwrap();
         let parsed = parse_frontmatter(&content).unwrap();
         assert!(!parsed.read);
     }
@@ -833,7 +910,13 @@ mod tests {
         let config = test_config(tmp.path());
         let _cfg_guard = setup_config(&config);
 
-        let result = set_read_status(&config, "nonexistent", "2025-06-01-001", true);
+        let result = set_read_status(
+            &config,
+            "nonexistent",
+            Folder::Inbox,
+            "2025-06-01-001",
+            true,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("does not exist"));
     }
@@ -844,10 +927,71 @@ mod tests {
         let config = test_config(tmp.path());
         let _cfg_guard = setup_config(&config);
 
-        std::fs::create_dir_all(tmp.path().join("alice")).unwrap();
-        let result = set_read_status(&config, "alice", "nonexistent", true);
+        std::fs::create_dir_all(inbox_of(tmp.path(), "alice")).unwrap();
+        let result = set_read_status(&config, "alice", Folder::Inbox, "nonexistent", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not found"));
+    }
+
+    #[test]
+    fn set_read_status_reads_sent_folder_when_requested() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _cfg_guard = setup_config(&config);
+
+        let meta = sample_meta("2025-06-02-001", "sender@test.com", "Outbound", false);
+        let sent = tmp.path().join("sent").join("alice");
+        create_test_email(&sent, "2025-06-02-001", &meta);
+
+        set_read_status(&config, "alice", Folder::Sent, "2025-06-02-001", true).unwrap();
+
+        let content = std::fs::read_to_string(sent.join("2025-06-02-001.md")).unwrap();
+        let parsed = parse_frontmatter(&content).unwrap();
+        assert!(parsed.read);
+    }
+
+    #[test]
+    fn resolve_folder_default_is_inbox() {
+        assert_eq!(resolve_folder(None).unwrap(), Folder::Inbox);
+        assert_eq!(resolve_folder(Some("inbox")).unwrap(), Folder::Inbox);
+    }
+
+    #[test]
+    fn resolve_folder_sent() {
+        assert_eq!(resolve_folder(Some("sent")).unwrap(), Folder::Sent);
+    }
+
+    #[test]
+    fn resolve_folder_rejects_unknown() {
+        let err = resolve_folder(Some("drafts")).unwrap_err();
+        assert!(err.contains("Invalid folder"));
+        assert!(err.contains("drafts"));
+    }
+
+    #[test]
+    fn list_emails_reads_bundle_markdown() {
+        // Bundle `<stem>/<stem>.md` is indexed alongside flat `.md` files.
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("alice");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta_flat = sample_meta("2025-06-01-001-flat", "a@test.com", "Flat", false);
+        create_test_email(&dir, "2025-06-01-001-flat", &meta_flat);
+
+        let bundle_stem = "2025-06-01-002-bundle";
+        let bundle = dir.join(bundle_stem);
+        std::fs::create_dir_all(&bundle).unwrap();
+        let meta_bundle = sample_meta(bundle_stem, "b@test.com", "Bundled", true);
+        let toml_str = toml::to_string_pretty(&meta_bundle).unwrap();
+        let content = format!("+++\n{toml_str}+++\n\nBundle body.\n");
+        std::fs::write(bundle.join(format!("{bundle_stem}.md")), content).unwrap();
+        std::fs::write(bundle.join("att.txt"), "attached").unwrap();
+
+        let emails = list_emails(&dir).unwrap();
+        assert_eq!(emails.len(), 2);
+        let ids: Vec<&str> = emails.iter().map(|e| e.id.as_str()).collect();
+        assert!(ids.contains(&"2025-06-01-001-flat"));
+        assert!(ids.contains(&bundle_stem));
     }
 
     #[test]
@@ -871,13 +1015,41 @@ mod tests {
 
         let meta1 = sample_meta("2025-06-01-001", "a@test.com", "A", false);
         let meta2 = sample_meta("2025-06-01-002", "b@test.com", "B", true);
-        create_test_email(&tmp.path().join("alice"), "2025-06-01-001", &meta1);
-        create_test_email(&tmp.path().join("alice"), "2025-06-01-002", &meta2);
+        create_test_email(&inbox_of(tmp.path(), "alice"), "2025-06-01-001", &meta1);
+        create_test_email(&inbox_of(tmp.path(), "alice"), "2025-06-01-002", &meta2);
 
         let result = list_mailboxes_with_unread(&config);
         let alice = result.iter().find(|m| m.0 == "alice").unwrap();
         assert_eq!(alice.1, 2); // total
         assert_eq!(alice.2, 1); // unread
+        assert!(alice.3, "alice is registered in config");
+    }
+
+    #[test]
+    fn list_mailboxes_with_unread_surfaces_unregistered_dir() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _cfg_guard = setup_config(&config);
+
+        // Stray inbox dir created out-of-band (e.g. backup restore) with
+        // no entry in `config.mailboxes`.
+        let stray = inbox_of(tmp.path(), "stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        let meta = sample_meta("2025-06-01-100", "x@test.com", "X", true);
+        create_test_email(&stray, "2025-06-01-100", &meta);
+
+        let result = list_mailboxes_with_unread(&config);
+        let stray_row = result
+            .iter()
+            .find(|m| m.0 == "stray")
+            .expect("stray dir must surface in mailbox_list");
+        assert_eq!(stray_row.1, 1); // total
+        assert_eq!(stray_row.2, 0); // unread (meta.read=true)
+        assert!(!stray_row.3, "stray is not registered in config");
+
+        // catchall and alice still surface as registered.
+        assert!(result.iter().any(|m| m.0 == "catchall" && m.3));
+        assert!(result.iter().any(|m| m.0 == "alice" && m.3));
     }
 
     #[test]
@@ -941,8 +1113,8 @@ mod tests {
         let config = test_config(tmp.path());
         let _cfg_guard = setup_config(&config);
 
-        std::fs::create_dir_all(tmp.path().join("alice")).unwrap();
-        let result = set_read_status(&config, "alice", "../../etc/passwd", true);
+        std::fs::create_dir_all(inbox_of(tmp.path(), "alice")).unwrap();
+        let result = set_read_status(&config, "alice", Folder::Inbox, "../../etc/passwd", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));
     }

@@ -7,6 +7,53 @@ use tokio::net::TcpStream;
 use crate::config::{Config, MailboxConfig};
 use crate::smtp::SmtpServer;
 
+/// Return the on-disk inbox directory for a mailbox under `data_dir`.
+fn inbox(data_dir: &std::path::Path, name: &str) -> PathBuf {
+    data_dir.join("inbox").join(name)
+}
+
+/// Collect every `.md` file under a mailbox directory, descending into
+/// bundle subdirectories (`<stem>/<stem>.md`) as well as flat files.
+fn collect_md_files(mailbox_dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let entries = match std::fs::read_dir(mailbox_dir) {
+        Ok(e) => e,
+        Err(_) => return out,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
+                let md = path.join(format!("{stem}.md"));
+                if md.exists() {
+                    out.push(md);
+                }
+            }
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            out.push(path);
+        }
+    }
+    out.sort();
+    out
+}
+
+/// Return the first attachment file matching `name` anywhere inside
+/// `mailbox_dir` (including bundle subdirectories). Used by tests that
+/// know the attachment filename but don't know the bundle stem.
+fn find_attachment(mailbox_dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let entries = std::fs::read_dir(mailbox_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let candidate = path.join(name);
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 fn test_config(data_dir: &std::path::Path) -> Config {
     let mut mailboxes = HashMap::new();
     mailboxes.insert(
@@ -185,13 +232,9 @@ async fn test_full_mail_transaction() {
     let resp = client.send_and_read("QUIT").await;
     assert!(resp.starts_with("221"));
 
-    let alice_dir = tmp.path().join("alice");
+    let alice_dir = inbox(tmp.path(), "alice");
     assert!(alice_dir.exists());
-    let entries: Vec<_> = std::fs::read_dir(&alice_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
+    let entries = collect_md_files(&alice_dir);
     assert_eq!(entries.len(), 1);
 }
 
@@ -217,16 +260,8 @@ async fn test_multi_recipient() {
 
     client.send_and_read("QUIT").await;
 
-    let alice_mds: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
-    let catchall_mds: Vec<_> = std::fs::read_dir(tmp.path().join("catchall"))
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
+    let alice_mds = collect_md_files(&inbox(tmp.path(), "alice"));
+    let catchall_mds = collect_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(alice_mds.len(), 1);
     assert_eq!(catchall_mds.len(), 1);
 }
@@ -615,15 +650,11 @@ async fn test_ingest_creates_markdown_file() {
 
     client.send_and_read("QUIT").await;
 
-    let alice_dir = tmp.path().join("alice");
-    let md_files: Vec<_> = std::fs::read_dir(&alice_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
+    let alice_dir = inbox(tmp.path(), "alice");
+    let md_files = collect_md_files(&alice_dir);
     assert_eq!(md_files.len(), 1);
 
-    let content = std::fs::read_to_string(md_files[0].path()).unwrap();
+    let content = std::fs::read_to_string(&md_files[0]).unwrap();
     assert!(content.contains("+++"));
     assert!(content.contains("subject = \"Test\""));
     assert!(content.contains("Hello World"));
@@ -818,12 +849,8 @@ async fn test_multiple_transactions_per_connection() {
 
     client.send_and_read("QUIT").await;
 
-    let alice_dir = tmp.path().join("alice");
-    let md_files: Vec<_> = std::fs::read_dir(&alice_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
+    let alice_dir = inbox(tmp.path(), "alice");
+    let md_files = collect_md_files(&alice_dir);
     assert_eq!(md_files.len(), 2);
 }
 
@@ -875,7 +902,8 @@ async fn test_text_attachment_from_real_file() {
     assert!(resp.starts_with("250"), "Expected 250: {resp}");
     client.send_and_read("QUIT").await;
 
-    let attachment_path = tmp.path().join("alice/attachments/README.md");
+    let attachment_path =
+        find_attachment(&inbox(tmp.path(), "alice"), "README.md").expect("attachment missing");
     assert!(attachment_path.exists(), "Attachment file should exist");
     let received = std::fs::read(&attachment_path).unwrap();
     assert_eq!(
@@ -943,7 +971,8 @@ async fn test_binary_attachment_roundtrip() {
     assert!(resp.starts_with("250"), "Expected 250: {resp}");
     client.send_and_read("QUIT").await;
 
-    let attachment_path = tmp.path().join("alice/attachments/random.bin");
+    let attachment_path =
+        find_attachment(&inbox(tmp.path(), "alice"), "random.bin").expect("bin attachment");
     assert!(
         attachment_path.exists(),
         "Binary attachment file should exist"
@@ -1032,8 +1061,10 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
     assert!(resp.starts_with("250"), "Expected 250: {resp}");
     client.send_and_read("QUIT").await;
 
-    // Verify text attachment
-    let text_att_path = tmp.path().join("alice/attachments/README.md");
+    // Verify text attachment — both should be inside the same bundle dir.
+    let alice_dir = inbox(tmp.path(), "alice");
+    let text_att_path =
+        find_attachment(&alice_dir, "README.md").expect("README attachment missing");
     assert!(text_att_path.exists(), "Text attachment should exist");
     let received_text = std::fs::read(&text_att_path).unwrap();
     assert_eq!(
@@ -1042,7 +1073,7 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
     );
 
     // Verify binary attachment
-    let bin_att_path = tmp.path().join("alice/attachments/data.bin");
+    let bin_att_path = find_attachment(&alice_dir, "data.bin").expect("bin attachment missing");
     assert!(bin_att_path.exists(), "Binary attachment should exist");
     let received_bin = std::fs::read(&bin_att_path).unwrap();
     assert_eq!(
@@ -1051,15 +1082,10 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
     );
 
     // Verify the email body is intact
-    let alice_dir = tmp.path().join("alice");
-    let md_files: Vec<_> = std::fs::read_dir(&alice_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-        .collect();
+    let md_files = collect_md_files(&alice_dir);
     assert_eq!(md_files.len(), 1, "Should have exactly one email file");
 
-    let content = std::fs::read_to_string(md_files[0].path()).unwrap();
+    let content = std::fs::read_to_string(&md_files[0]).unwrap();
     assert!(
         content.contains("subject = \"Mixed attachments test\""),
         "Frontmatter should contain the subject"
