@@ -7,6 +7,26 @@ use std::path::Path;
 
 const DKIM_KEY_BITS: usize = 2048;
 
+/// Wrap an `io::Error` from the DKIM write path with a message naming the
+/// target directory and suggesting `sudo` or the `AIMX_CONFIG_DIR` override.
+///
+/// A hard root check is deliberately avoided: `AIMX_CONFIG_DIR` is the
+/// supported non-root path (used by tests and dev loops) and pointing that
+/// at a user-writable tempdir must continue to work without `sudo`.
+fn wrap_dkim_write_error(dkim_root: &Path, err: std::io::Error) -> Box<dyn std::error::Error> {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        format!(
+            "Permission denied writing to {}. \
+             Run `sudo aimx dkim-keygen`, or set `AIMX_CONFIG_DIR=<writable-path>` \
+             and rerun `aimx dkim-keygen` for development.",
+            dkim_root.display()
+        )
+        .into()
+    } else {
+        err.into()
+    }
+}
+
 /// Resolve `<dkim_root>/{private,public}.key`.
 ///
 /// `dkim_root` is treated as the directory containing the DKIM keys
@@ -33,7 +53,7 @@ pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std
         return Err("DKIM keys already exist. Use --force to overwrite.".into());
     }
 
-    std::fs::create_dir_all(dkim_root)?;
+    std::fs::create_dir_all(dkim_root).map_err(|e| wrap_dkim_write_error(dkim_root, e))?;
 
     // Force-overwrite path: remove pre-existing files so `create_new(true)`
     // succeeds with the tightened mode. (Otherwise `OpenOptions` would
@@ -41,7 +61,7 @@ pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std
     if force {
         for p in [&private_path, &public_path] {
             if p.exists() {
-                std::fs::remove_file(p)?;
+                std::fs::remove_file(p).map_err(|e| wrap_dkim_write_error(dkim_root, e))?;
             }
         }
     }
@@ -50,13 +70,37 @@ pub fn generate_keypair(dkim_root: &Path, force: bool) -> Result<(), Box<dyn std
     let private_key = RsaPrivateKey::new(&mut rng, DKIM_KEY_BITS)?;
 
     let private_pem = private_key.to_pkcs1_pem(LineEnding::LF)?;
-    write_file_with_mode(&private_path, private_pem.as_bytes(), 0o600)?;
+    write_file_with_mode(&private_path, private_pem.as_bytes(), 0o600)
+        .map_err(|e| wrap_dkim_write_error_from_boxed(dkim_root, e))?;
 
     let public_key = RsaPublicKey::from(&private_key);
     let public_pem = public_key.to_public_key_pem(LineEnding::LF)?;
-    write_file_with_mode(&public_path, public_pem.as_bytes(), 0o644)?;
+    write_file_with_mode(&public_path, public_pem.as_bytes(), 0o644)
+        .map_err(|e| wrap_dkim_write_error_from_boxed(dkim_root, e))?;
 
     Ok(())
+}
+
+/// Like [`wrap_dkim_write_error`] but accepts a boxed error coming out of
+/// [`write_file_with_mode`]. If the underlying cause is an
+/// `io::ErrorKind::PermissionDenied`, rewrap with the friendly message;
+/// otherwise pass through unchanged.
+fn wrap_dkim_write_error_from_boxed(
+    dkim_root: &Path,
+    err: Box<dyn std::error::Error>,
+) -> Box<dyn std::error::Error> {
+    if let Some(io_err) = err.downcast_ref::<std::io::Error>()
+        && io_err.kind() == std::io::ErrorKind::PermissionDenied
+    {
+        return format!(
+            "Permission denied writing to {}. \
+             Run `sudo aimx dkim-keygen`, or set `AIMX_CONFIG_DIR=<writable-path>` \
+             and rerun `aimx dkim-keygen` for development.",
+            dkim_root.display()
+        )
+        .into();
+    }
+    err
 }
 
 /// Create `path` with `bytes` as contents and the given Unix mode applied
@@ -262,6 +306,68 @@ mod tests {
         let new = std::fs::read_to_string(tmp.path().join("private.key")).unwrap();
 
         assert_ne!(original, new);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generate_keypair_permission_denied_suggests_sudo_or_aimx_config_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip when running as root — `chmod 0o500` is bypassed by CAP_DAC_OVERRIDE
+        // / euid 0, so we can't force PermissionDenied.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("skipping: test must run as non-root");
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let parent = tmp.path().join("ro-config");
+        std::fs::create_dir_all(&parent).unwrap();
+
+        // Strip write permission on the parent. `create_dir_all(dkim_root)`
+        // inside `generate_keypair` will then fail with PermissionDenied.
+        let dkim_root = parent.join("dkim");
+        std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+        let result = generate_keypair(&dkim_root, false);
+
+        // Always restore so TempDir cleanup can succeed.
+        let _ = std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o755));
+
+        let err = result.expect_err("generate_keypair must fail on a read-only parent");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Permission denied"),
+            "error must mention permission denial: {msg}"
+        );
+        assert!(
+            msg.contains(&dkim_root.display().to_string()),
+            "error must name the target directory: {msg}"
+        );
+        assert!(
+            msg.contains("sudo") || msg.contains("AIMX_CONFIG_DIR"),
+            "error must suggest sudo or AIMX_CONFIG_DIR: {msg}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generate_keypair_non_permission_io_error_passes_through() {
+        // A non-permission IO error (here: `dkim_root` is an existing *file*,
+        // not a directory — `create_dir_all` returns NotADirectory /
+        // AlreadyExists, not PermissionDenied) must NOT be rewrapped with
+        // the sudo guidance.
+        let tmp = TempDir::new().unwrap();
+        let bogus = tmp.path().join("not-a-dir");
+        std::fs::write(&bogus, b"").unwrap();
+
+        let result = generate_keypair(&bogus, false);
+        let err = result.expect_err("must fail");
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("sudo") && !msg.contains("AIMX_CONFIG_DIR"),
+            "non-PermissionDenied errors must surface their native message: {msg}"
+        );
     }
 
     #[test]

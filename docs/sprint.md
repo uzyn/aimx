@@ -346,7 +346,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
-## Sprint 43 — Pre-launch README Sweep + Hardening (Days 120.5–123) [NOT STARTED]
+## Sprint 43 — Pre-launch README Sweep + Hardening (Days 120.5–123) [IN PROGRESS]
 
 **Goal:** Bring `README.md` up to date with the v0.2 reshape (Sprints 33–40) before public release; fix correctness and UX gaps surfaced by external review: `aimx status` OpenRC support, HTML-body size cap, `Received:` IP parser, transport error classification, attachment-filename safety, and `dkim-keygen` permission errors.
 
@@ -495,7 +495,7 @@ Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-n
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
 | 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Done |
-| 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | Not Started |
+| 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | In Progress |
 
 ## Deferred to v2
 

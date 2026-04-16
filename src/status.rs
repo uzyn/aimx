@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::frontmatter::InboundFrontmatter;
+use crate::setup::{RealSystemOps, SystemOps};
 use crate::term;
 use std::path::{Path, PathBuf};
 
@@ -29,8 +30,14 @@ pub struct RecentEmail {
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
+    gather_status_with_ops(config, &RealSystemOps)
+}
+
+/// Injectable seam for testing: takes a `SystemOps` implementation so tests
+/// can mock `is_service_running` without shelling out to `systemctl`/`rc-service`.
+pub fn gather_status_with_ops<S: SystemOps>(config: &Config, sys: &S) -> StatusInfo {
     let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
-    let smtp_running = check_smtp_running();
+    let smtp_running = sys.is_service_running("aimx");
 
     let mut mailboxes: Vec<MailboxStatus> = config
         .mailboxes
@@ -120,13 +127,6 @@ fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
     all.sort_by(|a, b| b.date.cmp(&a.date));
     all.truncate(5);
     all
-}
-
-fn check_smtp_running() -> bool {
-    std::process::Command::new("systemctl")
-        .args(["is-active", "--quiet", "aimx"])
-        .status()
-        .is_ok_and(|s| s.success())
 }
 
 fn count_messages(dir: &Path) -> (usize, usize) {
@@ -272,6 +272,93 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::setup::Port25Status;
+
+    /// Minimal mock that only exercises `is_service_running`. All other
+    /// `SystemOps` methods panic — they must not be reached by `gather_status`.
+    struct FakeServiceOps {
+        running: bool,
+    }
+
+    impl SystemOps for FakeServiceOps {
+        fn write_file(
+            &self,
+            _path: &Path,
+            _content: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch write_file")
+        }
+        fn file_exists(&self, _path: &Path) -> bool {
+            unreachable!("gather_status must not touch file_exists")
+        }
+        fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch restart_service")
+        }
+        fn is_service_running(&self, service: &str) -> bool {
+            assert_eq!(service, "aimx", "status must query the aimx service");
+            self.running
+        }
+        fn generate_tls_cert(
+            &self,
+            _cert_dir: &Path,
+            _domain: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch generate_tls_cert")
+        }
+        fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch get_aimx_binary_path")
+        }
+        fn check_root(&self) -> bool {
+            unreachable!("gather_status must not touch check_root")
+        }
+        fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch check_port25_occupancy")
+        }
+        fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch install_service_file")
+        }
+        fn wait_for_service_ready(&self) -> bool {
+            unreachable!("gather_status must not touch wait_for_service_ready")
+        }
+    }
+
+    fn empty_config(data_dir: &Path) -> Config {
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes: std::collections::HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[test]
+    fn gather_status_reports_running_when_systemops_returns_true() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let config = empty_config(tmp.path());
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: true });
+        assert!(info.smtp_running);
+    }
+
+    #[test]
+    fn gather_status_reports_not_running_when_systemops_returns_false() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let config = empty_config(tmp.path());
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false });
+        assert!(!info.smtp_running);
+    }
+
+    // Manual verification note (S43-2): on OpenRC hosts (Alpine) the real
+    // `RealSystemOps::is_service_running` dispatches to `rc-service aimx status`
+    // via `crate::serve::service::is_service_running_command`. The previous
+    // hardcoded `systemctl is-active` call always returned false on OpenRC.
+    // With this refactor, `aimx status` now reports the correct state on
+    // both systemd and OpenRC hosts.
 
     #[test]
     fn format_status_no_mailboxes() {

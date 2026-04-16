@@ -426,6 +426,14 @@ fn extract_received_ip(raw: &[u8]) -> Option<IpAddr> {
     None
 }
 
+/// Parse a connecting-client IP from a `Received:` header.
+///
+/// Trusts **only** the bracketed-form address (`[1.2.3.4]` / `[2001:db8::1]`)
+/// — the RFC 5321 canonical marker for the client IP recorded by the receiving
+/// MTA. Any IP embedded in free-text comments, HELO strings, or
+/// `received from hostname` prose is ignored, because those fields are
+/// attacker-controlled: the sender can write anything into the HELO/EHLO
+/// command or a hostname that happens to contain a dotted-quad. See S43-4.
 fn parse_ip_from_received(line: &str) -> Option<IpAddr> {
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -436,15 +444,6 @@ fn parse_ip_from_received(line: &str) -> Option<IpAddr> {
             {
                 return Some(ip);
             }
-        }
-    }
-
-    for word in line.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != ':');
-        if let Ok(ip) = trimmed.parse::<IpAddr>()
-            && !ip.is_loopback()
-        {
-            return Some(ip);
         }
     }
 
@@ -474,16 +473,51 @@ fn extract_local_part(rcpt: &str) -> &str {
     rcpt.split('@').next().unwrap_or(rcpt)
 }
 
+/// Maximum bytes of HTML input passed to `html2text::from_read`.
+///
+/// SMTP `max_message_size` already caps raw DATA at 25 MB, but pathological
+/// HTML (deeply nested tables, runaway CSS) within that envelope can still
+/// burn significant CPU in the conversion layer. 2 MB is far above any
+/// realistic marketing HTML (< 500 KB typical) so legitimate messages are
+/// unaffected; anything larger is truncated and a visible marker is appended
+/// to the rendered body.
+pub(crate) const HTML_CONVERSION_CAP: usize = 2 * 1024 * 1024;
+const HTML_TRUNCATION_MARKER: &str = "\n\n[...HTML body truncated at 2 MB for rendering...]";
+
 fn extract_body(message: &mail_parser::Message) -> String {
     if let Some(text) = message.body_text(0) {
         return text.to_string();
     }
 
     if let Some(html) = message.body_html(0) {
-        return html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.to_string());
+        return render_html_body(html.as_bytes());
     }
 
     String::new()
+}
+
+/// Convert an HTML body to plain text via `html2text`, capping input size to
+/// [`HTML_CONVERSION_CAP`] to bound CPU. When the input is truncated, the
+/// rendered output ends with a visible marker so agents (and humans) see
+/// that the body was cut.
+pub(crate) fn render_html_body(html: &[u8]) -> String {
+    if html.is_empty() {
+        return String::new();
+    }
+
+    let (input, truncated) = if html.len() > HTML_CONVERSION_CAP {
+        (&html[..HTML_CONVERSION_CAP], true)
+    } else {
+        (html, false)
+    };
+
+    let mut rendered =
+        html2text::from_read(input, 80).unwrap_or_else(|_| String::from_utf8_lossy(input).into());
+
+    if truncated {
+        rendered.push_str(HTML_TRUNCATION_MARKER);
+    }
+    rendered
 }
 
 struct PreparedAttachment {
@@ -495,21 +529,14 @@ struct PreparedAttachment {
 fn prepare_attachments(message: &mail_parser::Message) -> Vec<PreparedAttachment> {
     let mut result = Vec::new();
 
-    for attachment in message.attachments() {
-        let raw_name = match attachment.attachment_name() {
-            Some(name) => name.to_string(),
-            None => continue,
-        };
+    for (index, attachment) in message.attachments().enumerate() {
+        let raw_name = attachment.attachment_name().unwrap_or("").to_string();
 
-        let filename = Path::new(&raw_name)
-            .file_name()
-            .and_then(|f| f.to_str())
-            .unwrap_or("")
-            .to_string();
-
-        if filename.is_empty() {
-            continue;
-        }
+        // `sanitize_attachment_filename` always returns a non-empty, filesystem-
+        // safe name (falling back to `attachment-<index>` for empty / unsafe
+        // input). The sanitized value is the single source of truth for both
+        // the on-disk bundle file and the `attachments = [...]` frontmatter.
+        let filename = sanitize_attachment_filename(&raw_name, index);
 
         let content_type = attachment
             .content_type()
@@ -530,6 +557,116 @@ fn prepare_attachments(message: &mail_parser::Message) -> Vec<PreparedAttachment
     }
 
     result
+}
+
+/// Cap for sanitized attachment filenames, in bytes. Leaves comfortable
+/// headroom under the typical Linux/macOS `NAME_MAX = 255` after any
+/// future prefix/suffix. Truncation happens on a UTF-8 char boundary.
+const ATTACHMENT_FILENAME_MAX_BYTES: usize = 200;
+
+/// Sanitize an attachment filename from an untrusted inbound email.
+///
+/// The raw filename coming out of `mail-parser` is attacker-controlled. On
+/// top of `Path::file_name()` (which strips directory components), this
+/// helper additionally:
+/// - NFC-normalizes so visually-identical names don't split into NFC/NFD
+///   variants (filesystem collision + agent confusion).
+/// - Strips control characters (C0, DEL) and bidi / invisible Unicode
+///   controls (RLO, LRO, PDF, ZWJ, ZWNJ, BOM, LRM, RLM, LRE, RLE, etc.)
+///   so a filename can't hide its extension or rewrite itself in agent
+///   logs.
+/// - Replaces `/` and `\` with `_` so a malformed name can never escape
+///   the bundle directory even if the Path::file_name() guard is lost in
+///   a refactor (defense in depth).
+/// - Collapses runs of unsafe characters to a single `_`.
+/// - Trims leading/trailing whitespace, `.`, and `-`. Leading `-` matters
+///   because downstream CLI tools (`rm`, `find`, `curl`) may interpret a
+///   filename beginning with `-` as a flag.
+/// - Caps the byte length at [`ATTACHMENT_FILENAME_MAX_BYTES`] on a UTF-8
+///   char boundary so the filesystem's `NAME_MAX` is not hit.
+/// - Falls back to `attachment-<index>` when the result would be empty
+///   (e.g. the whole name was control chars).
+pub(crate) fn sanitize_attachment_filename(raw: &str, index: usize) -> String {
+    use unicode_normalization::UnicodeNormalization;
+
+    // First line of defense: pick the filename component only. `mail-parser`
+    // already unescapes headers, so `../../etc/passwd` arrives as a literal
+    // string; `Path::file_name` on `"../../etc/passwd"` returns `"passwd"`,
+    // which neutralizes naive path-traversal. `\\` on Unix is NOT a path
+    // separator, so Windows-style paths need explicit handling — do it
+    // below after normalization.
+    let base = Path::new(raw)
+        .file_name()
+        .and_then(|f| f.to_str())
+        .unwrap_or("");
+
+    // NFC-normalize so NFD-form names collapse into their NFC siblings.
+    let normalized: String = base.nfc().collect();
+
+    let mut out = String::with_capacity(normalized.len());
+    let mut last_was_underscore = false;
+    for ch in normalized.chars() {
+        let unsafe_char = is_filename_unsafe(ch);
+        if unsafe_char {
+            if !last_was_underscore {
+                out.push('_');
+                last_was_underscore = true;
+            }
+        } else {
+            out.push(ch);
+            last_was_underscore = false;
+        }
+    }
+
+    // Trim leading/trailing whitespace, dots, dashes, and collapse-underscores.
+    // A leading `-` is flag-like to many CLI tools; a leading `.` yields a
+    // hidden file; a leading `_` would often just be a residue of the
+    // unsafe-char collapse step above and adds no information.
+    let trim_chars = |c: char| c.is_whitespace() || c == '.' || c == '-' || c == '_';
+    let trimmed = out.trim_matches(trim_chars);
+    let mut trimmed = trimmed.to_string();
+
+    // Byte-cap on a UTF-8 char boundary.
+    if trimmed.len() > ATTACHMENT_FILENAME_MAX_BYTES {
+        let mut end = ATTACHMENT_FILENAME_MAX_BYTES;
+        while end > 0 && !trimmed.is_char_boundary(end) {
+            end -= 1;
+        }
+        trimmed.truncate(end);
+        // Post-truncation: re-trim trailing separators exposed by the cut.
+        let retrimmed = trimmed.trim_end_matches(trim_chars);
+        trimmed = retrimmed.to_string();
+    }
+
+    if trimmed.is_empty() {
+        return format!("attachment-{index}");
+    }
+    trimmed
+}
+
+/// Characters never allowed in a sanitized attachment filename.
+fn is_filename_unsafe(ch: char) -> bool {
+    // Path separators (defense in depth — `Path::file_name` already strips
+    // these, but on Unix `\\` is NOT a path separator so we must reject it
+    // explicitly to keep a consistent shape across platforms and protect
+    // downstream Windows consumers).
+    if ch == '/' || ch == '\\' {
+        return true;
+    }
+    // NUL and all C0 control characters + DEL.
+    if ch == '\0' || ch.is_control() {
+        return true;
+    }
+    // Bidirectional and other invisible-control Unicode code points.
+    // These can hide an extension, re-order visible glyphs, or be used to
+    // spoof extensions in agent / operator logs.
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200F}'   // ZWSP / ZWJ / ZWNJ / LRM / RLM
+            | '\u{202A}'..='\u{202E}' // LRE / RLE / PDF / LRO / RLO
+            | '\u{2066}'..='\u{2069}' // LRI / RLI / FSI / PDI
+            | '\u{FEFF}'              // BOM / ZWNBSP
+    )
 }
 
 fn write_attachments(
@@ -827,6 +964,38 @@ mod tests {
     }
 
     #[test]
+    fn render_html_body_under_cap_is_full_conversion() {
+        let html = b"<html><body><h1>Hello</h1><p>World</p></body></html>";
+        let rendered = render_html_body(html);
+        assert!(rendered.contains("Hello"));
+        assert!(rendered.contains("World"));
+        assert!(
+            !rendered.contains("HTML body truncated"),
+            "under-cap input must not produce a truncation marker: {rendered}"
+        );
+    }
+
+    #[test]
+    fn render_html_body_empty_is_empty() {
+        assert_eq!(render_html_body(b""), "");
+    }
+
+    #[test]
+    fn render_html_body_over_cap_appends_marker() {
+        // Build 2 MB + 1 KB of harmless HTML. Anything over the cap triggers
+        // truncation regardless of content.
+        let filler = "<p>x</p>".repeat((HTML_CONVERSION_CAP / 8) + 128);
+        let html = format!("<html><body>{filler}</body></html>");
+        assert!(html.len() > HTML_CONVERSION_CAP);
+        let rendered = render_html_body(html.as_bytes());
+        assert!(
+            rendered.contains("HTML body truncated at 2 MB for rendering"),
+            "over-cap input must end with a truncation marker: (len={})",
+            rendered.len()
+        );
+    }
+
+    #[test]
     fn ingest_multipart_prefers_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
@@ -1000,6 +1169,121 @@ mod tests {
     }
 
     #[test]
+    fn sanitize_filename_embedded_nul() {
+        // NUL must never appear in a sanitized filename; its removal must
+        // not leave a bare `_` as the whole name.
+        let out = sanitize_attachment_filename("bad\0name.txt", 0);
+        assert!(!out.contains('\0'));
+        assert!(out.contains("name.txt"));
+    }
+
+    #[test]
+    fn sanitize_filename_cr_lf_stripped() {
+        let out = sanitize_attachment_filename("report\r\nline2.pdf", 0);
+        assert!(!out.contains('\r') && !out.contains('\n'));
+        assert!(out.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn sanitize_filename_path_traversal_stripped() {
+        // `Path::file_name` already collapses `../../etc/passwd` to `passwd`,
+        // but this is defense in depth: even if the input arrived whole, the
+        // separators would collapse to `_`s.
+        let out = sanitize_attachment_filename("../../etc/passwd", 0);
+        assert!(!out.contains('/'));
+        assert!(out == "passwd" || out.contains("passwd"));
+    }
+
+    #[test]
+    fn sanitize_filename_leading_dash_stripped() {
+        // `-rf` as a filename is dangerous to naive downstream `rm` wrappers.
+        // The leading `-` must be stripped.
+        let out = sanitize_attachment_filename("-rf", 0);
+        assert!(!out.starts_with('-'));
+        // May be "rf" or may fall back to attachment-0 if the whole name
+        // was trimmed away; both are safe.
+        assert!(out == "rf" || out == "attachment-0");
+    }
+
+    #[test]
+    fn sanitize_filename_500_char_truncated_under_cap_on_char_boundary() {
+        let raw: String = "a".repeat(500);
+        let out = sanitize_attachment_filename(&raw, 0);
+        assert!(
+            out.len() <= ATTACHMENT_FILENAME_MAX_BYTES,
+            "sanitized name must be ≤{ATTACHMENT_FILENAME_MAX_BYTES} bytes: {}",
+            out.len()
+        );
+        // UTF-8 boundary — ASCII is trivially aligned; just sanity check.
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn sanitize_filename_empty_after_sanitize_falls_back() {
+        // A name made entirely of control characters sanitizes to empty,
+        // which must fall back to `attachment-<index>`.
+        let all_controls = "\0\0\r\n\x01\x02";
+        assert_eq!(
+            sanitize_attachment_filename(all_controls, 3),
+            "attachment-3"
+        );
+        assert_eq!(sanitize_attachment_filename("", 0), "attachment-0");
+    }
+
+    #[test]
+    fn sanitize_filename_windows_style_backslash() {
+        // On Unix, `\\` is NOT a path separator, so `Path::file_name` keeps
+        // `a\\b\\c.pdf` as-is. The sanitizer must still strip the backslashes
+        // so the filename doesn't confuse Windows consumers or shell escapes.
+        let out = sanitize_attachment_filename("a\\b\\c.pdf", 0);
+        assert!(!out.contains('\\'));
+        assert!(out.ends_with(".pdf"));
+    }
+
+    #[test]
+    fn sanitize_filename_nfd_normalized_to_nfc() {
+        // NFD "é" (e + combining acute) normalizes to precomposed NFC "é"
+        // so filesystem collisions between NFC/NFD siblings can't happen
+        // downstream.
+        let nfd = "caf\u{0065}\u{0301}.pdf";
+        let out = sanitize_attachment_filename(nfd, 0);
+        assert!(
+            out.contains("caf\u{00E9}"),
+            "NFD must collapse to precomposed é: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_bidi_override_stripped() {
+        // An RLO (U+202E) embedded in the filename can reorder glyphs in
+        // logs/agent output so `file.txt` displays as `file.gpj`. The
+        // sanitizer must strip all bidi overrides.
+        let bidi = "safe\u{202E}fdp.pdf";
+        let out = sanitize_attachment_filename(bidi, 0);
+        assert!(!out.chars().any(|c| c == '\u{202E}'));
+    }
+
+    #[test]
+    fn sanitize_filename_zero_width_joiner_stripped() {
+        let zwj = "inv\u{200D}oice.pdf";
+        let out = sanitize_attachment_filename(zwj, 0);
+        assert!(!out.chars().any(|c| c == '\u{200D}'));
+    }
+
+    #[test]
+    fn sanitize_filename_unsafe_runs_collapse_to_single_underscore() {
+        // Multiple unsafe chars in a row must collapse to one `_`, not spray
+        // `____` across the filename.
+        let out = sanitize_attachment_filename("a////b\\\\c.pdf", 0);
+        // Count runs of `_` — each should be length 1.
+        let has_long_run = out.split(|c: char| c != '_').any(|s| s.len() > 1);
+        assert!(
+            !has_long_run,
+            "unsafe-char runs must collapse to a single `_`: {out}"
+        );
+    }
+
+    #[test]
     fn attachment_path_traversal_sanitized() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
@@ -1035,6 +1319,82 @@ mod tests {
         let bundle = bundles[0].path();
         assert!(bundle.join("evil").exists());
         assert!(!tmp.path().join("etc").exists());
+    }
+
+    #[test]
+    fn attachment_malicious_names_sanitized_integration() {
+        // S43-7 integration: two attachments with hostile names.
+        // - `../../etc/passwd` — path-traversal attempt.
+        // - `\x00rce.sh` — embedded NUL + potentially flag-looking name.
+        // Both must land INSIDE the bundle directory with names that
+        // contain no path separators and no NUL bytes. `tmp/etc/` must
+        // not exist — nothing escaped the bundle.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+
+        let eml = b"From: sender@example.com\r\n\
+            To: alice@test.com\r\n\
+            Subject: Malicious\r\n\
+            Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+            Message-ID: <evil2@example.com>\r\n\
+            MIME-Version: 1.0\r\n\
+            Content-Type: multipart/mixed; boundary=\"b1\"\r\n\
+            \r\n\
+            --b1\r\n\
+            Content-Type: text/plain; charset=utf-8\r\n\
+            \r\n\
+            Body.\r\n\
+            --b1\r\n\
+            Content-Type: text/plain; name=\"../../etc/passwd\"\r\n\
+            Content-Disposition: attachment; filename=\"../../etc/passwd\"\r\n\
+            \r\n\
+            passwd-contents\r\n\
+            --b1\r\n\
+            Content-Type: application/x-sh; name=\"\x00rce.sh\"\r\n\
+            Content-Disposition: attachment; filename=\"\x00rce.sh\"\r\n\
+            \r\n\
+            #!/bin/sh\r\n\
+            --b1--\r\n";
+
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let bundle = bundles[0].path();
+
+        // Nothing escaped.
+        assert!(
+            !tmp.path().join("etc").exists(),
+            "attachment sanitization must prevent `etc/` escape"
+        );
+
+        // Walk the bundle and assert every file is safe.
+        let entries: Vec<_> = std::fs::read_dir(&bundle)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let mut saw_attachment_file = false;
+        for e in entries {
+            let name = e.file_name().to_string_lossy().into_owned();
+            // `<stem>.md` is the email body itself.
+            if name.ends_with(".md") {
+                continue;
+            }
+            saw_attachment_file = true;
+            assert!(!name.contains('/'), "leaked path separator in {name}");
+            assert!(!name.contains('\\'), "leaked backslash in {name}");
+            assert!(!name.contains('\0'), "leaked NUL in {name}");
+            assert!(!name.starts_with('-'), "leading dash in {name}");
+        }
+        assert!(
+            saw_attachment_file,
+            "expected at least one sanitized attachment file in the bundle"
+        );
     }
 
     #[test]
@@ -1108,6 +1468,54 @@ mod tests {
         let line = "Received: from mail.example.com ([2001:db8::1])";
         let ip = parse_ip_from_received(line);
         assert_eq!(ip, Some("2001:db8::1".parse().unwrap()));
+    }
+
+    #[test]
+    fn parse_ip_from_received_rejects_bare_ip_in_comment() {
+        // S43-4: previously the whitespace-split fallback would happily pick
+        // up an IP embedded in a HELO or a free-text comment. That fallback
+        // is gone — only the bracketed RFC 5321 form is trusted.
+        let line = "Received: from evil.example.com (HELO mail.legit 1.2.3.4 via clever.host)";
+        assert_eq!(parse_ip_from_received(line), None);
+    }
+
+    #[test]
+    fn parse_ip_from_received_rejects_hostname_with_dotted_quad() {
+        // A hostname like `host-1.2.3.4.example.com` must NOT be parsed as
+        // an IP — the old fallback was susceptible to this.
+        let line = "Received: from host-1.2.3.4.example.com by mx.local";
+        assert_eq!(parse_ip_from_received(line), None);
+    }
+
+    #[test]
+    fn parse_ip_from_received_rejects_ipv6_in_free_text() {
+        // Same principle for IPv6: no brackets → no trust.
+        let line = "Received: from mail.example.com (claims 2001:db8::abcd)";
+        assert_eq!(parse_ip_from_received(line), None);
+    }
+
+    #[test]
+    fn parse_ip_from_received_real_fixture_shapes() {
+        // Three canonical `Received:` header shapes pulled from real
+        // inbound mail. All three use the bracketed form.
+        let gmail = "Received: from mail-sor-f41.google.com (mail-sor-f41.google.com. [209.85.220.41]) by mx.local";
+        assert_eq!(
+            parse_ip_from_received(gmail),
+            Some("209.85.220.41".parse().unwrap())
+        );
+
+        let microsoft = "Received: from NAM10-BN7-obe.outbound.protection.outlook.com ([40.107.93.79]) by mx.local";
+        assert_eq!(
+            parse_ip_from_received(microsoft),
+            Some("40.107.93.79".parse().unwrap())
+        );
+
+        let postfix =
+            "Received: from mta.example.com (unknown [198.51.100.7]) by mx.local with ESMTPS";
+        assert_eq!(
+            parse_ip_from_received(postfix),
+            Some("198.51.100.7".parse().unwrap())
+        );
     }
 
     #[test]

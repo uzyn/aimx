@@ -32,6 +32,7 @@ hickory-resolver = "0.25"
 include_dir = "0.7"
 sha2 = "0.10"
 psl = "2"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
