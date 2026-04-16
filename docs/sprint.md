@@ -300,9 +300,9 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
-## Sprint 42 — CLI UX: Config Error Messages + Setup Port-Check Race (Days 118–120.5) [NOT STARTED]
+## Sprint 42 — CLI UX: Config Error Messages + Setup Port-Check Race + Version Hash (Days 118–120.5) [NOT STARTED]
 
-**Goal:** Fix two P0 UX issues that block first-time setup: (1) commands that require config give a cryptic "os error 2" instead of pointing the user to `aimx setup`, and (2) `aimx setup` fails the inbound port 25 check because it races against `aimx serve` startup.
+**Goal:** Fix P0 UX issues that block first-time setup and improve build traceability: (1) commands that require config give a cryptic "os error 2" instead of pointing the user to `aimx setup`, (2) `aimx setup` fails the inbound port 25 check because it races against `aimx serve` startup, and (3) `aimx --version` includes the git commit hash so pre-release builds are distinguishable.
 
 **Dependencies:** Sprint 41 (all prior work complete)
 
@@ -329,6 +329,19 @@ Completed sprints 1–37 have been archived for context window efficiency.
 - [ ] If the loop times out (service didn't bind within 5s), setup proceeds to the port checks without error — the existing "Inbound port 25... FAIL" message covers this case
 - [ ] The wait loop is behind the `SystemOps` trait (or `NetworkOps`) so tests can mock it without real sleeps
 - [ ] Existing setup tests still pass; new test verifies that setup proceeds after the wait loop succeeds
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S42-3: Include git commit hash in `aimx --version` output
+
+**Context:** Pre-release, `aimx --version` prints only `aimx 0.1.0` (from `Cargo.toml`). When testing builds on a VPS it's impossible to tell which commit the binary was built from. Add a `build.rs` that captures the 8-character short git hash at compile time and bakes it into the version string so `aimx --version` prints e.g. `aimx 0.1.0 (abcd1234)`. If the build happens outside a git repo (e.g. `cargo install` from a tarball), fall back gracefully to just the version number without a hash.
+
+**Priority:** P1
+
+- [ ] New `build.rs` at the repo root runs `git rev-parse --short=8 HEAD` and sets a `GIT_HASH` env var via `cargo:rustc-env`
+- [ ] If `git` is unavailable or the working directory isn't a repo, `GIT_HASH` is set to `"unknown"` (no build failure)
+- [ ] `cli.rs` composes the clap version string as `format!("{} ({})", env!("CARGO_PKG_VERSION"), env!("GIT_HASH"))` — output: `aimx 0.1.0 (abcd1234)`
+- [ ] When `GIT_HASH` is `"unknown"`, version string omits the parenthetical — output: `aimx 0.1.0`
+- [ ] `build.rs` emits `cargo:rerun-if-changed=.git/HEAD` and `cargo:rerun-if-changed=.git/refs` so the hash updates on new commits without full rebuilds
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
@@ -383,7 +396,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
-| 42 | 118–120.5 | CLI UX: Config Errors + Setup Race | Helpful error when config missing (`aimx status` etc.), wait-for-ready loop in `aimx setup` before port checks | Not Started |
+| 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Not Started |
 
 ## Deferred to v2
 
