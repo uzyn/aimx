@@ -240,8 +240,8 @@ mod tests {
         }
     }
 
-    /// Parity test: for a `trust: verified` mailbox, `trusted == "true"` IFF
-    /// the channel-trigger gate would fire.
+    /// Parity test: for a `trust: verified` mailbox, `trusted == "true"`
+    /// implies the channel-trigger gate fires, but NOT the reverse.
     ///
     /// The channel gate (v1 semantics) fires when:
     /// - sender is allowlisted, OR
@@ -252,7 +252,8 @@ mod tests {
     ///
     /// So `trusted == "true"` is strictly stronger than the trigger gate.
     /// When `trusted == "true"`, the trigger gate also fires (both conditions
-    /// met). This test confirms that agreement.
+    /// met). The reverse does NOT hold: the trigger fires for allowlisted
+    /// senders even when DKIM fails, but `trusted` is `"false"` in that case.
     #[test]
     fn parity_trusted_true_implies_trigger_fires() {
         use crate::channel;
@@ -303,10 +304,28 @@ mod tests {
 
             let trigger_would_fire = channel::should_execute_triggers(&mb, &meta);
 
+            // Forward direction: trusted=true => trigger fires
             if trusted == TrustedValue::True {
                 assert!(
                     trigger_would_fire,
                     "trusted=true but trigger would NOT fire for from={from}, dkim={dkim_result}"
+                );
+            }
+
+            // Reverse direction: trigger fires does NOT imply trusted=true.
+            // Specifically, allowlisted senders with DKIM fail fire the
+            // trigger (v1 semantics: allowlisted OR DKIM pass), but
+            // trusted is "false" because FR-37b requires BOTH.
+            if trigger_would_fire && trusted != TrustedValue::True {
+                // This is expected for:
+                //   - allowlisted + dkim fail  (trigger fires via allowlist, trusted="false")
+                //   - allowlisted + dkim none  (trigger fires via allowlist, trusted="false")
+                //   - not-allowlisted + dkim pass (trigger fires via DKIM, trusted="false")
+                assert_eq!(
+                    trusted,
+                    TrustedValue::False,
+                    "trigger fires but trusted is not 'true' — must be 'false' \
+                     (the asymmetry) for from={from}, dkim={dkim_result}"
                 );
             }
         }
