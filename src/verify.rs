@@ -290,6 +290,9 @@ mod tests {
         ) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
+        fn wait_for_service_ready(&self) -> bool {
+            true
+        }
     }
 
     #[test]

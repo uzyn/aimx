@@ -98,7 +98,17 @@ fn default_dkim_selector() -> String {
 
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
-        let content = std::fs::read_to_string(path)?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!(
+                    "Config file not found at {} — run 'sudo aimx setup' first",
+                    path.display()
+                )
+                .into()
+            } else {
+                Box::new(e) as Box<dyn std::error::Error>
+            }
+        })?;
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
@@ -472,5 +482,41 @@ probe_url = "https://old.example.com/probe"
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.domain, "test.com");
         assert!(config.verify_host.is_none());
+    }
+
+    #[test]
+    fn load_missing_config_gives_helpful_error() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("nonexistent.toml");
+        let err = Config::load(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Config file not found"),
+            "Expected helpful message, got: {msg}"
+        );
+        assert!(
+            msg.contains(&path.display().to_string()),
+            "Expected path in message, got: {msg}"
+        );
+        assert!(
+            msg.contains("sudo aimx setup"),
+            "Expected setup suggestion, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn load_resolved_missing_config_includes_config_dir_path() {
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+        let err = Config::load_resolved().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Config file not found"),
+            "Expected helpful message, got: {msg}"
+        );
+        assert!(
+            msg.contains(&tmp.path().display().to_string()),
+            "Expected config dir path in message, got: {msg}"
+        );
     }
 }
