@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 44 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup + 1 CLI UX fixes)
-**Timeline:** ~120 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days, CLI UX fixes: ~2.5 days)
+**Total sprints:** 45 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup + 1 CLI UX fixes + 1 pre-launch README + hardening sweep)
+**Timeline:** ~122.5 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days, CLI UX fixes: ~2.5 days, pre-launch sweep: ~2.5 days)
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
 
 **v0.2 Scope (pre-launch reshape, Sprints 33–40 + 33.1 scope-reversal):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable). Sprint 33.1 (scope reversal, inserted after Sprint 33 merged) drops PTR/reverse-DNS handling (operator responsibility, out of aimx scope) and drops the `aimx` system group introduced in S33-4 — authorization on the UDS send socket is explicitly out of scope for v0.2 and the socket becomes world-writable (`0o666`). Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a world-writable Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
@@ -346,6 +346,104 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
+## Sprint 43 — Pre-launch README Sweep + Hardening (Days 120.5–123) [NOT STARTED]
+
+**Goal:** Bring `README.md` up to date with the v0.2 reshape (Sprints 33–40) before public release; fix correctness and UX gaps surfaced by external review: `aimx status` OpenRC support, HTML-body size cap, `Received:` IP parser, transport error classification, attachment-filename safety, and `dkim-keygen` permission errors.
+
+**Dependencies:** Sprint 42 (all v0.2 + post-v0.2 work complete).
+
+#### S43-1: README.md pre-launch sweep
+
+**Context:** The README has multiple stale sections from before the v0.2 reshape. (a) Storage layout (266–281) shows `/var/lib/aimx/config.toml`, `/var/lib/aimx/dkim/`, flat `catchall/` with shared `attachments/` — actual layout is config + DKIM at `/etc/aimx/` (private `0600`, public `0644`) and datadir split into `inbox/<mailbox>/` + `sent/<mailbox>/` with Zola-style per-email bundles. (b) Configuration section (188–190) says config lives in the data directory; it's at `/etc/aimx/`. `AIMX_CONFIG_DIR` is never mentioned. (c) Email format example (287–305) uses the pre-Sprint-37 flat schema, missing `thread_id`, `received_at`, `received_from_ip`, `delivered_to`, `size_bytes`, `list_id`, `auto_submitted`, `dmarc`, `trusted`, `labels`. (d) Trust policy section (255–264) doesn't mention the `trusted` frontmatter field from Sprint 38. This is a top-to-bottom sweep, not just the four identified sections.
+
+**Priority:** P0
+
+- [ ] Storage layout rewritten for `/etc/aimx/{config.toml,dkim/}` + `/var/lib/aimx/{inbox,sent}/<mailbox>/`, with a Zola bundle example and permission notes (DKIM private `0600` root-only, public `0644`, datadir world-readable by design)
+- [ ] Configuration section: `/etc/aimx/config.toml` is canonical; documents `AIMX_CONFIG_DIR` override (for tests / non-standard installs) separately from `--data-dir` / `AIMX_DATA_DIR`
+- [ ] Email format example rewritten with all current inbound fields in the `frontmatter.rs` section order; includes a short outbound-block example or pointer to `book/mailboxes.md`
+- [ ] Trust policy section mentions the `trusted: "none" | "true" | "false"` frontmatter surface alongside per-mailbox `trust` + `trusted_senders`
+- [ ] DKIM key management section notes keys live at `/etc/aimx/dkim/` and `aimx dkim-keygen` requires root (or `AIMX_CONFIG_DIR` for dev)
+- [ ] Top-to-bottom pass against `book/` + `CLAUDE.md` + actual code — every other drift (MCP tool list, send examples, channel variables, DNS records) verified or corrected
+- [ ] Repo-wide grep for `/var/lib/aimx/<mailbox>/` bare (without `inbox/`/`sent/`) returns zero hits in `README.md`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-2: `aimx status` uses `SystemOps::is_service_running`
+
+**Context:** `status.rs:125-130` hardcodes `Command::new("systemctl").args(["is-active", "--quiet", "aimx"])`. On Alpine/Fedora/Gentoo OpenRC hosts — which `book/setup.md` claims are supported — this always reports the daemon as "not running" because `systemctl` is absent or behaves differently. The codebase already has a `SystemOps::is_service_running` abstraction (used by `setup.rs`) that handles systemd vs OpenRC. Reuse it.
+
+**Priority:** P1
+
+- [ ] `status.rs` replaces the hardcoded `systemctl` invocation with `SystemOps::is_service_running("aimx")`
+- [ ] `status::run` instantiates a `RealSystemOps` at the call site (or accepts it as a parameter) — whichever matches the codebase's existing pattern
+- [ ] Test mocks `SystemOps::is_service_running` returning `true` and `false`, asserts `status` output accordingly
+- [ ] Manual verification note in the test file or PR description that status now works on an OpenRC host
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-3: HTML body size cap before `html2text::from_read`
+
+**Context:** `src/ingest.rs:482-483` calls `html2text::from_read(html.as_bytes(), 80)` on the HTML part with no size guard. SMTP `max_message_size = 25 MB` bounds raw DATA (so the "100 MB DoS" framing in the review is wrong), but 25 MB of pathological HTML can still consume significant CPU in `html2text`. Cap the input at a safe bound (~2 MB) and truncate with a visible marker in the rendered body when exceeded. 2 MB is far above realistic HTML email (typical marketing HTML < 500 KB) so legitimate messages are unaffected.
+
+**Priority:** P1
+
+- [ ] `ingest.rs` defines `const HTML_CONVERSION_CAP: usize = 2 * 1024 * 1024;`
+- [ ] When HTML length exceeds the cap, only the first `HTML_CONVERSION_CAP` bytes are passed to `html2text`; the rendered body appends a marker like `\n\n[...HTML body truncated at 2 MB for rendering...]`
+- [ ] Within-cap messages behave identically to today
+- [ ] Unit test: under-cap → full conversion; over-cap → truncated with marker; empty HTML → empty string (unchanged)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-4: `parse_ip_from_received` trusts only bracketed forms
+
+**Context:** `src/ingest.rs:429-452` first scans for bracketed-form IPs (`[1.2.3.4]`) — the RFC 5321 canonical marker for the connecting client — but then falls back to a whitespace-split scan that accepts any token that parses as an IP. That fallback happily picks up IPs embedded in comments or HELO strings (e.g. `Received: from evil.example.com (HELO mail.legit[1.2.3.4])` — the fallback will return `1.2.3.4` even when no true bracketed form exists). The frontmatter `received_from_ip` field then carries an attacker-controlled value. Drop the fallback.
+
+**Priority:** P2
+
+- [ ] `parse_ip_from_received` returns `None` when no bracketed non-loopback IP is found (word-by-word fallback removed)
+- [ ] Existing tests relying on the fallback updated or removed
+- [ ] New test: `Received:` header with IP only in a free-text comment (no brackets) returns `None`
+- [ ] Behavior spot-checked against at least three real `Received:` header shapes from ingest fixtures
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-5: `LettreTransport` error classification via lettre `Error` methods
+
+**Context:** Sprint 41 (S41-4) typed the error *surface* — `MailTransport::send` returns `Result<_, TransportError>` — but `src/transport.rs:257-266` still classifies errors via `msg.contains("Connection refused")` / `msg.contains("timed out")` on the lettre error's `Display` string. Substring matching is brittle across lettre upgrades. Lettre's `smtp::Error` exposes structured classification (`is_transient()`, `is_permanent()`, `is_timeout()`, etc.). Use those.
+
+**Priority:** P2
+
+- [ ] `LettreTransport::send` classifies via `lettre::transport::smtp::Error` accessor methods, not `msg.contains(...)`
+- [ ] Short inline comment documents which lettre `Error` shapes map to `TransportError::Temp` vs `TransportError::Permanent`
+- [ ] Existing send-handler tests still pass; behavior preserved (same variant for same scenario)
+- [ ] If lettre's API allows constructing `Error` values in tests, add a test per branch; otherwise rely on existing end-to-end coverage with a note in the PR
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-6: `aimx dkim-keygen` helpful permission-denied message
+
+**Context:** `aimx dkim-keygen` without root on a default install writes to `/etc/aimx/dkim/` (via `config::dkim_dir()`), which fails with the raw `io::Error`: `Error: Permission denied (os error 13)`. No hint about `sudo` or the `AIMX_CONFIG_DIR` override (which is how tests and dev loops legitimately run dkim-keygen against a tempdir without root). Catch `ErrorKind::PermissionDenied` in `dkim::run_keygen` / `generate_keypair` / `write_file_with_mode` and wrap with a message naming the directory and suggesting `sudo` or `AIMX_CONFIG_DIR`. Do NOT add a hard root check — that would break the override path.
+
+**Priority:** P2
+
+- [ ] `io::ErrorKind::PermissionDenied` from the dkim write path is wrapped with a clear message naming the target directory and suggesting `sudo aimx dkim-keygen` or `AIMX_CONFIG_DIR=<path> aimx dkim-keygen`
+- [ ] Other IO errors (disk full, etc.) surface their native message unmodified
+- [ ] Test: set `AIMX_CONFIG_DIR` to a read-only tempdir, run `aimx dkim-keygen`, assert error text mentions both the attempted path and either `sudo` or `AIMX_CONFIG_DIR`
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S43-7: Attachment filename safety + subject/filename NFC normalization
+
+**Context:** Two related hardening items in the ingest path against malicious inbound email. (a) Attachment filenames from `mail-parser` flow into filesystem paths at `ingest.rs:504-512`. `Path::file_name()` already strips directory components and rejects `.` / `..`, so direct path-traversal is blocked. But filenames can still contain: control characters (`\0`, `\r`, `\n`, C0, DEL); bidi overrides and zero-width joiners (confuse agents and humans); leading `-` (interpreted as flags by naive downstream CLI tools); NFC/NFD-collision Unicode (two visually identical names differing in composition); pathological lengths (filesystem ENAMETOOLONG). Channel-trigger `{filepath}` templates already `shell_escape_value` every substitution (`channel.rs:13-16`), so the primary RCE vector is closed — but attachment filenames also flow into the `attachments = [...]` frontmatter field, which agents may shell out to. Defense in depth. (b) Slug generation in `slug.rs:28-53` does not NFC-normalize the subject before slugging, so two subjects looking identical but differing in Unicode composition yield different slugs / filenames.
+
+Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-normalize, strip control chars + DEL + bidi/invisible controls, replace path separators and backslash with `_`, collapse unsafe-char runs to a single `_`, trim leading/trailing whitespace + `.` + `-`, cap at 200 bytes (leaves headroom under typical 255-byte `NAME_MAX`). Empty result → fall back to `attachment-<index>`. Also prepend an NFC normalization step to `slug::slugify` before its existing ASCII-folding pass.
+
+**Priority:** P1
+
+- [ ] New `sanitize_attachment_filename(raw: &str, index: usize) -> String` helper (in `ingest.rs` or a sibling module)
+- [ ] `prepare_attachments` calls the helper on every entry; sanitized name is used for both the on-disk bundle file AND the `attachments` frontmatter entry (one source of truth)
+- [ ] `slug::slugify` NFC-normalizes input before ASCII folding (add `unicode-normalization` crate if not already present transitively)
+- [ ] Unit tests for `sanitize_attachment_filename` cover: embedded NUL, CR/LF, `../../etc/passwd`, leading `-rf`, 500-char name (truncated to ≤200 bytes on a char boundary), empty-after-sanitization (falls back to `attachment-<n>`), Windows-style `a\\b\\c.pdf`, NFD-form Unicode, bidi-override sequence, zero-width joiner
+- [ ] Unit test for `slugify`: NFD and NFC forms of the same visible subject produce the same slug
+- [ ] Integration test: ingest a fixture `.eml` with two attachments named `../../etc/passwd` and `\x00rce.sh`; assert files land under the expected bundle directory with sanitized names and no path escape
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -397,6 +495,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
 | 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Done |
+| 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | Not Started |
 
 ## Deferred to v2
 
