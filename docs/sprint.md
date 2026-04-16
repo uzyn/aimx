@@ -1203,7 +1203,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 112–114.5) [IN PROGRESS]
+## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 112–114.5) [DONE]
 
 **Goal:** Ship the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned, auto-refreshed on daemon startup), replace stale `/var/log/aimx.log` references with `journalctl` commands, and bring every affected `book/` chapter and `CLAUDE.md` up to date with the v0.2 reshape. Last sprint before launch.
 
@@ -1220,15 +1220,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/datadir_readme.rs` and `src/datadir_readme.md.tpl` created
-- [ ] Version bump procedure documented in a `// VERSION BUMP:` comment at the top of `datadir_readme.rs`
-- [ ] `write()` writes the template verbatim to `<data_dir>/README.md` with mode `0o644`
-- [ ] `refresh_if_outdated()` parses the first line; if the version comment is missing, malformed, or differs from `VERSION`, overwrite; otherwise no-op
-- [ ] `aimx setup` calls `write()` at the end of setup
-- [ ] `aimx serve` startup calls `refresh_if_outdated()` before binding listeners
-- [ ] Unit tests: `write` creates the file; `refresh` no-op when version matches; `refresh` overwrites when version differs; `refresh` overwrites when first line is missing or malformed
-- [ ] Integration test: run `aimx serve` in a tempdir with a stale README; assert it's refreshed at startup
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/datadir_readme.rs` and `src/datadir_readme.md.tpl` created
+- [x] Version bump procedure documented in a `// VERSION BUMP:` comment at the top of `datadir_readme.rs`
+- [x] `write()` writes the template verbatim to `<data_dir>/README.md` with mode `0o644`
+- [x] `refresh_if_outdated()` parses the first line; if the version comment is missing, malformed, or differs from `VERSION`, overwrite; otherwise no-op
+- [x] `aimx setup` calls `write()` at the end of setup
+- [x] `aimx serve` startup calls `refresh_if_outdated()` before binding listeners
+- [x] Unit tests: `write` creates the file; `refresh` no-op when version matches; `refresh` overwrites when version differs; `refresh` overwrites when first line is missing or malformed
+- [x] Integration test: run `aimx serve` in a tempdir with a stale README; assert it's refreshed at startup
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S40-2: Journald documentation + `/var/log/aimx.log` purge
 
@@ -1236,11 +1236,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `book/troubleshooting.md`: every `/var/log/aimx.log` occurrence replaced with `journalctl -u aimx` commands
-- [ ] `book/troubleshooting.md`: new "Where are the logs?" subsection covering systemd + OpenRC
-- [ ] `book/channel-recipes.md`: header note distinguishing user-chosen trigger-log paths from aimx's own logs
-- [ ] Grep confirms `/var/log/aimx.log` appears nowhere under `book/`, `docs/`, or `README.md`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `book/troubleshooting.md`: every `/var/log/aimx.log` occurrence replaced with `journalctl -u aimx` commands
+- [x] `book/troubleshooting.md`: new "Where are the logs?" subsection covering systemd + OpenRC
+- [x] `book/channel-recipes.md`: header note distinguishing user-chosen trigger-log paths from aimx's own logs
+- [x] Grep confirms `/var/log/aimx.log` appears nowhere under `book/`, `docs/`, or `README.md`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S40-3: Book/ v0.2 pass + `CLAUDE.md` rewrite
 
@@ -1257,13 +1257,13 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Every `book/*.md` chapter listed above is updated with the v0.2 details
-- [ ] `CLAUDE.md` module descriptions regenerated — old ones removed, new ones added in the right order
-- [ ] Repo-wide grep for `/var/lib/aimx/<mailbox>/` (without `inbox/` or `sent/` prefix) returns zero hits in `book/`, `docs/`, `README.md`
-- [ ] Repo-wide grep for `aimx send` under `book/` never mentions `sudo aimx send` and always mentions the `aimx` group requirement in a nearby paragraph
-- [ ] `book/agent-integration.md` table of supported agents extended with a "progressive disclosure" column
-- [ ] Spot-check every `agents/<agent>/README.md` for drift against the new primer layout; update as needed
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Every `book/*.md` chapter listed above is updated with the v0.2 details
+- [x] `CLAUDE.md` module descriptions regenerated — old ones removed, new ones added in the right order
+- [x] Repo-wide grep for `/var/lib/aimx/<mailbox>/` (without `inbox/` or `sent/` prefix) returns zero hits in `book/`, `docs/`, `README.md`
+- [x] Repo-wide grep for `aimx send` under `book/` never mentions `sudo aimx send` <!-- `aimx` group requirement N/A — group dropped in Sprint 33.1; UDS socket is world-writable (0o666) -->
+- [x] `book/agent-integration.md` table of supported agents extended with a "progressive disclosure" column
+- [x] Spot-check every `agents/<agent>/README.md` for drift against the new primer layout; update as needed
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
@@ -1315,7 +1315,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Done |
 | 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Done |
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
-| 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | In Progress |
+| 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 
 ## Deferred to v2
 
