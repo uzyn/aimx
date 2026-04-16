@@ -1,6 +1,6 @@
 use crate::cli::SendArgs;
 use crate::config::Config;
-use crate::ingest::EmailMetadata;
+use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
 use crate::send_protocol::SendRequest;
@@ -330,14 +330,7 @@ impl AimxMcpServer {
         let (reply_to_id, references) = if meta.message_id.is_empty() {
             (None, None)
         } else {
-            let refs = send::build_references(
-                if meta.references.is_empty() {
-                    None
-                } else {
-                    Some(&meta.references)
-                },
-                &meta.message_id,
-            );
+            let refs = send::build_references(meta.references.as_deref(), &meta.message_id);
             (Some(meta.message_id.clone()), Some(refs))
         };
 
@@ -448,7 +441,7 @@ fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, boo
 /// entries and Zola-style bundle directories containing `<stem>.md`.
 pub fn list_emails(
     mailbox_dir: &std::path::Path,
-) -> Result<Vec<EmailMetadata>, Box<dyn std::error::Error>> {
+) -> Result<Vec<InboundFrontmatter>, Box<dyn std::error::Error>> {
     let mut emails = Vec::new();
 
     let entries = match std::fs::read_dir(mailbox_dir) {
@@ -521,7 +514,7 @@ fn folder_dir(config: &Config, mailbox: &str, folder: Folder) -> PathBuf {
     }
 }
 
-pub fn parse_frontmatter(content: &str) -> Option<EmailMetadata> {
+pub fn parse_frontmatter(content: &str) -> Option<InboundFrontmatter> {
     let parts: Vec<&str> = content.splitn(3, "+++").collect();
     if parts.len() < 3 {
         return None;
@@ -531,12 +524,12 @@ pub fn parse_frontmatter(content: &str) -> Option<EmailMetadata> {
 }
 
 pub fn filter_emails(
-    emails: Vec<EmailMetadata>,
+    emails: Vec<InboundFrontmatter>,
     unread: Option<bool>,
     from: Option<&str>,
     since: Option<&str>,
     subject: Option<&str>,
-) -> Result<Vec<EmailMetadata>, String> {
+) -> Result<Vec<InboundFrontmatter>, String> {
     let since_dt = match since {
         Some(s) => Some(
             chrono::DateTime::parse_from_rfc3339(s)
@@ -608,13 +601,13 @@ pub fn set_read_status(
     }
 
     let toml_str = parts[1].trim();
-    let mut meta: EmailMetadata =
+    let mut meta: InboundFrontmatter =
         toml::from_str(toml_str).map_err(|e| format!("Failed to parse frontmatter: {e}"))?;
 
     meta.read = read;
 
-    let new_toml = toml::to_string_pretty(&meta)
-        .map_err(|e| format!("Failed to serialize frontmatter: {e}"))?;
+    let new_toml =
+        toml::to_string(&meta).map_err(|e| format!("Failed to serialize frontmatter: {e}"))?;
     let body = parts[2];
 
     let mut result = String::new();
@@ -691,35 +684,47 @@ mod tests {
         guard
     }
 
-    fn create_test_email(dir: &std::path::Path, id: &str, meta: &EmailMetadata) {
+    fn create_test_email(dir: &std::path::Path, id: &str, meta: &InboundFrontmatter) {
         std::fs::create_dir_all(dir).unwrap();
-        let toml_str = toml::to_string_pretty(meta).unwrap();
+        let toml_str = toml::to_string(meta).unwrap();
         let content = format!("+++\n{toml_str}+++\n\nThis is the body of email {id}.\n");
         std::fs::write(dir.join(format!("{id}.md")), content).unwrap();
     }
 
-    fn sample_meta(id: &str, from: &str, subject: &str, read: bool) -> EmailMetadata {
-        EmailMetadata {
+    fn sample_meta(id: &str, from: &str, subject: &str, read: bool) -> InboundFrontmatter {
+        InboundFrontmatter {
             id: id.to_string(),
             message_id: format!("<{id}@test.com>"),
+            thread_id: "0123456789abcdef".to_string(),
             from: from.to_string(),
             to: "alice@test.com".to_string(),
+            cc: None,
+            reply_to: None,
+            delivered_to: "alice@test.com".to_string(),
             subject: subject.to_string(),
             date: "2025-06-01T12:00:00Z".to_string(),
-            in_reply_to: "".to_string(),
-            references: "".to_string(),
+            received_at: "2025-06-01T12:00:01Z".to_string(),
+            received_from_ip: None,
+            size_bytes: 100,
+            in_reply_to: None,
+            references: None,
             attachments: vec![],
-            mailbox: "alice".to_string(),
-            read,
+            list_id: None,
+            auto_submitted: None,
             dkim: "none".to_string(),
             spf: "none".to_string(),
+            dmarc: "none".to_string(),
+            trusted: "none".to_string(),
+            mailbox: "alice".to_string(),
+            read,
+            labels: vec![],
         }
     }
 
     #[test]
     fn parse_frontmatter_valid() {
         let meta = sample_meta("2025-06-01-001", "sender@example.com", "Hello", false);
-        let toml_str = toml::to_string_pretty(&meta).unwrap();
+        let toml_str = toml::to_string(&meta).unwrap();
         let content = format!("+++\n{toml_str}+++\n\nBody text.\n");
 
         let parsed = parse_frontmatter(&content).unwrap();
