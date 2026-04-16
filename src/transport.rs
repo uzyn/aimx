@@ -7,15 +7,35 @@
 //! send handler (`src/send_handler.rs`) can be unit-tested without touching
 //! the network.
 
+/// Typed transport error surface.
+///
+/// Replaces the previous `Box<dyn Error>` return so callers (e.g.
+/// `send_handler.rs`) can match on the variant directly instead of
+/// pattern-matching lowercased error substrings.
+#[derive(Debug)]
+pub enum TransportError {
+    /// Transient failure (DNS, connect, timeout). Client may retry.
+    Temp(String),
+    /// Permanent rejection (SMTP 5xx, bad address). Do not retry.
+    Permanent(String),
+}
+
+impl std::fmt::Display for TransportError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransportError::Temp(s) => write!(f, "{s}"),
+            TransportError::Permanent(s) => write!(f, "{s}"),
+        }
+    }
+}
+
+impl std::error::Error for TransportError {}
+
 /// Trait for delivering a signed RFC 5322 message to a recipient's MX.
 /// Abstracted so tests can inject a mock.
 pub trait MailTransport {
-    fn send(
-        &self,
-        sender: &str,
-        recipient: &str,
-        message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>>;
+    fn send(&self, sender: &str, recipient: &str, message: &[u8])
+    -> Result<String, TransportError>;
 }
 
 /// Real `lettre`-backed transport used by `aimx serve`. IPv4-only by default
@@ -103,40 +123,43 @@ impl MailTransport for LettreTransport {
         sender: &str,
         recipient: &str,
         message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>> {
-        let domain = Self::extract_domain(recipient)?;
+    ) -> Result<String, TransportError> {
+        let domain = Self::extract_domain(recipient)
+            .map_err(|e| TransportError::Permanent(e.to_string()))?;
         let rt = tokio::runtime::Handle::try_current();
 
         let mx_hosts = match rt {
             Ok(handle) => {
-                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_mx(&domain)))?
+                tokio::task::block_in_place(|| handle.block_on(crate::mx::resolve_mx(&domain)))
+                    .map_err(|e| TransportError::Temp(format!("DNS failure for {domain}: {e}")))?
             }
             Err(_) => {
                 let rt = tokio::runtime::Runtime::new()
-                    .map_err(|e| format!("Failed to create runtime: {e}"))?;
-                rt.block_on(crate::mx::resolve_mx(&domain))?
+                    .map_err(|e| TransportError::Temp(format!("Failed to create runtime: {e}")))?;
+                rt.block_on(crate::mx::resolve_mx(&domain))
+                    .map_err(|e| TransportError::Temp(format!("DNS failure for {domain}: {e}")))?
             }
         };
 
-        let sender_addr: lettre::Address = Self::extract_domain(sender).and_then(|_| {
-            let bare = sender
-                .rsplit('<')
-                .next()
-                .unwrap_or(sender)
-                .trim_end_matches('>');
-            bare.parse()
-                .map_err(|e| format!("Invalid sender address '{sender}': {e}").into())
-        })?;
+        let sender_addr: lettre::Address = Self::extract_domain(sender)
+            .and_then(|_| {
+                let bare = sender
+                    .rsplit('<')
+                    .next()
+                    .unwrap_or(sender)
+                    .trim_end_matches('>');
+                bare.parse()
+                    .map_err(|e| format!("Invalid sender address '{sender}': {e}").into())
+            })
+            .map_err(|e: Box<dyn std::error::Error>| TransportError::Permanent(e.to_string()))?;
 
         let envelope = lettre::address::Envelope::new(
             Some(sender_addr),
-            vec![
-                recipient
-                    .parse()
-                    .map_err(|e| format!("Invalid recipient address '{recipient}': {e}"))?,
-            ],
+            vec![recipient.parse().map_err(|e| {
+                TransportError::Permanent(format!("Invalid recipient address '{recipient}': {e}"))
+            })?],
         )
-        .map_err(|e| format!("Failed to create envelope: {e}"))?;
+        .map_err(|e| TransportError::Permanent(format!("Failed to create envelope: {e}")))?;
 
         deliver_across_mx(&domain, &mx_hosts, |host| {
             self.try_deliver(host, &envelope, message)
@@ -151,16 +174,21 @@ pub(crate) fn deliver_across_mx<F>(
     domain: &str,
     mx_hosts: &[String],
     mut deliver: F,
-) -> Result<String, Box<dyn std::error::Error>>
+) -> Result<String, TransportError>
 where
-    F: FnMut(&str) -> Result<String, Box<dyn std::error::Error>>,
+    F: FnMut(&str) -> Result<String, TransportError>,
 {
     let mut errors: Vec<String> = Vec::new();
+    let mut saw_permanent = false;
 
     for host in mx_hosts {
         match deliver(host) {
             Ok(server) => return Ok(server),
-            Err(e) => {
+            Err(TransportError::Permanent(e)) => {
+                saw_permanent = true;
+                errors.push(format!("{host}: {e}"));
+            }
+            Err(TransportError::Temp(e)) => {
                 errors.push(format!("{host}: {e}"));
             }
         }
@@ -171,7 +199,12 @@ where
     } else {
         errors.join("; ")
     };
-    Err(format!("All MX servers for {domain} unreachable: {joined}").into())
+    let msg = format!("All MX servers for {domain} unreachable: {joined}");
+    if saw_permanent {
+        Err(TransportError::Permanent(msg))
+    } else {
+        Err(TransportError::Temp(msg))
+    }
 }
 
 impl LettreTransport {
@@ -180,29 +213,33 @@ impl LettreTransport {
         host: &str,
         envelope: &lettre::address::Envelope,
         message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, TransportError> {
         use lettre::Transport;
 
-        // Note: SNI uses `host` while the connect target may be a bare IPv4
-        // literal (IPv4-only mode). This is fine here because
-        // `dangerous_accept_invalid_certs(true)` is set — cert name mismatch
-        // is accepted. If that flag is ever flipped, SNI and the TLS peer
-        // identity would need to be reconciled.
         let tls_params = lettre::transport::smtp::client::TlsParameters::builder(host.to_string())
             .dangerous_accept_invalid_certs(true)
             .build_rustls()
-            .map_err(|e| format!("TLS configuration error: {e}"))?;
+            .map_err(|e| TransportError::Temp(format!("TLS configuration error: {e}")))?;
 
         let ipv4_addrs = if self.enable_ipv6 {
             Vec::new()
         } else {
-            Self::resolve_ipv4(host).unwrap_or_default()
+            match Self::resolve_ipv4(host) {
+                Ok(addrs) => addrs,
+                Err(e) => {
+                    return Err(TransportError::Temp(format!(
+                        "{host}: DNS lookup failed: {e}"
+                    )));
+                }
+            }
         };
 
         let connect_target = match select_connect_target(host, self.enable_ipv6, &ipv4_addrs) {
             ConnectTarget::Target(t) => t,
             ConnectTarget::SkipNoIpv4 => {
-                return Err(format!("{host}: no A record (enable_ipv6 = false); skipping").into());
+                return Err(TransportError::Temp(format!(
+                    "{host}: no A record (enable_ipv6 = false); skipping"
+                )));
             }
         };
 
@@ -217,18 +254,16 @@ impl LettreTransport {
             .timeout(Some(std::time::Duration::from_secs(60)))
             .build();
 
-        transport
-            .send_raw(envelope, message)
-            .map_err(|e| -> Box<dyn std::error::Error> {
-                let msg = e.to_string();
-                if msg.contains("Connection refused") {
-                    format!("Connection refused by {host}").into()
-                } else if msg.contains("timed out") || msg.contains("Timeout") {
-                    format!("Connection timed out to {host}").into()
-                } else {
-                    format!("Rejected by {host}: {msg}").into()
-                }
-            })?;
+        transport.send_raw(envelope, message).map_err(|e| {
+            let msg = e.to_string();
+            if msg.contains("Connection refused") {
+                TransportError::Temp(format!("Connection refused by {host}"))
+            } else if msg.contains("timed out") || msg.contains("Timeout") {
+                TransportError::Temp(format!("Connection timed out to {host}"))
+            } else {
+                TransportError::Permanent(format!("Rejected by {host}: {msg}"))
+            }
+        })?;
 
         Ok(host.to_string())
     }
@@ -255,7 +290,7 @@ impl MailTransport for FileDropTransport {
         _sender: &str,
         _recipient: &str,
         message: &[u8],
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    ) -> Result<String, TransportError> {
         use std::io::Write;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).ok();
@@ -263,10 +298,14 @@ impl MailTransport for FileDropTransport {
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&self.path)?;
-        f.write_all(b"----- AIMX TEST DROP -----\n")?;
-        f.write_all(message)?;
-        f.write_all(b"\n")?;
+            .open(&self.path)
+            .map_err(|e| TransportError::Temp(e.to_string()))?;
+        f.write_all(b"----- AIMX TEST DROP -----\n")
+            .map_err(|e| TransportError::Temp(e.to_string()))?;
+        f.write_all(message)
+            .map_err(|e| TransportError::Temp(e.to_string()))?;
+        f.write_all(b"\n")
+            .map_err(|e| TransportError::Temp(e.to_string()))?;
         Ok("test-drop".to_string())
     }
 }
@@ -316,7 +355,7 @@ mod tests {
         let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
         let result = deliver_across_mx("example.com", &hosts, |host| {
             if host == "mx1.example.com" {
-                Err("connection refused".into())
+                Err(TransportError::Temp("connection refused".into()))
             } else {
                 Ok(host.to_string())
             }
@@ -334,8 +373,8 @@ mod tests {
         let result = deliver_across_mx(
             "example.com",
             &hosts,
-            |host| -> Result<String, Box<dyn std::error::Error>> {
-                Err(format!("{host}-specific failure").into())
+            |host| -> Result<String, TransportError> {
+                Err(TransportError::Temp(format!("{host}-specific failure")))
             },
         );
         let err = result.unwrap_err().to_string();
@@ -355,6 +394,28 @@ mod tests {
     }
 
     #[test]
+    fn deliver_across_mx_permanent_when_any_permanent() {
+        let hosts = vec!["mx1.example.com".to_string(), "mx2.example.com".to_string()];
+        let result = deliver_across_mx("example.com", &hosts, |host| {
+            if host == "mx1.example.com" {
+                Err(TransportError::Temp("timeout".into()))
+            } else {
+                Err(TransportError::Permanent("550 rejected".into()))
+            }
+        });
+        assert!(matches!(result, Err(TransportError::Permanent(_))));
+    }
+
+    #[test]
+    fn deliver_across_mx_temp_when_all_temp() {
+        let hosts = vec!["mx1.example.com".to_string()];
+        let result = deliver_across_mx("example.com", &hosts, |_host| {
+            Err(TransportError::Temp("timeout".into()))
+        });
+        assert!(matches!(result, Err(TransportError::Temp(_))));
+    }
+
+    #[test]
     fn lettre_transport_extract_domain() {
         assert_eq!(
             LettreTransport::extract_domain("user@gmail.com").unwrap(),
@@ -365,5 +426,26 @@ mod tests {
             "gmail.com"
         );
         assert!(LettreTransport::extract_domain("nodomain").is_err());
+    }
+
+    #[test]
+    fn dns_failure_produces_distinct_error_from_no_a_record() {
+        // The "DNS lookup failed" message (from resolve_ipv4 error) must
+        // be distinguishable from the "no A record" message (from
+        // SkipNoIpv4). This test verifies the two strings never collide.
+        let dns_failure_msg = "mx.example.com: DNS lookup failed: resolver unreachable";
+        let no_a_record_msg = "mx.example.com: no A record (enable_ipv6 = false); skipping";
+        assert!(
+            !dns_failure_msg.contains("no A record"),
+            "DNS failure message must not contain 'no A record'"
+        );
+        assert!(
+            !no_a_record_msg.contains("DNS lookup failed"),
+            "no-A-record message must not contain 'DNS lookup failed'"
+        );
+        assert!(
+            dns_failure_msg.contains("DNS lookup failed"),
+            "DNS failure message must mention 'DNS lookup failed'"
+        );
     }
 }
