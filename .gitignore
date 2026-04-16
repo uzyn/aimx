@@ -8,3 +8,4 @@ logs/
 .worktrees/
 /target/
 **/target/
+/book-output/
