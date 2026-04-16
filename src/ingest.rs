@@ -281,8 +281,8 @@ fn verify_auth(raw: &[u8]) -> AuthResults {
 
         let dkim_result = dkim_output_to_string(&dkim_output, auth_msg.is_some());
 
-        let spf_result = verify_spf_async(raw, &resolver).await;
         let spf_output = build_spf_output(raw, &resolver).await;
+        let spf_result = spf_output_to_string(&spf_output);
 
         let dmarc_result = match &auth_msg {
             Some(msg) => verify_dmarc_async(msg, &dkim_output, &spf_output, raw, &resolver).await,
@@ -341,6 +341,17 @@ async fn build_spf_output(
         .await
 }
 
+fn spf_output_to_string(output: &mail_auth::SpfOutput) -> String {
+    match output.result() {
+        mail_auth::SpfResult::Pass => "pass".to_string(),
+        mail_auth::SpfResult::Fail => "fail".to_string(),
+        mail_auth::SpfResult::SoftFail => "softfail".to_string(),
+        mail_auth::SpfResult::Neutral => "neutral".to_string(),
+        mail_auth::SpfResult::None => "none".to_string(),
+        _ => "none".to_string(),
+    }
+}
+
 async fn verify_dmarc_async(
     auth_msg: &mail_auth::AuthenticatedMessage<'_>,
     dkim_output: &[mail_auth::DkimOutput<'_>],
@@ -380,37 +391,6 @@ pub fn spf_domain(mail_from: &str) -> Option<&str> {
         None
     } else {
         Some(domain)
-    }
-}
-
-async fn verify_spf_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
-    let ip = match extract_received_ip(raw) {
-        Some(ip) => ip,
-        None => return "none".to_string(),
-    };
-
-    let mail_from = extract_mail_from(raw).unwrap_or_default();
-
-    let helo_domain = match spf_domain(&mail_from) {
-        Some(d) => d,
-        None => return "none".to_string(),
-    };
-
-    let spf_output = resolver
-        .verify_spf(mail_auth::spf::verify::SpfParameters::verify_mail_from(
-            ip,
-            helo_domain,
-            helo_domain,
-            &mail_from,
-        ))
-        .await;
-
-    match spf_output.result() {
-        mail_auth::SpfResult::Pass => "pass".to_string(),
-        mail_auth::SpfResult::Fail => "fail".to_string(),
-        mail_auth::SpfResult::SoftFail => "fail".to_string(),
-        mail_auth::SpfResult::None => "none".to_string(),
-        _ => "fail".to_string(),
     }
 }
 

@@ -278,23 +278,44 @@ async fn run_send_listener(
     eprintln!("[send] UDS accept loop drained");
 }
 
+/// Per-connection UDS request timeout. A connected client must deliver its
+/// entire `AIMX/1 SEND` request frame within this window or the connection
+/// is dropped. Prevents slow-loris abuse on the world-writable socket.
+const UDS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn handle_send_connection(stream: tokio::net::UnixStream, ctx: Arc<SendContext>) {
+    handle_send_connection_with_timeout(stream, ctx, UDS_REQUEST_TIMEOUT).await;
+}
+
+async fn handle_send_connection_with_timeout(
+    stream: tokio::net::UnixStream,
+    ctx: Arc<SendContext>,
+    timeout: std::time::Duration,
+) {
     let (mut reader, mut writer) = stream.into_split();
-    let (response, parse_failed) = match send_protocol::parse_request(&mut reader).await {
-        Ok(req) => (crate::send_handler::handle_send(req, &ctx).await, false),
-        Err(send_protocol::ParseError::ClosedBeforeRequest) => {
-            // Client connected and closed without sending anything. No
-            // response to write — just drop the connection.
-            return;
-        }
-        Err(e) => (
-            send_protocol::SendResponse::Err {
-                code: send_protocol::ErrCode::Malformed,
-                reason: e.to_string(),
-            },
-            true,
-        ),
-    };
+    let (response, parse_failed) =
+        match tokio::time::timeout(timeout, send_protocol::parse_request(&mut reader)).await {
+            Ok(Ok(req)) => (crate::send_handler::handle_send(req, &ctx).await, false),
+            Ok(Err(send_protocol::ParseError::ClosedBeforeRequest)) => {
+                // Client connected and closed without sending anything. No
+                // response to write — just drop the connection.
+                return;
+            }
+            Ok(Err(e)) => (
+                send_protocol::SendResponse::Err {
+                    code: send_protocol::ErrCode::Malformed,
+                    reason: e.to_string(),
+                },
+                true,
+            ),
+            Err(_elapsed) => {
+                eprintln!(
+                    "[send] request timed out after {}s, dropping connection",
+                    timeout.as_secs()
+                );
+                return;
+            }
+        };
 
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     // When the parser rejects the request (typically on the first line of
@@ -866,7 +887,12 @@ mod tests {
 
     struct NoopTransport;
     impl MailTransport for NoopTransport {
-        fn send(&self, _: &str, _: &str, _: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+        fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &[u8],
+        ) -> Result<String, crate::transport::TransportError> {
             Ok("noop".into())
         }
     }
@@ -890,7 +916,7 @@ mod tests {
                 _: &str,
                 _: &str,
                 message: &[u8],
-            ) -> Result<String, Box<dyn std::error::Error>> {
+            ) -> Result<String, crate::transport::TransportError> {
                 self.captured.lock().unwrap().push(message.to_vec());
                 Ok("mock-mx".into())
             }
@@ -972,6 +998,72 @@ mod tests {
 
             shutdown_tx.send(true).unwrap();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
+        });
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uds_slow_loris_times_out() {
+        use std::collections::HashSet;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let sock = tmp.path().join("send.sock");
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let listener = bind_send_socket(&sock).unwrap();
+
+            let dkim_tmp = tempfile::TempDir::new().unwrap();
+            crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
+            let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+            let mut mboxes = HashSet::new();
+            mboxes.insert("catchall".to_string());
+            let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
+            let ctx = Arc::new(crate::send_handler::SendContext {
+                dkim_key: Arc::new(key),
+                primary_domain: "example.com".to_string(),
+                dkim_selector: "dkim".to_string(),
+                registered_mailboxes: mboxes,
+                transport,
+                data_dir: tmp.path().to_path_buf(),
+            });
+
+            // Accept one connection and handle it with a 1-second timeout.
+            let accept_handle = {
+                let ctx = Arc::clone(&ctx);
+                tokio::spawn(async move {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    handle_send_connection_with_timeout(
+                        stream,
+                        ctx,
+                        std::time::Duration::from_secs(1),
+                    )
+                    .await;
+                })
+            };
+
+            // Connect and send only the request line but then stall.
+            let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
+            use tokio::io::AsyncWriteExt;
+            client
+                .write_all(b"AIMX/1 SEND\nFrom-Mailbox: catchall\n")
+                .await
+                .unwrap();
+            // Don't send Content-Length or body — stall.
+
+            // The handler should drop the connection within ~1s.
+            let result =
+                tokio::time::timeout(std::time::Duration::from_secs(5), accept_handle).await;
+            assert!(
+                result.is_ok(),
+                "handler should complete within 5s (1s timeout + margin)"
+            );
+
+            // The client should see a disconnect (read returns 0 bytes).
+            use tokio::io::AsyncReadExt;
+            let mut buf = [0u8; 64];
+            let n = client.read(&mut buf).await.unwrap_or(0);
+            assert_eq!(n, 0, "server should have closed the connection");
         });
     }
 

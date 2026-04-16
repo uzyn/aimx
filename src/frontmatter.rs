@@ -167,7 +167,7 @@ pub struct OutboundFrontmatter {
     // -- Content --
     pub subject: String,
     pub date: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub received_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub received_from_ip: Option<String>,
@@ -722,7 +722,7 @@ mod tests {
             delivered_to: "bob@gmail.com".to_string(),
             subject: "Hello".to_string(),
             date: "2025-01-01T12:00:00Z".to_string(),
-            received_at: "2025-01-01T12:00:01Z".to_string(),
+            received_at: String::new(),
             received_from_ip: None,
             size_bytes: 256,
             attachments: vec![],
@@ -777,7 +777,9 @@ mod tests {
             })
             .collect();
 
-        // Inbound block first, then outbound block at the end
+        // Inbound block first, then outbound block at the end.
+        // `received_at` is omitted because it is empty on outbound messages
+        // (S41-1: skip_serializing_if = "String::is_empty").
         let expected_keys = vec![
             "id",
             "message_id",
@@ -787,7 +789,6 @@ mod tests {
             "delivered_to",
             "subject",
             "date",
-            "received_at",
             "size_bytes",
             "dkim",
             "spf",
@@ -869,5 +870,16 @@ mod tests {
         assert!(fm.outbound);
         let toml_str = toml::to_string(&fm).unwrap();
         assert!(toml_str.contains("outbound = true"));
+    }
+
+    #[test]
+    fn outbound_received_at_omitted_when_empty() {
+        let fm = sample_outbound_frontmatter();
+        assert!(fm.received_at.is_empty());
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(
+            !toml_str.contains("received_at"),
+            "empty received_at must be omitted on outbound files; got:\n{toml_str}"
+        );
     }
 }
