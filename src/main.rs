@@ -3,6 +3,7 @@ mod channel;
 mod cli;
 mod config;
 mod dkim;
+mod frontmatter;
 mod ingest;
 mod mailbox;
 mod mcp;
