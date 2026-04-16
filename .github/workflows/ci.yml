@@ -28,6 +28,19 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      - name: Check author metadata
+        run: |
+          if grep -r '"author"' agents/ | grep -q '"AIMX"'; then
+            echo "ERROR: Found placeholder author string 'AIMX' under agents/"
+            grep -rn '"author"' agents/ | grep '"AIMX"'
+            exit 1
+          fi
+          if grep -r 'chua@example.com' agents/; then
+            echo "ERROR: Found placeholder email under agents/"
+            exit 1
+          fi
+          echo "Author metadata check passed"
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:
