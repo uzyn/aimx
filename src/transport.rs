@@ -254,18 +254,40 @@ impl LettreTransport {
             .timeout(Some(std::time::Duration::from_secs(60)))
             .build();
 
-        transport.send_raw(envelope, message).map_err(|e| {
-            let msg = e.to_string();
-            if msg.contains("Connection refused") {
-                TransportError::Temp(format!("Connection refused by {host}"))
-            } else if msg.contains("timed out") || msg.contains("Timeout") {
-                TransportError::Temp(format!("Connection timed out to {host}"))
-            } else {
-                TransportError::Permanent(format!("Rejected by {host}: {msg}"))
-            }
-        })?;
+        transport
+            .send_raw(envelope, message)
+            .map_err(|e| classify_lettre_error(host, &e))?;
 
         Ok(host.to_string())
+    }
+}
+
+/// Classify a `lettre::transport::smtp::Error` into a typed `TransportError`.
+///
+/// Mapping (documented so future lettre upgrades don't silently drift):
+/// - `is_permanent()` → `Permanent` (SMTP 5xx reply; recipient rejected the
+///   message outright — do not retry)
+/// - `is_transient()` → `Temp` (SMTP 4xx reply; recipient asked us to retry)
+/// - `is_timeout()` → `Temp` (connect or read timeout)
+/// - `is_transport_shutdown()` → `Temp` (pool shut down)
+/// - TLS failure (`is_tls()`) → `Temp` (usually recoverable by retry or a
+///   different MX host)
+/// - `is_response()` / `is_client()` → `Temp` (protocol hiccup; the message
+///   was not rejected on its merits)
+/// - anything else (network/connection/unknown) → `Temp`
+///
+/// Previously this classification was substring-matched against
+/// `e.to_string()`, which was brittle across lettre versions; see S43-5.
+fn classify_lettre_error(host: &str, e: &lettre::transport::smtp::Error) -> TransportError {
+    let msg = e.to_string();
+    if e.is_permanent() {
+        TransportError::Permanent(format!("Rejected by {host}: {msg}"))
+    } else if e.is_timeout() {
+        TransportError::Temp(format!("Connection timed out to {host}"))
+    } else {
+        // Transient SMTP (4xx), TLS, transport-shutdown, response/client
+        // parse errors, and raw network/connection failures all map to Temp.
+        TransportError::Temp(format!("{host}: {msg}"))
     }
 }
 
@@ -427,6 +449,16 @@ mod tests {
         );
         assert!(LettreTransport::extract_domain("nodomain").is_err());
     }
+
+    // Note (S43-5): `classify_lettre_error` maps `lettre::transport::smtp::Error`
+    // variants to our typed `TransportError`. `smtp::Error` has no public
+    // constructor — its `new()`, `code()`, `response()`, `client()`, `network()`,
+    // `connection()`, `tls()`, and `transport_shutdown()` helpers are all
+    // `pub(crate)`. That means we can't build a synthetic `smtp::Error` for a
+    // branch-by-branch unit test; behaviour is covered end-to-end by the
+    // `LettreTransport` path (`send_handler` integration tests drive real sends
+    // against localhost and observe the typed error). The mapping is documented
+    // above `classify_lettre_error`.
 
     #[test]
     fn dns_failure_produces_distinct_error_from_no_a_record() {
