@@ -1147,7 +1147,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 109.5–112) [IN PROGRESS]
+## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 109.5–112) [DONE]
 
 **Goal:** Restructure the shared agent primer from a single file into a main body + `references/` layout (the anthropics/skills progressive-disclosure pattern), standardize author metadata across every agent package, and reverse the earlier storage-exposure redaction policy so the primer documents the datadir layout explicitly.
 
@@ -1164,14 +1164,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `agents/common/aimx-primer.md` rewritten — 300–500 lines (soft cap; enforce via a line-count comment or PR review)
-- [ ] `agents/common/references/mcp-tools.md`, `frontmatter.md`, `workflows.md`, `troubleshooting.md` created with the content described above
-- [ ] Main primer explicitly links `references/` files and the runtime `/var/lib/aimx/README.md`
-- [ ] Main primer documents the storage layout plainly (FR-50c reversal); inline comment cites FR-50c
-- [ ] `trusted` field documented in the frontmatter quick-reference AND in `references/frontmatter.md` with the three values and the per-mailbox evaluation logic
-- [ ] All references to removed/renamed v1 paths purged (grep for `/var/lib/aimx/<mailbox>/` outside of `inbox/`/`sent/` context)
-- [ ] Byte-level test that asserts the main primer's line count stays within the target range (prevents future bloat)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `agents/common/aimx-primer.md` rewritten — 300–500 lines (soft cap; enforce via a line-count comment or PR review)
+- [x] `agents/common/references/mcp-tools.md`, `frontmatter.md`, `workflows.md`, `troubleshooting.md` created with the content described above
+- [x] Main primer explicitly links `references/` files and the runtime `/var/lib/aimx/README.md`
+- [x] Main primer documents the storage layout plainly (FR-50c reversal); inline comment cites FR-50c
+- [x] `trusted` field documented in the frontmatter quick-reference AND in `references/frontmatter.md` with the three values and the per-mailbox evaluation logic
+- [x] All references to removed/renamed v1 paths purged (grep for `/var/lib/aimx/<mailbox>/` outside of `inbox/`/`sent/` context)
+- [x] Byte-level test that asserts the main primer's line count stays within the target range (prevents future bloat)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S39-2: `agent_setup.rs` install-time concat — `<suffix>.footer` + `references/` copy
 
@@ -1181,13 +1181,13 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `AgentSpec` registry struct gains `progressive_disclosure: bool` (and `suffix_filename: Option<&str>` if `.footer` is used)
-- [ ] Install flow: header + common primer + optional footer → SKILL.md; references copied only when `progressive_disclosure: true`
-- [ ] Per-agent `progressive_disclosure` assignments made per the design note above
-- [ ] Byte-level test for a progressive-disclosure agent: install lays down `SKILL.md` + `references/` tree, contents match fixtures
-- [ ] Byte-level test for a non-progressive-disclosure agent: install lays down single-blob output with references absent
-- [ ] `--print` mode emits both `SKILL.md` and `references/` files for progressive-disclosure agents; only `SKILL.md` for others
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `AgentSpec` registry struct gains `progressive_disclosure: bool` (and `suffix_filename: Option<&str>` if `.footer` is used)
+- [x] Install flow: header + common primer + optional footer → SKILL.md; references copied only when `progressive_disclosure: true`
+- [x] Per-agent `progressive_disclosure` assignments made per the design note above
+- [x] Byte-level test for a progressive-disclosure agent: install lays down `SKILL.md` + `references/` tree, contents match fixtures
+- [x] Byte-level test for a non-progressive-disclosure agent: install lays down single-blob output with references absent
+- [x] `--print` mode emits both `SKILL.md` and `references/` files for progressive-disclosure agents; only `SKILL.md` for others
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S39-3: Author metadata standardization + repo-wide grep verification
 
@@ -1195,15 +1195,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] All six agent packages carry `U-Zyn Chua <chua@uzyn.com>` in their author field
-- [ ] Goose: if the recipe schema supports `author`, it's populated; if not, inline comment in `agents/goose/aimx.yaml.header` notes the gap
-- [ ] `.github/workflows/ci.yml` gains a grep step that fails if `"AIMX"` or placeholder author strings appear under `agents/` (pattern: literal `"author": "AIMX"` and `<chua@example.com>` style placeholders)
-- [ ] Existing agent integration tests pass; install-layout assertions updated if they captured the author string
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] All six agent packages carry `U-Zyn Chua <chua@uzyn.com>` in their author field
+- [x] Goose: if the recipe schema supports `author`, it's populated; if not, inline comment in `agents/goose/aimx.yaml.header` notes the gap
+- [x] `.github/workflows/ci.yml` gains a grep step that fails if `"AIMX"` or placeholder author strings appear under `agents/` (pattern: literal `"author": "AIMX"` and `<chua@example.com>` style placeholders)
+- [x] Existing agent integration tests pass; install-layout assertions updated if they captured the author string
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 112–114.5) [NOT STARTED]
+## Sprint 40 — Datadir `README.md` + Journald Docs + Book/ Pass (Days 112–114.5) [IN PROGRESS]
 
 **Goal:** Ship the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned, auto-refreshed on daemon startup), replace stale `/var/log/aimx.log` references with `journalctl` commands, and bring every affected `book/` chapter and `CLAUDE.md` up to date with the v0.2 reshape. Last sprint before launch.
 
@@ -1312,10 +1312,10 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | Done |
 | 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Done |
 | 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Done |
-| 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | In Progress |
-| 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
-| 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Not started |
-| 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Not started |
+| 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Done |
+| 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Done |
+| 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
+| 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | In Progress |
 
 ## Deferred to v2
 
