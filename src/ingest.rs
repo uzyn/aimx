@@ -1,10 +1,20 @@
 use crate::channel::{self, TriggerContext};
 use crate::config::Config;
+use crate::slug::{allocate_filename, slugify};
 use mail_parser::{MessageParser, MimeHeaders};
 use serde::Serialize;
 use std::io::Read;
 use std::net::IpAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Process-scoped lock guarding the inbound critical section: filename
+/// allocation, bundle directory creation, attachment writes, and the
+/// final `.md` write. The aimx daemon is the single writer to
+/// `<data_dir>/inbox/`, so a process Mutex is sufficient — no
+/// filesystem-level lock needed. Symmetric to the outbound `Mutex<()>`
+/// planned for FR-19b.
+static INGEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct EmailMetadata {
@@ -50,9 +60,9 @@ pub fn ingest_email(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let local_part = extract_local_part(rcpt);
     let mailbox = config.resolve_mailbox(local_part);
-    let mailbox_dir = config.mailbox_dir(&mailbox);
+    let inbox_dir = config.inbox_dir(&mailbox);
 
-    std::fs::create_dir_all(&mailbox_dir)?;
+    std::fs::create_dir_all(&inbox_dir)?;
 
     let message = MessageParser::default()
         .parse(raw)
@@ -107,12 +117,56 @@ pub fn ingest_email(
 
     let body = extract_body(&message);
 
-    let attachments = extract_attachments(&message, &mailbox_dir)?;
+    // Collect attachments as in-memory metadata + payload so we can decide
+    // between flat and bundle layouts before committing any file to disk.
+    let prepared_attachments = prepare_attachments(&message);
+    let has_attachments = !prepared_attachments.is_empty();
 
     let (dkim_result, spf_result) = verify_auth(raw, rcpt);
 
-    let meta_template = EmailMetadata {
-        id: String::new(), // placeholder, set after atomic creation
+    let slug = slugify(&subject);
+    let timestamp = chrono::Utc::now();
+
+    // Hold the inbound write lock across allocate → mkdir → write
+    // attachments → write markdown so two ingests racing on the same UTC
+    // second + slug + attachment filenames cannot interleave: the second
+    // arrival sees the first's bundle on disk and picks a `-2` suffix.
+    let _guard = INGEST_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let md_path = allocate_filename(&inbox_dir, timestamp, &slug, has_attachments);
+    let parent_dir = md_path
+        .parent()
+        .ok_or("allocate_filename returned a rootless path")?
+        .to_path_buf();
+
+    // For bundle layouts the parent is `<stem>/`; for flat layouts it is
+    // the mailbox directory itself (already created above). Either way,
+    // `create_dir_all` is idempotent and cheap.
+    std::fs::create_dir_all(&parent_dir)?;
+
+    let id = md_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_string();
+
+    // Roll back a freshly created bundle directory on any post-allocation
+    // failure (attachment write or markdown write). For flat layouts the
+    // parent is the mailbox dir itself and stays untouched.
+    let cleanup_bundle = || {
+        if has_attachments && parent_dir != inbox_dir {
+            let _ = std::fs::remove_dir_all(&parent_dir);
+        }
+    };
+
+    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|_| {
+        cleanup_bundle();
+    })?;
+
+    let meta = EmailMetadata {
+        id: id.clone(),
         message_id,
         from,
         to,
@@ -127,11 +181,15 @@ pub fn ingest_email(
         spf: spf_result,
     };
 
-    let (_id, filepath, meta) = create_file_atomic(&mailbox_dir, &meta_template, &body)?;
+    write_markdown(&md_path, &meta, &body).inspect_err(|_| {
+        cleanup_bundle();
+    })?;
+
+    drop(_guard);
 
     if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
         let ctx = TriggerContext {
-            filepath: &filepath,
+            filepath: &md_path,
             metadata: &meta,
         };
         channel::execute_triggers(mailbox_config, &ctx);
@@ -325,12 +383,17 @@ fn extract_body(message: &mail_parser::Message) -> String {
     String::new()
 }
 
-fn extract_attachments(
-    message: &mail_parser::Message,
-    mailbox_dir: &Path,
-) -> Result<Vec<AttachmentMeta>, Box<dyn std::error::Error>> {
+/// An attachment extracted from the parsed MIME message but not yet written
+/// to disk. Lives long enough to decide between flat and bundle layouts
+/// before any file I/O happens.
+struct PreparedAttachment {
+    filename: String,
+    content_type: String,
+    body: Vec<u8>,
+}
+
+fn prepare_attachments(message: &mail_parser::Message) -> Vec<PreparedAttachment> {
     let mut result = Vec::new();
-    let attachments_dir = mailbox_dir.join("attachments");
 
     for attachment in message.attachments() {
         let raw_name = match attachment.attachment_name() {
@@ -338,6 +401,9 @@ fn extract_attachments(
             None => continue,
         };
 
+        // Strip any path components the sender may have smuggled in;
+        // `file_name` on a traversal string like `../../etc/foo` returns
+        // just `foo`.
         let filename = Path::new(&raw_name)
             .file_name()
             .and_then(|f| f.to_str())
@@ -347,8 +413,6 @@ fn extract_attachments(
         if filename.is_empty() {
             continue;
         }
-
-        std::fs::create_dir_all(&attachments_dir)?;
 
         let content_type = attachment
             .content_type()
@@ -361,19 +425,37 @@ fn extract_attachments(
             })
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
-        let body = attachment.contents();
-        let dest_filename = deduplicate_filename(&attachments_dir, &filename);
-        let dest_path = attachments_dir.join(&dest_filename);
+        result.push(PreparedAttachment {
+            filename,
+            content_type,
+            body: attachment.contents().to_vec(),
+        });
+    }
 
-        std::fs::write(&dest_path, body)?;
+    result
+}
 
-        let relative_path = format!("attachments/{dest_filename}");
+/// Write each attachment as a sibling of the `.md` file inside the bundle
+/// directory. Duplicate filenames are disambiguated with `-1`, `-2`, …
+/// before the extension. The returned `AttachmentMeta` entries carry the
+/// on-disk filename (without any bundle prefix — each attachment is a
+/// sibling of the `.md`, so the relative path is just the filename).
+fn write_attachments(
+    bundle_dir: &Path,
+    attachments: Vec<PreparedAttachment>,
+) -> Result<Vec<AttachmentMeta>, Box<dyn std::error::Error>> {
+    let mut result = Vec::with_capacity(attachments.len());
+
+    for att in attachments {
+        let dest_filename = deduplicate_filename(bundle_dir, &att.filename);
+        let dest_path = bundle_dir.join(&dest_filename);
+        std::fs::write(&dest_path, &att.body)?;
 
         result.push(AttachmentMeta {
-            filename: dest_filename,
-            content_type,
-            size: body.len(),
-            path: relative_path,
+            filename: dest_filename.clone(),
+            content_type: att.content_type,
+            size: att.body.len(),
+            path: dest_filename,
         });
     }
 
@@ -404,46 +486,22 @@ fn deduplicate_filename(dir: &Path, filename: &str) -> String {
     unreachable!()
 }
 
-fn create_file_atomic(
-    mailbox_dir: &Path,
-    meta_template: &EmailMetadata,
+fn write_markdown(
+    path: &Path,
+    meta: &EmailMetadata,
     body: &str,
-) -> Result<(String, std::path::PathBuf, EmailMetadata), Box<dyn std::error::Error>> {
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-    let mut counter = 1u32;
-
-    const MAX_COUNTER: u32 = 999_999;
-
-    loop {
-        if counter > MAX_COUNTER {
-            return Err(format!(
-                "Exhausted {MAX_COUNTER} file ID candidates for {today} in {}",
-                mailbox_dir.display()
-            )
-            .into());
-        }
-
-        let candidate = format!("{today}-{counter:03}");
-        let path = mailbox_dir.join(format!("{candidate}.md"));
-
-        match OpenOptions::new().write(true).create_new(true).open(&path) {
-            Ok(mut file) => {
-                let mut meta = meta_template.clone();
-                meta.id = candidate.clone();
-                let content = format_markdown(&meta, body);
-                file.write_all(content.as_bytes())?;
-                return Ok((candidate, path, meta));
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                counter += 1;
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
+    // `allocate_filename` already reserved this path by scanning the
+    // directory, but we still open with `create_new` so two in-flight
+    // ingests racing on the same subject at the same UTC second collide
+    // noisily instead of silently overwriting.
+    let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
+    let content = format_markdown(meta, body);
+    file.write_all(content.as_bytes())?;
+    Ok(path.to_path_buf())
 }
 
 fn format_markdown(meta: &EmailMetadata, body: &str) -> String {
@@ -586,20 +644,47 @@ mod tests {
           --mixbound2--\r\n"
     }
 
+    /// Walk the inbox mailbox dir and return every `.md` file, descending
+    /// into bundle directories when they exist. Ordering is by filename.
+    fn collect_md_files(mailbox_dir: &Path) -> Vec<std::path::PathBuf> {
+        let mut result: Vec<std::path::PathBuf> = Vec::new();
+        let entries = match std::fs::read_dir(mailbox_dir) {
+            Ok(e) => e,
+            Err(_) => return result,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // Bundle directory: expect exactly one sibling `.md` with
+                // the same stem as the directory.
+                if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
+                    let md = path.join(format!("{stem}.md"));
+                    if md.exists() {
+                        result.push(md);
+                    }
+                }
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                result.push(path);
+            }
+        }
+        result.sort();
+        result
+    }
+
+    fn inbox(tmp: &Path, name: &str) -> std::path::PathBuf {
+        tmp.join("inbox").join(name)
+    }
+
     #[test]
     fn ingest_plain_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 1);
 
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
 
         let parts: Vec<&str> = content.splitn(3, "+++").collect();
         assert!(parts.len() >= 3);
@@ -620,17 +705,51 @@ mod tests {
     }
 
     #[test]
+    fn ingest_writes_to_inbox_subdir() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+
+        // New Sprint 36 layout: inbox/<mailbox>/ instead of <mailbox>/.
+        assert!(tmp.path().join("inbox").join("alice").exists());
+        assert!(!tmp.path().join("alice").exists());
+    }
+
+    #[test]
+    fn ingest_filename_uses_utc_slug_format() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let name = entries[0]
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
+        // "Hello" subject → "hello" slug.
+        assert!(
+            name.ends_with("-hello.md"),
+            "expected slug-suffixed filename, got {name}"
+        );
+        // Matches YYYY-MM-DD-HHMMSS-<slug>.md shape.
+        let stem = name.trim_end_matches(".md");
+        let parts: Vec<&str> = stem.splitn(5, '-').collect();
+        assert_eq!(parts.len(), 5, "expected 5 dash-segments in {stem}");
+        assert_eq!(parts[0].len(), 4);
+        assert_eq!(parts[1].len(), 2);
+        assert_eq!(parts[2].len(), 2);
+        assert_eq!(parts[3].len(), 6);
+    }
+
+    #[test]
     fn ingest_html_only() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", html_only_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
         assert!(content.contains("Hello"));
         assert!(content.contains("World"));
         assert!(!content.contains("<html>"));
@@ -642,12 +761,8 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", multipart_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
         assert!(content.contains("Plain text part."));
         assert!(!content.contains("<html>"));
     }
@@ -658,12 +773,8 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(&config, "unknown@test.com", plain_text_eml()).unwrap();
 
-        assert!(tmp.path().join("catchall").exists());
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("catchall"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
+        assert!(inbox(tmp.path(), "catchall").exists());
+        let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
     }
 
@@ -673,12 +784,8 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
 
         let parts: Vec<&str> = content.splitn(3, "+++").collect();
         assert!(parts.len() >= 3);
@@ -710,31 +817,43 @@ mod tests {
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        assert_eq!(entries.len(), 2);
+        // Two ingests of the same subject within the same UTC second: the
+        // second must land on a distinct path thanks to the `-2` suffix.
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        assert_eq!(entries.len(), 2, "got entries: {entries:?}");
+        assert_ne!(entries[0], entries[1]);
     }
 
     #[test]
-    fn attachment_extracted() {
+    fn attachment_creates_bundle_directory() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
 
-        let att_path = tmp.path().join("alice/attachments/notes.txt");
-        assert!(att_path.exists());
+        let alice = inbox(tmp.path(), "alice");
+        // Top-level `attachments/` is GONE (Sprint 36).
+        assert!(!alice.join("attachments").exists());
+
+        // Exactly one bundle directory should have been created.
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let bundle = bundles[0].path();
+        let stem = bundle.file_name().unwrap().to_string_lossy().to_string();
+
+        // The bundle contains <stem>.md AND the attachment as a sibling.
+        let md = bundle.join(format!("{stem}.md"));
+        assert!(md.exists(), "bundle md {md:?} should exist");
+        let att_path = bundle.join("notes.txt");
+        assert!(att_path.exists(), "attachment at {att_path:?} should exist");
+
         let content = std::fs::read_to_string(&att_path).unwrap();
         assert!(content.contains("These are my notes."));
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let md_content = std::fs::read_to_string(&md).unwrap();
         let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
         let toml_str = parts[1].trim();
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
@@ -742,51 +861,70 @@ mod tests {
         let attachments = table.get("attachments").unwrap().as_array().unwrap();
         assert_eq!(attachments.len(), 1);
         let att = attachments[0].as_table().unwrap();
-        let filename = att.get("filename").unwrap().as_str().unwrap();
-        assert_eq!(filename, "notes.txt");
-        let path_val = att.get("path").unwrap().as_str().unwrap();
-        assert_eq!(path_val, "attachments/notes.txt");
+        assert_eq!(att.get("filename").unwrap().as_str().unwrap(), "notes.txt");
+        // Bundle-relative path has no `attachments/` prefix any more.
+        assert_eq!(att.get("path").unwrap().as_str().unwrap(), "notes.txt");
     }
 
     #[test]
-    fn multiple_attachments() {
+    fn multiple_attachments_in_single_bundle() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", multi_attachment_eml()).unwrap();
 
-        let att_dir = tmp.path().join("alice/attachments");
-        assert!(att_dir.join("file.txt").exists());
-        assert!(att_dir.join("data.bin").exists());
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let bundle = bundles[0].path();
+        assert!(bundle.join("file.txt").exists());
+        assert!(bundle.join("data.bin").exists());
     }
 
     #[test]
-    fn duplicate_attachment_filenames() {
+    fn duplicate_attachment_filenames_are_bundle_scoped() {
+        // Two emails with the same filename land in two distinct bundle
+        // directories, so the attachment names don't collide — no `-1`
+        // suffix needed inside either bundle.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
         ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
         ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
 
-        let att_dir = tmp.path().join("alice/attachments");
-        assert!(att_dir.join("notes.txt").exists());
-        assert!(att_dir.join("notes-1.txt").exists());
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 2, "expected two separate bundles");
+
+        for b in bundles {
+            assert!(b.path().join("notes.txt").exists());
+        }
     }
 
     #[test]
-    fn no_attachments() {
+    fn no_attachments_flat_markdown() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let att_dir = tmp.path().join("alice/attachments");
-        assert!(!att_dir.exists());
-
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
+        let alice = inbox(tmp.path(), "alice");
+        // No bundle directory, no legacy attachments dir.
+        let dirs: Vec<_> = std::fs::read_dir(&alice)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
+            .filter(|e| e.path().is_dir())
             .collect();
-        let md_content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(dirs.is_empty(), "flat layout must not create directories");
+
+        let entries = collect_md_files(&alice);
+        let md_content = std::fs::read_to_string(&entries[0]).unwrap();
         let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
         let toml_str = parts[1].trim();
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
@@ -827,8 +965,17 @@ mod tests {
 
         ingest_email(&config, "alice@test.com", eml).unwrap();
 
-        let att_dir = tmp.path().join("alice/attachments");
-        assert!(att_dir.join("evil").exists());
+        // Path traversal in the attachment filename collapses to `evil`
+        // inside the bundle; nothing escapes the mailbox dir.
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 1);
+        let bundle = bundles[0].path();
+        assert!(bundle.join("evil").exists());
         assert!(!tmp.path().join("etc").exists());
     }
 
@@ -863,12 +1010,8 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
         let parts: Vec<&str> = content.splitn(3, "+++").collect();
         let toml_str = parts[1].trim();
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
@@ -929,12 +1072,8 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let entries: Vec<_> = std::fs::read_dir(tmp.path().join("alice"))
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
         let parts: Vec<&str> = content.splitn(3, "+++").collect();
         let toml_str = parts[1].trim();
         let parsed: toml::Value = toml::from_str(toml_str).unwrap();
@@ -980,15 +1119,10 @@ mod tests {
 
         ingest_email(&config, "agent@test.com", raw).unwrap();
 
-        let catchall_dir = tmp.path().join("catchall");
-        let entries: Vec<_> = std::fs::read_dir(&catchall_dir)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
+        let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
 
-        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
         assert!(content.contains("subject = \"Test DKIM signed email from Gmail\""));
         assert!(content.contains("from = \"Test User <testuser@gmail.com>\""));
         assert!(content.contains("CAB1234567890abcdef@mail.gmail.com"));
@@ -1049,65 +1183,64 @@ mod tests {
     }
 
     #[test]
-    fn atomic_file_creation_retries_on_collision() {
+    fn concurrent_same_subject_attachment_ingests_do_not_corrupt_each_other() {
+        // Sprint 36 review fix: with the inbound `Mutex<()>` guarding the
+        // allocate-create-write critical section, two threads racing the
+        // same subject + same attachment filename in the same UTC second
+        // each end up in their own bundle directory with their own copy
+        // of the attachment intact.
+        use std::sync::Arc;
+        use std::thread;
+
         let tmp = TempDir::new().unwrap();
-        let mailbox_dir = tmp.path().join("alice");
-        std::fs::create_dir_all(&mailbox_dir).unwrap();
+        let config = Arc::new(test_config(tmp.path()));
 
-        // Pre-create a file with today's date and counter 001
-        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
-        let existing = mailbox_dir.join(format!("{today}-001.md"));
-        std::fs::write(&existing, "pre-existing file").unwrap();
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cfg = Arc::clone(&config);
+            handles.push(thread::spawn(move || {
+                ingest_email(&cfg, "alice@test.com", attachment_eml()).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
 
-        let meta = EmailMetadata {
-            id: String::new(),
-            message_id: "<test@test.com>".to_string(),
-            from: "sender@test.com".to_string(),
-            to: "alice@test.com".to_string(),
-            subject: "Collision test".to_string(),
-            date: "2025-01-01T00:00:00Z".to_string(),
-            in_reply_to: "".to_string(),
-            references: "".to_string(),
-            attachments: vec![],
-            mailbox: "alice".to_string(),
-            read: false,
-            dkim: "none".to_string(),
-            spf: "none".to_string(),
-        };
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 8, "each ingest must own its bundle dir");
 
-        let (id, _path, _meta) = create_file_atomic(&mailbox_dir, &meta, "body").unwrap();
-        assert_eq!(id, format!("{today}-002"));
-
-        // Pre-existing file should not be overwritten
-        let content = std::fs::read_to_string(&existing).unwrap();
-        assert_eq!(content, "pre-existing file");
+        for b in bundles {
+            let path = b.path();
+            let stem = path.file_name().unwrap().to_str().unwrap().to_string();
+            let md = path.join(format!("{stem}.md"));
+            let attachment = path.join("notes.txt");
+            assert!(md.exists(), "md file present in {stem}");
+            assert!(attachment.exists(), "attachment present in {stem}");
+            // Attachment content is the original — no other thread
+            // truncated/overwrote it.
+            let body = std::fs::read_to_string(&attachment).unwrap();
+            assert!(body.contains("These are my notes."));
+        }
     }
 
     #[test]
-    fn atomic_file_creation_two_rapid_calls_produce_different_ids() {
+    fn rapid_same_subject_ingests_get_unique_paths() {
+        // Two ingests with identical subjects landing in the same UTC
+        // second must not overwrite each other; `allocate_filename` picks
+        // the `-2` suffix for the second one.
         let tmp = TempDir::new().unwrap();
-        let mailbox_dir = tmp.path().join("alice");
-        std::fs::create_dir_all(&mailbox_dir).unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
 
-        let meta = EmailMetadata {
-            id: String::new(),
-            message_id: "<test@test.com>".to_string(),
-            from: "sender@test.com".to_string(),
-            to: "alice@test.com".to_string(),
-            subject: "Rapid test".to_string(),
-            date: "2025-01-01T00:00:00Z".to_string(),
-            in_reply_to: "".to_string(),
-            references: "".to_string(),
-            attachments: vec![],
-            mailbox: "alice".to_string(),
-            read: false,
-            dkim: "none".to_string(),
-            spf: "none".to_string(),
-        };
-
-        let (id1, _, _) = create_file_atomic(&mailbox_dir, &meta, "body1").unwrap();
-        let (id2, _, _) = create_file_atomic(&mailbox_dir, &meta, "body2").unwrap();
-        assert_ne!(id1, id2);
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        assert_eq!(entries.len(), 2);
+        assert_ne!(entries[0], entries[1]);
     }
 
     #[test]

@@ -13,6 +13,7 @@ mod send_handler;
 mod send_protocol;
 mod serve;
 mod setup;
+mod slug;
 mod smtp;
 mod status;
 mod term;

@@ -77,6 +77,7 @@ List emails in a mailbox with optional filters.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name to list emails from |
+| `folder` | string | no | `"inbox"` (default) or `"sent"` — picks which side of the mailbox to list |
 | `unread` | bool | no | Filter to only unread emails |
 | `from` | string | no | Filter by sender address (substring match) |
 | `since` | string | no | Filter to emails since this datetime (RFC 3339 format) |
@@ -93,7 +94,8 @@ Read the full content of an email.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name |
-| `id` | string | yes | Email ID (e.g. `2025-01-15-001`) |
+| `id` | string | yes | Email ID, i.e. the filename stem (e.g. `2025-01-15-103000-meeting`) |
+| `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 **Returns:** Complete `.md` file content including frontmatter and body.
 
@@ -136,7 +138,8 @@ Mark an email as read.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name |
-| `id` | string | yes | Email ID (e.g. `2025-01-15-001`) |
+| `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
+| `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 Updates `read = true` in the email's frontmatter.
 
@@ -149,7 +152,8 @@ Mark an email as unread.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name |
-| `id` | string | yes | Email ID (e.g. `2025-01-15-001`) |
+| `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
+| `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 Updates `read = false` in the email's frontmatter.
 

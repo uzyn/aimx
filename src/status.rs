@@ -1,7 +1,7 @@
 use crate::config::Config;
 use crate::ingest::EmailMetadata;
 use crate::term;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct StatusInfo {
     pub domain: String,
@@ -66,21 +66,32 @@ fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
     let mut all: Vec<RecentEmail> = Vec::new();
 
     for name in config.mailboxes.keys() {
-        let dir = config.mailbox_dir(name);
+        let dir = config.inbox_dir(name);
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
 
-        let mut md_files: Vec<_> = entries
-            .flatten()
-            .filter(|e| e.path().extension().is_some_and(|ext| ext == "md"))
-            .collect();
-
-        md_files.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
-
-        for entry in md_files.into_iter().take(3) {
+        // Collect both flat `<stem>.md` and bundle `<stem>/<stem>.md`
+        // paths; sort newest-first by stem (UTC timestamp prefix orders
+        // lexicographically).
+        let mut md_paths: Vec<PathBuf> = Vec::new();
+        for entry in entries.flatten() {
             let path = entry.path();
+            if path.is_dir() {
+                if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
+                    let md = path.join(format!("{stem}.md"));
+                    if md.exists() {
+                        md_paths.push(md);
+                    }
+                }
+            } else if path.extension().is_some_and(|ext| ext == "md") {
+                md_paths.push(path);
+            }
+        }
+        md_paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
+
+        for path in md_paths.into_iter().take(3) {
             let content = match std::fs::read_to_string(&path) {
                 Ok(c) => c,
                 Err(_) => continue,
@@ -129,11 +140,26 @@ fn count_messages(dir: &Path) -> (usize, usize) {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "md") {
-            total += 1;
-            if is_unread(&path) {
-                unread += 1;
+        let md_path = if path.is_dir() {
+            // Bundle directory: look for the `<stem>.md` inside.
+            let stem = match path.file_name().and_then(|f| f.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let candidate = path.join(format!("{stem}.md"));
+            if !candidate.exists() {
+                continue;
             }
+            candidate
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            path
+        } else {
+            continue;
+        };
+
+        total += 1;
+        if is_unread(&md_path) {
+            unread += 1;
         }
     }
 
@@ -561,7 +587,7 @@ mod tests {
     fn gather_recent_activity_reads_emails() {
         let tmp = tempfile::TempDir::new().unwrap();
         let data_dir = tmp.path();
-        let catchall = data_dir.join("catchall");
+        let catchall = data_dir.join("inbox").join("catchall");
         std::fs::create_dir_all(&catchall).unwrap();
 
         let email_content = "+++\nid = \"2025-01-15-001\"\nmessage_id = \"<a@b>\"\nfrom = \"alice@example.com\"\nto = \"c@d\"\nsubject = \"Test email\"\ndate = \"2025-01-15T10:30:00Z\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\nBody here";
