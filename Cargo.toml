@@ -30,6 +30,8 @@ rustls-pki-types = { version = "1", features = ["alloc"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 hickory-resolver = "0.25"
 include_dir = "0.7"
+sha2 = "0.10"
+psl = "2"
 
 [dev-dependencies]
 tempfile = "3"

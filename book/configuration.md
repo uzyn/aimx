@@ -58,6 +58,28 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 
 See [Mailboxes](mailboxes.md) for mailbox management and [Channel Rules](channels.md) for trigger configuration.
 
+### Inbound email verification
+
+AIMX verifies three authentication mechanisms on every inbound email and records the results in the email's TOML frontmatter:
+
+| Field | Values | Description |
+|-------|--------|-------------|
+| `dkim` | `pass`, `fail`, `none` | DKIM signature verification result. `none` when no DKIM signature is present. |
+| `spf` | `pass`, `fail`, `none` | SPF record check against the sending server's IP. `none` when no SPF record exists or no IP could be extracted. |
+| `dmarc` | `pass`, `fail`, `none` | DMARC alignment check combining DKIM and SPF results against the sender's published DMARC policy. `none` when no DMARC record is published or the check could not be performed. |
+
+All three fields are always written (never omitted), so agents can reliably check authentication status without guessing whether a missing field means "not checked" or "failed."
+
+The `trusted` frontmatter field summarizes the per-mailbox trust evaluation:
+
+| Value | Meaning |
+|-------|---------|
+| `"none"` | Mailbox `trust` is `none` (default) -- no trust evaluation performed. |
+| `"true"` | Mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed. |
+| `"false"` | Mailbox `trust` is `verified`, any other outcome. |
+
+Trust only gates channel trigger execution -- all email is stored regardless of the `trusted` result.
+
 ### Channel rule settings
 
 Channel rules are defined as `[[mailboxes.<name>.on_receive]]` arrays:
@@ -80,17 +102,21 @@ See [Channel Rules](channels.md) for full details on triggers, match filters, an
     └── public.key           # RSA public key (mode 0644)
 
 /run/aimx/                   # Runtime directory (mode 0755, root:root)
-└── send.sock                # (Sprint 34) world-writable UDS for aimx send
+└── send.sock                # World-writable UDS for aimx send
 
 /var/lib/aimx/               # Mailbox storage
-├── catchall/                # Default mailbox
-│   ├── 2025-01-15-001.md
-│   ├── 2025-01-15-002.md
-│   └── attachments/
-│       └── document.pdf
-└── support/                 # Named mailbox
-    ├── 2025-01-15-001.md
-    └── attachments/
+├── inbox/
+│   ├── catchall/            # Default mailbox
+│   │   ├── 2025-04-15-143022-hello.md
+│   │   └── 2025-04-15-153300-invoice-march/   # Attachment bundle
+│   │       ├── 2025-04-15-153300-invoice-march.md
+│   │       ├── invoice.pdf
+│   │       └── receipt.png
+│   └── support/             # Named mailbox
+│       └── ...
+└── sent/
+    └── support/             # Outbound sent copies
+        └── ...
 ```
 
 ## IPv6 delivery (advanced)

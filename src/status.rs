@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::ingest::EmailMetadata;
+use crate::frontmatter::InboundFrontmatter;
 use crate::term;
 use std::path::{Path, PathBuf};
 
@@ -102,7 +102,7 @@ fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
                 None => continue,
             };
 
-            let meta: EmailMetadata = match toml::from_str(&fm) {
+            let meta: InboundFrontmatter = match toml::from_str(&fm) {
                 Ok(m) => m,
                 Err(_) => continue,
             };
@@ -177,7 +177,7 @@ fn is_unread(path: &Path) -> bool {
         None => return false,
     };
 
-    match toml::from_str::<EmailMetadata>(&frontmatter) {
+    match toml::from_str::<InboundFrontmatter>(&frontmatter) {
         Ok(meta) => !meta.read,
         Err(_) => false,
     }

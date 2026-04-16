@@ -1,5 +1,5 @@
 use crate::config::{MailboxConfig, MatchFilter, OnReceiveRule};
-use crate::ingest::EmailMetadata;
+use crate::frontmatter::InboundFrontmatter;
 use shell_escape::escape;
 use std::borrow::Cow;
 use std::path::Path;
@@ -7,7 +7,7 @@ use std::process::Command;
 
 pub struct TriggerContext<'a> {
     pub filepath: &'a Path,
-    pub metadata: &'a EmailMetadata,
+    pub metadata: &'a InboundFrontmatter,
 }
 
 fn shell_escape_value(val: &str) -> String {
@@ -28,7 +28,7 @@ pub fn substitute_template(command: &str, ctx: &TriggerContext) -> String {
         .replace("{date}", &shell_escape_value(&ctx.metadata.date))
 }
 
-pub fn matches_filter(filter: &MatchFilter, metadata: &EmailMetadata) -> bool {
+pub fn matches_filter(filter: &MatchFilter, metadata: &InboundFrontmatter) -> bool {
     if let Some(ref from_pattern) = filter.from {
         let from_addr = extract_email_for_match(&metadata.from);
         if !glob_match::glob_match(from_pattern, &from_addr) {
@@ -64,7 +64,7 @@ fn extract_email_for_match(from: &str) -> String {
     from.to_lowercase()
 }
 
-pub fn should_fire(rule: &OnReceiveRule, metadata: &EmailMetadata) -> bool {
+pub fn should_fire(rule: &OnReceiveRule, metadata: &InboundFrontmatter) -> bool {
     if rule.rule_type != "cmd" {
         return false;
     }
@@ -84,7 +84,10 @@ pub fn is_sender_trusted(mailbox_config: &MailboxConfig, from: &str) -> bool {
     false
 }
 
-pub fn should_execute_triggers(mailbox_config: &MailboxConfig, metadata: &EmailMetadata) -> bool {
+pub fn should_execute_triggers(
+    mailbox_config: &MailboxConfig,
+    metadata: &InboundFrontmatter,
+) -> bool {
     if mailbox_config.trust == "none" {
         return true;
     }
@@ -137,28 +140,40 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
 mod tests {
     use super::*;
     use crate::config::{MatchFilter, OnReceiveRule};
-    use crate::ingest::{AttachmentMeta, EmailMetadata};
+    use crate::frontmatter::{AttachmentMeta, InboundFrontmatter};
     use std::path::PathBuf;
 
-    fn sample_metadata() -> EmailMetadata {
-        EmailMetadata {
+    fn sample_metadata() -> InboundFrontmatter {
+        InboundFrontmatter {
             id: "2025-06-01-001".to_string(),
             message_id: "<test@example.com>".to_string(),
+            thread_id: "0123456789abcdef".to_string(),
             from: "alice@gmail.com".to_string(),
             to: "agent@test.com".to_string(),
+            cc: None,
+            reply_to: None,
+            delivered_to: "agent@test.com".to_string(),
             subject: "Hello World".to_string(),
             date: "2025-06-01T12:00:00Z".to_string(),
-            in_reply_to: "".to_string(),
-            references: "".to_string(),
+            received_at: "2025-06-01T12:00:01Z".to_string(),
+            received_from_ip: None,
+            size_bytes: 100,
+            in_reply_to: None,
+            references: None,
             attachments: vec![],
-            mailbox: "catchall".to_string(),
-            read: false,
+            list_id: None,
+            auto_submitted: None,
             dkim: "none".to_string(),
             spf: "none".to_string(),
+            dmarc: "none".to_string(),
+            trusted: "none".to_string(),
+            mailbox: "catchall".to_string(),
+            read: false,
+            labels: vec![],
         }
     }
 
-    fn sample_ctx<'a>(filepath: &'a Path, metadata: &'a EmailMetadata) -> TriggerContext<'a> {
+    fn sample_ctx<'a>(filepath: &'a Path, metadata: &'a InboundFrontmatter) -> TriggerContext<'a> {
         TriggerContext { filepath, metadata }
     }
 

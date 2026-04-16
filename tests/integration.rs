@@ -1778,7 +1778,7 @@ fn serve_e2e_bcc_recipients() {
     assert_eq!(get_toml_str(alice_table, "mailbox"), "alice");
     assert_eq!(get_toml_str(bob_table, "mailbox"), "bob");
 
-    // BCC address should not appear as a header in the stored email
+    // BCC address should not appear as a Bcc: header in the stored email
     let bob_content = std::fs::read_to_string(&bob_files[0]).unwrap();
     assert!(
         !bob_content.contains("Bcc:")
@@ -1786,9 +1786,12 @@ fn serve_e2e_bcc_recipients() {
             && !bob_content.contains("BCC:"),
         "BCC header line should not be in stored email"
     );
-    assert!(
-        !bob_content.contains("bob@agent.example.com"),
-        "BCC recipient address should not appear in stored email"
+    // delivered_to carries the actual RCPT TO (envelope recipient),
+    // which for BCC is the BCC address. This is correct per FR-13.
+    assert_eq!(
+        get_toml_str(bob_table, "delivered_to"),
+        "bob@agent.example.com",
+        "delivered_to should be the envelope recipient (BCC address)"
     );
     assert_eq!(
         get_toml_str(bob_table, "to"),

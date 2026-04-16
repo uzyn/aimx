@@ -1,8 +1,10 @@
 use crate::channel::{self, TriggerContext};
 use crate::config::Config;
+use crate::frontmatter::{
+    AttachmentMeta, AuthResults, InboundFrontmatter, compute_thread_id, format_frontmatter,
+};
 use crate::slug::{allocate_filename, slugify};
 use mail_parser::{MessageParser, MimeHeaders};
-use serde::Serialize;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
@@ -16,47 +18,20 @@ use std::sync::Mutex;
 /// planned for FR-19b.
 static INGEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct EmailMetadata {
-    pub id: String,
-    pub message_id: String,
-    pub from: String,
-    pub to: String,
-    pub subject: String,
-    pub date: String,
-    pub in_reply_to: String,
-    pub references: String,
-    pub attachments: Vec<AttachmentMeta>,
-    pub mailbox: String,
-    pub read: bool,
-    #[serde(default = "default_auth_result")]
-    pub dkim: String,
-    #[serde(default = "default_auth_result")]
-    pub spf: String,
-}
-
-fn default_auth_result() -> String {
-    "none".to_string()
-}
-
-#[derive(Debug, Clone, Serialize, serde::Deserialize)]
-pub struct AttachmentMeta {
-    pub filename: String,
-    pub content_type: String,
-    pub size: usize,
-    pub path: String,
-}
-
 pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
-    ingest_email(&config, rcpt, &raw)
+    // Manual stdin path: no SMTP session, so received_from_ip is the
+    // unspecified sentinel (0.0.0.0).
+    let sentinel_ip: IpAddr = "0.0.0.0".parse().unwrap();
+    ingest_email(&config, rcpt, &raw, sentinel_ip)
 }
 
 pub fn ingest_email(
     config: &Config,
     rcpt: &str,
     raw: &[u8],
+    received_from_ip: IpAddr,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let local_part = extract_local_part(rcpt);
     let mailbox = config.resolve_mailbox(local_part);
@@ -94,6 +69,40 @@ pub fn ingest_email(
         })
         .unwrap_or_default();
 
+    let cc = message.cc().and_then(|addrs| {
+        let parts: Vec<String> = addrs
+            .iter()
+            .filter_map(|a| {
+                a.address().map(|addr| match a.name() {
+                    Some(name) => format!("{name} <{addr}>"),
+                    None => addr.to_string(),
+                })
+            })
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    });
+
+    let reply_to = message.reply_to().and_then(|addrs| {
+        let parts: Vec<String> = addrs
+            .iter()
+            .filter_map(|a| {
+                a.address().map(|addr| match a.name() {
+                    Some(name) => format!("{name} <{addr}>"),
+                    None => addr.to_string(),
+                })
+            })
+            .collect();
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(", "))
+        }
+    });
+
     let subject = message.subject().unwrap_or("(no subject)").to_string();
 
     let date = message
@@ -103,34 +112,54 @@ pub fn ingest_email(
 
     let message_id = message.message_id().unwrap_or("").to_string();
 
-    let in_reply_to = message
+    let in_reply_to_raw = message
         .in_reply_to()
         .as_text()
         .unwrap_or_default()
         .to_string();
 
-    let references = message
+    let references_raw = message
         .references()
         .as_text()
         .unwrap_or_default()
         .to_string();
 
+    let thread_id = compute_thread_id(
+        &message_id,
+        if in_reply_to_raw.is_empty() {
+            None
+        } else {
+            Some(in_reply_to_raw.as_str())
+        },
+        if references_raw.is_empty() {
+            None
+        } else {
+            Some(references_raw.as_str())
+        },
+    );
+
+    let list_id = extract_header_value(&message, "List-ID");
+    let auto_submitted = extract_header_value(&message, "Auto-Submitted");
+
     let body = extract_body(&message);
 
-    // Collect attachments as in-memory metadata + payload so we can decide
-    // between flat and bundle layouts before committing any file to disk.
     let prepared_attachments = prepare_attachments(&message);
     let has_attachments = !prepared_attachments.is_empty();
 
-    let (dkim_result, spf_result) = verify_auth(raw, rcpt);
+    let auth_results = verify_auth(raw);
+
+    let received_at = chrono::Utc::now().to_rfc3339();
+    let size_bytes = raw.len();
+
+    let ip_str = if received_from_ip.is_unspecified() {
+        None
+    } else {
+        Some(received_from_ip.to_string())
+    };
 
     let slug = slugify(&subject);
     let timestamp = chrono::Utc::now();
 
-    // Hold the inbound write lock across allocate → mkdir → write
-    // attachments → write markdown so two ingests racing on the same UTC
-    // second + slug + attachment filenames cannot interleave: the second
-    // arrival sees the first's bundle on disk and picks a `-2` suffix.
     let _guard = INGEST_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -141,9 +170,6 @@ pub fn ingest_email(
         .ok_or("allocate_filename returned a rootless path")?
         .to_path_buf();
 
-    // For bundle layouts the parent is `<stem>/`; for flat layouts it is
-    // the mailbox directory itself (already created above). Either way,
-    // `create_dir_all` is idempotent and cheap.
     std::fs::create_dir_all(&parent_dir)?;
 
     let id = md_path
@@ -152,9 +178,6 @@ pub fn ingest_email(
         .unwrap_or_default()
         .to_string();
 
-    // Roll back a freshly created bundle directory on any post-allocation
-    // failure (attachment write or markdown write). For flat layouts the
-    // parent is the mailbox dir itself and stays untouched.
     let cleanup_bundle = || {
         if has_attachments && parent_dir != inbox_dir {
             let _ = std::fs::remove_dir_all(&parent_dir);
@@ -165,20 +188,40 @@ pub fn ingest_email(
         cleanup_bundle();
     })?;
 
-    let meta = EmailMetadata {
+    let meta = InboundFrontmatter {
         id: id.clone(),
         message_id,
+        thread_id,
         from,
         to,
+        cc,
+        reply_to,
+        delivered_to: rcpt.to_string(),
         subject,
         date,
-        in_reply_to,
-        references,
+        received_at,
+        received_from_ip: ip_str,
+        size_bytes,
         attachments,
+        in_reply_to: if in_reply_to_raw.is_empty() {
+            None
+        } else {
+            Some(in_reply_to_raw)
+        },
+        references: if references_raw.is_empty() {
+            None
+        } else {
+            Some(references_raw)
+        },
+        list_id,
+        auto_submitted,
+        dkim: auth_results.dkim,
+        spf: auth_results.spf,
+        dmarc: auth_results.dmarc,
+        trusted: "none".to_string(),
         mailbox: mailbox.clone(),
         read: false,
-        dkim: dkim_result,
-        spf: spf_result,
+        labels: vec![],
     };
 
     write_markdown(&md_path, &meta, &body).inspect_err(|_| {
@@ -198,53 +241,130 @@ pub fn ingest_email(
     Ok(())
 }
 
+fn extract_header_value(message: &mail_parser::Message, name: &str) -> Option<String> {
+    let val = message.header_raw(name)?;
+    let s = val.trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
 fn create_resolver() -> Option<mail_auth::MessageAuthenticator> {
     mail_auth::MessageAuthenticator::new_system_conf()
         .or_else(|_| mail_auth::MessageAuthenticator::new_cloudflare())
         .ok()
 }
 
-fn verify_auth(raw: &[u8], rcpt: &str) -> (String, String) {
+fn verify_auth(raw: &[u8]) -> AuthResults {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
-        Err(_) => return ("none".to_string(), "none".to_string()),
+        Err(_) => return AuthResults::default(),
     };
 
     let resolver = match create_resolver() {
         Some(r) => r,
-        None => return ("none".to_string(), "none".to_string()),
+        None => return AuthResults::default(),
     };
 
     rt.block_on(async {
-        let dkim_result = verify_dkim_async(raw, &resolver).await;
-        let spf_result = verify_spf_async(raw, rcpt, &resolver).await;
-        (dkim_result, spf_result)
+        let auth_msg = mail_auth::AuthenticatedMessage::parse(raw);
+
+        let dkim_output = match &auth_msg {
+            Some(msg) => resolver.verify_dkim(msg).await,
+            None => vec![],
+        };
+
+        let dkim_result = dkim_output_to_string(&dkim_output, auth_msg.is_some());
+
+        let spf_result = verify_spf_async(raw, &resolver).await;
+        let spf_output = build_spf_output(raw, &resolver).await;
+
+        let dmarc_result = match &auth_msg {
+            Some(msg) => verify_dmarc_async(msg, &dkim_output, &spf_output, raw, &resolver).await,
+            None => "none".to_string(),
+        };
+
+        AuthResults {
+            dkim: dkim_result,
+            spf: spf_result,
+            dmarc: dmarc_result,
+        }
     })
 }
 
-async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
-    let auth_msg = match mail_auth::AuthenticatedMessage::parse(raw) {
-        Some(msg) => msg,
-        None => return "none".to_string(),
-    };
-
-    if auth_msg.dkim_headers.is_empty() {
+fn dkim_output_to_string(results: &[mail_auth::DkimOutput<'_>], parsed: bool) -> String {
+    if !parsed {
         return "none".to_string();
     }
-
-    let results = resolver.verify_dkim(&auth_msg).await;
 
     if results.is_empty() {
         return "none".to_string();
     }
 
-    for output in &results {
+    for output in results {
         if matches!(output.result(), mail_auth::DkimResult::Pass) {
             return "pass".to_string();
         }
     }
 
     "fail".to_string()
+}
+
+async fn build_spf_output(
+    raw: &[u8],
+    resolver: &mail_auth::MessageAuthenticator,
+) -> mail_auth::SpfOutput {
+    let ip = match extract_received_ip(raw) {
+        Some(ip) => ip,
+        None => return mail_auth::SpfOutput::new(String::new()),
+    };
+
+    let mail_from = extract_mail_from(raw).unwrap_or_default();
+
+    let helo_domain = match spf_domain(&mail_from) {
+        Some(d) => d.to_string(),
+        None => return mail_auth::SpfOutput::new(String::new()),
+    };
+
+    resolver
+        .verify_spf(mail_auth::spf::verify::SpfParameters::verify_mail_from(
+            ip,
+            &helo_domain,
+            &helo_domain,
+            &mail_from,
+        ))
+        .await
+}
+
+async fn verify_dmarc_async(
+    auth_msg: &mail_auth::AuthenticatedMessage<'_>,
+    dkim_output: &[mail_auth::DkimOutput<'_>],
+    spf_output: &mail_auth::SpfOutput,
+    raw: &[u8],
+    resolver: &mail_auth::MessageAuthenticator,
+) -> String {
+    let mail_from = extract_mail_from(raw).unwrap_or_default();
+    let mail_from_domain = spf_domain(&mail_from).unwrap_or("");
+
+    let params = mail_auth::dmarc::verify::DmarcParameters {
+        message: auth_msg,
+        dkim_output,
+        rfc5321_mail_from_domain: mail_from_domain,
+        spf_output,
+        domain_suffix_fn: |d| psl::domain_str(d).unwrap_or(d),
+    };
+
+    let output = resolver.verify_dmarc(params).await;
+
+    if output.dkim_result() == &mail_auth::DmarcResult::Pass {
+        return "pass".to_string();
+    }
+    if output.spf_result() == &mail_auth::DmarcResult::Pass {
+        return "pass".to_string();
+    }
+
+    match (output.dkim_result(), output.spf_result()) {
+        (mail_auth::DmarcResult::None, mail_auth::DmarcResult::None) => "none".to_string(),
+        _ => "fail".to_string(),
+    }
 }
 
 pub fn spf_domain(mail_from: &str) -> Option<&str> {
@@ -256,11 +376,7 @@ pub fn spf_domain(mail_from: &str) -> Option<&str> {
     }
 }
 
-async fn verify_spf_async(
-    raw: &[u8],
-    _rcpt: &str,
-    resolver: &mail_auth::MessageAuthenticator,
-) -> String {
+async fn verify_spf_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
     let ip = match extract_received_ip(raw) {
         Some(ip) => ip,
         None => return "none".to_string(),
@@ -383,9 +499,6 @@ fn extract_body(message: &mail_parser::Message) -> String {
     String::new()
 }
 
-/// An attachment extracted from the parsed MIME message but not yet written
-/// to disk. Lives long enough to decide between flat and bundle layouts
-/// before any file I/O happens.
 struct PreparedAttachment {
     filename: String,
     content_type: String,
@@ -401,9 +514,6 @@ fn prepare_attachments(message: &mail_parser::Message) -> Vec<PreparedAttachment
             None => continue,
         };
 
-        // Strip any path components the sender may have smuggled in;
-        // `file_name` on a traversal string like `../../etc/foo` returns
-        // just `foo`.
         let filename = Path::new(&raw_name)
             .file_name()
             .and_then(|f| f.to_str())
@@ -435,11 +545,6 @@ fn prepare_attachments(message: &mail_parser::Message) -> Vec<PreparedAttachment
     result
 }
 
-/// Write each attachment as a sibling of the `.md` file inside the bundle
-/// directory. Duplicate filenames are disambiguated with `-1`, `-2`, …
-/// before the extension. The returned `AttachmentMeta` entries carry the
-/// on-disk filename (without any bundle prefix — each attachment is a
-/// sibling of the `.md`, so the relative path is just the filename).
 fn write_attachments(
     bundle_dir: &Path,
     attachments: Vec<PreparedAttachment>,
@@ -488,35 +593,16 @@ fn deduplicate_filename(dir: &Path, filename: &str) -> String {
 
 fn write_markdown(
     path: &Path,
-    meta: &EmailMetadata,
+    meta: &InboundFrontmatter,
     body: &str,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
     use std::fs::OpenOptions;
     use std::io::Write;
 
-    // `allocate_filename` already reserved this path by scanning the
-    // directory, but we still open with `create_new` so two in-flight
-    // ingests racing on the same subject at the same UTC second collide
-    // noisily instead of silently overwriting.
     let mut file = OpenOptions::new().write(true).create_new(true).open(path)?;
-    let content = format_markdown(meta, body);
+    let content = format_frontmatter(meta, body);
     file.write_all(content.as_bytes())?;
     Ok(path.to_path_buf())
-}
-
-fn format_markdown(meta: &EmailMetadata, body: &str) -> String {
-    let toml_str = toml::to_string_pretty(meta).expect("EmailMetadata must serialize to TOML");
-    let mut result = String::new();
-    result.push_str("+++\n");
-    result.push_str(&toml_str);
-    result.push_str("+++\n\n");
-    result.push_str(body);
-
-    if !body.ends_with('\n') {
-        result.push('\n');
-    }
-
-    result
 }
 
 #[cfg(test)]
@@ -554,6 +640,10 @@ mod tests {
             verify_host: None,
             enable_ipv6: false,
         }
+    }
+
+    fn sentinel_ip() -> IpAddr {
+        "0.0.0.0".parse().unwrap()
     }
 
     fn plain_text_eml() -> &'static [u8] {
@@ -644,8 +734,6 @@ mod tests {
           --mixbound2--\r\n"
     }
 
-    /// Walk the inbox mailbox dir and return every `.md` file, descending
-    /// into bundle directories when they exist. Ordering is by filename.
     fn collect_md_files(mailbox_dir: &Path) -> Vec<std::path::PathBuf> {
         let mut result: Vec<std::path::PathBuf> = Vec::new();
         let entries = match std::fs::read_dir(mailbox_dir) {
@@ -655,8 +743,6 @@ mod tests {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Bundle directory: expect exactly one sibling `.md` with
-                // the same stem as the directory.
                 if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
                     let md = path.join(format!("{stem}.md"));
                     if md.exists() {
@@ -675,31 +761,32 @@ mod tests {
         tmp.join("inbox").join(name)
     }
 
+    fn parse_toml_frontmatter(content: &str) -> toml::value::Table {
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        assert!(parts.len() >= 3);
+        let toml_str = parts[1].trim();
+        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
+        parsed.as_table().unwrap().clone()
+    }
+
     #[test]
     fn ingest_plain_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 1);
 
         let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
 
-        let parts: Vec<&str> = content.splitn(3, "+++").collect();
-        assert!(parts.len() >= 3);
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
-
-        let from_val = table.get("from").unwrap().as_str().unwrap();
-        assert_eq!(from_val, "sender@example.com");
-
-        let subject_val = table.get("subject").unwrap().as_str().unwrap();
-        assert_eq!(subject_val, "Hello");
-
-        let read_val = table.get("read").unwrap();
-        assert_eq!(read_val, &toml::Value::Boolean(false));
+        assert_eq!(
+            table.get("from").unwrap().as_str().unwrap(),
+            "sender@example.com"
+        );
+        assert_eq!(table.get("subject").unwrap().as_str().unwrap(), "Hello");
+        assert_eq!(table.get("read").unwrap(), &toml::Value::Boolean(false));
 
         assert!(content.contains("This is a plain text email."));
     }
@@ -708,9 +795,8 @@ mod tests {
     fn ingest_writes_to_inbox_subdir() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
-        // New Sprint 36 layout: inbox/<mailbox>/ instead of <mailbox>/.
         assert!(tmp.path().join("inbox").join("alice").exists());
         assert!(!tmp.path().join("alice").exists());
     }
@@ -719,7 +805,7 @@ mod tests {
     fn ingest_filename_uses_utc_slug_format() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let name = entries[0]
@@ -727,12 +813,10 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
-        // "Hello" subject → "hello" slug.
         assert!(
             name.ends_with("-hello.md"),
             "expected slug-suffixed filename, got {name}"
         );
-        // Matches YYYY-MM-DD-HHMMSS-<slug>.md shape.
         let stem = name.trim_end_matches(".md");
         let parts: Vec<&str> = stem.splitn(5, '-').collect();
         assert_eq!(parts.len(), 5, "expected 5 dash-segments in {stem}");
@@ -746,7 +830,7 @@ mod tests {
     fn ingest_html_only() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", html_only_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", html_only_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -759,7 +843,7 @@ mod tests {
     fn ingest_multipart_prefers_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", multipart_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", multipart_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -771,7 +855,7 @@ mod tests {
     fn ingest_routes_unknown_to_catchall() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "unknown@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "unknown@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         assert!(inbox(tmp.path(), "catchall").exists());
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
@@ -782,31 +866,30 @@ mod tests {
     fn frontmatter_valid_toml() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
-
-        let parts: Vec<&str> = content.splitn(3, "+++").collect();
-        assert!(parts.len() >= 3);
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
+        let table = parse_toml_frontmatter(&content);
 
         assert!(table.contains_key("id"));
         assert!(table.contains_key("message_id"));
+        assert!(table.contains_key("thread_id"));
         assert!(table.contains_key("from"));
         assert!(table.contains_key("to"));
+        assert!(table.contains_key("delivered_to"));
         assert!(table.contains_key("subject"));
         assert!(table.contains_key("date"));
-        assert!(table.contains_key("in_reply_to"));
-        assert!(table.contains_key("references"));
-        assert!(table.contains_key("attachments"));
+        assert!(table.contains_key("received_at"));
+        assert!(table.contains_key("size_bytes"));
+        assert!(table.contains_key("dkim"));
+        assert!(table.contains_key("spf"));
+        assert!(table.contains_key("dmarc"));
+        assert!(table.contains_key("trusted"));
         assert!(table.contains_key("mailbox"));
         assert!(table.contains_key("read"));
 
-        let read_val = table.get("read").unwrap();
-        assert_eq!(read_val, &toml::Value::Boolean(false));
+        assert_eq!(table.get("read").unwrap(), &toml::Value::Boolean(false));
     }
 
     #[test]
@@ -814,11 +897,9 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
-        // Two ingests of the same subject within the same UTC second: the
-        // second must land on a distinct path thanks to the `-2` suffix.
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 2, "got entries: {entries:?}");
         assert_ne!(entries[0], entries[1]);
@@ -828,13 +909,11 @@ mod tests {
     fn attachment_creates_bundle_directory() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
 
         let alice = inbox(tmp.path(), "alice");
-        // Top-level `attachments/` is GONE (Sprint 36).
         assert!(!alice.join("attachments").exists());
 
-        // Exactly one bundle directory should have been created.
         let bundles: Vec<_> = std::fs::read_dir(&alice)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -844,7 +923,6 @@ mod tests {
         let bundle = bundles[0].path();
         let stem = bundle.file_name().unwrap().to_string_lossy().to_string();
 
-        // The bundle contains <stem>.md AND the attachment as a sibling.
         let md = bundle.join(format!("{stem}.md"));
         assert!(md.exists(), "bundle md {md:?} should exist");
         let att_path = bundle.join("notes.txt");
@@ -854,15 +932,11 @@ mod tests {
         assert!(content.contains("These are my notes."));
 
         let md_content = std::fs::read_to_string(&md).unwrap();
-        let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
+        let table = parse_toml_frontmatter(&md_content);
         let attachments = table.get("attachments").unwrap().as_array().unwrap();
         assert_eq!(attachments.len(), 1);
         let att = attachments[0].as_table().unwrap();
         assert_eq!(att.get("filename").unwrap().as_str().unwrap(), "notes.txt");
-        // Bundle-relative path has no `attachments/` prefix any more.
         assert_eq!(att.get("path").unwrap().as_str().unwrap(), "notes.txt");
     }
 
@@ -870,7 +944,13 @@ mod tests {
     fn multiple_attachments_in_single_bundle() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", multi_attachment_eml()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            multi_attachment_eml(),
+            sentinel_ip(),
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -886,14 +966,11 @@ mod tests {
 
     #[test]
     fn duplicate_attachment_filenames_are_bundle_scoped() {
-        // Two emails with the same filename land in two distinct bundle
-        // directories, so the attachment names don't collide — no `-1`
-        // suffix needed inside either bundle.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
-        ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
-        ingest_email(&config, "alice@test.com", attachment_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -912,10 +989,9 @@ mod tests {
     fn no_attachments_flat_markdown() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let alice = inbox(tmp.path(), "alice");
-        // No bundle directory, no legacy attachments dir.
         let dirs: Vec<_> = std::fs::read_dir(&alice)
             .unwrap()
             .filter_map(|e| e.ok())
@@ -925,12 +1001,9 @@ mod tests {
 
         let entries = collect_md_files(&alice);
         let md_content = std::fs::read_to_string(&entries[0]).unwrap();
-        let parts: Vec<&str> = md_content.splitn(3, "+++").collect();
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
-        let attachments = table.get("attachments").unwrap().as_array().unwrap();
-        assert!(attachments.is_empty());
+        let table = parse_toml_frontmatter(&md_content);
+        // Empty attachments vec is omitted from TOML output
+        assert!(!table.contains_key("attachments"));
     }
 
     #[test]
@@ -963,10 +1036,8 @@ mod tests {
             malicious content\r\n\
             --evilbound--\r\n";
 
-        ingest_email(&config, "alice@test.com", eml).unwrap();
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
 
-        // Path traversal in the attachment filename collapses to `evil`
-        // inside the bundle; nothing escapes the mailbox dir.
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
             .unwrap()
@@ -981,23 +1052,35 @@ mod tests {
 
     #[test]
     fn toml_handles_special_characters() {
-        let meta = EmailMetadata {
+        let meta = InboundFrontmatter {
             id: "2025-01-01-001".to_string(),
             message_id: "<test@example.com>".to_string(),
+            thread_id: "0123456789abcdef".to_string(),
             from: "test\n+++\ninjected: true".to_string(),
             to: "to@test.com".to_string(),
+            cc: None,
+            reply_to: None,
+            delivered_to: "to@test.com".to_string(),
             subject: "colons: and #hashes".to_string(),
             date: "2025-01-01T00:00:00Z".to_string(),
-            in_reply_to: "".to_string(),
-            references: "".to_string(),
+            received_at: "2025-01-01T00:00:01Z".to_string(),
+            received_from_ip: None,
+            size_bytes: 100,
+            in_reply_to: None,
+            references: None,
             attachments: vec![],
-            mailbox: "catchall".to_string(),
-            read: false,
+            list_id: None,
+            auto_submitted: None,
             dkim: "none".to_string(),
             spf: "none".to_string(),
+            dmarc: "none".to_string(),
+            trusted: "none".to_string(),
+            mailbox: "catchall".to_string(),
+            read: false,
+            labels: vec![],
         };
 
-        let toml_str = toml::to_string_pretty(&meta).unwrap();
+        let toml_str = toml::to_string(&meta).unwrap();
         let parsed: toml::Value = toml::from_str(&toml_str).unwrap();
         let table = parsed.as_table().unwrap();
         let from = table.get("from").unwrap();
@@ -1005,23 +1088,18 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_email_has_dkim_none_spf_none() {
+    fn unsigned_email_has_dkim_none_spf_none_dmarc_none() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
-        let parts: Vec<&str> = content.splitn(3, "+++").collect();
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
+        let table = parse_toml_frontmatter(&content);
 
-        let dkim = table.get("dkim").unwrap().as_str().unwrap();
-        assert_eq!(dkim, "none");
-
-        let spf = table.get("spf").unwrap().as_str().unwrap();
-        assert_eq!(spf, "none");
+        assert_eq!(table.get("dkim").unwrap().as_str().unwrap(), "none");
+        assert_eq!(table.get("spf").unwrap().as_str().unwrap(), "none");
+        assert_eq!(table.get("dmarc").unwrap().as_str().unwrap(), "none");
     }
 
     #[test]
@@ -1067,20 +1145,18 @@ mod tests {
     }
 
     #[test]
-    fn frontmatter_includes_dkim_spf_fields() {
+    fn frontmatter_includes_dkim_spf_dmarc_fields() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
-        let parts: Vec<&str> = content.splitn(3, "+++").collect();
-        let toml_str = parts[1].trim();
-        let parsed: toml::Value = toml::from_str(toml_str).unwrap();
-        let table = parsed.as_table().unwrap();
+        let table = parse_toml_frontmatter(&content);
 
         assert!(table.contains_key("dkim"));
         assert!(table.contains_key("spf"));
+        assert!(table.contains_key("dmarc"));
     }
 
     #[test]
@@ -1117,7 +1193,7 @@ mod tests {
         let config = test_config(tmp.path());
         let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
 
-        ingest_email(&config, "agent@test.com", raw).unwrap();
+        ingest_email(&config, "agent@test.com", raw, sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
@@ -1184,11 +1260,6 @@ mod tests {
 
     #[test]
     fn concurrent_same_subject_attachment_ingests_do_not_corrupt_each_other() {
-        // Sprint 36 review fix: with the inbound `Mutex<()>` guarding the
-        // allocate-create-write critical section, two threads racing the
-        // same subject + same attachment filename in the same UTC second
-        // each end up in their own bundle directory with their own copy
-        // of the attachment intact.
         use std::sync::Arc;
         use std::thread;
 
@@ -1199,7 +1270,7 @@ mod tests {
         for _ in 0..8 {
             let cfg = Arc::clone(&config);
             handles.push(thread::spawn(move || {
-                ingest_email(&cfg, "alice@test.com", attachment_eml()).unwrap();
+                ingest_email(&cfg, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
             }));
         }
         for h in handles {
@@ -1221,8 +1292,6 @@ mod tests {
             let attachment = path.join("notes.txt");
             assert!(md.exists(), "md file present in {stem}");
             assert!(attachment.exists(), "attachment present in {stem}");
-            // Attachment content is the original — no other thread
-            // truncated/overwrote it.
             let body = std::fs::read_to_string(&attachment).unwrap();
             assert!(body.contains("These are my notes."));
         }
@@ -1230,13 +1299,10 @@ mod tests {
 
     #[test]
     fn rapid_same_subject_ingests_get_unique_paths() {
-        // Two ingests with identical subjects landing in the same UTC
-        // second must not overwrite each other; `allocate_filename` picks
-        // the `-2` suffix for the second one.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 2);
@@ -1261,5 +1327,142 @@ mod tests {
     #[test]
     fn spf_domain_empty_domain_part_returns_none() {
         assert_eq!(spf_domain("user@"), None);
+    }
+
+    #[test]
+    fn frontmatter_new_fields_populated() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let ip: IpAddr = "203.0.113.50".parse().unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), ip).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
+
+        assert!(table.contains_key("thread_id"));
+        let thread_id = table.get("thread_id").unwrap().as_str().unwrap();
+        assert_eq!(thread_id.len(), 16);
+
+        assert!(table.contains_key("received_at"));
+
+        assert_eq!(
+            table.get("received_from_ip").unwrap().as_str().unwrap(),
+            "203.0.113.50"
+        );
+
+        assert_eq!(
+            table.get("delivered_to").unwrap().as_str().unwrap(),
+            "alice@test.com"
+        );
+
+        assert!(table.get("size_bytes").unwrap().as_integer().unwrap() > 0);
+
+        assert_eq!(table.get("trusted").unwrap().as_str().unwrap(), "none");
+        assert_eq!(table.get("dmarc").unwrap().as_str().unwrap(), "none");
+    }
+
+    #[test]
+    fn frontmatter_received_from_ip_omitted_for_sentinel() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
+
+        // 0.0.0.0 sentinel is omitted
+        assert!(!table.contains_key("received_from_ip"));
+    }
+
+    #[test]
+    fn frontmatter_list_id_populated() {
+        let eml = b"From: sender@example.com\r\n\
+            To: alice@test.com\r\n\
+            Subject: List email\r\n\
+            Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+            Message-ID: <list1@example.com>\r\n\
+            List-ID: <mylist.example.com>\r\n\
+            \r\n\
+            List message body.\r\n";
+
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
+        assert_eq!(
+            table.get("list_id").unwrap().as_str().unwrap(),
+            "<mylist.example.com>"
+        );
+    }
+
+    #[test]
+    fn frontmatter_auto_submitted_populated() {
+        let eml = b"From: sender@example.com\r\n\
+            To: alice@test.com\r\n\
+            Subject: Auto reply\r\n\
+            Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+            Message-ID: <auto1@example.com>\r\n\
+            Auto-Submitted: auto-replied\r\n\
+            \r\n\
+            Automatic reply.\r\n";
+
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
+        assert_eq!(
+            table.get("auto_submitted").unwrap().as_str().unwrap(),
+            "auto-replied"
+        );
+    }
+
+    #[test]
+    fn frontmatter_optional_headers_omitted_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        let content = std::fs::read_to_string(&entries[0]).unwrap();
+        let table = parse_toml_frontmatter(&content);
+
+        assert!(!table.contains_key("cc"));
+        assert!(!table.contains_key("reply_to"));
+        assert!(!table.contains_key("list_id"));
+        assert!(!table.contains_key("auto_submitted"));
+        assert!(!table.contains_key("in_reply_to"));
+        assert!(!table.contains_key("references"));
+        assert!(!table.contains_key("labels"));
+    }
+
+    #[test]
+    fn thread_id_deterministic_for_same_message() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        assert_eq!(entries.len(), 2);
+
+        let content1 = std::fs::read_to_string(&entries[0]).unwrap();
+        let content2 = std::fs::read_to_string(&entries[1]).unwrap();
+
+        let table1 = parse_toml_frontmatter(&content1);
+        let table2 = parse_toml_frontmatter(&content2);
+
+        assert_eq!(
+            table1.get("thread_id").unwrap().as_str().unwrap(),
+            table2.get("thread_id").unwrap().as_str().unwrap(),
+        );
     }
 }
