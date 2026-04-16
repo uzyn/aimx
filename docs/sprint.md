@@ -1086,7 +1086,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 107–109.5) [IN PROGRESS]
+## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 107–109.5) [DONE]
 
 **Goal:** Evaluate per-mailbox trust at ingest time and surface the result in the always-written `trusted` frontmatter field. Persist every successfully delivered outbound message to `sent/<from-mailbox>/` with the full outbound frontmatter block.
 
@@ -1107,14 +1107,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `TrustedValue` enum added with three variants, serializing to `"none"`, `"true"`, `"false"` lowercase
-- [ ] `evaluate_trust()` implements the three-value logic exactly as specified
-- [ ] Ingest pipeline calls `evaluate_trust()` and writes the result into the `trusted` frontmatter field
-- [ ] Channel-trigger gate logic remains at v1 semantics — `src/channel.rs` is NOT modified to read `trusted`; it continues to evaluate allowlist + DKIM independently. Inline comment in `channel.rs` points at `evaluate_trust()` for the rationale.
-- [ ] Unit tests cover every arm of `evaluate_trust()`: `trust: none` → `"none"`; `trust: verified` + allowlisted + DKIM pass → `"true"`; allowlisted + DKIM fail → `"false"`; not allowlisted + DKIM pass → `"false"`; not allowlisted + DKIM fail → `"false"`
-- [ ] Parity test: for a `trust: verified` mailbox, `trusted == "true"` IFF the channel-trigger gate would fire, confirming the two pieces of logic agree
-- [ ] `book/configuration.md` explains the `trusted` field semantics; `book/mcp.md` mentions it in the frontmatter reference
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `TrustedValue` enum added with three variants, serializing to `"none"`, `"true"`, `"false"` lowercase
+- [x] `evaluate_trust()` implements the three-value logic exactly as specified
+- [x] Ingest pipeline calls `evaluate_trust()` and writes the result into the `trusted` frontmatter field
+- [x] Channel-trigger gate logic remains at v1 semantics — `src/channel.rs` is NOT modified to read `trusted`; it continues to evaluate allowlist + DKIM independently. Inline comment in `channel.rs` points at `evaluate_trust()` for the rationale.
+- [x] Unit tests cover every arm of `evaluate_trust()`: `trust: none` → `"none"`; `trust: verified` + allowlisted + DKIM pass → `"true"`; allowlisted + DKIM fail → `"false"`; not allowlisted + DKIM pass → `"false"`; not allowlisted + DKIM fail → `"false"`
+- [x] Parity test: for a `trust: verified` mailbox, `trusted == "true"` IFF the channel-trigger gate would fire, confirming the two pieces of logic agree
+- [x] `book/configuration.md` explains the `trusted` field semantics; `book/mcp.md` mentions it in the frontmatter reference
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S38-2: Outbound frontmatter block (`outbound`, `bcc`, `delivered_at`, `delivery_status`, `delivery_details`)
 
@@ -1122,12 +1122,12 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `DeliveryStatus` enum serializes to the four lowercase strings
-- [ ] `OutboundFrontmatter` struct composes `InboundFrontmatter` (identity/parties/content/threading/auth/storage) + the outbound block (outbound/bcc/delivered_at/delivery_status/delivery_details)
-- [ ] Field ordering in the serialized output: inbound block first, outbound block at the end
-- [ ] `delivery_status` is ALWAYS written (never omitted); other outbound fields follow omission rules
-- [ ] Golden test: outbound fixture serializes byte-for-byte to the expected layout
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `DeliveryStatus` enum serializes to the four lowercase strings
+- [x] `OutboundFrontmatter` struct composes `InboundFrontmatter` (identity/parties/content/threading/auth/storage) + the outbound block (outbound/bcc/delivered_at/delivery_status/delivery_details)
+- [x] Field ordering in the serialized output: inbound block first, outbound block at the end
+- [x] `delivery_status` is ALWAYS written (never omitted); other outbound fields follow omission rules
+- [x] Golden test: outbound fixture serializes byte-for-byte to the expected layout
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S38-3: Sent-items persistence in `aimx serve` send handler
 
@@ -1135,19 +1135,19 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Successful sends write `<data_dir>/sent/<from_mailbox>/<stem>.md` (or bundle directory) with `delivery_status: "delivered"` and `delivered_at` populated
-- [ ] Signed RFC 5322 bytes are the body of the `.md` file (below the `+++` frontmatter block); the exact DKIM-signed message delivered to the MX is what's persisted
-- [ ] `Mutex<()>` guards the filename allocation critical section only; the file-write IO happens outside the lock
-- [ ] Failed sends (permanent `DELIVERY` error): write the file with `delivery_status: "failed"` and `delivery_details` carrying the last remote SMTP response
-- [ ] `TEMP` errors: do NOT persist (the client will see the transient error and retry itself); inline comment documents why
-- [ ] `mailbox_list` CLI output now reports sent counts alongside inbox counts
-- [ ] Integration test: drive an end-to-end send via UDS; assert the sent file exists at the expected path, has the right frontmatter, and contains a DKIM signature that verifies against the public key
-- [ ] Integration test for permanent-failure persistence: inject a mock MX that always rejects; assert the `.md` is written with `delivery_status: "failed"`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Successful sends write `<data_dir>/sent/<from_mailbox>/<stem>.md` (or bundle directory) with `delivery_status: "delivered"` and `delivered_at` populated
+- [x] Signed RFC 5322 bytes are the body of the `.md` file (below the `+++` frontmatter block); the exact DKIM-signed message delivered to the MX is what's persisted
+- [x] `Mutex<()>` guards the filename allocation critical section only; the file-write IO happens outside the lock
+- [x] Failed sends (permanent `DELIVERY` error): write the file with `delivery_status: "failed"` and `delivery_details` carrying the last remote SMTP response
+- [x] `TEMP` errors: do NOT persist (the client will see the transient error and retry itself); inline comment documents why
+- [x] `mailbox_list` CLI output now reports sent counts alongside inbox counts
+- [x] Integration test: drive an end-to-end send via UDS; assert the sent file exists at the expected path, has the right frontmatter, and contains a DKIM signature that verifies against the public key
+- [x] Integration test for permanent-failure persistence: inject a mock MX that always rejects; assert the `.md` is written with `delivery_status: "failed"`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 109.5–112) [NOT STARTED]
+## Sprint 39 — Agent Primer as Progressive-Disclosure Skill Bundle + Author Metadata (Days 109.5–112) [IN PROGRESS]
 
 **Goal:** Restructure the shared agent primer from a single file into a main body + `references/` layout (the anthropics/skills progressive-disclosure pattern), standardize author metadata across every agent package, and reverse the earlier storage-exposure redaction policy so the primer documents the datadir layout explicitly.
 
@@ -1401,6 +1401,9 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 34)** Add a per-read idle timeout inside `send_protocol::parse_request` to bound slow-loris exposure on the world-writable UDS socket. Any local process can announce a 25 MB `Content-Length` and then stall, parking a 25 MB `Vec<u8>` + tokio task indefinitely. A short (e.g. 30s) `tokio::time::timeout` around the reads is cheaper than a full concurrency semaphore and closes the primary abuse vector.
 - [ ] **(Sprint 34)** Replace the substring-based `send_handler::classify_transport_error` with a typed error surface on `MailTransport`. The current classifier pattern-matches on lowercased substrings (`"unreachable"`, `"timed out"`, `"connection refused"`) emitted by `LettreTransport::try_deliver` — any future refactor of those error strings will silently re-classify `Temp` vs `Delivery`. A thin enum (`TransportError { Temp(String), Permanent(String) }`) on the trait return would be durable.
 - [ ] **(Sprint 34)** Cache the test DKIM keypair across integration tests via `once_cell` + a process-scoped `TempDir` rather than re-shelling `aimx dkim-keygen` per test. Each 2048-bit RSA generation costs ~200ms and the Sprint 34 integration suite now spawns `aimx serve` in many tests. A sharable keypair cache would cut ~10-15s off the integration run.
+- [ ] **(Sprint 38)** Parity test docstring in `src/trust.rs` says "IFF" (if and only if) but the test only checks one direction (trusted==true implies trigger fires). The reverse direction (trigger fires implies trusted==true) is not tested. Either narrow the docstring or add the reverse check.
+- [ ] **(Sprint 38)** `received_at` in `OutboundFrontmatter` serializes as empty string `""` for outbound messages instead of being omitted — outbound messages don't have a `received_at`, so the field should use `skip_serializing_if` to omit when empty.
+- [ ] **(Sprint 38)** `date` field in outbound frontmatter uses a fresh `Utc::now()` timestamp instead of parsing the `Date:` header from the composed RFC 5322 message — the two will diverge slightly, and the `Date:` header is the canonical value.
 - [ ] **(Sprint 37)** SPF is still verified twice in `src/ingest.rs` — `verify_spf_async` and `build_spf_output` both independently call `resolver.verify_spf()`. The same consolidation pattern applied to DKIM (single call, reuse output) could be applied to SPF to eliminate the redundant DNS lookup per ingest.
 - [ ] **(Sprint 35)** `LettreTransport::resolve_ipv4` in `src/transport.rs` swallows DNS failures with `unwrap_or_default()` — lookup errors silently produce an empty `Vec`, which then triggers the `SkipNoIpv4` path with the misleading message "no A record (enable_ipv6 = false); skipping". This is pre-existing behaviour lifted verbatim from the old `send.rs`, not introduced in Sprint 35. Log the underlying DNS error (or surface a distinct `DnsFailure` outcome) so operators can distinguish "no A record" from "resolver unreachable".
 
