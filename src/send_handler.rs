@@ -2,22 +2,36 @@
 //!
 //! This module contains the per-connection business logic that runs inside
 //! `aimx serve` after a request frame has been decoded: domain validation,
-//! DKIM signing, and delivery. Framing is the [`send_protocol`] module's
-//! responsibility — this one deals only in parsed `SendRequest`s.
+//! DKIM signing, delivery, and sent-items persistence. Framing is the
+//! [`send_protocol`] module's responsibility — this one deals only in parsed
+//! `SendRequest`s.
 //!
 //! The handler is deliberately testable: real MX delivery is abstracted
 //! behind the [`MailTransport`](crate::transport::MailTransport) trait so
 //! tests can inject a mock.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
 use crate::dkim;
+use crate::frontmatter::{
+    DeliveryStatus, OutboundFrontmatter, compute_thread_id, format_outbound_frontmatter,
+};
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
+use crate::slug::{allocate_filename, slugify};
 use crate::transport::MailTransport;
+
+/// Process-scoped lock guarding the outbound critical section: filename
+/// allocation + file/directory creation. The daemon is the single writer
+/// to `<data_dir>/sent/`, so a process Mutex is sufficient. The lock is
+/// held only for the metadata check + `fs::File::create` — the actual
+/// file write happens outside the lock. Symmetric to `INGEST_WRITE_LOCK`
+/// in `ingest.rs`.
+static SENT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Context shared across every per-connection send.
 ///
@@ -38,6 +52,9 @@ pub struct SendContext {
     /// Transport used for final MX delivery. In production this is a
     /// `LettreTransport`; tests inject a mock.
     pub transport: Arc<dyn MailTransport + Send + Sync>,
+    /// Data directory root (`/var/lib/aimx` by default). Sent files are
+    /// written to `<data_dir>/sent/<from_mailbox>/`.
+    pub data_dir: PathBuf,
 }
 
 /// Execute one submitted send end-to-end and return the wire response.
@@ -68,7 +85,18 @@ where
         };
     }
 
-    let headers = scan_headers(&req.body, &["From", "To", "Message-ID"]);
+    let headers = scan_headers(
+        &req.body,
+        &[
+            "From",
+            "To",
+            "Message-ID",
+            "Subject",
+            "In-Reply-To",
+            "References",
+            "Date",
+        ],
+    );
 
     let from_header = match headers.get("From") {
         Some(v) => v.clone(),
@@ -156,11 +184,52 @@ where
         }
     };
 
+    let subject = headers.get("Subject").cloned().unwrap_or_default();
+    let in_reply_to = headers.get("In-Reply-To").cloned();
+    let references_val = headers.get("References").cloned();
+
     match ctx.transport.send(&from_header, &recipient_bare, &signed) {
-        Ok(_server) => SendResponse::Ok { message_id },
+        Ok(_server) => {
+            let delivered_at = chrono::Utc::now().to_rfc3339();
+            persist_sent_file(
+                ctx,
+                &req.from_mailbox,
+                &message_id,
+                &from_header,
+                &to_header,
+                &subject,
+                in_reply_to.as_deref(),
+                references_val.as_deref(),
+                &signed,
+                DeliveryStatus::Delivered,
+                Some(&delivered_at),
+                None,
+            );
+            SendResponse::Ok { message_id }
+        }
         Err(e) => {
             let msg = e.to_string();
             let code = classify_transport_error(&msg);
+            // TEMP errors: do NOT persist. The client sees the transient
+            // error and may retry, so writing a "failed" record would be
+            // premature. Only permanent delivery failures (DELIVERY) get
+            // persisted.
+            if code == ErrCode::Delivery {
+                persist_sent_file(
+                    ctx,
+                    &req.from_mailbox,
+                    &message_id,
+                    &from_header,
+                    &to_header,
+                    &subject,
+                    in_reply_to.as_deref(),
+                    references_val.as_deref(),
+                    &signed,
+                    DeliveryStatus::Failed,
+                    None,
+                    Some(&msg),
+                );
+            }
             SendResponse::Err { code, reason: msg }
         }
     }
@@ -288,6 +357,121 @@ fn classify_transport_error(msg: &str) -> ErrCode {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn persist_sent_file(
+    ctx: &SendContext,
+    from_mailbox: &str,
+    message_id: &str,
+    from_header: &str,
+    to_header: &str,
+    subject: &str,
+    in_reply_to: Option<&str>,
+    references: Option<&str>,
+    signed_bytes: &[u8],
+    delivery_status: DeliveryStatus,
+    delivered_at: Option<&str>,
+    delivery_details: Option<&str>,
+) {
+    let sent_dir = ctx.data_dir.join("sent").join(from_mailbox);
+    if let Err(e) = std::fs::create_dir_all(&sent_dir) {
+        eprintln!(
+            "[send] failed to create sent dir {}: {e}",
+            sent_dir.display()
+        );
+        return;
+    }
+
+    let slug = slugify(subject);
+    let timestamp = chrono::Utc::now();
+    let has_attachments = false; // Outbound via UDS is text-only for now (v0.2).
+
+    let thread_id = compute_thread_id(message_id, in_reply_to, references);
+
+    let date = chrono::Utc::now().to_rfc3339();
+
+    let meta = OutboundFrontmatter {
+        id: String::new(), // filled after allocation
+        message_id: message_id.to_string(),
+        thread_id,
+        from: from_header.to_string(),
+        to: to_header.to_string(),
+        cc: None,
+        reply_to: None,
+        delivered_to: to_header.to_string(),
+        subject: subject.to_string(),
+        date,
+        received_at: String::new(),
+        received_from_ip: None,
+        size_bytes: signed_bytes.len(),
+        attachments: vec![],
+        in_reply_to: in_reply_to.map(|s| s.to_string()),
+        references: references.map(|s| s.to_string()),
+        list_id: None,
+        auto_submitted: None,
+        dkim: "pass".to_string(),
+        spf: "none".to_string(),
+        dmarc: "none".to_string(),
+        trusted: "none".to_string(),
+        mailbox: from_mailbox.to_string(),
+        read: false,
+        labels: vec![],
+        outbound: true,
+        delivery_status,
+        bcc: None,
+        delivered_at: delivered_at.map(|s| s.to_string()),
+        delivery_details: delivery_details.map(|s| s.to_string()),
+    };
+
+    // Critical section: allocate filename + create the file atomically.
+    let (md_path, id) = {
+        let _guard = SENT_WRITE_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let md_path = allocate_filename(&sent_dir, timestamp, &slug, has_attachments);
+        let parent_dir = md_path.parent().unwrap_or(&sent_dir);
+
+        if let Err(e) = std::fs::create_dir_all(parent_dir) {
+            eprintln!(
+                "[send] failed to create parent dir {}: {e}",
+                parent_dir.display()
+            );
+            return;
+        }
+
+        let id = md_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default()
+            .to_string();
+
+        // Touch the file to claim the path before releasing the lock.
+        if let Err(e) = std::fs::File::create_new(&md_path) {
+            eprintln!(
+                "[send] failed to create sent file {}: {e}",
+                md_path.display()
+            );
+            return;
+        }
+
+        (md_path, id)
+    };
+
+    // Write the actual content outside the lock.
+    let mut meta = meta;
+    meta.id = id;
+
+    let body = String::from_utf8_lossy(signed_bytes);
+    let content = format_outbound_frontmatter(&meta, &body);
+
+    if let Err(e) = std::fs::write(&md_path, content) {
+        eprintln!(
+            "[send] failed to write sent file {}: {e}",
+            md_path.display()
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +505,13 @@ mod tests {
     }
 
     fn test_ctx(transport: Arc<dyn MailTransport + Send + Sync>) -> SendContext {
+        test_ctx_with_data_dir(transport, None)
+    }
+
+    fn test_ctx_with_data_dir(
+        transport: Arc<dyn MailTransport + Send + Sync>,
+        data_dir: Option<std::path::PathBuf>,
+    ) -> SendContext {
         use tempfile::TempDir;
         let tmp = TempDir::new().unwrap();
         dkim::generate_keypair(tmp.path(), false).unwrap();
@@ -328,12 +519,14 @@ mod tests {
         let mut boxes = HashSet::new();
         boxes.insert("catchall".to_string());
         boxes.insert("alice".to_string());
+        let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
         SendContext {
             dkim_key: Arc::new(key),
             primary_domain: "example.com".to_string(),
             dkim_selector: "dkim".to_string(),
             registered_mailboxes: boxes,
             transport,
+            data_dir: dir,
         }
     }
 
@@ -701,5 +894,127 @@ mod tests {
             }
             other => panic!("expected Err(SIGN), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn successful_send_persists_sent_file() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let sent_dir = data_dir.path().join("sent").join("alice");
+        assert!(sent_dir.exists(), "sent dir should be created");
+
+        let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "one sent file");
+
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("delivery_status = \"delivered\""));
+        assert!(content.contains("outbound = true"));
+        assert!(content.contains("delivered_at ="));
+        assert!(content.contains("DKIM-Signature:"));
+        assert!(content.contains("dkim = \"pass\""));
+    }
+
+    #[tokio::test]
+    async fn permanent_failure_persists_sent_file_with_failed_status() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Err("Rejected by mx.example.com: 550 no such user".to_string()),
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
+
+        let sent_dir = data_dir.path().join("sent").join("alice");
+        let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(entries.len(), 1, "failed send persists a file");
+
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+        assert!(content.contains("delivery_status = \"failed\""));
+        assert!(content.contains("delivery_details ="));
+        assert!(content.contains("550 no such user"));
+    }
+
+    #[tokio::test]
+    async fn temp_error_does_not_persist_sent_file() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Err("All MX servers for gmail.com unreachable: ...".to_string()),
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
+
+        let sent_dir = data_dir.path().join("sent").join("alice");
+        if sent_dir.exists() {
+            let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .collect();
+            assert_eq!(entries.len(), 0, "TEMP errors should not persist");
+        }
+    }
+
+    #[tokio::test]
+    async fn sent_file_frontmatter_roundtrips() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            from_mailbox: "alice".to_string(),
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+
+        let sent_dir = data_dir.path().join("sent").join("alice");
+        let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let content = std::fs::read_to_string(entries[0].path()).unwrap();
+
+        // Parse frontmatter back
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        assert!(parts.len() >= 3);
+        let toml_str = parts[1].trim();
+        let parsed: crate::frontmatter::OutboundFrontmatter = toml::from_str(toml_str).unwrap();
+        assert!(parsed.outbound);
+        assert_eq!(
+            parsed.delivery_status,
+            crate::frontmatter::DeliveryStatus::Delivered
+        );
+        assert_eq!(parsed.mailbox, "alice");
+        assert_eq!(parsed.message_id, "<abc@example.com>");
+        assert!(parsed.delivered_at.is_some());
     }
 }

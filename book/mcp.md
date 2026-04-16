@@ -157,6 +157,31 @@ Mark an email as unread.
 
 Updates `read = false` in the email's frontmatter.
 
+## Frontmatter reference
+
+Every email stored by AIMX carries a TOML frontmatter block between `+++` delimiters. Inbound emails include:
+
+| Field | Always written | Description |
+|-------|----------------|-------------|
+| `id` | yes | Filename stem (e.g. `2025-04-15-143022-hello`) |
+| `message_id` | yes | RFC 5322 `Message-ID` |
+| `thread_id` | yes | 16-hex-char SHA-256 of the resolved thread root |
+| `from` | yes | Sender address |
+| `to` | yes | Recipient address |
+| `delivered_to` | yes | Actual RCPT TO |
+| `subject` | yes | Subject line |
+| `date` | yes | Sender-claimed datetime (RFC 3339) |
+| `received_at` | yes | Server receipt datetime (RFC 3339 UTC) |
+| `dkim` | yes | `pass`, `fail`, or `none` |
+| `spf` | yes | `pass`, `fail`, or `none` |
+| `dmarc` | yes | `pass`, `fail`, or `none` |
+| `trusted` | yes | `none`, `true`, or `false` -- per-mailbox trust evaluation result (see [Configuration](configuration.md)) |
+| `mailbox` | yes | Target mailbox name |
+| `read` | yes | Read/unread status |
+| `delivery_status` | sent only | `delivered`, `failed`, `deferred`, or `pending` |
+
+Outbound (sent) emails additionally carry `outbound = true`, `delivery_status`, and optionally `delivered_at` and `delivery_details`.
+
 ## Compatible agent frameworks
 
 | Framework | Integration method |
