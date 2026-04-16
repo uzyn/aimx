@@ -2246,6 +2246,41 @@ fn send_uds_end_to_end_delivers_signed_message() {
     );
 }
 
+#[test]
+fn serve_e2e_stale_readme_refreshed_at_startup() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    // Plant a stale README with an outdated version comment.
+    let readme_path = tmp.path().join("README.md");
+    std::fs::write(
+        &readme_path,
+        "<!-- aimx-readme-version: 0 -->\nstale content\n",
+    )
+    .unwrap();
+    let before = std::fs::read_to_string(&readme_path).unwrap();
+    assert!(before.contains("stale content"));
+
+    let child = start_serve(tmp.path(), port);
+
+    // By the time start_serve returns the TCP listener is bound, which is
+    // *after* refresh_if_outdated runs in serve startup.  The README should
+    // now contain the current template, not the stale content.
+    let after = std::fs::read_to_string(&readme_path).unwrap();
+    assert!(
+        after.starts_with("<!-- aimx-readme-version: 1 -->"),
+        "README should start with current version comment after serve startup; got: {}",
+        after.lines().next().unwrap_or("<empty>")
+    );
+    assert!(
+        !after.contains("stale content"),
+        "stale content should be replaced after serve startup"
+    );
+
+    stop_serve(child);
+}
+
 #[cfg(unix)]
 #[test]
 fn send_without_daemon_reports_missing_socket() {

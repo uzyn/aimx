@@ -1,0 +1,158 @@
+<!-- aimx-readme-version: 1 -->
+# AIMX data directory
+
+> This file is regenerated on AIMX upgrade. User edits will be overwritten.
+
+This directory (`/var/lib/aimx/` by default) is the data root for AIMX, a
+self-hosted email system for AI agents. Agents may read everything here;
+all mutations go through the `aimx` MCP server or CLI — never write to this
+directory directly.
+
+## Access model
+
+- **Read:** world-readable. Any local user or agent can read email files,
+  scan directories, and inspect frontmatter.
+- **Write:** owned by `aimx serve` (the SMTP daemon). All changes — ingest,
+  send, mark-read, mailbox create/delete — flow through the daemon or the
+  `aimx` MCP server. Direct writes corrupt state.
+
+Configuration and secrets live under `/etc/aimx/` (root-owned, not readable
+by agents).
+
+## Directory layout
+
+```
+/var/lib/aimx/
+├── README.md                                  # this file (auto-generated)
+├── inbox/
+│   ├── catchall/                              # default mailbox for unknown local parts
+│   │   ├── 2026-04-15-143022-hello.md         # flat file: no attachments
+│   │   └── 2026-04-15-153300-invoice-march/   # attachment bundle
+│   │       ├── 2026-04-15-153300-invoice-march.md
+│   │       ├── invoice.pdf
+│   │       └── receipt.png
+│   └── support/                               # named mailbox
+│       └── ...
+└── sent/
+    └── support/                               # outbound sent copies
+        └── 2026-04-15-160145-re-meeting.md
+```
+
+- `inbox/` holds inbound mail, one subdirectory per mailbox.
+- `sent/` holds outbound copies, mirroring the same mailbox names.
+- `catchall` receives mail for unrecognised local parts. It is inbox-only
+  (no `sent/catchall/`) because it is a routing target, not a sending
+  identity.
+
+## File naming
+
+Filenames follow `YYYY-MM-DD-HHMMSS-<slug>.md` in UTC.
+
+### Slug algorithm
+
+1. MIME-decode the `Subject:` header.
+2. Lowercase.
+3. Replace every non-alphanumeric character with `-`.
+4. Collapse runs of `-` to a single `-`.
+5. Trim leading and trailing `-`.
+6. Truncate to 20 characters; re-trim if truncation leaves a trailing `-`.
+7. Empty result becomes `no-subject`.
+
+On filename collision within the same directory, AIMX appends `-2`, `-3`,
+etc., to the slug segment until a free name is found.
+
+## Attachment bundles
+
+- **Zero attachments** — flat file: `<stem>.md`.
+- **One or more attachments** — Zola-style bundle directory: `<stem>/`
+  containing `<stem>.md` plus each attachment as a sibling file.
+
+The frontmatter `attachments` array lists each attachment with `filename`,
+`content_type`, `size`, and `path` (relative to the bundle directory).
+
+## Frontmatter quick reference
+
+Each email file has TOML frontmatter between `+++` delimiters. Key fields:
+
+| Field            | Type     | Always? | Notes                                       |
+|-----------------|----------|---------|----------------------------------------------|
+| `id`            | string   | yes     | Matches the filename stem                    |
+| `message_id`    | string   | yes     | RFC 5322 Message-ID                          |
+| `thread_id`     | string   | yes     | 16-hex SHA-256 of thread root Message-ID     |
+| `from`          | string   | yes     | Sender address (may include display name)    |
+| `to`            | string   | yes     | Recipient address                            |
+| `delivered_to`  | string   | yes     | Actual RCPT TO address                       |
+| `subject`       | string   | yes     | Subject line                                 |
+| `date`          | string   | yes     | Sender-claimed RFC 3339 timestamp            |
+| `received_at`   | string   | yes     | Server-side RFC 3339 UTC timestamp           |
+| `dkim`          | string   | yes     | `"pass"`, `"fail"`, or `"none"`              |
+| `spf`           | string   | yes     | `"pass"`, `"fail"`, `"softfail"`, `"neutral"`, or `"none"` |
+| `dmarc`         | string   | yes     | `"pass"`, `"fail"`, or `"none"`              |
+| `trusted`       | string   | yes     | `"none"`, `"true"`, or `"false"`             |
+| `read`          | bool     | yes     | `false` on ingest                            |
+| `in_reply_to`   | string   | opt     | Parent Message-ID                            |
+| `references`    | string   | opt     | Space-separated Message-ID chain             |
+| `list_id`       | string   | opt     | Mailing list ID, if present                  |
+| `auto_submitted`| string   | opt     | `auto-generated`, `auto-replied`, etc.       |
+
+Sent copies additionally carry `outbound = true`, `delivery_status`
+(`"delivered"`, `"deferred"`, `"failed"`, `"pending"`), and optional
+`delivered_at` and `delivery_details`.
+
+For the complete schema, see `agents/common/references/frontmatter.md` in
+the AIMX source tree.
+
+## Trust, DKIM, SPF, and DMARC
+
+AIMX verifies DKIM, SPF, and DMARC on every inbound email. Results are
+stored in frontmatter as `dkim`, `spf`, and `dmarc` fields. All three are
+always written — never omitted — so "none" means "not applicable or no
+record published," not "the check was skipped."
+
+The `trusted` field summarises the per-mailbox trust evaluation:
+
+- `"none"` — mailbox has `trust = "none"` (the default). No evaluation.
+- `"true"` — mailbox has `trust = "verified"`, sender matches
+  `trusted_senders`, AND DKIM passed.
+- `"false"` — mailbox has `trust = "verified"`, but conditions were not met.
+
+Trust only gates channel triggers. All email is stored regardless.
+
+## Thread grouping
+
+Messages in the same thread share a `thread_id`. The value is the first
+16 hex characters of SHA-256 over the resolved thread root `Message-ID`
+(walk `In-Reply-To` first, then `References` leftmost; fall back to the
+message's own `Message-ID`). Group by `thread_id` and sort by `date` to
+reconstruct conversations.
+
+## Auto-submitted and list mail
+
+Check `auto_submitted` in frontmatter before replying — if it is
+`auto-generated` or `auto-replied`, do not reply. This prevents infinite
+loops between bots. Similarly, check `list_id` for mailing list mail and
+reply only when the context warrants it.
+
+## Sending mail
+
+`aimx send` (CLI) and `email_send` / `email_reply` (MCP) compose an
+unsigned RFC 5322 message and submit it to `aimx serve` over the Unix
+domain socket at `/run/aimx/send.sock`. The daemon DKIM-signs the message
+and delivers it directly to the recipient's MX server. The client never
+reads the DKIM private key and does not need root.
+
+The wire protocol is `AIMX/1 SEND` — a length-prefixed frame carrying a
+`From-Mailbox` header and the raw RFC 5322 body. The response is a
+single-line `AIMX/1 OK <message-id>` or `AIMX/1 ERR <code> <reason>`.
+
+## MCP server
+
+The `aimx` MCP server (launched via `aimx mcp`) provides 9 tools for
+mailbox and email operations over stdio:
+
+- `mailbox_list`, `mailbox_create`, `mailbox_delete`
+- `email_list`, `email_read`, `email_send`, `email_reply`
+- `email_mark_read`, `email_mark_unread`
+
+All mutations — send, reply, mark-read, create/delete mailbox — must go
+through the MCP server or `aimx` CLI. Do not modify files directly.

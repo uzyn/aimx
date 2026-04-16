@@ -15,7 +15,7 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 ├── inbox/              # inbound mail lives here
 │   ├── catchall/
 │   └── support/
-└── sent/               # outbound sent copies (populated in a future release)
+└── sent/               # outbound sent copies
     └── support/
 ```
 
@@ -70,19 +70,22 @@ Incoming emails are parsed from raw MIME (`.eml`) and stored as Markdown with TO
 
 ```markdown
 +++
-id = "2025-01-15-001"
-message_id = "<abc123@example.com>"
+id = "2025-04-15-143022-hello"
+message_id = "abc123@example.com"
+thread_id = "a1b2c3d4e5f6a7b8"
 from = "Alice <alice@example.com>"
 to = "support@agent.yourdomain.com"
+delivered_to = "support@agent.yourdomain.com"
 subject = "Hello"
-date = "2025-01-15T10:30:00Z"
-in_reply_to = ""
-references = ""
-attachments = []
-mailbox = "support"
-read = false
+date = "2025-04-15T14:30:22Z"
+received_at = "2025-04-15T14:30:23Z"
+size_bytes = 1024
 dkim = "pass"
 spf = "pass"
+dmarc = "pass"
+trusted = "true"
+mailbox = "support"
+read = false
 +++
 
 Hello, this is the email body in plain text.
@@ -94,19 +97,25 @@ This format is designed to be agent-readable without parsing libraries. An agent
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `id` | string | Unique email ID within the mailbox (the filename stem, e.g. `2025-01-15-103000-meeting`) |
-| `message_id` | string | RFC 5322 Message-ID header |
+| `id` | string | Filename stem (e.g. `2025-04-15-143022-hello`) |
+| `message_id` | string | RFC 5322 Message-ID |
+| `thread_id` | string | 16-hex-char SHA-256 of the thread root Message-ID |
 | `from` | string | Sender address with optional display name |
 | `to` | string | Recipient address |
+| `delivered_to` | string | Actual RCPT TO address |
 | `subject` | string | Email subject line |
-| `date` | string | Email date in RFC 3339 format |
-| `in_reply_to` | string | Message-ID of the email being replied to |
-| `references` | string | Full threading chain of Message-IDs |
+| `date` | string | Sender-claimed date in RFC 3339 format |
+| `received_at` | string | Server-side receipt datetime (RFC 3339 UTC) |
+| `size_bytes` | integer | Raw message size in bytes |
 | `attachments` | array | Attachment metadata (see below) |
+| `in_reply_to` | string | Message-ID of the email being replied to (optional, omitted when empty) |
+| `references` | string | Full threading chain of Message-IDs (optional, omitted when empty) |
+| `dkim` | string | DKIM verification result: `pass`, `fail`, or `none` |
+| `spf` | string | SPF verification result: `pass`, `fail`, `softfail`, `neutral`, or `none` |
+| `dmarc` | string | DMARC alignment result: `pass`, `fail`, or `none` |
+| `trusted` | string | Per-mailbox trust evaluation: `none`, `true`, or `false` |
 | `mailbox` | string | Mailbox name this email was routed to |
 | `read` | bool | Read status (`false` on ingest) |
-| `dkim` | string | DKIM verification result: `pass`, `fail`, or `none` |
-| `spf` | string | SPF verification result: `pass`, `fail`, or `none` |
 
 ### Body extraction
 

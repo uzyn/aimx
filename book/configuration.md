@@ -40,7 +40,7 @@ This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `domain` | string | *(required)* | The email domain (e.g. `agent.yourdomain.com`) |
-| `data_dir` | string | `/var/lib/aimx` | Directory for storing config, keys, and mailboxes |
+| `data_dir` | string | `/var/lib/aimx` | Directory for storing mailboxes (config and keys live under `/etc/aimx/`) |
 | `dkim_selector` | string | `dkim` | DKIM selector name used in DNS records |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx verify` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |

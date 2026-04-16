@@ -50,14 +50,26 @@ Key properties:
 The matrix below tracks what is available in the current `aimx` binary. It
 grows as more agents are landed in subsequent sprints.
 
-| Agent | Install command | Destination | Activation |
-|-------|-----------------|-------------|------------|
-| Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Restart Claude Code; the plugin is auto-discovered from `~/.claude/plugins/`. |
-| Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. |
-| OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. |
-| Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. |
-| Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. |
-| OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. |
+| Agent | Install command | Destination | Activation | Progressive disclosure |
+|-------|-----------------|-------------|------------|------------------------|
+| Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Restart Claude Code; the plugin is auto-discovered from `~/.claude/plugins/`. | Primer as skill + `references/` directory copied as siblings |
+| Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. | Primer as skill + `references/` directory copied as siblings |
+| OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. | Single skill file (primer body); references inlined |
+| Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body); references inlined |
+| Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar); references inlined |
+| OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. | Primer as skill + `references/` directory copied as siblings |
+
+### Progressive disclosure
+
+Every agent receives the same canonical AIMX primer (`agents/common/aimx-primer.md`).
+For agents that support multi-file skill directories (Claude Code, Codex CLI, OpenClaw),
+the installer also copies `agents/common/references/` alongside the skill so the agent
+can load detailed reference material on demand without bloating the initial context.
+
+For agents that use a single file format (OpenCode, Gemini CLI, Goose), the full primer
+is embedded directly in the skill or recipe file. The `references/` content is available
+in the AIMX source tree and at `/var/lib/aimx/README.md` (the auto-generated datadir
+layout guide).
 
 ### Claude Code
 

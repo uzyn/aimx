@@ -57,12 +57,35 @@ On Alpine Linux (OpenRC):
 # Check service status
 rc-service aimx status
 
-# View logs
-tail -f /var/log/aimx.log
+# View recent logs (OpenRC logs to the supervise-daemon log output)
+less /var/log/messages
 
 # Restart
 rc-service aimx restart
 ```
+
+## Where are the logs?
+
+AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system:
+
+**systemd (Ubuntu, Fedora, Debian, etc.)**
+
+The systemd unit declares `StandardOutput=journal` and `StandardError=journal`, so all daemon output is routed to journald:
+
+```bash
+# Follow logs in real time
+journalctl -u aimx -f
+
+# Show today's logs
+journalctl -u aimx --since today
+
+# Show last 200 lines
+journalctl -u aimx -n 200
+```
+
+**OpenRC (Alpine)**
+
+The generated OpenRC init script uses `supervise-daemon`, which routes daemon output to the system logger (typically `/var/log/messages` or syslog). Check your OpenRC logging configuration for the exact destination.
 
 ## DKIM/SPF debugging
 
@@ -77,7 +100,7 @@ The output should contain `v=DKIM1; k=rsa; p=...` matching your public key.
 To see the current public key:
 
 ```bash
-cat /var/lib/aimx/dkim/public.key
+cat /etc/aimx/dkim/public.key
 ```
 
 ### Check SPF record
@@ -101,7 +124,7 @@ Should include `v=DMARC1; p=reject`.
 Read an email's frontmatter to check inbound verification results:
 
 ```bash
-head -20 /var/lib/aimx/catchall/*.md
+head -20 /var/lib/aimx/inbox/catchall/*.md
 ```
 
 Look at the `dkim` and `spf` fields -- they should show `pass` for properly authenticated senders.
@@ -120,14 +143,14 @@ If outbound emails land in spam:
 Verify the DKIM private key has correct permissions:
 
 ```bash
-ls -la /var/lib/aimx/dkim/private.key
+ls -la /etc/aimx/dkim/private.key
 # Should show: -rw------- (mode 0600)
 ```
 
 If permissions are wrong:
 
 ```bash
-sudo chmod 600 /var/lib/aimx/dkim/private.key
+sudo chmod 600 /etc/aimx/dkim/private.key
 ```
 
 ## How verify works
@@ -155,7 +178,7 @@ If verify fails with EHLO probe after setup, the issue is likely in the `aimx se
 | `sudo systemctl status aimx` | Check aimx serve service |
 | `journalctl -u aimx -e` | View aimx serve logs |
 | `dig +short TXT agent.yourdomain.com` | Check DNS records |
-| `cat /var/lib/aimx/dkim/public.key` | View DKIM public key |
+| `cat /etc/aimx/dkim/public.key` | View DKIM public key |
 
 ---
 
