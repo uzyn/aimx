@@ -146,7 +146,7 @@ pub fn ingest_email(
     let prepared_attachments = prepare_attachments(&message);
     let has_attachments = !prepared_attachments.is_empty();
 
-    let auth_results = verify_auth(raw, rcpt);
+    let auth_results = verify_auth(raw);
 
     let received_at = chrono::Utc::now().to_rfc3339();
     let size_bytes = raw.len();
@@ -253,7 +253,7 @@ fn create_resolver() -> Option<mail_auth::MessageAuthenticator> {
         .ok()
 }
 
-fn verify_auth(raw: &[u8], rcpt: &str) -> AuthResults {
+fn verify_auth(raw: &[u8]) -> AuthResults {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(_) => return AuthResults::default(),
@@ -267,15 +267,15 @@ fn verify_auth(raw: &[u8], rcpt: &str) -> AuthResults {
     rt.block_on(async {
         let auth_msg = mail_auth::AuthenticatedMessage::parse(raw);
 
-        let dkim_result = verify_dkim_async(raw, &resolver).await;
-        let spf_result = verify_spf_async(raw, rcpt, &resolver).await;
-
         let dkim_output = match &auth_msg {
             Some(msg) => resolver.verify_dkim(msg).await,
             None => vec![],
         };
 
-        let spf_output = build_spf_output(raw, rcpt, &resolver).await;
+        let dkim_result = dkim_output_to_string(&dkim_output, auth_msg.is_some());
+
+        let spf_result = verify_spf_async(raw, &resolver).await;
+        let spf_output = build_spf_output(raw, &resolver).await;
 
         let dmarc_result = match &auth_msg {
             Some(msg) => verify_dmarc_async(msg, &dkim_output, &spf_output, raw, &resolver).await,
@@ -290,9 +290,26 @@ fn verify_auth(raw: &[u8], rcpt: &str) -> AuthResults {
     })
 }
 
+fn dkim_output_to_string(results: &[mail_auth::DkimOutput<'_>], parsed: bool) -> String {
+    if !parsed {
+        return "none".to_string();
+    }
+
+    if results.is_empty() {
+        return "none".to_string();
+    }
+
+    for output in results {
+        if matches!(output.result(), mail_auth::DkimResult::Pass) {
+            return "pass".to_string();
+        }
+    }
+
+    "fail".to_string()
+}
+
 async fn build_spf_output(
     raw: &[u8],
-    _rcpt: &str,
     resolver: &mail_auth::MessageAuthenticator,
 ) -> mail_auth::SpfOutput {
     let ip = match extract_received_ip(raw) {
@@ -350,31 +367,6 @@ async fn verify_dmarc_async(
     }
 }
 
-async fn verify_dkim_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
-    let auth_msg = match mail_auth::AuthenticatedMessage::parse(raw) {
-        Some(msg) => msg,
-        None => return "none".to_string(),
-    };
-
-    if auth_msg.dkim_headers.is_empty() {
-        return "none".to_string();
-    }
-
-    let results = resolver.verify_dkim(&auth_msg).await;
-
-    if results.is_empty() {
-        return "none".to_string();
-    }
-
-    for output in &results {
-        if matches!(output.result(), mail_auth::DkimResult::Pass) {
-            return "pass".to_string();
-        }
-    }
-
-    "fail".to_string()
-}
-
 pub fn spf_domain(mail_from: &str) -> Option<&str> {
     let domain = mail_from.split('@').nth(1).unwrap_or("");
     if domain.is_empty() {
@@ -384,11 +376,7 @@ pub fn spf_domain(mail_from: &str) -> Option<&str> {
     }
 }
 
-async fn verify_spf_async(
-    raw: &[u8],
-    _rcpt: &str,
-    resolver: &mail_auth::MessageAuthenticator,
-) -> String {
+async fn verify_spf_async(raw: &[u8], resolver: &mail_auth::MessageAuthenticator) -> String {
     let ip = match extract_received_ip(raw) {
         Some(ip) => ip,
         None => return "none".to_string(),

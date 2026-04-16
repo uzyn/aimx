@@ -100,10 +100,17 @@ pub fn compute_thread_id(
     references: Option<&str>,
 ) -> String {
     let root = resolve_thread_root(message_id, in_reply_to, references);
+    let normalized = strip_angle_brackets(&root);
     let mut hasher = Sha256::new();
-    hasher.update(root.as_bytes());
+    hasher.update(normalized.as_bytes());
     let hash = hasher.finalize();
-    hex::encode(&hash[..8])
+    hex_encode(&hash[..8])
+}
+
+fn strip_angle_brackets(s: &str) -> &str {
+    s.strip_prefix('<')
+        .and_then(|s| s.strip_suffix('>'))
+        .unwrap_or(s)
 }
 
 fn resolve_thread_root(
@@ -155,12 +162,6 @@ fn extract_first_message_id(header_value: &str) -> String {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-mod hex {
-    pub fn encode(bytes: &[u8]) -> String {
-        super::hex_encode(bytes)
-    }
 }
 
 pub fn format_frontmatter(meta: &InboundFrontmatter, body: &str) -> String {
