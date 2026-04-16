@@ -969,7 +969,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 36 — Datadir Reshape (Inbox/Sent Split, Slug, Bundles, Mailbox Lifecycle) (Days 102–104.5) [IN PROGRESS]
+## Sprint 36 — Datadir Reshape (Inbox/Sent Split, Slug, Bundles, Mailbox Lifecycle) (Days 102–104.5) [DONE]
 
 **Goal:** Ship the final on-disk layout: `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/`, deterministic `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, and mailbox-create that establishes both inbox + sent subdirectories. Inbound mail lands in the new layout after this sprint; outbound sent-items persistence still comes in Sprint 38.
 
@@ -987,11 +987,11 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/slug.rs` created with `slugify()` and `allocate_filename()`
-- [ ] Unit tests cover: ASCII subject, unicode subject with MIME decoding, all-non-alphanumeric subject (→ `no-subject`), long subject truncation to 20 chars, collapsed dash runs, trimmed leading/trailing dashes
-- [ ] Collision tests: no collision → base stem; one collision → `<stem>-2`; two → `<stem>-3`; bundle collisions check the directory name (not the `.md` inside) when `has_attachments = true`
-- [ ] Timestamp format in the filename is UTC `YYYY-MM-DD-HHMMSS` (6-digit time, no separators between HH/MM/SS other than what's in the format); test asserts exact string for known timestamps
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/slug.rs` created with `slugify()` and `allocate_filename()`
+- [x] Unit tests cover: ASCII subject, unicode subject with MIME decoding, all-non-alphanumeric subject (→ `no-subject`), long subject truncation to 20 chars, collapsed dash runs, trimmed leading/trailing dashes
+- [x] Collision tests: no collision → base stem; one collision → `<stem>-2`; two → `<stem>-3`; bundle collisions check the directory name (not the `.md` inside) when `has_attachments = true`
+- [x] Timestamp format in the filename is UTC `YYYY-MM-DD-HHMMSS` (6-digit time, no separators between HH/MM/SS other than what's in the format); test asserts exact string for known timestamps
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S36-2: `aimx ingest` writes to `inbox/<mailbox>/` with new filenames + bundles
 
@@ -999,14 +999,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `ingest.rs` writes to `<data_dir>/inbox/<mailbox>/` by default; unknown local parts route to `<data_dir>/inbox/catchall/`
-- [ ] Zero-attachment emails produce a flat `<stem>.md`
-- [ ] One-or-more-attachment emails produce a bundle directory `<stem>/` containing `<stem>.md` and each attachment file as a sibling; attachment filenames preserved (with the existing Sprint 2.5 escaping applied)
-- [ ] `attachments/` subdirectory per mailbox is NOT created
-- [ ] `channel.rs` consumers updated: `{filepath}` now expands to the `.md` inside the bundle when attachments present; `book/channels.md` documents this
-- [ ] Sprint 31 integration test `channel_recipe_end_to_end_with_templated_args` still passes (update fixture assertions as needed)
-- [ ] Existing ingest integration tests in `tests/integration.rs` updated for the new layout
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `ingest.rs` writes to `<data_dir>/inbox/<mailbox>/` by default; unknown local parts route to `<data_dir>/inbox/catchall/`
+- [x] Zero-attachment emails produce a flat `<stem>.md`
+- [x] One-or-more-attachment emails produce a bundle directory `<stem>/` containing `<stem>.md` and each attachment file as a sibling; attachment filenames preserved (with the existing Sprint 2.5 escaping applied)
+- [x] `attachments/` subdirectory per mailbox is NOT created
+- [x] `channel.rs` consumers updated: `{filepath}` now expands to the `.md` inside the bundle when attachments present; `book/channels.md` documents this
+- [x] Sprint 31 integration test `channel_recipe_end_to_end_with_templated_args` still passes (update fixture assertions as needed)
+- [x] Existing ingest integration tests in `tests/integration.rs` updated for the new layout
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean <!-- Cycle 2: added `static INGEST_WRITE_LOCK: Mutex<()>` + extended bundle rollback to cover write_markdown failure; new 8-thread concurrent-ingest test -->
 
 #### S36-3: Mailbox lifecycle — create/list/delete both inbox + sent
 
@@ -1014,19 +1014,19 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `mailbox_create` creates both `inbox/<name>/` and `sent/<name>/` atomically (create one, then the other; if the second fails, the first is cleaned up)
-- [ ] `mailbox_list` scans `inbox/*/`, counts via a helper that handles both flat `.md` and bundle dirs, surfaces `catchall` explicitly
-- [ ] `mailbox_delete` removes both `inbox/<name>/` and `sent/<name>/`; refuses to delete `catchall` (preserved v1 guard, error message mentions catchall)
-- [ ] MCP tool signatures gain `folder: Option<String>` with default `"inbox"` on `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`
-- [ ] MCP tool handlers validate `folder` against `{"inbox", "sent"}`, returning a clear error for other values
-- [ ] CLI `aimx mailbox list` output shows the inbox count; sent count is deferred to Sprint 38 (when sent-items actually exist)
-- [ ] Tests cover: create creates both dirs; create is idempotent; delete removes both; delete refuses catchall; list surfaces catchall; MCP tool signatures include `folder` param; invalid folder value returns clean error
-- [ ] `book/mailboxes.md` updated for the new layout; `book/mcp.md` updated for the new `folder` parameter
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `mailbox_create` creates both `inbox/<name>/` and `sent/<name>/` atomically (create one, then the other; if the second fails, the first is cleaned up)
+- [x] `mailbox_list` scans `inbox/*/`, counts via a helper that handles both flat `.md` and bundle dirs, surfaces `catchall` explicitly <!-- Cycle 2: `discover_mailbox_names` unions config keys with filesystem scan; stray inbox dirs now surface with `(unregistered)` marker in CLI + MCP -->
+- [x] `mailbox_delete` removes both `inbox/<name>/` and `sent/<name>/`; refuses to delete `catchall` (preserved v1 guard, error message mentions catchall)
+- [x] MCP tool signatures gain `folder: Option<String>` with default `"inbox"` on `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`
+- [x] MCP tool handlers validate `folder` against `{"inbox", "sent"}`, returning a clear error for other values
+- [x] CLI `aimx mailbox list` output shows the inbox count; sent count is deferred to Sprint 38 (when sent-items actually exist)
+- [x] Tests cover: create creates both dirs; create is idempotent; delete removes both; delete refuses catchall; list surfaces catchall; MCP tool signatures include `folder` param; invalid folder value returns clean error
+- [x] `book/mailboxes.md` updated for the new layout; `book/mcp.md` updated for the new `folder` parameter
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 104.5–107) [NOT STARTED]
+## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 104.5–107) [IN PROGRESS]
 
 **Goal:** Land the full inbound frontmatter schema — new fields, section ordering, omission-vs-null discipline — and add DMARC verification alongside existing DKIM/SPF. Every inbound email written after this sprint carries the final v0.2 schema.
 
@@ -1311,8 +1311,8 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 33.1 | 94.5–97 | Scope Reversal: Drop PTR + `aimx` Group + Non-blocking Cleanup | Strip PTR/reverse-DNS, drop `aimx` system group + group-gating, clear ready-now backlog items, manual E2E validation of Claude Code + Codex CLI plugins | Done |
 | 34 | 97–99.5 | v0.2 UDS Wire Protocol + Daemon Send Handler | `src/send_protocol.rs` codec, `aimx serve` binds `/run/aimx/send.sock` (`0o666` world-writable), per-connection handler signs + delivers with `SO_PEERCRED` logged for diagnostics only | Done |
 | 35 | 99.5–102 | v0.2 Thin UDS Client + End-to-End | `aimx send` rewritten as UDS client (no DKIM access), end-to-end integration test from client → signed delivery, dead-code + docs sweep | Done |
-| 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | In Progress |
-| 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | Not started |
+| 36 | 102–104.5 | v0.2 Datadir Reshape | `inbox/` + `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames, Zola-style attachment bundles, mailbox lifecycle touches both trees, MCP `folder` param | Done |
+| 37 | 104.5–107 | v0.2 Frontmatter Schema + DMARC | `InboundFrontmatter` struct with section ordering, new fields (`thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`), DMARC verification | In Progress |
 | 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Not started |
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Not started |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Not started |
