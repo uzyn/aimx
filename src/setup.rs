@@ -28,6 +28,9 @@ pub trait SystemOps {
     fn check_root(&self) -> bool;
     fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
+    /// Poll `127.0.0.1:25` until a TCP connection succeeds or the timeout
+    /// elapses. Returns `true` if the port became reachable, `false` on timeout.
+    fn wait_for_service_ready(&self) -> bool;
 }
 
 pub trait NetworkOps {
@@ -185,6 +188,26 @@ impl SystemOps for RealSystemOps {
             }
         }
         Ok(())
+    }
+
+    fn wait_for_service_ready(&self) -> bool {
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::{Duration, Instant};
+
+        let addr: SocketAddr = "127.0.0.1:25".parse().expect("static address parses");
+        let budget = Duration::from_millis(5_000);
+        let interval = Duration::from_millis(500);
+        let connect_timeout = Duration::from_millis(200);
+        let start = Instant::now();
+        loop {
+            if TcpStream::connect_timeout(&addr, connect_timeout).is_ok() {
+                return true;
+            }
+            if start.elapsed() >= budget {
+                return false;
+            }
+            std::thread::sleep(interval);
+        }
     }
 }
 
@@ -1207,6 +1230,14 @@ pub fn run_setup(
         println!("Installing AIMX service...");
         sys.install_service_file(data_dir)?;
         println!("{}", term::success("`aimx serve` started."));
+
+        print!("  Waiting for aimx serve to be ready... ");
+        io::stdout().flush()?;
+        if sys.wait_for_service_ready() {
+            println!("{}", term::pass_badge());
+        } else {
+            println!("timeout (proceeding anyway)");
+        }
     }
 
     // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
@@ -1405,6 +1436,8 @@ mod tests {
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
+        service_ready: bool,
+        wait_for_ready_calls: RefCell<u32>,
     }
 
     impl Default for MockSystemOps {
@@ -1417,6 +1450,8 @@ mod tests {
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
+                service_ready: true,
+                wait_for_ready_calls: RefCell::new(0),
             }
         }
     }
@@ -1463,6 +1498,10 @@ mod tests {
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
             Ok(())
+        }
+        fn wait_for_service_ready(&self) -> bool {
+            *self.wait_for_ready_calls.borrow_mut() += 1;
+            self.service_ready
         }
     }
 
@@ -1970,6 +2009,114 @@ mod tests {
         assert!(
             !*sys.service_file_installed.borrow(),
             "re-entrant setup must skip `install_service_file`"
+        );
+    }
+
+    #[test]
+    fn fresh_setup_waits_for_service_ready_after_install() {
+        // S42-2: after installing + restarting aimx, setup must poll for the
+        // daemon to bind port 25 before running the outbound/inbound probes.
+        // We force outbound to fail so the run returns early (before the DNS
+        // retry loop, which reads stdin); the assertion is that by that point
+        // `wait_for_service_ready` has been called exactly once, after the
+        // service file install.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let sys = MockSystemOps {
+            service_ready: true,
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            *sys.service_file_installed.borrow(),
+            "fresh setup must call install_service_file"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            1,
+            "fresh setup must wait for the service to be ready before port checks"
+        );
+    }
+
+    #[test]
+    fn fresh_setup_proceeds_when_service_ready_times_out() {
+        // S42-2: a timed-out wait must not abort setup — the existing port-check
+        // failure path still surfaces the problem. Force outbound to fail so
+        // run_setup returns without hitting the DNS loop.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let sys = MockSystemOps {
+            service_ready: false,
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            *sys.service_file_installed.borrow(),
+            "fresh setup must call install_service_file"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            1,
+            "wait_for_service_ready must be called exactly once"
+        );
+        // Setup proceeded past the wait loop and ran the port checks; because
+        // outbound was mocked to fail, it errors out at the port-check summary.
+        let err = result.expect_err("port-check failure must bubble up");
+        assert!(
+            err.to_string().contains("Port 25 checks failed"),
+            "expected port-check failure message, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reentrant_setup_does_not_wait_for_service_ready() {
+        // S42-2: the wait-for-ready loop is gated on the fresh-install branch.
+        // A re-entrant run (cert + DKIM already present, service already
+        // running) must skip both `install_service_file` and the wait loop.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let mut existing = HashMap::new();
+        existing.insert(PathBuf::from("/etc/ssl/aimx/cert.pem"), "cert".to_string());
+        existing.insert(
+            crate::config::dkim_dir().join("private.key"),
+            "key".to_string(),
+        );
+
+        let sys = MockSystemOps {
+            existing_files: existing,
+            service_running: true,
+            ..Default::default()
+        };
+        let net = MockNetworkOps {
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "re-entrant setup must skip install_service_file"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            0,
+            "re-entrant setup must skip the wait-for-ready loop"
         );
     }
 

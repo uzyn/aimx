@@ -1,5 +1,18 @@
 use clap::{Parser, Subcommand};
 
+pub fn version_string() -> &'static str {
+    use std::sync::LazyLock;
+    static VERSION: LazyLock<String> = LazyLock::new(|| {
+        let hash = env!("GIT_HASH");
+        if hash == "unknown" || hash.is_empty() {
+            env!("CARGO_PKG_VERSION").to_string()
+        } else {
+            format!("{} ({hash})", env!("CARGO_PKG_VERSION"))
+        }
+    });
+    &VERSION
+}
+
 #[derive(Parser)]
 #[command(
     name = "aimx",
@@ -8,7 +21,7 @@ use clap::{Parser, Subcommand};
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
                    MCP is built in. Channel rules trigger agent actions on incoming mail.",
-    version
+    version = version_string()
 )]
 pub struct Cli {
     /// Data directory override (default: /var/lib/aimx)
