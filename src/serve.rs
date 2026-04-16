@@ -63,6 +63,16 @@ async fn run_serve(
     key_path: &str,
     tls_explicit: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Refresh the agent-facing README if the baked-in version differs from
+    // what is on disk. Runs before any listener is bound so the file is
+    // up-to-date by the time agents read it.
+    if let Err(e) = crate::datadir_readme::refresh_if_outdated(&config.data_dir) {
+        eprintln!(
+            "{} Failed to refresh datadir README: {e}",
+            term::warn("Warning:")
+        );
+    }
+
     let cert = std::path::Path::new(cert_path);
     let key = std::path::Path::new(key_path);
 

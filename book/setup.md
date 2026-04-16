@@ -182,8 +182,8 @@ aimx status
 **Inbound:** Send an email from an external account (e.g. Gmail) to `catchall@agent.yourdomain.com`, then check:
 
 ```bash
-ls /var/lib/aimx/catchall/
-cat /var/lib/aimx/catchall/*.md
+ls /var/lib/aimx/inbox/catchall/
+cat /var/lib/aimx/inbox/catchall/*.md
 ```
 
 **Outbound:** Send a test email:

@@ -10,6 +10,9 @@ into Codex. Contents are bundled into the `aimx` binary at compile time
   Its body is the canonical AIMX primer (`agents/common/aimx-primer.md`);
   the installer assembles the final `SKILL.md` from a YAML header plus
   that primer so there is one source of truth.
+- `references/` at `~/.codex/skills/aimx/references/` — detailed reference
+  docs (MCP tool signatures, frontmatter schema, workflows, troubleshooting)
+  copied from `agents/common/references/`.
 
 ## Install
 

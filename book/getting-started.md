@@ -43,6 +43,12 @@ Verify the binary is installed:
 aimx --version
 ```
 
+## Security model
+
+AIMX stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: AIMX assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
+
+All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI — never write to the data directory directly. The UDS send socket at `/run/aimx/send.sock` is world-writable; any local user can submit outbound mail through `aimx send`.
+
 ## Setup
 
 Run the interactive setup wizard:

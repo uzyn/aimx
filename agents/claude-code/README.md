@@ -12,6 +12,10 @@ time (via `include_dir!`) and installed by `aimx agent-setup claude-code`.
   AIMX primer (`agents/common/aimx-primer.md`); the installer assembles the
   final `SKILL.md` from a YAML header plus that primer so there is one
   source of truth.
+- `skills/aimx/references/` — detailed reference docs (MCP tool signatures,
+  frontmatter schema, workflows, troubleshooting) copied from
+  `agents/common/references/`. Progressive disclosure: Claude Code loads the
+  primer first and reads references on demand.
 
 ## Install
 
