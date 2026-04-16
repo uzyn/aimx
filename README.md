@@ -37,7 +37,7 @@ Outbound:
 - **Email sending** -- RFC 5322 composition on the client, DKIM signing (RSA-SHA256) and MX delivery inside `aimx serve` (via `/run/aimx/send.sock`), threading support, attachments
 - **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
 - **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
-- **Inbound trust** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
+- **Inbound trust** -- DKIM / SPF / DMARC verification recorded on every email, per-mailbox trust policies, trusted sender allowlists
 - **Verifier service** -- self-hostable port probe and port 25 listener for setup verification
 
 ## Requirements
@@ -60,15 +60,17 @@ Outbound:
 ## Quick start
 
 ```bash
-# 1. Build and install
-cargo install --path .
+# 1. Build and install the binary into /usr/local/bin
+git clone https://github.com/uzyn/aimx.git
+cd aimx
+cargo build --release
 sudo cp target/release/aimx /usr/local/bin/
 
-# 2. Run setup (generates service file, DKIM keys, DNS guidance)
+# 2. Run setup (writes /etc/aimx/, installs systemd/OpenRC unit, DKIM keygen, DNS guidance)
 sudo aimx setup agent.yourdomain.com
 
 # 3. Follow the interactive prompts to add DNS records
-# 4. Verify the setup
+# 4. Verify inbound + outbound port 25 reachability
 sudo aimx verify
 
 # 5. Check status
@@ -76,6 +78,8 @@ aimx status
 ```
 
 ## Installation
+
+AIMX is built from source. There are no prebuilt binaries or package-manager distributions yet.
 
 ```bash
 git clone https://github.com/uzyn/aimx.git
@@ -174,20 +178,31 @@ Available MCP tools:
 
 ### DKIM key management
 
+DKIM keys live at `/etc/aimx/dkim/{private,public}.key`. The private key is `0600` (root-only); the public key is `0644` (advertised via DNS). `aimx dkim-keygen` writes to that directory, so it must be invoked with `sudo`:
+
 ```bash
-# Generate DKIM keypair
-aimx dkim-keygen
+# Generate DKIM keypair (requires root)
+sudo aimx dkim-keygen
 
 # Force regenerate (overwrites existing)
-aimx dkim-keygen --force
+sudo aimx dkim-keygen --force
 
 # Custom selector
-aimx dkim-keygen --selector mykey
+sudo aimx dkim-keygen --selector mykey
 ```
+
+For tests or dev loops that need to run without root, set `AIMX_CONFIG_DIR` to a writable location first (e.g. `AIMX_CONFIG_DIR=/tmp/aimx-dev aimx dkim-keygen`).
 
 ## Configuration
 
-Configuration is stored in `config.toml` in the data directory (default: `/var/lib/aimx/`).
+Configuration lives at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created by `aimx setup` and is read by every `aimx` command. The DKIM keypair sits beside it under `/etc/aimx/dkim/`. The **data directory** (`/var/lib/aimx/` by default) holds only mailbox storage.
+
+Two environment overrides exist, and they are independent:
+
+- `--data-dir <PATH>` / `AIMX_DATA_DIR=<PATH>` — relocate the storage directory (`/var/lib/aimx/`). Useful for unusual deployments or for running multiple instances side-by-side.
+- `AIMX_CONFIG_DIR=<PATH>` — relocate the config directory (`/etc/aimx/`, which contains `config.toml` and `dkim/`). Intended for tests and dev loops that need to run without root.
+
+Under a normal install you don't need either — `aimx setup` writes to `/etc/aimx/` and every command picks it up from there.
 
 ### config.toml reference
 
@@ -195,7 +210,9 @@ Configuration is stored in `config.toml` in the data directory (default: `/var/l
 # Domain for this email server (required)
 domain = "agent.yourdomain.com"
 
-# Data directory (default: /var/lib/aimx)
+# Storage directory for mailboxes (default: /var/lib/aimx).
+# Config and DKIM keys live under /etc/aimx/ separately and are NOT
+# governed by this setting — see the Configuration section above.
 data_dir = "/var/lib/aimx"
 
 # DKIM selector name (default: dkim)
@@ -206,6 +223,11 @@ dkim_selector = "dkim"
 # you are self-hosting the verifier service (see `services/verifier/`). aimx appends
 # `/probe` to this base URL internally.
 # verify_host = "https://verify.yourdomain.com"
+
+# Advanced: opt into IPv6 outbound delivery. Default false — outbound goes
+# over IPv4 only, matching the default SPF record. See book/configuration.md
+# for the extra AAAA + `ip6:` SPF records you need when enabling this.
+# enable_ipv6 = true
 
 # Catchall mailbox (receives all unmatched addresses)
 [mailboxes.catchall]
@@ -244,12 +266,12 @@ Available in `on_receive` command templates:
 
 | Variable | Description |
 |----------|-------------|
-| `{filepath}` | Full path to the saved `.md` file |
+| `{filepath}` | Full path to the saved `.md` file (e.g., `/var/lib/aimx/inbox/support/2025-04-15-103000-hello.md`) |
 | `{from}` | Sender email address |
 | `{to}` | Recipient email address |
 | `{subject}` | Email subject |
 | `{mailbox}` | Mailbox name |
-| `{id}` | Email ID (e.g., `2025-01-15-001`) |
+| `{id}` | Email ID / filename stem (e.g., `2025-04-15-103000-hello`) |
 | `{date}` | Email date |
 
 ### Trust policy
@@ -261,48 +283,77 @@ Trust policies control whether channel triggers fire based on sender authenticat
 
 The `trusted_senders` list allows specific senders to bypass DKIM verification. Supports glob patterns.
 
+Every inbound email records the evaluated result in a `trusted` frontmatter field so agents can act on it without re-reading config:
+
+| Value | Meaning |
+|-------|---------|
+| `"none"` | Mailbox `trust` is `none` (default) -- no evaluation performed. |
+| `"true"` | Mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed. |
+| `"false"` | Mailbox `trust` is `verified`, any other outcome. |
+
 Email is always stored regardless of trust result. Trust only gates trigger execution.
 
 ## Storage layout
 
 ```
-/var/lib/aimx/
-├── config.toml
-├── dkim/
-│   ├── private.key
-│   └── public.key
-├── catchall/
-│   ├── 2025-01-15-001.md
-│   ├── 2025-01-15-002.md
-│   └── attachments/
-│       └── document.pdf
-└── support/
-    └── ...
+/etc/aimx/                       # Config + secrets (root-owned, mode 0755)
+├── config.toml                  # Configuration (mode 0640, root:root)
+└── dkim/
+    ├── private.key              # RSA private key (mode 0600, root-only)
+    └── public.key               # RSA public key (mode 0644, advertised via DNS)
+
+/run/aimx/                       # Runtime dir (mode 0755, root:root)
+└── send.sock                    # World-writable UDS for aimx send (mode 0666)
+
+/var/lib/aimx/                   # Mailbox storage (world-readable by design)
+├── inbox/                       # inbound mail
+│   ├── catchall/                # default mailbox
+│   │   ├── 2025-04-15-143022-hello.md                  # flat: zero attachments
+│   │   └── 2025-04-15-153300-invoice-march/            # Zola-style bundle
+│   │       ├── 2025-04-15-153300-invoice-march.md
+│   │       ├── invoice.pdf
+│   │       └── receipt.png
+│   └── support/
+│       └── ...
+└── sent/                        # outbound sent copies
+    └── support/
+        └── ...
 ```
+
+Filenames use `YYYY-MM-DD-HHMMSS-<slug>.md` in UTC. Zero attachments produce a flat `.md` file; one or more attachments produce a bundle directory of the same stem with the `.md` and every attachment as siblings (the old `attachments/` subdirectory is gone).
+
+The DKIM private key is `0600` and readable only by root (`aimx serve` loads it at startup and signs in-process). The public key and the datadir are world-readable; AIMX treats DKIM secret isolation as the security boundary, not filesystem ACLs on the mailbox tree.
 
 ### Email format
 
-Emails are stored as Markdown with TOML frontmatter:
+Inbound emails are stored as Markdown with TOML frontmatter:
 
 ```markdown
 +++
-id = "2025-01-15-001"
-message_id = "<abc123@example.com>"
+id = "2025-04-15-143022-hello"
+message_id = "abc123@example.com"
+thread_id = "a1b2c3d4e5f6a7b8"
 from = "Alice <alice@example.com>"
 to = "support@agent.yourdomain.com"
+delivered_to = "support@agent.yourdomain.com"
 subject = "Hello"
-date = "2025-01-15T10:30:00Z"
-in_reply_to = ""
-references = ""
-attachments = []
-mailbox = "support"
-read = false
+date = "2025-04-15T14:30:22Z"
+received_at = "2025-04-15T14:30:23Z"
+received_from_ip = "203.0.113.10"
+size_bytes = 1024
 dkim = "pass"
 spf = "pass"
+dmarc = "pass"
+trusted = "true"
+mailbox = "support"
+read = false
+labels = []
 +++
 
 Hello, this is the email body in plain text.
 ```
+
+Optional fields (`cc`, `reply_to`, `in_reply_to`, `references`, `list_id`, `auto_submitted`, `received_from_ip`) are omitted when empty rather than written as empty strings. Sent copies (under `/var/lib/aimx/sent/<mailbox>/`) add an outbound block with `outbound`, `delivery_status`, `bcc`, `delivered_at`, and `delivery_details`. See [`book/mailboxes.md`](book/mailboxes.md) for the full field reference and outbound schema.
 
 ## Verifier service
 
@@ -350,18 +401,27 @@ To prevent emails from landing in spam:
 3. In Gmail: Settings > Filters > Create filter for `*@yourdomain.com` > Never send to Spam.
 4. Alternatively, reply to an email from the domain -- Gmail learns it is not spam.
 
-## Data directory override
+## Directory overrides
 
-The default data directory is `/var/lib/aimx`. Override with:
+AIMX splits its filesystem footprint across two roots, each with its own override:
+
+- **Storage** (`/var/lib/aimx/`) — mailboxes, inbound and sent. Override with `--data-dir <PATH>` or `AIMX_DATA_DIR=<PATH>`.
+- **Config + DKIM** (`/etc/aimx/`) — `config.toml` plus the DKIM keypair. Override with `AIMX_CONFIG_DIR=<PATH>`.
 
 ```bash
-# CLI flag
-aimx --data-dir /custom/path status
+# Storage override (CLI flag — wins over env var)
+aimx --data-dir /custom/storage status
 
-# Environment variable
-export AIMX_DATA_DIR=/custom/path
+# Storage override (env var)
+export AIMX_DATA_DIR=/custom/storage
 aimx status
+
+# Config + DKIM override (tests and dev loops that can't run as root)
+export AIMX_CONFIG_DIR=/tmp/aimx-dev
+aimx dkim-keygen
 ```
+
+Under a normal install you won't need either — `aimx setup` writes to the canonical locations and everything picks them up from there.
 
 ## License
 

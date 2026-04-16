@@ -18,15 +18,25 @@ const SLUG_EMPTY_FALLBACK: &str = "no-subject";
 /// Callers pass the already-MIME-decoded subject (e.g. the `&str` returned
 /// by `mail_parser::Message::subject`, which decodes RFC 2047 encoded words
 /// transparently). The transformation is:
-/// 1. Lowercase (Unicode-aware).
-/// 2. Every non-alphanumeric character becomes `-`.
-/// 3. Runs of `-` collapse to one.
-/// 4. Leading/trailing `-` are trimmed.
-/// 5. Truncated to 20 characters (counted as Unicode scalar values, then
+/// 1. NFC-normalize (so NFC and NFD encodings of the same visible subject
+///    produce identical slugs — see S43-7).
+/// 2. Lowercase (Unicode-aware).
+/// 3. Every non-alphanumeric character becomes `-`.
+/// 4. Runs of `-` collapse to one.
+/// 5. Leading/trailing `-` are trimmed.
+/// 6. Truncated to 20 characters (counted as Unicode scalar values, then
 ///    re-trimmed in case truncation left a trailing `-`).
-/// 6. Empty result becomes `no-subject`.
+/// 7. Empty result becomes `no-subject`.
 pub fn slugify(subject: &str) -> String {
-    let lowered: String = subject.to_lowercase();
+    use unicode_normalization::UnicodeNormalization;
+
+    // NFC-normalize first so decomposed (NFD) forms of the same visible
+    // subject produce the same slug. Without this, `"Héllo"` written as
+    // `H` + `e` + combining-acute and `"Héllo"` written as `H` + precomposed
+    // `é` would yield different slugs even though humans and mail clients
+    // treat them as identical. See S43-7.
+    let normalized: String = subject.nfc().collect();
+    let lowered: String = normalized.to_lowercase();
 
     let mut out = String::with_capacity(lowered.len());
     let mut last_was_dash = false;
@@ -176,6 +186,19 @@ mod tests {
     #[test]
     fn slugify_numbers_preserved() {
         assert_eq!(slugify("Invoice #123 for 2025"), "invoice-123-for-2025");
+    }
+
+    #[test]
+    fn slugify_nfd_and_nfc_match() {
+        // S43-7: NFD and NFC forms of the same visible subject must slug to
+        // the same value. Without the NFC-normalization step they split into
+        // different slugs because `to_lowercase()` is not composition-aware.
+        // "Hé" written two ways:
+        //   * NFC:  "H\u{00E9}"         (precomposed é)
+        //   * NFD:  "H\u{0065}\u{0301}" (e + combining acute)
+        let nfc = "H\u{00E9}llo";
+        let nfd = "H\u{0065}\u{0301}llo";
+        assert_eq!(slugify(nfc), slugify(nfd));
     }
 
     #[test]

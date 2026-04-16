@@ -346,7 +346,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
-## Sprint 43 — Pre-launch README Sweep + Hardening (Days 120.5–123) [NOT STARTED]
+## Sprint 43 — Pre-launch README Sweep + Hardening (Days 120.5–123) [DONE]
 
 **Goal:** Bring `README.md` up to date with the v0.2 reshape (Sprints 33–40) before public release; fix correctness and UX gaps surfaced by external review: `aimx status` OpenRC support, HTML-body size cap, `Received:` IP parser, transport error classification, attachment-filename safety, and `dkim-keygen` permission errors.
 
@@ -358,14 +358,14 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Storage layout rewritten for `/etc/aimx/{config.toml,dkim/}` + `/var/lib/aimx/{inbox,sent}/<mailbox>/`, with a Zola bundle example and permission notes (DKIM private `0600` root-only, public `0644`, datadir world-readable by design)
-- [ ] Configuration section: `/etc/aimx/config.toml` is canonical; documents `AIMX_CONFIG_DIR` override (for tests / non-standard installs) separately from `--data-dir` / `AIMX_DATA_DIR`
-- [ ] Email format example rewritten with all current inbound fields in the `frontmatter.rs` section order; includes a short outbound-block example or pointer to `book/mailboxes.md`
-- [ ] Trust policy section mentions the `trusted: "none" | "true" | "false"` frontmatter surface alongside per-mailbox `trust` + `trusted_senders`
-- [ ] DKIM key management section notes keys live at `/etc/aimx/dkim/` and `aimx dkim-keygen` requires root (or `AIMX_CONFIG_DIR` for dev)
-- [ ] Top-to-bottom pass against `book/` + `CLAUDE.md` + actual code — every other drift (MCP tool list, send examples, channel variables, DNS records) verified or corrected
-- [ ] Repo-wide grep for `/var/lib/aimx/<mailbox>/` bare (without `inbox/`/`sent/`) returns zero hits in `README.md`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Storage layout rewritten for `/etc/aimx/{config.toml,dkim/}` + `/var/lib/aimx/{inbox,sent}/<mailbox>/`, with a Zola bundle example and permission notes (DKIM private `0600` root-only, public `0644`, datadir world-readable by design)
+- [x] Configuration section: `/etc/aimx/config.toml` is canonical; documents `AIMX_CONFIG_DIR` override (for tests / non-standard installs) separately from `--data-dir` / `AIMX_DATA_DIR`
+- [x] Email format example rewritten with all current inbound fields in the `frontmatter.rs` section order; includes a short outbound-block example or pointer to `book/mailboxes.md`
+- [x] Trust policy section mentions the `trusted: "none" | "true" | "false"` frontmatter surface alongside per-mailbox `trust` + `trusted_senders`
+- [x] DKIM key management section notes keys live at `/etc/aimx/dkim/` and `aimx dkim-keygen` requires root (or `AIMX_CONFIG_DIR` for dev)
+- [x] Top-to-bottom pass against `book/` + `CLAUDE.md` + actual code — every other drift (MCP tool list, send examples, channel variables, DNS records) verified or corrected
+- [x] Repo-wide grep for `/var/lib/aimx/<mailbox>/` bare (without `inbox/`/`sent/`) returns zero hits in `README.md`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-2: `aimx status` uses `SystemOps::is_service_running`
 
@@ -373,11 +373,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `status.rs` replaces the hardcoded `systemctl` invocation with `SystemOps::is_service_running("aimx")`
-- [ ] `status::run` instantiates a `RealSystemOps` at the call site (or accepts it as a parameter) — whichever matches the codebase's existing pattern
-- [ ] Test mocks `SystemOps::is_service_running` returning `true` and `false`, asserts `status` output accordingly
-- [ ] Manual verification note in the test file or PR description that status now works on an OpenRC host
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `status.rs` replaces the hardcoded `systemctl` invocation with `SystemOps::is_service_running("aimx")`
+- [x] `status::run` instantiates a `RealSystemOps` at the call site (or accepts it as a parameter) — whichever matches the codebase's existing pattern
+- [x] Test mocks `SystemOps::is_service_running` returning `true` and `false`, asserts `status` output accordingly
+- [x] Manual verification note in the test file or PR description that status now works on an OpenRC host
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-3: HTML body size cap before `html2text::from_read`
 
@@ -385,11 +385,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `ingest.rs` defines `const HTML_CONVERSION_CAP: usize = 2 * 1024 * 1024;`
-- [ ] When HTML length exceeds the cap, only the first `HTML_CONVERSION_CAP` bytes are passed to `html2text`; the rendered body appends a marker like `\n\n[...HTML body truncated at 2 MB for rendering...]`
-- [ ] Within-cap messages behave identically to today
-- [ ] Unit test: under-cap → full conversion; over-cap → truncated with marker; empty HTML → empty string (unchanged)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `ingest.rs` defines `const HTML_CONVERSION_CAP: usize = 2 * 1024 * 1024;`
+- [x] When HTML length exceeds the cap, only the first `HTML_CONVERSION_CAP` bytes are passed to `html2text`; the rendered body appends a marker like `\n\n[...HTML body truncated at 2 MB for rendering...]`
+- [x] Within-cap messages behave identically to today
+- [x] Unit test: under-cap → full conversion; over-cap → truncated with marker; empty HTML → empty string (unchanged)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-4: `parse_ip_from_received` trusts only bracketed forms
 
@@ -397,11 +397,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] `parse_ip_from_received` returns `None` when no bracketed non-loopback IP is found (word-by-word fallback removed)
-- [ ] Existing tests relying on the fallback updated or removed
-- [ ] New test: `Received:` header with IP only in a free-text comment (no brackets) returns `None`
-- [ ] Behavior spot-checked against at least three real `Received:` header shapes from ingest fixtures
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `parse_ip_from_received` returns `None` when no bracketed non-loopback IP is found (word-by-word fallback removed)
+- [x] Existing tests relying on the fallback updated or removed
+- [x] New test: `Received:` header with IP only in a free-text comment (no brackets) returns `None`
+- [x] Behavior spot-checked against at least three real `Received:` header shapes from ingest fixtures
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-5: `LettreTransport` error classification via lettre `Error` methods
 
@@ -409,11 +409,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] `LettreTransport::send` classifies via `lettre::transport::smtp::Error` accessor methods, not `msg.contains(...)`
-- [ ] Short inline comment documents which lettre `Error` shapes map to `TransportError::Temp` vs `TransportError::Permanent`
-- [ ] Existing send-handler tests still pass; behavior preserved (same variant for same scenario)
-- [ ] If lettre's API allows constructing `Error` values in tests, add a test per branch; otherwise rely on existing end-to-end coverage with a note in the PR
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `LettreTransport::send` classifies via `lettre::transport::smtp::Error` accessor methods, not `msg.contains(...)`
+- [x] Short inline comment documents which lettre `Error` shapes map to `TransportError::Temp` vs `TransportError::Permanent`
+- [x] Existing send-handler tests still pass; behavior preserved (same variant for same scenario)
+- [x] If lettre's API allows constructing `Error` values in tests, add a test per branch; otherwise rely on existing end-to-end coverage with a note in the PR
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-6: `aimx dkim-keygen` helpful permission-denied message
 
@@ -421,10 +421,10 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] `io::ErrorKind::PermissionDenied` from the dkim write path is wrapped with a clear message naming the target directory and suggesting `sudo aimx dkim-keygen` or `AIMX_CONFIG_DIR=<path> aimx dkim-keygen`
-- [ ] Other IO errors (disk full, etc.) surface their native message unmodified
-- [ ] Test: set `AIMX_CONFIG_DIR` to a read-only tempdir, run `aimx dkim-keygen`, assert error text mentions both the attempted path and either `sudo` or `AIMX_CONFIG_DIR`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `io::ErrorKind::PermissionDenied` from the dkim write path is wrapped with a clear message naming the target directory and suggesting `sudo aimx dkim-keygen` or `AIMX_CONFIG_DIR=<path> aimx dkim-keygen`
+- [x] Other IO errors (disk full, etc.) surface their native message unmodified
+- [x] Test: set `AIMX_CONFIG_DIR` to a read-only tempdir, run `aimx dkim-keygen`, assert error text mentions both the attempted path and either `sudo` or `AIMX_CONFIG_DIR`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S43-7: Attachment filename safety + subject/filename NFC normalization
 
@@ -434,13 +434,13 @@ Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-n
 
 **Priority:** P1
 
-- [ ] New `sanitize_attachment_filename(raw: &str, index: usize) -> String` helper (in `ingest.rs` or a sibling module)
-- [ ] `prepare_attachments` calls the helper on every entry; sanitized name is used for both the on-disk bundle file AND the `attachments` frontmatter entry (one source of truth)
-- [ ] `slug::slugify` NFC-normalizes input before ASCII folding (add `unicode-normalization` crate if not already present transitively)
-- [ ] Unit tests for `sanitize_attachment_filename` cover: embedded NUL, CR/LF, `../../etc/passwd`, leading `-rf`, 500-char name (truncated to ≤200 bytes on a char boundary), empty-after-sanitization (falls back to `attachment-<n>`), Windows-style `a\\b\\c.pdf`, NFD-form Unicode, bidi-override sequence, zero-width joiner
-- [ ] Unit test for `slugify`: NFD and NFC forms of the same visible subject produce the same slug
-- [ ] Integration test: ingest a fixture `.eml` with two attachments named `../../etc/passwd` and `\x00rce.sh`; assert files land under the expected bundle directory with sanitized names and no path escape
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `sanitize_attachment_filename(raw: &str, index: usize) -> String` helper (in `ingest.rs` or a sibling module)
+- [x] `prepare_attachments` calls the helper on every entry; sanitized name is used for both the on-disk bundle file AND the `attachments` frontmatter entry (one source of truth)
+- [x] `slug::slugify` NFC-normalizes input before ASCII folding (add `unicode-normalization` crate if not already present transitively)
+- [x] Unit tests for `sanitize_attachment_filename` cover: embedded NUL, CR/LF, `../../etc/passwd`, leading `-rf`, 500-char name (truncated to ≤200 bytes on a char boundary), empty-after-sanitization (falls back to `attachment-<n>`), Windows-style `a\\b\\c.pdf`, NFD-form Unicode, bidi-override sequence, zero-width joiner
+- [x] Unit test for `slugify`: NFD and NFC forms of the same visible subject produce the same slug
+- [x] Integration test: ingest a fixture `.eml` with two attachments named `../../etc/passwd` and `\x00rce.sh`; assert files land under the expected bundle directory with sanitized names and no path escape
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
@@ -495,7 +495,7 @@ Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-n
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
 | 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Done |
-| 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | Not Started |
+| 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | Done |
 
 ## Deferred to v2
 

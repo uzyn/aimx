@@ -423,6 +423,60 @@ fn dkim_keygen_force_overwrite() {
     assert_ne!(original, new);
 }
 
+#[cfg(unix)]
+#[test]
+fn dkim_keygen_permission_denied_error_mentions_path_and_override() {
+    use std::os::unix::fs::PermissionsExt;
+
+    // Skip when running as root — chmod 0o500 is bypassed by CAP_DAC_OVERRIDE.
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: test must run as non-root");
+        return;
+    }
+
+    // `AIMX_CONFIG_DIR` points at a read-only directory. `aimx dkim-keygen`
+    // then tries to create `<ro>/dkim/` and hits PermissionDenied. The error
+    // message must name the target path and suggest `sudo` or `AIMX_CONFIG_DIR`.
+    let tmp = TempDir::new().unwrap();
+    let config_dir = tmp.path().join("ro-config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        tmp.path().display()
+    );
+    std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
+    // Remove write permission so `create_dir_all(<ro-config>/dkim)` inside
+    // `generate_keypair` fails with PermissionDenied.
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .arg("dkim-keygen")
+        .output()
+        .expect("spawn aimx");
+
+    // Restore permissions for TempDir cleanup.
+    let _ = std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o755));
+
+    assert!(
+        !output.status.success(),
+        "dkim-keygen must fail on read-only config dir"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let combined = format!("{stderr}{}", String::from_utf8_lossy(&output.stdout));
+    let dkim_path = config_dir.join("dkim");
+    assert!(
+        combined.contains(&dkim_path.display().to_string())
+            || combined.contains(&config_dir.display().to_string()),
+        "error must mention the attempted path; got: {combined}"
+    );
+    assert!(
+        combined.contains("sudo") || combined.contains("AIMX_CONFIG_DIR"),
+        "error must suggest sudo or AIMX_CONFIG_DIR; got: {combined}"
+    );
+}
+
 fn aimx_binary_path() -> std::path::PathBuf {
     assert_cmd::cargo::cargo_bin("aimx")
 }
