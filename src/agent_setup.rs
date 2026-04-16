@@ -24,6 +24,12 @@ pub struct AgentSpec {
     /// the user to paste a JSON/JSONC snippet can embed the right
     /// `--data-dir` argument into that snippet.
     pub activation_hint: fn(data_dir: Option<&Path>) -> String,
+    /// When `true`, the installer copies `agents/common/references/*.md`
+    /// alongside the installed SKILL.md. Agents that support progressive
+    /// disclosure (Claude Code, Codex, OpenClaw) load reference files on
+    /// demand. Agents that take a single blob (Goose, Gemini, OpenCode)
+    /// receive only the main primer.
+    pub progressive_disclosure: bool,
 }
 
 /// Static registry of supported agents.
@@ -57,24 +63,28 @@ pub fn registry() -> &'static [AgentSpec] {
             source_subdir: "claude-code",
             dest_template: "$HOME/.claude/plugins/aimx",
             activation_hint: claude_code_hint,
+            progressive_disclosure: true,
         },
         AgentSpec {
             name: "codex",
             source_subdir: "codex",
             dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
+            progressive_disclosure: true,
         },
         AgentSpec {
             name: "opencode",
             source_subdir: "opencode",
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
             activation_hint: opencode_hint,
+            progressive_disclosure: false,
         },
         AgentSpec {
             name: "gemini",
             source_subdir: "gemini",
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
+            progressive_disclosure: false,
         },
         AgentSpec {
             name: "goose",
@@ -84,6 +94,7 @@ pub fn registry() -> &'static [AgentSpec] {
             // directory. Destination template points at the file itself.
             dest_template: "$XDG_CONFIG_HOME/goose/recipes",
             activation_hint: goose_hint,
+            progressive_disclosure: false,
         },
         AgentSpec {
             name: "openclaw",
@@ -92,6 +103,7 @@ pub fn registry() -> &'static [AgentSpec] {
             // skill-directory package (no flat SKILL.md at the root).
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
+            progressive_disclosure: true,
         },
     ]
 }
@@ -412,7 +424,8 @@ fn install_to_writer(
         )
     })?;
 
-    let files = assemble_plugin_files(source, opts.data_dir)?;
+    let files =
+        assemble_plugin_files_with_disclosure(source, opts.data_dir, spec.progressive_disclosure)?;
     let hint = (spec.activation_hint)(opts.data_dir);
 
     if opts.print {
@@ -445,18 +458,31 @@ fn install_to_writer(
 }
 
 /// Walk the embedded plugin source, transform known files (skill header +
-/// primer, plugin.json), and return the full set of files to write.
+/// primer + optional footer, plugin.json), and return the full set of files
+/// to write.
+///
+/// When `progressive_disclosure` is `true`, the `references/*.md` files from
+/// `agents/common/references/` are included alongside the assembled SKILL.md.
+/// When `false`, only the main primer is included.
 ///
 /// Returns `(relative_path, bytes)` pairs. Relative paths are relative to
 /// the install destination root.
+#[cfg(test)]
 pub fn assemble_plugin_files(
     source: &Dir<'_>,
     data_dir: Option<&Path>,
 ) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
+    assemble_plugin_files_with_disclosure(source, data_dir, false)
+}
+
+pub fn assemble_plugin_files_with_disclosure(
+    source: &Dir<'_>,
+    data_dir: Option<&Path>,
+    progressive_disclosure: bool,
+) -> Result<Vec<(PathBuf, Vec<u8>)>, String> {
     let mut out: Vec<(PathBuf, Vec<u8>)> = Vec::new();
     collect_entries(source, Path::new(""), &mut out)?;
 
-    // Transformation 1: assemble SKILL.md from SKILL.md.header + common primer.
     let primer = AGENTS_DIR
         .get_file("common/aimx-primer.md")
         .ok_or_else(|| {
@@ -470,6 +496,25 @@ pub fn assemble_plugin_files(
             let target = rel.with_file_name("SKILL.md");
             let mut combined = bytes.clone();
             combined.extend_from_slice(primer);
+
+            // Append optional footer if present (e.g. SKILL.md.footer).
+            let footer_name = "SKILL.md.footer";
+            let footer_path = source
+                .path()
+                .parent()
+                .map(|_| {
+                    // Try to find footer relative to where the header lives
+                    let header_dir = rel.parent().unwrap_or(Path::new(""));
+                    header_dir.join(footer_name)
+                })
+                .unwrap_or_else(|| PathBuf::from(footer_name));
+
+            // Look for the footer in the source directory entries we collected
+            // (they were drained, so check the embedded source directly).
+            if let Some(footer_file) = find_file_in_dir(source, &footer_path) {
+                combined.extend_from_slice(footer_file);
+            }
+
             transformed.push((target, combined));
             continue;
         }
@@ -524,11 +569,46 @@ pub fn assemble_plugin_files(
             continue;
         }
 
+        // Skip .footer files — they are consumed during header+primer assembly
+        // and should not appear as standalone files in the output.
+        if rel
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(".footer"))
+        {
+            continue;
+        }
+
         transformed.push((rel, bytes));
+    }
+
+    if progressive_disclosure && let Some(refs_dir) = AGENTS_DIR.get_dir("common/references") {
+        // Place references/ as a sibling of the assembled SKILL.md.
+        let skill_parent = transformed
+            .iter()
+            .find(|(rel, _)| rel.file_name().is_some_and(|n| n == "SKILL.md"))
+            .map(|(rel, _)| rel.parent().unwrap_or(Path::new("")).to_path_buf())
+            .unwrap_or_default();
+
+        for entry in refs_dir.entries() {
+            if let DirEntry::File(f) = entry {
+                let name = f
+                    .path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let rel = skill_parent.join("references").join(&name);
+                transformed.push((rel, f.contents().to_vec()));
+            }
+        }
     }
 
     transformed.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(transformed)
+}
+
+fn find_file_in_dir<'a>(dir: &'a Dir<'_>, rel_path: &Path) -> Option<&'a [u8]> {
+    let full_path = dir.path().join(rel_path);
+    dir.get_file(&full_path).map(|f| f.contents())
 }
 
 fn collect_entries(
@@ -1436,7 +1516,7 @@ mod tests {
             "recipe: {text}"
         );
         assert!(
-            text.contains("  - `mailbox_create(name: string)`"),
+            text.contains("  - `mailbox_create(name)`"),
             "recipe: {text}"
         );
         // Extensions section references AIMX's stdio MCP server.
@@ -1777,5 +1857,334 @@ mod tests {
             dmode, 0o755,
             ".claude-plugin dir should be 0o755, got {dmode:o}"
         );
+    }
+
+    #[test]
+    fn primer_line_count_within_target_range() {
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .expect("common/aimx-primer.md must exist")
+            .contents();
+        let text = std::str::from_utf8(primer).expect("primer must be valid UTF-8");
+        let line_count = text.lines().count();
+        // Sprint 39 target: 300–500 lines (soft cap).
+        assert!(
+            (300..=500).contains(&line_count),
+            "main primer has {line_count} lines; target range is 300–500"
+        );
+    }
+
+    #[test]
+    fn references_directory_exists_in_embedded_assets() {
+        let refs_dir = AGENTS_DIR.get_dir("common/references");
+        assert!(
+            refs_dir.is_some(),
+            "agents/common/references/ must exist in embedded assets"
+        );
+        let refs_dir = refs_dir.unwrap();
+        let filenames: Vec<String> = refs_dir
+            .entries()
+            .iter()
+            .filter_map(|e| match e {
+                DirEntry::File(f) => f
+                    .path()
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(filenames.contains(&"mcp-tools.md".to_string()));
+        assert!(filenames.contains(&"frontmatter.md".to_string()));
+        assert!(filenames.contains(&"workflows.md".to_string()));
+        assert!(filenames.contains(&"troubleshooting.md".to_string()));
+    }
+
+    #[test]
+    fn progressive_disclosure_agent_gets_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        // Claude Code has progressive_disclosure: true
+        run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".claude/plugins/aimx");
+        let refs = dest.join("skills/aimx/references");
+        assert!(
+            refs.join("mcp-tools.md").exists(),
+            "progressive-disclosure agent should have references/mcp-tools.md"
+        );
+        assert!(refs.join("frontmatter.md").exists());
+        assert!(refs.join("workflows.md").exists());
+        assert!(refs.join("troubleshooting.md").exists());
+
+        // Verify references content is non-empty and matches embedded assets
+        let installed = std::fs::read_to_string(refs.join("mcp-tools.md")).unwrap();
+        let embedded = AGENTS_DIR
+            .get_file("common/references/mcp-tools.md")
+            .unwrap()
+            .contents();
+        assert_eq!(installed.as_bytes(), embedded);
+    }
+
+    #[test]
+    fn non_progressive_disclosure_agent_has_no_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        // OpenCode has progressive_disclosure: false
+        run_with_env(Some("opencode".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".config/opencode/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(
+            !dest.join("references").exists(),
+            "non-progressive-disclosure agent should NOT have references/"
+        );
+    }
+
+    #[test]
+    fn codex_progressive_disclosure_installs_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("codex".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".codex/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("references/mcp-tools.md").exists());
+        assert!(dest.join("references/frontmatter.md").exists());
+        assert!(dest.join("references/workflows.md").exists());
+        assert!(dest.join("references/troubleshooting.md").exists());
+    }
+
+    #[test]
+    fn openclaw_progressive_disclosure_installs_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("openclaw".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".openclaw/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("references/mcp-tools.md").exists());
+        assert!(dest.join("references/frontmatter.md").exists());
+    }
+
+    #[test]
+    fn gemini_no_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("gemini".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".gemini/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("references").exists());
+    }
+
+    #[test]
+    fn goose_no_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("goose".into()), false, false, false, None, &env).unwrap();
+
+        let recipe = tmp.path().join(".config/goose/recipes/aimx.yaml");
+        assert!(recipe.exists());
+        assert!(!tmp.path().join(".config/goose/recipes/references").exists());
+    }
+
+    #[test]
+    fn print_mode_shows_references_for_progressive_disclosure() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let spec = find_agent("codex").unwrap();
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+
+        assert!(
+            printed.contains("=== references/mcp-tools.md ==="),
+            "print mode should show references for progressive-disclosure agents"
+        );
+        assert!(printed.contains("=== references/frontmatter.md ==="));
+        assert!(printed.contains("=== references/workflows.md ==="));
+        assert!(printed.contains("=== references/troubleshooting.md ==="));
+    }
+
+    #[test]
+    fn print_mode_omits_references_for_non_progressive_disclosure() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let spec = find_agent("opencode").unwrap();
+        let opts = InstallOptions {
+            force: false,
+            print: true,
+            data_dir: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        install_to_writer(spec, &opts, &env, &mut buf).unwrap();
+        let printed = String::from_utf8(buf).unwrap();
+
+        assert!(
+            !printed.contains("=== references/"),
+            "print mode should NOT show references for non-progressive-disclosure agents"
+        );
+    }
+
+    #[test]
+    fn progressive_disclosure_assignments() {
+        let reg = registry();
+        let by_name = |n: &str| reg.iter().find(|s| s.name == n).unwrap();
+
+        assert!(by_name("claude-code").progressive_disclosure);
+        assert!(by_name("codex").progressive_disclosure);
+        assert!(by_name("openclaw").progressive_disclosure);
+
+        assert!(!by_name("opencode").progressive_disclosure);
+        assert!(!by_name("gemini").progressive_disclosure);
+        assert!(!by_name("goose").progressive_disclosure);
+    }
+
+    #[test]
+    fn author_metadata_in_claude_code_plugin_json() {
+        let plugin_bytes = AGENTS_DIR
+            .get_file("claude-code/.claude-plugin/plugin.json")
+            .expect("plugin.json must exist")
+            .contents();
+        let text = std::str::from_utf8(plugin_bytes).unwrap();
+        assert!(
+            text.contains("U-Zyn Chua"),
+            "plugin.json must have standardized author"
+        );
+        assert!(
+            !text.contains("\"name\": \"AIMX\""),
+            "plugin.json must not have AIMX as author name"
+        );
+    }
+
+    #[test]
+    fn author_metadata_in_all_skill_headers() {
+        for agent in ["claude-code", "codex", "opencode", "gemini", "openclaw"] {
+            let header_path = match agent {
+                "claude-code" => "claude-code/skills/aimx/SKILL.md.header",
+                _ => &format!("{agent}/SKILL.md.header"),
+            };
+            let header = AGENTS_DIR
+                .get_file(header_path)
+                .unwrap_or_else(|| panic!("missing header for {agent}"))
+                .contents();
+            let text = std::str::from_utf8(header).unwrap();
+            assert!(
+                text.contains("author: U-Zyn Chua <chua@uzyn.com>"),
+                "{agent} SKILL.md.header must contain author metadata"
+            );
+        }
+    }
+
+    #[test]
+    fn goose_header_notes_author_gap() {
+        let header = AGENTS_DIR
+            .get_file("goose/aimx.yaml.header")
+            .expect("goose header must exist")
+            .contents();
+        let text = std::str::from_utf8(header).unwrap();
+        assert!(
+            text.contains("U-Zyn Chua"),
+            "goose header must reference the author"
+        );
+        assert!(
+            text.contains("does not support an author field"),
+            "goose header must note the schema gap"
+        );
+    }
+
+    #[test]
+    fn no_aimx_author_placeholder_in_agents() {
+        fn check_dir(dir: &Dir<'_>, path_prefix: &str) {
+            for entry in dir.entries() {
+                match entry {
+                    DirEntry::File(f) => {
+                        if let Ok(text) = std::str::from_utf8(f.contents()) {
+                            let full_path = format!("{}/{}", path_prefix, f.path().display());
+                            assert!(
+                                !text.contains("\"author\": \"AIMX\"")
+                                    && !text.contains("\"name\": \"AIMX\""),
+                                "found placeholder author in {full_path}"
+                            );
+                            assert!(
+                                !text.contains("chua@example.com"),
+                                "found placeholder email in {full_path}"
+                            );
+                        }
+                    }
+                    DirEntry::Dir(sub) => {
+                        check_dir(sub, &format!("{}/{}", path_prefix, sub.path().display()));
+                    }
+                }
+            }
+        }
+        check_dir(&AGENTS_DIR, "agents");
+    }
+
+    #[test]
+    fn primer_documents_storage_layout_plainly() {
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+        let text = std::str::from_utf8(primer).unwrap();
+        assert!(
+            text.contains("/var/lib/aimx/"),
+            "primer must document the datadir layout plainly (FR-50c)"
+        );
+        assert!(text.contains("inbox/"));
+        assert!(text.contains("sent/"));
+        assert!(text.contains("FR-50c"));
+    }
+
+    #[test]
+    fn primer_links_references_and_runtime_readme() {
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+        let text = std::str::from_utf8(primer).unwrap();
+        assert!(text.contains("references/mcp-tools.md"));
+        assert!(text.contains("references/frontmatter.md"));
+        assert!(text.contains("references/workflows.md"));
+        assert!(text.contains("references/troubleshooting.md"));
+        assert!(text.contains("/var/lib/aimx/README.md"));
+    }
+
+    #[test]
+    fn trusted_field_documented_in_primer_and_reference() {
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+        let primer_text = std::str::from_utf8(primer).unwrap();
+        assert!(primer_text.contains("`trusted`"));
+        assert!(primer_text.contains("\"none\""));
+        assert!(primer_text.contains("\"true\""));
+        assert!(primer_text.contains("\"false\""));
+
+        let frontmatter_ref = AGENTS_DIR
+            .get_file("common/references/frontmatter.md")
+            .unwrap()
+            .contents();
+        let ref_text = std::str::from_utf8(frontmatter_ref).unwrap();
+        assert!(ref_text.contains("`trusted`"));
+        assert!(ref_text.contains("\"none\""));
+        assert!(ref_text.contains("\"true\""));
+        assert!(ref_text.contains("\"false\""));
+        assert!(ref_text.contains("trusted_senders"));
     }
 }
