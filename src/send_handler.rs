@@ -187,6 +187,7 @@ where
     let subject = headers.get("Subject").cloned().unwrap_or_default();
     let in_reply_to = headers.get("In-Reply-To").cloned();
     let references_val = headers.get("References").cloned();
+    let date_header = headers.get("Date").cloned();
 
     match ctx.transport.send(&from_header, &recipient_bare, &signed) {
         Ok(_server) => {
@@ -198,6 +199,7 @@ where
                 &from_header,
                 &to_header,
                 &subject,
+                date_header.as_deref(),
                 in_reply_to.as_deref(),
                 references_val.as_deref(),
                 &signed,
@@ -209,7 +211,10 @@ where
         }
         Err(e) => {
             let msg = e.to_string();
-            let code = classify_transport_error(&msg);
+            let code = match &e {
+                crate::transport::TransportError::Temp(_) => ErrCode::Temp,
+                crate::transport::TransportError::Permanent(_) => ErrCode::Delivery,
+            };
             // TEMP errors: do NOT persist. The client sees the transient
             // error and may retry, so writing a "failed" record would be
             // premature. Only permanent delivery failures (DELIVERY) get
@@ -222,6 +227,7 @@ where
                     &from_header,
                     &to_header,
                     &subject,
+                    date_header.as_deref(),
                     in_reply_to.as_deref(),
                     references_val.as_deref(),
                     &signed,
@@ -336,27 +342,6 @@ fn extract_bare_address(value: &str) -> Option<String> {
     Some(addr.to_string())
 }
 
-/// Map a transport error string to an `ErrCode`.
-///
-/// Heuristic — the transport layer returns `Box<dyn Error>` strings today,
-/// so we pattern-match the message. Connection-level failures (DNS,
-/// refused, timeout) are classified as `Temp` because they're usually
-/// retriable; explicit MX rejects (5xx SMTP replies) map to `Delivery`.
-fn classify_transport_error(msg: &str) -> ErrCode {
-    let lower = msg.to_ascii_lowercase();
-    if lower.contains("unreachable")
-        || lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("connection refused")
-        || lower.contains("no a record")
-        || lower.contains("dns")
-    {
-        ErrCode::Temp
-    } else {
-        ErrCode::Delivery
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn persist_sent_file(
     ctx: &SendContext,
@@ -365,6 +350,7 @@ fn persist_sent_file(
     from_header: &str,
     to_header: &str,
     subject: &str,
+    date_header: Option<&str>,
     in_reply_to: Option<&str>,
     references: Option<&str>,
     signed_bytes: &[u8],
@@ -387,7 +373,9 @@ fn persist_sent_file(
 
     let thread_id = compute_thread_id(message_id, in_reply_to, references);
 
-    let date = chrono::Utc::now().to_rfc3339();
+    let date = date_header
+        .map(|d| d.to_string())
+        .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
 
     let meta = OutboundFrontmatter {
         id: String::new(), // filled after allocation
@@ -484,7 +472,8 @@ mod tests {
 
     enum Behavior {
         Ok,
-        Err(String),
+        TempErr(String),
+        PermanentErr(String),
     }
 
     impl MailTransport for MockTransport {
@@ -493,13 +482,16 @@ mod tests {
             _sender: &str,
             _recipient: &str,
             message: &[u8],
-        ) -> Result<String, Box<dyn std::error::Error>> {
+        ) -> Result<String, crate::transport::TransportError> {
             match &self.behavior {
                 Behavior::Ok => {
                     self.captured.lock().unwrap().push(message.to_vec());
                     Ok("mock-mx.example.com".to_string())
                 }
-                Behavior::Err(s) => Err(s.clone().into()),
+                Behavior::TempErr(s) => Err(crate::transport::TransportError::Temp(s.clone())),
+                Behavior::PermanentErr(s) => {
+                    Err(crate::transport::TransportError::Permanent(s.clone()))
+                }
             }
         }
     }
@@ -671,7 +663,9 @@ mod tests {
     async fn transport_permanent_error_maps_to_delivery() {
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
-            behavior: Behavior::Err("Rejected by mx.example.com: 550 no such user".to_string()),
+            behavior: Behavior::PermanentErr(
+                "Rejected by mx.example.com: 550 no such user".to_string(),
+            ),
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
@@ -692,7 +686,9 @@ mod tests {
     async fn transport_unreachable_maps_to_temp() {
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
-            behavior: Behavior::Err("All MX servers for gmail.com unreachable: ...".to_string()),
+            behavior: Behavior::TempErr(
+                "All MX servers for gmail.com unreachable: ...".to_string(),
+            ),
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
@@ -933,7 +929,9 @@ mod tests {
         let data_dir = tempfile::TempDir::new().unwrap();
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
-            behavior: Behavior::Err("Rejected by mx.example.com: 550 no such user".to_string()),
+            behavior: Behavior::PermanentErr(
+                "Rejected by mx.example.com: 550 no such user".to_string(),
+            ),
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
@@ -961,7 +959,9 @@ mod tests {
         let data_dir = tempfile::TempDir::new().unwrap();
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
-            behavior: Behavior::Err("All MX servers for gmail.com unreachable: ...".to_string()),
+            behavior: Behavior::TempErr(
+                "All MX servers for gmail.com unreachable: ...".to_string(),
+            ),
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {

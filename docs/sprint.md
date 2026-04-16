@@ -205,7 +205,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
-## Sprint 41 — Post-v0.2 Backlog Cleanup (Days 115–117.5) [NOT STARTED]
+## Sprint 41 — Post-v0.2 Backlog Cleanup (Days 115–117.5) [DONE]
 
 **Goal:** Close out the entire non-blocking review backlog accumulated during Sprints 34–40. Fixes outbound frontmatter bugs, consolidates redundant SPF verification, adds UDS slow-loris protection, types the transport error surface, caches test DKIM keys, and sweeps stale `#[allow(dead_code)]` annotations.
 
@@ -220,11 +220,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `OutboundFrontmatter.received_at`: add `#[serde(skip_serializing_if = "String::is_empty")]` — outbound `.md` files no longer emit `received_at = ""`
-- [ ] `persist_sent_file`: accept a `date: &str` parameter; caller (`handle_send_inner`) passes the scanned `Date:` header value (already available via `scan_headers`). Fall back to `Utc::now().to_rfc3339()` only if `Date:` is missing
-- [ ] `trust.rs` parity test: add reverse-direction cases — when `should_execute_triggers` returns true, verify `trusted` is `"true"` for the same inputs. OR: narrow the docstring from "IFF" to "implies" if the reverse doesn't hold for all cases (the docstring already notes `trusted == "true"` is strictly stronger). Decide based on what the code says
-- [ ] Existing golden tests and frontmatter roundtrip tests still pass
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `OutboundFrontmatter.received_at`: add `#[serde(skip_serializing_if = "String::is_empty")]` — outbound `.md` files no longer emit `received_at = ""`
+- [x] `persist_sent_file`: accept a `date: &str` parameter; caller (`handle_send_inner`) passes the scanned `Date:` header value (already available via `scan_headers`). Fall back to `Utc::now().to_rfc3339()` only if `Date:` is missing
+- [x] `trust.rs` parity test: add reverse-direction cases — when `should_execute_triggers` returns true, verify `trusted` is `"true"` for the same inputs. OR: narrow the docstring from "IFF" to "implies" if the reverse doesn't hold for all cases (the docstring already notes `trusted == "true"` is strictly stronger). Decide based on what the code says
+- [x] Existing golden tests and frontmatter roundtrip tests still pass
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-2 — SPF verification deduplication
 
@@ -232,11 +232,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] Remove `verify_spf_async()` entirely
-- [ ] Derive the SPF string result (`"pass"`, `"fail"`, `"softfail"`, `"neutral"`, `"none"`) from the `SpfOutput` returned by `build_spf_output()` — add a helper `spf_output_to_string(&SpfOutput) -> String`
-- [ ] `verify_auth()` calls `build_spf_output()` once; uses the `SpfOutput` for DMARC and the derived string for the `spf` frontmatter field
-- [ ] All existing auth-related tests still pass; no behavior change
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Remove `verify_spf_async()` entirely
+- [x] Derive the SPF string result (`"pass"`, `"fail"`, `"softfail"`, `"neutral"`, `"none"`) from the `SpfOutput` returned by `build_spf_output()` — add a helper `spf_output_to_string(&SpfOutput) -> String`
+- [x] `verify_auth()` calls `build_spf_output()` once; uses the `SpfOutput` for DMARC and the derived string for the `spf` frontmatter field
+- [x] All existing auth-related tests still pass; no behavior change
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-3 — UDS slow-loris timeout
 
@@ -244,10 +244,10 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] Wrap the `parse_request` call in `serve.rs`'s UDS handler with `tokio::time::timeout(Duration::from_secs(30), ...)`. On timeout, log a warning and drop the connection (no response needed — the client is the slow party)
-- [ ] Add a unit test: connect to UDS, send the request line + headers, then stall — verify the handler drops the connection within ~30s (use a short timeout override for testing, e.g. 1s)
-- [ ] Existing send integration tests still pass (normal sends complete well under 30s)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Wrap the `parse_request` call in `serve.rs`'s UDS handler with `tokio::time::timeout(Duration::from_secs(30), ...)`. On timeout, log a warning and drop the connection (no response needed — the client is the slow party)
+- [x] Add a unit test: connect to UDS, send the request line + headers, then stall — verify the handler drops the connection within ~30s (use a short timeout override for testing, e.g. 1s)
+- [x] Existing send integration tests still pass (normal sends complete well under 30s)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-4 — Typed transport errors
 
@@ -255,13 +255,13 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] Define `TransportError { Temp(String), Permanent(String) }` (or equivalent) in `src/transport.rs`
-- [ ] `MailTransport::send` returns `Result<String, TransportError>` instead of `Result<String, Box<dyn Error>>`
-- [ ] `LettreTransport::send` classifies errors at the source (DNS/connect failures → `Temp`, SMTP rejects → `Permanent`) and wraps them in the enum
-- [ ] `FileDropTransport` (test transport) updated for the new return type
-- [ ] `send_handler.rs`: delete `classify_transport_error()`; match on `TransportError` variants directly
-- [ ] Existing send handler tests updated; behavior preserved (same error codes for same conditions)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Define `TransportError { Temp(String), Permanent(String) }` (or equivalent) in `src/transport.rs`
+- [x] `MailTransport::send` returns `Result<String, TransportError>` instead of `Result<String, Box<dyn Error>>`
+- [x] `LettreTransport::send` classifies errors at the source (DNS/connect failures → `Temp`, SMTP rejects → `Permanent`) and wraps them in the enum
+- [x] `FileDropTransport` (test transport) updated for the new return type
+- [x] `send_handler.rs`: delete `classify_transport_error()`; match on `TransportError` variants directly
+- [x] Existing send handler tests updated; behavior preserved (same error codes for same conditions)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-5 — DNS error surfacing in `resolve_ipv4`
 
@@ -269,10 +269,10 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P1
 
-- [ ] `resolve_ipv4` errors are surfaced: log the underlying DNS error before falling back, or propagate a distinct `DnsFailure` error message that names the original error
-- [ ] The `SkipNoIpv4` path's error message is updated or a new `DnsError` path added so the two cases produce different error text
-- [ ] Add a test: mock/force a DNS failure and verify the error message mentions the resolver error, not "no A record"
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `resolve_ipv4` errors are surfaced: log the underlying DNS error before falling back, or propagate a distinct `DnsFailure` error message that names the original error
+- [x] The `SkipNoIpv4` path's error message is updated or a new `DnsError` path added so the two cases produce different error text
+- [x] Add a test: mock/force a DNS failure and verify the error message mentions the resolver error, not "no A record"
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-6 — Test DKIM keypair caching
 
@@ -280,11 +280,11 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] Add a `once_cell::sync::Lazy` (or `std::sync::LazyLock` if MSRV permits) that holds a `TempDir` with a pre-generated DKIM keypair, shared across all integration tests in the process
-- [ ] Integration tests that need DKIM keys reference the cached dir instead of calling `aimx dkim-keygen`
-- [ ] All integration tests still pass and are not coupled to each other (read-only access to the shared keypair)
-- [ ] Measure: `cargo test --test integration` time before and after; expect ~10-15s improvement
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Add a `once_cell::sync::Lazy` (or `std::sync::LazyLock` if MSRV permits) that holds a `TempDir` with a pre-generated DKIM keypair, shared across all integration tests in the process
+- [x] Integration tests that need DKIM keys reference the cached dir instead of calling `aimx dkim-keygen`
+- [x] All integration tests still pass and are not coupled to each other (read-only access to the shared keypair)
+- [x] Measure: `cargo test --test integration` time before and after; expect ~10-15s improvement
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ### S41-7 — Stale `#[allow(dead_code)]` + integration test gap
 
@@ -294,9 +294,9 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 **Priority:** P2
 
-- [ ] Remove stale `#[allow(dead_code)]` from `write_request` in `send_protocol.rs:285` and its comment
-- [ ] Add integration test: write a stale/mismatched `README.md` to a tempdir's data root, start `aimx serve`, verify the file is refreshed to match the baked-in version
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Remove stale `#[allow(dead_code)]` from `write_request` in `send_protocol.rs:285` and its comment
+- [x] Add integration test: write a stale/mismatched `README.md` to a tempdir's data root, start `aimx serve`, verify the file is refreshed to match the baked-in version
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
@@ -349,7 +349,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 | 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Done |
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
-| 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Not started |
+| 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
 
 ## Deferred to v2
 

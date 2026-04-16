@@ -280,9 +280,8 @@ where
 }
 
 /// Write an `AIMX/1 SEND` request frame to `writer`. Used by the client
-/// (`aimx send`, Sprint 35) and by tests that exercise `parse_request` over a
-/// paired AsyncRead/AsyncWrite harness.
-#[allow(dead_code)] // consumed by `aimx send` in Sprint 35
+/// (`aimx send`) and by tests that exercise `parse_request` over a paired
+/// AsyncRead/AsyncWrite harness.
 pub async fn write_request<W>(writer: &mut W, request: &SendRequest) -> Result<(), std::io::Error>
 where
     W: AsyncWrite + Unpin,

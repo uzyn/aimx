@@ -3,8 +3,52 @@ use predicates::prelude::*;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
 use std::process::{Command as StdCommand, Stdio};
+use std::sync::LazyLock;
 use tempfile::TempDir;
 use wait_timeout::ChildExt;
+
+/// Process-scoped cache of a pre-generated 2048-bit RSA DKIM keypair.
+/// Shared read-only across all integration tests to avoid re-running
+/// `aimx dkim-keygen` (~200ms each) for every test that spawns `aimx serve`.
+static DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
+    let cache = TempDir::new().expect("create DKIM cache tempdir");
+    // dkim-keygen needs a parseable config.toml (it loads Config at startup).
+    let config_content = format!(
+        "domain = \"cache.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@cache.example.com\"\n",
+        cache.path().display()
+    );
+    std::fs::write(cache.path().join("config.toml"), config_content)
+        .expect("write cache config.toml");
+    let status = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", cache.path())
+        .arg("dkim-keygen")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("Failed to run aimx dkim-keygen for DKIM cache");
+    assert!(
+        status.success(),
+        "aimx dkim-keygen exited non-zero when populating DKIM cache"
+    );
+    cache
+});
+
+/// Copy the cached DKIM keypair into `tmp/dkim/`.
+fn install_cached_dkim_keys(tmp: &Path) {
+    let dkim_dir = tmp.join("dkim");
+    if dkim_dir.join("private.key").exists() {
+        return;
+    }
+    std::fs::create_dir_all(&dkim_dir).unwrap();
+    let cache_dkim = DKIM_CACHE.path().join("dkim");
+    for name in ["private.key", "public.key"] {
+        let src = cache_dkim.join(name);
+        let dst = dkim_dir.join(name);
+        if src.exists() {
+            std::fs::copy(&src, &dst).unwrap();
+        }
+    }
+}
 
 fn setup_test_env(tmp: &Path) -> String {
     let config_content = format!(
@@ -16,25 +60,7 @@ fn setup_test_env(tmp: &Path) -> String {
     std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
-    // Sprint 34: `aimx serve` loads the DKIM private key at startup and
-    // refuses to start if it's missing. Every integration test that spawns
-    // `aimx serve` as a subprocess needs a DKIM key on disk inside the
-    // AIMX_CONFIG_DIR tempdir. Generate via the `dkim-keygen` subcommand
-    // through the binary path to keep this helper dependency-free.
-    let dkim_dir = tmp.join("dkim");
-    if !dkim_dir.join("private.key").exists() {
-        let status = StdCommand::new(aimx_binary_path())
-            .env("AIMX_CONFIG_DIR", tmp)
-            .arg("dkim-keygen")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("Failed to run aimx dkim-keygen in test setup");
-        assert!(
-            status.success(),
-            "aimx dkim-keygen exited non-zero in test setup"
-        );
-    }
+    install_cached_dkim_keys(tmp);
     config_path.to_string_lossy().to_string()
 }
 
@@ -1428,21 +1454,7 @@ fn setup_test_env_with_bob(tmp: &Path) -> String {
     std::fs::create_dir_all(tmp.join("sent").join("bob")).unwrap();
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
-    // Sprint 34: `aimx serve` requires the DKIM private key at startup.
-    let dkim_dir = tmp.join("dkim");
-    if !dkim_dir.join("private.key").exists() {
-        let status = StdCommand::new(aimx_binary_path())
-            .env("AIMX_CONFIG_DIR", tmp)
-            .arg("dkim-keygen")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("Failed to run aimx dkim-keygen in test setup");
-        assert!(
-            status.success(),
-            "aimx dkim-keygen exited non-zero in test setup"
-        );
-    }
+    install_cached_dkim_keys(tmp);
     config_path.to_string_lossy().to_string()
 }
 
