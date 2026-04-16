@@ -134,7 +134,10 @@ impl AimxMcpServer {
 
         let result: Vec<String> = mailboxes
             .iter()
-            .map(|(name, total, unread)| format!("{name}: {total} messages ({unread} unread)"))
+            .map(|(name, total, unread, registered)| {
+                let suffix = if *registered { "" } else { " (unregistered)" };
+                format!("{name}: {total} messages ({unread} unread){suffix}")
+            })
             .collect();
         Ok(result.join("\n"))
     }
@@ -421,16 +424,20 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize)> {
-    let mut result: Vec<(String, usize, usize)> = config
-        .mailboxes
-        .keys()
+/// Return `(name, total, unread, registered)` for every mailbox the
+/// daemon knows about — both registered ones in `config.mailboxes` and
+/// stray `inbox/<name>/` directories left by backup restores or
+/// out-of-band tooling. Sorted by name.
+fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, bool)> {
+    let mut result: Vec<(String, usize, usize, bool)> = mailbox::discover_mailbox_names(config)
+        .into_iter()
         .map(|name| {
-            let dir = config.inbox_dir(name);
+            let dir = config.inbox_dir(&name);
             let emails = list_emails(&dir).unwrap_or_default();
             let total = emails.len();
             let unread = emails.iter().filter(|e| !e.read).count();
-            (name.clone(), total, unread)
+            let registered = mailbox::is_registered(config, &name);
+            (name, total, unread, registered)
         })
         .collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1015,6 +1022,34 @@ mod tests {
         let alice = result.iter().find(|m| m.0 == "alice").unwrap();
         assert_eq!(alice.1, 2); // total
         assert_eq!(alice.2, 1); // unread
+        assert!(alice.3, "alice is registered in config");
+    }
+
+    #[test]
+    fn list_mailboxes_with_unread_surfaces_unregistered_dir() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _cfg_guard = setup_config(&config);
+
+        // Stray inbox dir created out-of-band (e.g. backup restore) with
+        // no entry in `config.mailboxes`.
+        let stray = inbox_of(tmp.path(), "stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        let meta = sample_meta("2025-06-01-100", "x@test.com", "X", true);
+        create_test_email(&stray, "2025-06-01-100", &meta);
+
+        let result = list_mailboxes_with_unread(&config);
+        let stray_row = result
+            .iter()
+            .find(|m| m.0 == "stray")
+            .expect("stray dir must surface in mailbox_list");
+        assert_eq!(stray_row.1, 1); // total
+        assert_eq!(stray_row.2, 0); // unread (meta.read=true)
+        assert!(!stray_row.3, "stray is not registered in config");
+
+        // catchall and alice still surface as registered.
+        assert!(result.iter().any(|m| m.0 == "catchall" && m.3));
+        assert!(result.iter().any(|m| m.0 == "alice" && m.3));
     }
 
     #[test]

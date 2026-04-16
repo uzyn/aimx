@@ -6,6 +6,15 @@ use serde::Serialize;
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+
+/// Process-scoped lock guarding the inbound critical section: filename
+/// allocation, bundle directory creation, attachment writes, and the
+/// final `.md` write. The aimx daemon is the single writer to
+/// `<data_dir>/inbox/`, so a process Mutex is sufficient — no
+/// filesystem-level lock needed. Symmetric to the outbound `Mutex<()>`
+/// planned for FR-19b.
+static INGEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct EmailMetadata {
@@ -117,6 +126,15 @@ pub fn ingest_email(
 
     let slug = slugify(&subject);
     let timestamp = chrono::Utc::now();
+
+    // Hold the inbound write lock across allocate → mkdir → write
+    // attachments → write markdown so two ingests racing on the same UTC
+    // second + slug + attachment filenames cannot interleave: the second
+    // arrival sees the first's bundle on disk and picks a `-2` suffix.
+    let _guard = INGEST_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
     let md_path = allocate_filename(&inbox_dir, timestamp, &slug, has_attachments);
     let parent_dir = md_path
         .parent()
@@ -128,20 +146,24 @@ pub fn ingest_email(
     // `create_dir_all` is idempotent and cheap.
     std::fs::create_dir_all(&parent_dir)?;
 
-    // Write attachments first; if one fails we want to bubble the error
-    // before writing the `.md` so callers never see a half-written bundle.
-    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|_| {
-        // Best-effort cleanup of a freshly created bundle directory.
-        if has_attachments && parent_dir != inbox_dir {
-            let _ = std::fs::remove_dir_all(&parent_dir);
-        }
-    })?;
-
     let id = md_path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or_default()
         .to_string();
+
+    // Roll back a freshly created bundle directory on any post-allocation
+    // failure (attachment write or markdown write). For flat layouts the
+    // parent is the mailbox dir itself and stays untouched.
+    let cleanup_bundle = || {
+        if has_attachments && parent_dir != inbox_dir {
+            let _ = std::fs::remove_dir_all(&parent_dir);
+        }
+    };
+
+    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|_| {
+        cleanup_bundle();
+    })?;
 
     let meta = EmailMetadata {
         id: id.clone(),
@@ -159,7 +181,11 @@ pub fn ingest_email(
         spf: spf_result,
     };
 
-    write_markdown(&md_path, &meta, &body)?;
+    write_markdown(&md_path, &meta, &body).inspect_err(|_| {
+        cleanup_bundle();
+    })?;
+
+    drop(_guard);
 
     if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
         let ctx = TriggerContext {
@@ -1154,6 +1180,52 @@ mod tests {
             rcpt.split('@').nth(1).unwrap_or("")
         };
         assert_eq!(helo_domain, "recipient.com");
+    }
+
+    #[test]
+    fn concurrent_same_subject_attachment_ingests_do_not_corrupt_each_other() {
+        // Sprint 36 review fix: with the inbound `Mutex<()>` guarding the
+        // allocate-create-write critical section, two threads racing the
+        // same subject + same attachment filename in the same UTC second
+        // each end up in their own bundle directory with their own copy
+        // of the attachment intact.
+        use std::sync::Arc;
+        use std::thread;
+
+        let tmp = TempDir::new().unwrap();
+        let config = Arc::new(test_config(tmp.path()));
+
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let cfg = Arc::clone(&config);
+            handles.push(thread::spawn(move || {
+                ingest_email(&cfg, "alice@test.com", attachment_eml()).unwrap();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 8, "each ingest must own its bundle dir");
+
+        for b in bundles {
+            let path = b.path();
+            let stem = path.file_name().unwrap().to_str().unwrap().to_string();
+            let md = path.join(format!("{stem}.md"));
+            let attachment = path.join("notes.txt");
+            assert!(md.exists(), "md file present in {stem}");
+            assert!(attachment.exists(), "attachment present in {stem}");
+            // Attachment content is the original — no other thread
+            // truncated/overwrote it.
+            let body = std::fs::read_to_string(&attachment).unwrap();
+            assert!(body.contains("These are my notes."));
+        }
     }
 
     #[test]

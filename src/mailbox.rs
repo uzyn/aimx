@@ -64,16 +64,48 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
 }
 
 pub fn list_mailboxes(config: &Config) -> Vec<(String, usize)> {
-    let mut result: Vec<(String, usize)> = config
-        .mailboxes
-        .keys()
+    let names = discover_mailbox_names(config);
+    let mut result: Vec<(String, usize)> = names
+        .into_iter()
         .map(|name| {
-            let count = count_messages(&config.inbox_dir(name));
-            (name.clone(), count)
+            let count = count_messages(&config.inbox_dir(&name));
+            (name, count)
         })
         .collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
+}
+
+/// Sprint 36: union of (a) mailboxes registered in `config.mailboxes` and
+/// (b) directories under `<data_dir>/inbox/`. Operators who restore an
+/// inbox dir out-of-band, or unregister a mailbox while keeping its
+/// messages on disk, still see the directory listed (the CLI/MCP can
+/// surface unregistered ones with a marker if needed). The catchall is
+/// always kept in config so it is always surfaced.
+pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
+    use std::collections::BTreeSet;
+
+    let mut set: BTreeSet<String> = config.mailboxes.keys().cloned().collect();
+
+    let inbox_root = config.data_dir.join("inbox");
+    if let Ok(entries) = std::fs::read_dir(&inbox_root) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if entry.file_type().is_ok_and(|t| t.is_dir())
+                && let Some(name) = entry.file_name().to_str()
+            {
+                set.insert(name.to_string());
+            }
+        }
+    }
+
+    set.into_iter().collect()
+}
+
+/// Returns true when a mailbox name appears in the config map.
+/// Useful for callers that want to mark filesystem-only mailboxes as
+/// `(unregistered)` in display output.
+pub fn is_registered(config: &Config, name: &str) -> bool {
+    config.mailboxes.contains_key(name)
 }
 
 pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -151,11 +183,17 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     );
     for (name, count) in mailboxes {
         let name_pad = 20usize.saturating_sub(name.chars().count());
+        let suffix = if is_registered(config, &name) {
+            String::new()
+        } else {
+            format!(" {}", term::warn("(unregistered)"))
+        };
         println!(
-            "{}{:pad$} {}",
+            "{}{:pad$} {}{}",
             term::highlight(&name),
             "",
             count,
+            suffix,
             pad = name_pad,
         );
     }
@@ -280,6 +318,39 @@ mod tests {
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "catchall");
         assert_eq!(result[0].1, 2);
+    }
+
+    #[test]
+    fn list_surfaces_stray_inbox_dir_without_config_entry() {
+        // Sprint 36 review fix: `mailbox_list` must scan `inbox/*/` so an
+        // inbox directory left by a backup restore (or an unregistered
+        // mailbox) still appears in the listing.
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let _guard = setup_config_file(tmp.path(), &config);
+
+        // Registered mailbox: catchall + an `alice` we register.
+        create_mailbox(&config, "alice").unwrap();
+        let config = Config::load_resolved().unwrap();
+        let inbox_alice = tmp.path().join("inbox").join("alice");
+        std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
+
+        // Stray dir created out-of-band — no config entry.
+        let stray = tmp.path().join("inbox").join("stray");
+        std::fs::create_dir_all(&stray).unwrap();
+        std::fs::write(stray.join("2025-01-01-120000-z.md"), "x").unwrap();
+
+        let result = list_mailboxes(&config);
+        let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"alice"), "registered alice listed");
+        assert!(names.contains(&"catchall"), "catchall always listed");
+        assert!(names.contains(&"stray"), "stray inbox dir surfaced");
+
+        let stray_row = result.iter().find(|(n, _)| n == "stray").unwrap();
+        assert_eq!(stray_row.1, 1, "stray dir counts its messages");
+        assert!(!is_registered(&config, "stray"));
+        assert!(is_registered(&config, "alice"));
+        assert!(is_registered(&config, "catchall"));
     }
 
     #[test]
