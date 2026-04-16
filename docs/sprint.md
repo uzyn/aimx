@@ -1026,7 +1026,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
-## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 104.5–107) [IN PROGRESS]
+## Sprint 37 — Expanded Frontmatter Schema + DMARC Verification (Days 104.5–107) [DONE]
 
 **Goal:** Land the full inbound frontmatter schema — new fields, section ordering, omission-vs-null discipline — and add DMARC verification alongside existing DKIM/SPF. Every inbound email written after this sprint carries the final v0.2 schema.
 
@@ -1044,14 +1044,14 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `src/frontmatter.rs` created with `InboundFrontmatter` struct; field order matches FR-13 exactly
-- [ ] Optional fields serialize via `skip_serializing_if`; empty vecs do NOT appear in output
-- [ ] Always-written fields (`dkim`, `spf`, `dmarc`, `trusted`, `read`): their serde attribute makes them NON-skippable even at default value
-- [ ] `trusted` field placeholder always emits `"none"` in this sprint (Sprint 38 wires real evaluation)
-- [ ] `ingest.rs` writes frontmatter via `toml::to_string(&frontmatter)?` between `+++` delimiters
-- [ ] Golden tests: ingest a known `.eml` fixture and assert byte-for-byte frontmatter output
-- [ ] Field order regression test: any reordering of struct fields changes golden output and fails the test
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/frontmatter.rs` created with `InboundFrontmatter` struct; field order matches FR-13 exactly
+- [x] Optional fields serialize via `skip_serializing_if`; empty vecs do NOT appear in output
+- [x] Always-written fields (`dkim`, `spf`, `dmarc`, `trusted`, `read`): their serde attribute makes them NON-skippable even at default value
+- [x] `trusted` field placeholder always emits `"none"` in this sprint (Sprint 38 wires real evaluation)
+- [x] `ingest.rs` writes frontmatter via `toml::to_string(&frontmatter)?` between `+++` delimiters
+- [x] Golden tests: ingest a known `.eml` fixture and assert byte-for-byte frontmatter output
+- [x] Field order regression test: any reordering of struct fields changes golden output and fails the test
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S37-2: `thread_id` computation + population of new fields
 
@@ -1059,15 +1059,15 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] `compute_thread_id` helper added; deterministic (same inputs → same output); SHA-256 truncated to 16 hex chars
-- [ ] Resolution order: walk `In-Reply-To` first; fall back to walking `References` earliest-first; fall back to the message's own `Message-ID`
-- [ ] `ingest_email()` signature gains `received_from_ip: IpAddr`; `src/smtp/session.rs` threads the peer IP through
-- [ ] Manual-stdin `aimx ingest` path (no SMTP session) passes `0.0.0.0` or a documented sentinel for `received_from_ip`
-- [ ] `list_id` populated from `List-ID:` header; `auto_submitted` from `Auto-Submitted:` header; both omitted when headers absent
-- [ ] `size_bytes` is the raw `.eml` byte length seen at ingest
-- [ ] Unit tests for `compute_thread_id`: direct reply chain, orphan message, cross-references, missing headers, header with multiple Message-IDs
-- [ ] Integration test: ingest an `.eml` with known headers; frontmatter contains expected `thread_id`, `received_from_ip`, `delivered_to`, `size_bytes`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `compute_thread_id` helper added; deterministic (same inputs → same output); SHA-256 truncated to 16 hex chars
+- [x] Resolution order: walk `In-Reply-To` first; fall back to walking `References` earliest-first; fall back to the message's own `Message-ID`
+- [x] `ingest_email()` signature gains `received_from_ip: IpAddr`; `src/smtp/session.rs` threads the peer IP through
+- [x] Manual-stdin `aimx ingest` path (no SMTP session) passes `0.0.0.0` or a documented sentinel for `received_from_ip`
+- [x] `list_id` populated from `List-ID:` header; `auto_submitted` from `Auto-Submitted:` header; both omitted when headers absent
+- [x] `size_bytes` is the raw `.eml` byte length seen at ingest
+- [x] Unit tests for `compute_thread_id`: direct reply chain, orphan message, cross-references, missing headers, header with multiple Message-IDs
+- [x] Integration test: ingest an `.eml` with known headers; frontmatter contains expected `thread_id`, `received_from_ip`, `delivered_to`, `size_bytes`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S37-3: DMARC verification + always-written `dmarc` field
 
@@ -1075,18 +1075,18 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 **Priority:** P0
 
-- [ ] DMARC verification added to the ingest auth-check pipeline via `mail-auth`'s resolver
-- [ ] `AuthResults { dkim, spf, dmarc }` struct introduced; populated once per ingest and passed to frontmatter builder
-- [ ] `dmarc` value mapping: pass → `"pass"`, fail → `"fail"`, no record / lookup failure → `"none"` (failure logs at `warn` level with the lookup error)
-- [ ] Frontmatter `dmarc` field always written (never omitted)
-- [ ] Unit tests using `mail-auth` test fixtures: DMARC pass, DMARC fail, no DMARC record, lookup failure
-- [ ] Integration test: ingest an `.eml` with known DMARC outcome (use a captured fixture); frontmatter contains expected `dmarc` value
-- [ ] `book/configuration.md` documents DMARC verification alongside DKIM/SPF
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] DMARC verification added to the ingest auth-check pipeline via `mail-auth`'s resolver
+- [x] `AuthResults { dkim, spf, dmarc }` struct introduced; populated once per ingest and passed to frontmatter builder
+- [x] `dmarc` value mapping: pass → `"pass"`, fail → `"fail"`, no record / lookup failure → `"none"` (failure logs at `warn` level with the lookup error)
+- [x] Frontmatter `dmarc` field always written (never omitted)
+- [x] Unit tests using `mail-auth` test fixtures: DMARC pass, DMARC fail, no DMARC record, lookup failure
+- [x] Integration test: ingest an `.eml` with known DMARC outcome (use a captured fixture); frontmatter contains expected `dmarc` value
+- [x] `book/configuration.md` documents DMARC verification alongside DKIM/SPF
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 107–109.5) [NOT STARTED]
+## Sprint 38 — `trusted` Frontmatter + Sent-Items Persistence + Outbound Block (Days 107–109.5) [IN PROGRESS]
 
 **Goal:** Evaluate per-mailbox trust at ingest time and surface the result in the always-written `trusted` frontmatter field. Persist every successfully delivered outbound message to `sent/<from-mailbox>/` with the full outbound frontmatter block.
 
@@ -1401,6 +1401,7 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [ ] **(Sprint 34)** Add a per-read idle timeout inside `send_protocol::parse_request` to bound slow-loris exposure on the world-writable UDS socket. Any local process can announce a 25 MB `Content-Length` and then stall, parking a 25 MB `Vec<u8>` + tokio task indefinitely. A short (e.g. 30s) `tokio::time::timeout` around the reads is cheaper than a full concurrency semaphore and closes the primary abuse vector.
 - [ ] **(Sprint 34)** Replace the substring-based `send_handler::classify_transport_error` with a typed error surface on `MailTransport`. The current classifier pattern-matches on lowercased substrings (`"unreachable"`, `"timed out"`, `"connection refused"`) emitted by `LettreTransport::try_deliver` — any future refactor of those error strings will silently re-classify `Temp` vs `Delivery`. A thin enum (`TransportError { Temp(String), Permanent(String) }`) on the trait return would be durable.
 - [ ] **(Sprint 34)** Cache the test DKIM keypair across integration tests via `once_cell` + a process-scoped `TempDir` rather than re-shelling `aimx dkim-keygen` per test. Each 2048-bit RSA generation costs ~200ms and the Sprint 34 integration suite now spawns `aimx serve` in many tests. A sharable keypair cache would cut ~10-15s off the integration run.
+- [ ] **(Sprint 37)** SPF is still verified twice in `src/ingest.rs` — `verify_spf_async` and `build_spf_output` both independently call `resolver.verify_spf()`. The same consolidation pattern applied to DKIM (single call, reuse output) could be applied to SPF to eliminate the redundant DNS lookup per ingest.
 - [ ] **(Sprint 35)** `LettreTransport::resolve_ipv4` in `src/transport.rs` swallows DNS failures with `unwrap_or_default()` — lookup errors silently produce an empty `Vec`, which then triggers the `SkipNoIpv4` path with the misleading message "no A record (enable_ipv6 = false); skipping". This is pre-existing behaviour lifted verbatim from the old `send.rs`, not introduced in Sprint 35. Log the underlying DNS error (or surface a distinct `DnsFailure` outcome) so operators can distinguish "no A record" from "resolver unreachable".
 
 ### Deferred Feature Sprints
