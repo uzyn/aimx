@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 43 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup)
-**Timeline:** ~117 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days)
+**Total sprints:** 44 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup + 1 CLI UX fixes)
+**Timeline:** ~120 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days, CLI UX fixes: ~2.5 days)
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
 
 **v0.2 Scope (pre-launch reshape, Sprints 33–40 + 33.1 scope-reversal):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable). Sprint 33.1 (scope reversal, inserted after Sprint 33 merged) drops PTR/reverse-DNS handling (operator responsibility, out of aimx scope) and drops the `aimx` system group introduced in S33-4 — authorization on the UDS send socket is explicitly out of scope for v0.2 and the socket becomes world-writable (`0o666`). Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a world-writable Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
@@ -300,6 +300,39 @@ Completed sprints 1–37 have been archived for context window efficiency.
 
 ---
 
+## Sprint 42 — CLI UX: Config Error Messages + Setup Port-Check Race (Days 118–120.5) [NOT STARTED]
+
+**Goal:** Fix two P0 UX issues that block first-time setup: (1) commands that require config give a cryptic "os error 2" instead of pointing the user to `aimx setup`, and (2) `aimx setup` fails the inbound port 25 check because it races against `aimx serve` startup.
+
+**Dependencies:** Sprint 41 (all prior work complete)
+
+#### S42-1: Helpful error message when config file is missing
+
+**Context:** Running `aimx status` (or any config-dependent command: `mcp`, `send`, `mailbox`, `serve`) on a fresh VPS before `aimx setup` produces `Error: No such file or directory (os error 2)` — the raw ENOENT from trying to open `/etc/aimx/config.toml`. Users can't tell what's missing or what to do next. The fix should catch the "config not found" case in the config loading path and produce a message like: `Config file not found at /etc/aimx/config.toml — run 'sudo aimx setup' first`. This should cover all subcommands that load config (status, mcp, send, mailbox, serve, agent-setup).
+
+**Priority:** P0
+
+- [ ] `config::load()` (or the call site in `main.rs`) catches `io::ErrorKind::NotFound` on the config file and returns a clear error naming the expected path and suggesting `sudo aimx setup`
+- [ ] Error message includes the actual path attempted (respects `AIMX_CONFIG_DIR` override)
+- [ ] All config-dependent subcommands benefit from the fix (status, mcp, send, mailbox, serve, agent-setup, dkim-keygen) — no raw "os error 2" leaks to the user
+- [ ] Unit test: calling config load with a nonexistent path produces the expected error message, not a raw IO error
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S42-2: Wait-for-ready loop in `aimx setup` before port checks
+
+**Context:** After `install_service_file()` calls `restart_service("aimx")`, setup immediately runs the outbound + inbound port 25 checks. `restart_service()` returns as soon as `systemctl restart aimx` exits — not when `aimx serve` has finished binding port 25. The outbound check (local → remote verifier) usually passes because it doesn't need the local listener. The inbound check (remote verifier → local port 25 EHLO) fails because `aimx serve` hasn't bound yet. Standalone `aimx verify` doesn't have this problem because it either detects an already-running daemon or spawns its own listener and waits for readiness. Fix: after restarting the service and before running port checks, poll for `aimx serve` readiness — e.g., attempt a TCP connect to `127.0.0.1:25` in a retry loop (up to ~5 seconds, ~500ms between attempts). If the loop times out, proceed with the checks anyway (they'll fail with the existing error message, which is still accurate).
+
+**Priority:** P0
+
+- [ ] After `restart_service("aimx")` returns, a wait-for-ready loop polls `127.0.0.1:25` (TCP connect) with ~500ms interval, up to ~5s total
+- [ ] Loop exits early as soon as a connection succeeds (port is bound)
+- [ ] If the loop times out (service didn't bind within 5s), setup proceeds to the port checks without error — the existing "Inbound port 25... FAIL" message covers this case
+- [ ] The wait loop is behind the `SystemOps` trait (or `NetworkOps`) so tests can mock it without real sleeps
+- [ ] Existing setup tests still pass; new test verifies that setup proceeds after the wait loop succeeds
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -350,6 +383,7 @@ Completed sprints 1–37 have been archived for context window efficiency.
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
+| 42 | 118–120.5 | CLI UX: Config Errors + Setup Race | Helpful error when config missing (`aimx status` etc.), wait-for-ready loop in `aimx setup` before port checks | Not Started |
 
 ## Deferred to v2
 
