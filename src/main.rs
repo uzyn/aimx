@@ -19,6 +19,7 @@ mod smtp;
 mod status;
 mod term;
 mod transport;
+mod trust;
 mod verify;
 
 use clap::Parser;

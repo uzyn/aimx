@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundFrontmatter {
@@ -84,6 +85,147 @@ impl Default for AuthResults {
             dmarc: "none".to_string(),
         }
     }
+}
+
+/// Delivery status for outbound sent files (FR-19c).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryStatus {
+    Delivered,
+    Deferred,
+    Failed,
+    Pending,
+}
+
+impl DeliveryStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DeliveryStatus::Delivered => "delivered",
+            DeliveryStatus::Deferred => "deferred",
+            DeliveryStatus::Failed => "failed",
+            DeliveryStatus::Pending => "pending",
+        }
+    }
+}
+
+impl fmt::Display for DeliveryStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for DeliveryStatus {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for DeliveryStatus {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "delivered" => Ok(DeliveryStatus::Delivered),
+            "deferred" => Ok(DeliveryStatus::Deferred),
+            "failed" => Ok(DeliveryStatus::Failed),
+            "pending" => Ok(DeliveryStatus::Pending),
+            other => Err(serde::de::Error::custom(format!(
+                "invalid delivery_status: {other}"
+            ))),
+        }
+    }
+}
+
+/// Outbound frontmatter for sent-copy `.md` files (FR-19c).
+///
+/// Composes the same inbound fields (Identity/Parties/Content/Threading/
+/// Auth/Storage) at the top, plus an outbound block at the end containing
+/// `outbound`, `delivery_status`, and optional `bcc`, `delivered_at`,
+/// `delivery_details`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutboundFrontmatter {
+    // -- Identity --
+    pub id: String,
+    pub message_id: String,
+    #[serde(default)]
+    pub thread_id: String,
+
+    // -- Parties --
+    pub from: String,
+    pub to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cc: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
+    #[serde(default)]
+    pub delivered_to: String,
+
+    // -- Content --
+    pub subject: String,
+    pub date: String,
+    #[serde(default)]
+    pub received_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_from_ip: Option<String>,
+    #[serde(default)]
+    pub size_bytes: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<AttachmentMeta>,
+
+    // -- Threading --
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_reply_to: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub references: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_submitted: Option<String>,
+
+    // -- Auth --
+    #[serde(default = "default_auth_result")]
+    pub dkim: String,
+    #[serde(default = "default_auth_result")]
+    pub spf: String,
+    #[serde(default = "default_auth_result")]
+    pub dmarc: String,
+    #[serde(default = "default_auth_result")]
+    pub trusted: String,
+
+    // -- Storage --
+    pub mailbox: String,
+    pub read: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+
+    // -- Outbound block --
+    pub outbound: bool,
+    pub delivery_status: DeliveryStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery_details: Option<String>,
+}
+
+pub fn format_outbound_frontmatter(meta: &OutboundFrontmatter, body: &str) -> String {
+    let toml_str = toml::to_string(meta).expect("OutboundFrontmatter must serialize to TOML");
+    let mut result = String::new();
+    result.push_str("+++\n");
+    result.push_str(&toml_str);
+    result.push_str("+++\n\n");
+    result.push_str(body);
+
+    if !body.ends_with('\n') {
+        result.push('\n');
+    }
+
+    result
 }
 
 /// Compute a deterministic thread ID from email threading headers.
@@ -566,5 +708,166 @@ mod tests {
         fm.received_from_ip = None;
         let toml_str = toml::to_string(&fm).unwrap();
         assert!(!toml_str.contains("received_from_ip"));
+    }
+
+    fn sample_outbound_frontmatter() -> OutboundFrontmatter {
+        OutboundFrontmatter {
+            id: "2025-01-01-120000-hello".to_string(),
+            message_id: "<abc123@example.com>".to_string(),
+            thread_id: "a1b2c3d4e5f6a7b8".to_string(),
+            from: "alice@example.com".to_string(),
+            to: "bob@gmail.com".to_string(),
+            cc: None,
+            reply_to: None,
+            delivered_to: "bob@gmail.com".to_string(),
+            subject: "Hello".to_string(),
+            date: "2025-01-01T12:00:00Z".to_string(),
+            received_at: "2025-01-01T12:00:01Z".to_string(),
+            received_from_ip: None,
+            size_bytes: 256,
+            attachments: vec![],
+            in_reply_to: None,
+            references: None,
+            list_id: None,
+            auto_submitted: None,
+            dkim: "pass".to_string(),
+            spf: "none".to_string(),
+            dmarc: "none".to_string(),
+            trusted: "none".to_string(),
+            mailbox: "alice".to_string(),
+            read: false,
+            labels: vec![],
+            outbound: true,
+            delivery_status: DeliveryStatus::Delivered,
+            bcc: None,
+            delivered_at: Some("2025-01-01T12:00:05Z".to_string()),
+            delivery_details: Some("250 OK".to_string()),
+        }
+    }
+
+    #[test]
+    fn delivery_status_serialization() {
+        for (variant, expected) in [
+            (DeliveryStatus::Delivered, "\"delivered\""),
+            (DeliveryStatus::Deferred, "\"deferred\""),
+            (DeliveryStatus::Failed, "\"failed\""),
+            (DeliveryStatus::Pending, "\"pending\""),
+        ] {
+            let json = serde_json::to_string(&variant).unwrap();
+            assert_eq!(json, expected);
+            let back: DeliveryStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(variant, back);
+        }
+    }
+
+    #[test]
+    fn outbound_frontmatter_field_order() {
+        let fm = sample_outbound_frontmatter();
+        let toml_str = toml::to_string(&fm).unwrap();
+
+        let actual_keys: Vec<&str> = toml_str
+            .lines()
+            .filter_map(|line| {
+                let key = line.split('=').next()?.trim();
+                if key.starts_with('[') || key.is_empty() {
+                    None
+                } else {
+                    Some(key)
+                }
+            })
+            .collect();
+
+        // Inbound block first, then outbound block at the end
+        let expected_keys = vec![
+            "id",
+            "message_id",
+            "thread_id",
+            "from",
+            "to",
+            "delivered_to",
+            "subject",
+            "date",
+            "received_at",
+            "size_bytes",
+            "dkim",
+            "spf",
+            "dmarc",
+            "trusted",
+            "mailbox",
+            "read",
+            "outbound",
+            "delivery_status",
+            "delivered_at",
+            "delivery_details",
+        ];
+
+        assert_eq!(actual_keys, expected_keys);
+    }
+
+    #[test]
+    fn outbound_delivery_status_always_written() {
+        let mut fm = sample_outbound_frontmatter();
+        fm.delivered_at = None;
+        fm.delivery_details = None;
+        fm.bcc = None;
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(toml_str.contains("delivery_status = \"delivered\""));
+        assert!(!toml_str.contains("delivered_at"));
+        assert!(!toml_str.contains("delivery_details"));
+        assert!(!toml_str.contains("bcc"));
+    }
+
+    #[test]
+    fn outbound_golden_test() {
+        let fm = sample_outbound_frontmatter();
+        let output = format_outbound_frontmatter(&fm, "DKIM-Signature: ...\r\nFrom: ...");
+
+        assert!(output.starts_with("+++\n"));
+        assert!(output.contains("\n+++\n\n"));
+
+        // Parse back
+        let parts: Vec<&str> = output.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: OutboundFrontmatter = toml::from_str(toml_str).unwrap();
+        assert_eq!(parsed.id, fm.id);
+        assert!(parsed.outbound);
+        assert_eq!(parsed.delivery_status, DeliveryStatus::Delivered);
+        assert_eq!(parsed.delivered_at.as_deref(), Some("2025-01-01T12:00:05Z"));
+        assert_eq!(parsed.delivery_details.as_deref(), Some("250 OK"));
+    }
+
+    #[test]
+    fn outbound_failed_delivery() {
+        let mut fm = sample_outbound_frontmatter();
+        fm.delivery_status = DeliveryStatus::Failed;
+        fm.delivered_at = None;
+        fm.delivery_details = Some("550 no such user".to_string());
+
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(toml_str.contains("delivery_status = \"failed\""));
+        assert!(toml_str.contains("delivery_details = \"550 no such user\""));
+        assert!(!toml_str.contains("delivered_at"));
+    }
+
+    #[test]
+    fn outbound_with_bcc() {
+        let mut fm = sample_outbound_frontmatter();
+        fm.bcc = Some(vec![
+            "secret@example.com".to_string(),
+            "hidden@example.com".to_string(),
+        ]);
+
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(toml_str.contains("bcc"));
+        assert!(toml_str.contains("secret@example.com"));
+        assert!(toml_str.contains("hidden@example.com"));
+    }
+
+    #[test]
+    fn outbound_outbound_always_true() {
+        let fm = sample_outbound_frontmatter();
+        assert!(fm.outbound);
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(toml_str.contains("outbound = true"));
     }
 }

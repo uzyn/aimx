@@ -134,9 +134,9 @@ impl AimxMcpServer {
 
         let result: Vec<String> = mailboxes
             .iter()
-            .map(|(name, total, unread, registered)| {
+            .map(|(name, total, unread, sent_count, registered)| {
                 let suffix = if *registered { "" } else { " (unregistered)" };
-                format!("{name}: {total} messages ({unread} unread){suffix}")
+                format!("{name}: {total} messages ({unread} unread), {sent_count} sent{suffix}")
             })
             .collect();
         Ok(result.join("\n"))
@@ -417,22 +417,24 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Return `(name, total, unread, registered)` for every mailbox the
-/// daemon knows about — both registered ones in `config.mailboxes` and
+/// Return `(name, total, unread, sent_count, registered)` for every mailbox
+/// the daemon knows about — both registered ones in `config.mailboxes` and
 /// stray `inbox/<name>/` directories left by backup restores or
 /// out-of-band tooling. Sorted by name.
-fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, bool)> {
-    let mut result: Vec<(String, usize, usize, bool)> = mailbox::discover_mailbox_names(config)
-        .into_iter()
-        .map(|name| {
-            let dir = config.inbox_dir(&name);
-            let emails = list_emails(&dir).unwrap_or_default();
-            let total = emails.len();
-            let unread = emails.iter().filter(|e| !e.read).count();
-            let registered = mailbox::is_registered(config, &name);
-            (name, total, unread, registered)
-        })
-        .collect();
+fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, usize, bool)> {
+    let mut result: Vec<(String, usize, usize, usize, bool)> =
+        mailbox::discover_mailbox_names(config)
+            .into_iter()
+            .map(|name| {
+                let dir = config.inbox_dir(&name);
+                let emails = list_emails(&dir).unwrap_or_default();
+                let total = emails.len();
+                let unread = emails.iter().filter(|e| !e.read).count();
+                let sent_count = mailbox::count_messages(&config.sent_dir(&name));
+                let registered = mailbox::is_registered(config, &name);
+                (name, total, unread, sent_count, registered)
+            })
+            .collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
     result
 }
@@ -1025,9 +1027,10 @@ mod tests {
 
         let result = list_mailboxes_with_unread(&config);
         let alice = result.iter().find(|m| m.0 == "alice").unwrap();
-        assert_eq!(alice.1, 2); // total
+        assert_eq!(alice.1, 2); // total inbox
         assert_eq!(alice.2, 1); // unread
-        assert!(alice.3, "alice is registered in config");
+        assert_eq!(alice.3, 0); // sent count
+        assert!(alice.4, "alice is registered in config");
     }
 
     #[test]
@@ -1048,13 +1051,14 @@ mod tests {
             .iter()
             .find(|m| m.0 == "stray")
             .expect("stray dir must surface in mailbox_list");
-        assert_eq!(stray_row.1, 1); // total
+        assert_eq!(stray_row.1, 1); // total inbox
         assert_eq!(stray_row.2, 0); // unread (meta.read=true)
-        assert!(!stray_row.3, "stray is not registered in config");
+        assert_eq!(stray_row.3, 0); // sent
+        assert!(!stray_row.4, "stray is not registered in config");
 
         // catchall and alice still surface as registered.
-        assert!(result.iter().any(|m| m.0 == "catchall" && m.3));
-        assert!(result.iter().any(|m| m.0 == "alice" && m.3));
+        assert!(result.iter().any(|m| m.0 == "catchall" && m.4));
+        assert!(result.iter().any(|m| m.0 == "alice" && m.4));
     }
 
     #[test]

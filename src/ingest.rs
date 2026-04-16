@@ -4,6 +4,7 @@ use crate::frontmatter::{
     AttachmentMeta, AuthResults, InboundFrontmatter, compute_thread_id, format_frontmatter,
 };
 use crate::slug::{allocate_filename, slugify};
+use crate::trust;
 use mail_parser::{MessageParser, MimeHeaders};
 use std::io::Read;
 use std::net::IpAddr;
@@ -148,6 +149,12 @@ pub fn ingest_email(
 
     let auth_results = verify_auth(raw);
 
+    let trusted_value = config
+        .mailboxes
+        .get(&mailbox)
+        .map(|mb| trust::evaluate_trust(mb, &auth_results, &from))
+        .unwrap_or(trust::TrustedValue::None);
+
     let received_at = chrono::Utc::now().to_rfc3339();
     let size_bytes = raw.len();
 
@@ -218,7 +225,7 @@ pub fn ingest_email(
         dkim: auth_results.dkim,
         spf: auth_results.spf,
         dmarc: auth_results.dmarc,
-        trusted: "none".to_string(),
+        trusted: trusted_value.as_str().to_string(),
         mailbox: mailbox.clone(),
         read: false,
         labels: vec![],
