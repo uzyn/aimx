@@ -497,7 +497,8 @@ impl SmtpSession {
             let peer = self.params.peer_addr;
 
             let result = tokio::task::spawn_blocking(move || {
-                crate::ingest::ingest_email(&config, &rcpt_owned, &data).map_err(|e| e.to_string())
+                crate::ingest::ingest_email(&config, &rcpt_owned, &data, peer.ip())
+                    .map_err(|e| e.to_string())
             })
             .await;
 
