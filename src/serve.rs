@@ -123,6 +123,7 @@ async fn run_serve(
         dkim_selector: config.dkim_selector.clone(),
         registered_mailboxes: config.mailboxes.keys().cloned().collect(),
         transport,
+        data_dir: config.data_dir.clone(),
     });
 
     let server = SmtpServer::new(config);
@@ -824,6 +825,7 @@ mod tests {
                 dkim_selector: "dkim".to_string(),
                 registered_mailboxes: mboxes,
                 transport,
+                data_dir: tmp.path().to_path_buf(),
             });
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
@@ -906,6 +908,7 @@ mod tests {
                 dkim_selector: "dkim".to_string(),
                 registered_mailboxes: mboxes,
                 transport,
+                data_dir: tmp.path().to_path_buf(),
             });
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);

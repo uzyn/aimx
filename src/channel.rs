@@ -84,6 +84,15 @@ pub fn is_sender_trusted(mailbox_config: &MailboxConfig, from: &str) -> bool {
     false
 }
 
+/// Determine whether channel triggers should fire for this email.
+///
+/// v1 semantics (preserved intentionally): for `trust: verified`,
+/// triggers fire when the sender is allowlisted OR DKIM passes. This
+/// is deliberately looser than `trust::evaluate_trust()`, which
+/// requires BOTH allowlisted AND DKIM pass for `trusted = "true"`.
+/// The trigger gate keeps the "allowlisted senders skip verification"
+/// affordance intact; the `trusted` frontmatter field is the strict
+/// evaluation surfaced to agents and operators. See S38-1 rationale.
 pub fn should_execute_triggers(
     mailbox_config: &MailboxConfig,
     metadata: &InboundFrontmatter,

@@ -63,13 +63,14 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
-pub fn list_mailboxes(config: &Config) -> Vec<(String, usize)> {
+pub fn list_mailboxes(config: &Config) -> Vec<(String, usize, usize)> {
     let names = discover_mailbox_names(config);
-    let mut result: Vec<(String, usize)> = names
+    let mut result: Vec<(String, usize, usize)> = names
         .into_iter()
         .map(|name| {
-            let count = count_messages(&config.inbox_dir(&name));
-            (name, count)
+            let inbox_count = count_messages(&config.inbox_dir(&name));
+            let sent_count = count_messages(&config.sent_dir(&name));
+            (name, inbox_count, sent_count)
         })
         .collect();
     result.sort_by(|a, b| a.0.cmp(&b.0));
@@ -176,12 +177,12 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let header_pad = 20usize.saturating_sub("MAILBOX".len());
     println!(
-        "{}{:pad$} MESSAGES",
+        "{}{:pad$} INBOX    SENT",
         term::header("MAILBOX"),
         "",
         pad = header_pad,
     );
-    for (name, count) in mailboxes {
+    for (name, inbox_count, sent_count) in mailboxes {
         let name_pad = 20usize.saturating_sub(name.chars().count());
         let suffix = if is_registered(config, &name) {
             String::new()
@@ -189,10 +190,11 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
             format!(" {}", term::warn("(unregistered)"))
         };
         println!(
-            "{}{:pad$} {}{}",
+            "{}{:pad$} {:<8} {}{}",
             term::highlight(&name),
             "",
-            count,
+            inbox_count,
+            sent_count,
             suffix,
             pad = name_pad,
         );
@@ -317,7 +319,8 @@ mod tests {
         let result = list_mailboxes(&config);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].0, "catchall");
-        assert_eq!(result[0].1, 2);
+        assert_eq!(result[0].1, 2); // inbox count
+        assert_eq!(result[0].2, 0); // sent count
     }
 
     #[test]
@@ -341,12 +344,12 @@ mod tests {
         std::fs::write(stray.join("2025-01-01-120000-z.md"), "x").unwrap();
 
         let result = list_mailboxes(&config);
-        let names: Vec<&str> = result.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = result.iter().map(|(n, _, _)| n.as_str()).collect();
         assert!(names.contains(&"alice"), "registered alice listed");
         assert!(names.contains(&"catchall"), "catchall always listed");
         assert!(names.contains(&"stray"), "stray inbox dir surfaced");
 
-        let stray_row = result.iter().find(|(n, _)| n == "stray").unwrap();
+        let stray_row = result.iter().find(|(n, _, _)| n == "stray").unwrap();
         assert_eq!(stray_row.1, 1, "stray dir counts its messages");
         assert!(!is_registered(&config, "stray"));
         assert!(is_registered(&config, "alice"));
@@ -370,7 +373,8 @@ mod tests {
         std::fs::write(bundle.join("att.txt"), "att").unwrap();
 
         let result = list_mailboxes(&config);
-        assert_eq!(result[0].1, 2, "bundle and flat each count once");
+        assert_eq!(result[0].1, 2, "bundle and flat each count once (inbox)");
+        assert_eq!(result[0].2, 0, "no sent messages");
     }
 
     #[test]
@@ -425,7 +429,8 @@ mod tests {
         let config = test_config(tmp.path());
         let result = list_mailboxes(&config);
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].1, 0);
+        assert_eq!(result[0].1, 0); // inbox
+        assert_eq!(result[0].2, 0); // sent
     }
 
     #[test]
