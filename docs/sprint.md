@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 42 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape)
-**Timeline:** ~114.5 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days)
+**Total sprints:** 43 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup)
+**Timeline:** ~117 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days)
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
 
 **v0.2 Scope (pre-launch reshape, Sprints 33–40 + 33.1 scope-reversal):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable). Sprint 33.1 (scope reversal, inserted after Sprint 33 merged) drops PTR/reverse-DNS handling (operator responsibility, out of aimx scope) and drops the `aimx` system group introduced in S33-4 — authorization on the UDS send socket is explicitly out of scope for v0.2 and the socket becomes world-writable (`0o666`). Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a world-writable Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
@@ -1267,6 +1267,101 @@ Completed sprints 1–21 have been archived for context window efficiency.
 
 ---
 
+## Sprint 41 — Post-v0.2 Backlog Cleanup (Days 115–117.5) [NOT STARTED]
+
+**Goal:** Close out the entire non-blocking review backlog accumulated during Sprints 34–40. Fixes outbound frontmatter bugs, consolidates redundant SPF verification, adds UDS slow-loris protection, types the transport error surface, caches test DKIM keys, and sweeps stale `#[allow(dead_code)]` annotations.
+
+**Dependencies:** Sprint 40 (all v0.2 sprints complete)
+
+### S41-1 — Outbound frontmatter fixes
+
+**Context:** Three issues in `src/send_handler.rs` `persist_sent_file()` and `src/frontmatter.rs` `OutboundFrontmatter`:
+(a) `received_at` is `String::new()` (line 403) but serializes as `received_at = ""` instead of being omitted — outbound messages have no `received_at`, so the field should use `skip_serializing_if = "String::is_empty"`.
+(b) `date` (line 390) uses a fresh `Utc::now().to_rfc3339()` instead of parsing the `Date:` header from the composed RFC 5322 message — the two diverge slightly, and the `Date:` header is the canonical value. The `Date` header is already scanned in `scan_headers` (line 88-98); thread it through to `persist_sent_file`.
+(c) Parity test docstring in `src/trust.rs:243` says "IFF" but the test only checks one direction (trusted==true → trigger fires). Either add the reverse-direction check (trigger fires → trusted==true) or narrow the docstring to "implies."
+
+**Priority:** P0
+
+- [ ] `OutboundFrontmatter.received_at`: add `#[serde(skip_serializing_if = "String::is_empty")]` — outbound `.md` files no longer emit `received_at = ""`
+- [ ] `persist_sent_file`: accept a `date: &str` parameter; caller (`handle_send_inner`) passes the scanned `Date:` header value (already available via `scan_headers`). Fall back to `Utc::now().to_rfc3339()` only if `Date:` is missing
+- [ ] `trust.rs` parity test: add reverse-direction cases — when `should_execute_triggers` returns true, verify `trusted` is `"true"` for the same inputs. OR: narrow the docstring from "IFF" to "implies" if the reverse doesn't hold for all cases (the docstring already notes `trusted == "true"` is strictly stronger). Decide based on what the code says
+- [ ] Existing golden tests and frontmatter roundtrip tests still pass
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-2 — SPF verification deduplication
+
+**Context:** `src/ingest.rs:284-285` calls both `verify_spf_async()` and `build_spf_output()` — each independently calls `resolver.verify_spf()` with the same parameters, resulting in a redundant DNS lookup on every ingest. The DKIM path was already consolidated in Sprint 37 (single `verify_dkim` call, output reused for both string and DMARC input). Apply the same pattern to SPF: call `build_spf_output()` once, derive the string result from the `SpfOutput`.
+
+**Priority:** P1
+
+- [ ] Remove `verify_spf_async()` entirely
+- [ ] Derive the SPF string result (`"pass"`, `"fail"`, `"softfail"`, `"neutral"`, `"none"`) from the `SpfOutput` returned by `build_spf_output()` — add a helper `spf_output_to_string(&SpfOutput) -> String`
+- [ ] `verify_auth()` calls `build_spf_output()` once; uses the `SpfOutput` for DMARC and the derived string for the `spf` frontmatter field
+- [ ] All existing auth-related tests still pass; no behavior change
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-3 — UDS slow-loris timeout
+
+**Context:** `send_protocol::parse_request_with_limit()` has no per-read timeout. Any local process can connect to the world-writable UDS socket, announce `Content-Length: 26214400`, and stall — parking a 25 MB `Vec<u8>` + tokio task indefinitely. A 30-second `tokio::time::timeout` around the entire `parse_request_with_limit` call in `serve.rs`'s UDS accept loop is cheaper than a full concurrency semaphore and closes the primary abuse vector.
+
+**Priority:** P0
+
+- [ ] Wrap the `parse_request` call in `serve.rs`'s UDS handler with `tokio::time::timeout(Duration::from_secs(30), ...)`. On timeout, log a warning and drop the connection (no response needed — the client is the slow party)
+- [ ] Add a unit test: connect to UDS, send the request line + headers, then stall — verify the handler drops the connection within ~30s (use a short timeout override for testing, e.g. 1s)
+- [ ] Existing send integration tests still pass (normal sends complete well under 30s)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-4 — Typed transport errors
+
+**Context:** `send_handler.rs:345` `classify_transport_error()` pattern-matches on lowercased substrings (`"unreachable"`, `"timed out"`, `"dns"`, etc.) from `LettreTransport::try_deliver`'s `Box<dyn Error>`. Any future refactor of those error strings will silently re-classify `Temp` vs `Delivery`. Replace with a typed error enum on `MailTransport::send`.
+
+**Priority:** P1
+
+- [ ] Define `TransportError { Temp(String), Permanent(String) }` (or equivalent) in `src/transport.rs`
+- [ ] `MailTransport::send` returns `Result<String, TransportError>` instead of `Result<String, Box<dyn Error>>`
+- [ ] `LettreTransport::send` classifies errors at the source (DNS/connect failures → `Temp`, SMTP rejects → `Permanent`) and wraps them in the enum
+- [ ] `FileDropTransport` (test transport) updated for the new return type
+- [ ] `send_handler.rs`: delete `classify_transport_error()`; match on `TransportError` variants directly
+- [ ] Existing send handler tests updated; behavior preserved (same error codes for same conditions)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-5 — DNS error surfacing in `resolve_ipv4`
+
+**Context:** `src/transport.rs:199` — `Self::resolve_ipv4(host).unwrap_or_default()` swallows DNS lookup errors, producing an empty `Vec` that triggers `SkipNoIpv4` with the misleading message "no A record (enable_ipv6 = false); skipping." Operators can't distinguish "no A record" from "resolver unreachable."
+
+**Priority:** P1
+
+- [ ] `resolve_ipv4` errors are surfaced: log the underlying DNS error before falling back, or propagate a distinct `DnsFailure` error message that names the original error
+- [ ] The `SkipNoIpv4` path's error message is updated or a new `DnsError` path added so the two cases produce different error text
+- [ ] Add a test: mock/force a DNS failure and verify the error message mentions the resolver error, not "no A record"
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-6 — Test DKIM keypair caching
+
+**Context:** Each integration test that spawns `aimx serve` re-shells `aimx dkim-keygen` to create a fresh 2048-bit RSA keypair (~200ms each). With the Sprint 34+ test suite spawning `aimx serve` in many tests, a sharable keypair cache would cut ~10-15s off the integration run.
+
+**Priority:** P2
+
+- [ ] Add a `once_cell::sync::Lazy` (or `std::sync::LazyLock` if MSRV permits) that holds a `TempDir` with a pre-generated DKIM keypair, shared across all integration tests in the process
+- [ ] Integration tests that need DKIM keys reference the cached dir instead of calling `aimx dkim-keygen`
+- [ ] All integration tests still pass and are not coupled to each other (read-only access to the shared keypair)
+- [ ] Measure: `cargo test --test integration` time before and after; expect ~10-15s improvement
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+### S41-7 — Stale `#[allow(dead_code)]` + integration test gap
+
+**Context:** Two cleanup items:
+(a) `src/send_protocol.rs:285` has `#[allow(dead_code)]` on `write_request` with comment "consumed by `aimx send` in Sprint 35" — Sprint 35 shipped and `write_request` is now used by `send.rs:286`, `serve.rs:944`, and tests. The annotation is stale.
+(b) PR #70 review flagged a missing integration test: `aimx serve` in a tempdir with a stale `README.md` should refresh it at startup. Unit tests cover this, but no integration test verifies the startup refresh path.
+
+**Priority:** P2
+
+- [ ] Remove stale `#[allow(dead_code)]` from `write_request` in `send_protocol.rs:285` and its comment
+- [ ] Add integration test: write a stale/mismatched `README.md` to a tempdir's data root, start `aimx serve`, verify the file is refreshed to match the baked-in version
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -1316,6 +1411,7 @@ Completed sprints 1–21 have been archived for context window efficiency.
 | 38 | 107–109.5 | v0.2 `trusted` Field + Sent-Items Persistence | Always-written `trusted: "none"\|"true"\|"false"` (v1 trust model preserved), sent mail persisted to `sent/<mailbox>/` with outbound block + `delivery_status` | Done |
 | 39 | 109.5–112 | v0.2 Primer Skill Bundle + Author Metadata | `agents/common/aimx-primer.md` split into main + `references/`, install-time suffix + references-copy, `U-Zyn Chua <chua@uzyn.com>` standardized repo-wide | Done |
 | 40 | 112–114.5 | v0.2 Datadir README + Journald + Book/ | Baked-in `/var/lib/aimx/README.md` with version-gate refresh on `aimx serve` startup, `journalctl -u aimx` replaces stale `/var/log/aimx.log`, full `book/` + `CLAUDE.md` pass | Done |
+| 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Not started |
 
 ## Deferred to v2
 
@@ -1398,14 +1494,19 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 33)** Factor the `is_root()` helper out of `setup.rs` and `verify.rs` into a single shared location — _Triaged into Sprint 33.1 (S33.1-4)._
 - [x] **(Sprint 33)** `SystemOps::create_system_group` real-impl path has no direct unit coverage — _Obsolete: `create_system_group` entirely removed in Sprint 33.1 (S33.1-2)._
 - [x] **(Sprint 33)** Several runtime subcommands accept `_data_dir: Option<&std::path::Path>` as a CLI-dispatch uniformity convenience — _Triaged into Sprint 33.1 (S33.1-5)._
-- [ ] **(Sprint 34)** Add a per-read idle timeout inside `send_protocol::parse_request` to bound slow-loris exposure on the world-writable UDS socket. Any local process can announce a 25 MB `Content-Length` and then stall, parking a 25 MB `Vec<u8>` + tokio task indefinitely. A short (e.g. 30s) `tokio::time::timeout` around the reads is cheaper than a full concurrency semaphore and closes the primary abuse vector.
-- [ ] **(Sprint 34)** Replace the substring-based `send_handler::classify_transport_error` with a typed error surface on `MailTransport`. The current classifier pattern-matches on lowercased substrings (`"unreachable"`, `"timed out"`, `"connection refused"`) emitted by `LettreTransport::try_deliver` — any future refactor of those error strings will silently re-classify `Temp` vs `Delivery`. A thin enum (`TransportError { Temp(String), Permanent(String) }`) on the trait return would be durable.
-- [ ] **(Sprint 34)** Cache the test DKIM keypair across integration tests via `once_cell` + a process-scoped `TempDir` rather than re-shelling `aimx dkim-keygen` per test. Each 2048-bit RSA generation costs ~200ms and the Sprint 34 integration suite now spawns `aimx serve` in many tests. A sharable keypair cache would cut ~10-15s off the integration run.
-- [ ] **(Sprint 38)** Parity test docstring in `src/trust.rs` says "IFF" (if and only if) but the test only checks one direction (trusted==true implies trigger fires). The reverse direction (trigger fires implies trusted==true) is not tested. Either narrow the docstring or add the reverse check.
-- [ ] **(Sprint 38)** `received_at` in `OutboundFrontmatter` serializes as empty string `""` for outbound messages instead of being omitted — outbound messages don't have a `received_at`, so the field should use `skip_serializing_if` to omit when empty.
-- [ ] **(Sprint 38)** `date` field in outbound frontmatter uses a fresh `Utc::now()` timestamp instead of parsing the `Date:` header from the composed RFC 5322 message — the two will diverge slightly, and the `Date:` header is the canonical value.
-- [ ] **(Sprint 37)** SPF is still verified twice in `src/ingest.rs` — `verify_spf_async` and `build_spf_output` both independently call `resolver.verify_spf()`. The same consolidation pattern applied to DKIM (single call, reuse output) could be applied to SPF to eliminate the redundant DNS lookup per ingest.
-- [ ] **(Sprint 35)** `LettreTransport::resolve_ipv4` in `src/transport.rs` swallows DNS failures with `unwrap_or_default()` — lookup errors silently produce an empty `Vec`, which then triggers the `SkipNoIpv4` path with the misleading message "no A record (enable_ipv6 = false); skipping". This is pre-existing behaviour lifted verbatim from the old `send.rs`, not introduced in Sprint 35. Log the underlying DNS error (or surface a distinct `DnsFailure` outcome) so operators can distinguish "no A record" from "resolver unreachable".
+- [x] **(Sprint 34)** Add a per-read idle timeout inside `send_protocol::parse_request` to bound slow-loris exposure on the world-writable UDS socket. — _Triaged into Sprint 41 (S41-3)._
+- [x] **(Sprint 34)** Replace the substring-based `send_handler::classify_transport_error` with a typed error surface on `MailTransport`. — _Triaged into Sprint 41 (S41-4)._
+- [x] **(Sprint 34)** Cache the test DKIM keypair across integration tests via `once_cell` + a process-scoped `TempDir`. — _Triaged into Sprint 41 (S41-6)._
+- [x] **(Sprint 38)** Parity test docstring in `src/trust.rs` says "IFF" (if and only if) but the test only checks one direction. — _Triaged into Sprint 41 (S41-1)._
+- [x] **(Sprint 38)** `received_at` in `OutboundFrontmatter` serializes as empty string `""` for outbound messages instead of being omitted. — _Triaged into Sprint 41 (S41-1)._
+- [x] **(Sprint 38)** `date` field in outbound frontmatter uses a fresh `Utc::now()` timestamp instead of parsing the `Date:` header. — _Triaged into Sprint 41 (S41-1)._
+- [x] **(Sprint 37)** SPF is still verified twice in `src/ingest.rs` — redundant DNS lookup per ingest. — _Triaged into Sprint 41 (S41-2)._
+- [x] **(Sprint 35)** `LettreTransport::resolve_ipv4` in `src/transport.rs` swallows DNS failures with `unwrap_or_default()`. — _Triaged into Sprint 41 (S41-5)._
+- [x] **(Sprint 35, PR #65)** Stale `#[allow(dead_code)]` on `write_request` in `send_protocol.rs:285` — Sprint 35 shipped, function is now used by `send.rs`, `serve.rs`, and tests. — _Triaged into Sprint 41 (S41-7)._
+- [x] **(Sprint 40, PR #70)** Missing integration test: `aimx serve` in tempdir with stale `README.md` refreshed at startup. — _Triaged into Sprint 41 (S41-7)._
+- [x] **(Sprint 36, PR #66)** `mailbox_list` reads `config.mailboxes.keys()` instead of scanning `inbox/*/` — stray dirs not in config are invisible. — _Not a bug: config-authoritative mailbox list is the intended design (2026-04-16)._
+- [x] **(Sprint 36, PR #66)** Concurrent-ingest race on bundle directories — two ingests with the same subject/second can cross-contaminate attachment files. — _Deferred by user decision (2026-04-16). Unlikely in practice; locking design needed._
+- [x] **(Sprint 34, PR #64)** `LettreTransport::send` parses full `To:` header as `lettre::Address` — fails on display-name or multi-recipient form. — _Already fixed: `send_handler.rs:148` now uses `extract_bare_address(&to_header)` to normalize before transport._
 
 ### Deferred Feature Sprints
 
