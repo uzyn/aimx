@@ -495,9 +495,15 @@ impl SmtpSession {
             let data = Arc::clone(&data);
             let rcpt_owned = rcpt.clone();
             let peer = self.params.peer_addr;
+            let reverse_path = session_state.reverse_path.clone();
 
             let result = tokio::task::spawn_blocking(move || {
-                crate::ingest::ingest_email(&config, &rcpt_owned, &data, peer.ip())
+                let envelope = if reverse_path.is_empty() {
+                    None
+                } else {
+                    Some(reverse_path.as_str())
+                };
+                crate::ingest::ingest_email(&config, &rcpt_owned, &data, peer.ip(), envelope)
                     .map_err(|e| e.to_string())
             })
             .await;
