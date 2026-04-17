@@ -955,6 +955,45 @@ command = "false"
 }
 
 #[test]
+fn ingest_rejects_legacy_placeholder_config_at_cli() {
+    // Sprint 44 regression guard: Config::load must refuse a config that still
+    // references the retired `{from}` / `{subject}` / `{to}` / `{mailbox}` /
+    // `{filepath}` placeholders, and that error must surface to the CLI user
+    // as a non-zero exit code with a stderr message naming the placeholder and
+    // pointing at the migration (AIMX_* env vars).
+    let tmp = TempDir::new().unwrap();
+    let config_content = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = 'echo "from={{from}} subject={{subject}}" >> /tmp/legacy.log'
+"#,
+        tmp.path().display()
+    );
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("catchall"))
+        .stderr(predicate::str::contains("{from}"))
+        .stderr(predicate::str::contains("AIMX_FROM"));
+}
+
+#[test]
 fn ingest_trust_verified_blocks_unsigned_trigger() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("should_not_exist");
@@ -1112,13 +1151,17 @@ command = "touch {}"
     );
 }
 
-/// S31-2: end-to-end channel-recipe test.
+/// S31-2 / S44-1: end-to-end channel-recipe test.
 ///
 /// Drives the full ingest -> channel-rule-match -> templated shell command
-/// path with an assert-able one-liner that writes `{filepath}` and
-/// `{subject}` into a marker file. A second rule exits non-zero to prove
+/// path with an assert-able one-liner that writes `$AIMX_FILEPATH` and
+/// `$AIMX_SUBJECT` into a marker file. A second rule exits non-zero to prove
 /// that trigger failure does NOT block delivery. This is the smoke test
 /// protecting every recipe in `book/channel-recipes.md` from regressions.
+///
+/// Sprint 44 switched user-controlled fields from `{subject}` / `{filepath}`
+/// substitution to `AIMX_*` env vars (shell-injection fix). The test uses
+/// the new pattern end-to-end.
 #[test]
 fn channel_recipe_end_to_end_with_templated_args() {
     let tmp = TempDir::new().unwrap();
@@ -1132,7 +1175,7 @@ address = "*@agent.example.com"
 
 [[mailboxes.catchall.on_receive]]
 type = "cmd"
-command = 'printf "filepath=%s\nsubject=%s\n" {{filepath}} {{subject}} > {marker}'
+command = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
 
 [[mailboxes.catchall.on_receive]]
 type = "cmd"
@@ -1171,11 +1214,11 @@ command = "false"
     let md_path = md_files[0].to_string_lossy().to_string();
     assert!(
         contents.contains(&format!("filepath={md_path}")),
-        "Marker should contain the expanded {{filepath}} value; got: {contents}"
+        "Marker should contain the $AIMX_FILEPATH value; got: {contents}"
     );
     assert!(
         contents.contains("subject=Plain text test"),
-        "Marker should contain the expanded {{subject}} value; got: {contents}"
+        "Marker should contain the $AIMX_SUBJECT value; got: {contents}"
     );
 }
 

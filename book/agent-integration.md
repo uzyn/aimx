@@ -52,7 +52,7 @@ grows as more agents are landed in subsequent sprints.
 
 | Agent | Install command | Destination | Activation | Progressive disclosure |
 |-------|-----------------|-------------|------------|------------------------|
-| Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Restart Claude Code; the plugin is auto-discovered from `~/.claude/plugins/`. | Primer as skill + `references/` directory copied as siblings |
+| Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Run the printed `claude mcp add --scope user aimx …` command, then restart Claude Code. | Primer as skill + `references/` directory copied as siblings |
 | Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. | Primer as skill + `references/` directory copied as siblings |
 | OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. | Single skill file (primer body); references inlined |
 | Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body); references inlined |
@@ -73,11 +73,15 @@ layout guide).
 
 ### Claude Code
 
-Claude Code discovers plugins by scanning `~/.claude/plugins/`. The AIMX
-plugin ships two pieces:
+Claude Code discovers plugins by scanning `~/.claude/plugins/`, but the MCP
+server bundled inside a plugin is **not** auto-activated for every
+invocation — in particular `claude -p` (headless mode, used by channel
+triggers) needs an explicit `claude mcp add` so the server is registered in
+its MCP registry. The AIMX plugin ships two pieces:
 
-- `.claude-plugin/plugin.json` — manifest declaring the plugin and
-  registering `aimx mcp` as an MCP server.
+- `.claude-plugin/plugin.json` — manifest declaring the plugin and the
+  `mcpServers.aimx` entry. The plugin itself auto-activates for interactive
+  `claude` sessions.
 - `skills/aimx/SKILL.md` — a skill Claude Code loads when the conversation
   touches email, inboxes, or AIMX. The skill body is the canonical AIMX
   primer: MCP tool names and parameters, the on-disk storage layout, the
@@ -89,14 +93,26 @@ Install:
 aimx agent-setup claude-code
 ```
 
+Then register the MCP server with Claude Code:
+
+```bash
+claude mcp add --scope user aimx /usr/local/bin/aimx mcp
+```
+
+This updates `~/.claude.json` (the user-scope MCP registry) so both the
+interactive REPL and `claude -p` headless invocations see the `aimx`
+server. Restart Claude Code after registration.
+
 Custom data directory:
 
 ```bash
 aimx --data-dir /custom/path agent-setup claude-code
+claude mcp add --scope user aimx /usr/local/bin/aimx --data-dir /custom/path mcp
 ```
 
-The installer rewrites `mcpServers.aimx.args` to include
-`--data-dir /custom/path` before writing `plugin.json` to disk.
+The `aimx agent-setup` installer rewrites `mcpServers.aimx.args` in the
+plugin's `plugin.json` and prints a `claude mcp add` command that includes
+the same `--data-dir` override.
 
 ### Codex CLI
 

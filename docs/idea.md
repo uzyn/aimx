@@ -1,5 +1,7 @@
 # Idea
 
+> **Note (Sprint 44):** The channel-trigger recipes below use the pre-Sprint-44 placeholder syntax (`{from}`, `{subject}`, `{filepath}`, etc.). Those placeholders are now rejected at config load. In current AIMX, only `{id}` and `{date}` are substituted into the command string; user-controlled fields are passed as environment variables (`$AIMX_FROM`, `$AIMX_SUBJECT`, `$AIMX_TO`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`). See `book/channels.md` and `book/channel-recipes.md` for the current pattern.
+
 > Your server can receive email. Why are you routing through Gmail?
 
 SMTP for agents. No middleman.

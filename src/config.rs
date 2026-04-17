@@ -110,6 +110,11 @@ impl Config {
             }
         })?;
         let config: Config = toml::from_str(&content)?;
+        // S44-1: legacy user-controlled placeholders in on_receive.command
+        // are a shell-injection vector — refuse to load rather than run
+        // them. Pre-launch hard break; no compat shim.
+        crate::channel::validate_on_receive_commands(&config.mailboxes)
+            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         Ok(config)
     }
 
@@ -241,7 +246,7 @@ address = "support@agent.example.com"
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'echo "{from}" >> /tmp/log'
+command = 'echo "$AIMX_FROM" >> /tmp/log'
 
 [mailboxes.support.on_receive.match]
 from = "*@gmail.com"
@@ -267,11 +272,68 @@ has_attachment = true
         assert_eq!(support.on_receive.len(), 1);
         let rule = &support.on_receive[0];
         assert_eq!(rule.rule_type, "cmd");
-        assert_eq!(rule.command, "echo \"{from}\" >> /tmp/log");
+        assert_eq!(rule.command, "echo \"$AIMX_FROM\" >> /tmp/log");
         let m = rule.r#match.as_ref().unwrap();
         assert_eq!(m.from.as_deref(), Some("*@gmail.com"));
         assert_eq!(m.subject.as_deref(), Some("urgent"));
         assert_eq!(m.has_attachment, Some(true));
+    }
+
+    #[test]
+    fn load_rejects_legacy_from_placeholder() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.on_receive]]
+type = "cmd"
+command = 'echo {from}'
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("legacy placeholder '{from}'"),
+            "error should name the offender: {err}"
+        );
+        assert!(
+            err.contains("support"),
+            "error should name the mailbox: {err}"
+        );
+        assert!(
+            err.contains("AIMX_FROM"),
+            "error should point at the env-var migration: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_env_var_trigger_recipe() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.on_receive]]
+type = "cmd"
+command = '''
+printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
+'''
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes["support"].on_receive.len(), 1);
     }
 
     #[test]

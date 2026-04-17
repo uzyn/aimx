@@ -131,7 +131,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ### 6.6 Channel Manager
 - FR-29: Read trigger rules from `config.toml` per mailbox.
-- FR-30: Support `cmd` trigger type: execute shell command with template variables (`{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`).
+- FR-30: Support `cmd` trigger type: execute shell command with aimx-controlled template variables `{id}` and `{date}` substituted into the command string. User-controlled fields are exposed as environment variables (`AIMX_FROM`, `AIMX_TO`, `AIMX_SUBJECT`, `AIMX_MAILBOX`, `AIMX_FILEPATH`) to avoid shell-injection via header values. Legacy `{from}`/`{to}`/`{subject}`/`{mailbox}`/`{filepath}` placeholders are rejected at config load with a migration hint (Sprint 44).
 - FR-31: Support optional match filters: `from` (glob), `subject` (substring), `has_attachment` (bool). All conditions AND.
 - FR-32: Execute triggers synchronously during delivery. Log failures, never block delivery.
 

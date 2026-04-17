@@ -132,6 +132,17 @@ fn write_file_with_mode(
 }
 
 pub fn dns_record_value(dkim_root: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let b64 = public_key_spki_base64(dkim_root)?;
+    Ok(format!("v=DKIM1; k=rsa; p={b64}"))
+}
+
+/// Read the DKIM public key PEM at `<dkim_root>/public.key` and return its
+/// SPKI-DER base64 — i.e. the `p=` value in the DKIM1 TXT record.
+///
+/// Extracted from [`dns_record_value`] in Sprint 44 so the daemon's startup
+/// DNS sanity check (S44-2) can compare the DNS-published `p=` against the
+/// on-disk key without duplicating the PEM-parse logic.
+pub fn public_key_spki_base64(dkim_root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let (_, public_path) = dkim_paths(dkim_root);
     let pem = std::fs::read_to_string(&public_path)
         .map_err(|_| "DKIM public key not found. Run `aimx dkim-keygen` first.")?;
@@ -145,9 +156,28 @@ pub fn dns_record_value(dkim_root: &Path) -> Result<String, Box<dyn std::error::
     };
 
     let spki_der = public_key.to_public_key_der()?;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(spki_der.as_ref());
+    Ok(base64::engine::general_purpose::STANDARD.encode(spki_der.as_ref()))
+}
 
-    Ok(format!("v=DKIM1; k=rsa; p={b64}"))
+/// Extract the `p=` value from a DKIM1 TXT record. Returns `None` if the
+/// record does not contain a non-empty `p=` tag. Whitespace inside the
+/// value is stripped (DNS-multi-string records can have spaces inserted by
+/// resolvers).
+///
+/// Shared between `aimx setup`'s verify_dkim check and `aimx serve`'s
+/// startup DNS sanity check (S44-2). Keeping a single parser prevents the
+/// two checks from drifting and producing contradictory verdicts.
+pub fn extract_dkim_p_value(record: &str) -> Option<String> {
+    for part in record.split(';') {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("p=") {
+            let key = value.replace(char::is_whitespace, "");
+            if !key.is_empty() {
+                return Some(key);
+            }
+        }
+    }
+    None
 }
 
 /// Load the RSA DKIM private key from `<dkim_root>/private.key`.
@@ -379,6 +409,41 @@ mod tests {
         assert!(record.starts_with("v=DKIM1; k=rsa; p="));
         assert!(!record.contains('\n'));
         assert!(!record.contains("-----"));
+    }
+
+    #[test]
+    fn public_key_spki_base64_matches_dns_record() {
+        let tmp = TempDir::new().unwrap();
+        generate_keypair(tmp.path(), false).unwrap();
+        let b64 = public_key_spki_base64(tmp.path()).unwrap();
+        let record = dns_record_value(tmp.path()).unwrap();
+        // The SPKI base64 is embedded verbatim in the DNS record's `p=`
+        // value — same bytes, no whitespace.
+        assert!(record.ends_with(&b64), "record={record}, b64={b64}");
+    }
+
+    #[test]
+    fn extract_dkim_p_value_strips_whitespace() {
+        let record = "v=DKIM1; k=rsa; p=ABC DEF\tGHI";
+        assert_eq!(extract_dkim_p_value(record).as_deref(), Some("ABCDEFGHI"));
+    }
+
+    #[test]
+    fn extract_dkim_p_value_none_when_missing() {
+        let record = "v=DKIM1; k=rsa";
+        assert_eq!(extract_dkim_p_value(record), None);
+    }
+
+    #[test]
+    fn extract_dkim_p_value_empty_returns_none() {
+        let record = "v=DKIM1; k=rsa; p=";
+        assert_eq!(extract_dkim_p_value(record), None);
+    }
+
+    #[test]
+    fn extract_dkim_p_value_ignores_other_tags() {
+        let record = "v=DKIM1; k=rsa; p=HELLO; s=email";
+        assert_eq!(extract_dkim_p_value(record).as_deref(), Some("HELLO"));
     }
 
     #[test]
