@@ -600,6 +600,165 @@ In priority order:
 | #1 | P3 (DX) | `aimx mailbox create` silently produces a state where inbound is misrouted until the daemon is restarted | Either print a restart hint or signal-reload the daemon. |
 | #3 | P4 | User forwarded/replied to earlier messages; subjects got `Fwd:`/`Re:` prefixes. Not a bug — plan wording could clarify "compose new". |
 
+## Recommended fixes
+
+Each finding below has been investigated in the source tree. These are recommendations only — no code has been changed yet. Effort estimates are rough (S / M / L ≈ <100 / 100–500 / >500 LoC including tests + docs).
+
+### Fix for #10 — DKIM key on disk does not match DNS
+
+**Root cause (confirmed, not a code bug).** `src/dkim.rs:49-82 generate_keypair` writes `public.key` and `private.key` as an atomic pair. Line 52 blocks regeneration unless `--force` is passed. `src/setup.rs:988-996 finalize_setup` skips key generation if `private.key` exists. `src/dkim.rs:229-262 run_keygen` (the `aimx dkim-keygen` command) requires explicit `--force` to overwrite. The setup's DNS-check at `src/setup.rs:704-735 verify_dkim` correctly detects and reports the mismatch. Conclusion: the current state was produced at some earlier point by a deliberate `aimx dkim-keygen --force` (or a pre-safeguard version of aimx) without the operator updating DNS afterwards. Modern code paths cannot silently cause this.
+
+**Operator fix (immediate, no code change).** Publish the current on-disk public key to DNS:
+
+```
+Name:   dkim._domainkey.agent.zeroshot.lol
+Type:   TXT
+Value:  v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAyjQ9AW6uxv6S7DuPGmklSSNL7+IqZdKcYfP0HziAMgrCUL0IjQGmBChhbA4jJAI0ESjXPYguSc0fhaPk2Y0PkiT1UvXd9HCaTQ2AuacnkkRq8pnsnG1IDsQ0dyZCtGvK2Qo5xyyqK9kze4D6sOkRuBkq249VkauD9iuaOkws9N3tn3MnLM2us2WOMhAFyCN90TUTFO9+id7Emt8gqNamN/EiIiURdCJPwlCu70GidCa8VdrWoC8X2HAZijvO5FnBnqtqMLcEtr/zGF24HvNQV6BYDII/N2Sncu1uIKQBnW3/zNUG0HS6O1HdRDGftGmwApGZIgcaeCVLxq7KRkU5nQIDAQAB
+```
+(Value also printed by `sudo aimx setup agent.zeroshot.lol` in its `[DNS]` block.) After propagation (5–60 min), re-run T4 to confirm Gmail `dkim=pass`.
+
+**Code improvements (separate P1 follow-up, size S).**
+- **Startup DNS sanity-check.** In `src/serve.rs`, after the DKIM key is loaded (~line 95), resolve `dkim._domainkey.{config.domain}` via the already-configured `hickory-resolver`, compare the `p=` value to the SPKI-base64 of the loaded public key, and log a **loud red warning** to stderr + journal if they differ. Do NOT block startup (DNS may not yet have propagated post-setup). Helper goes in `src/dkim.rs` — expose `public_key_spki_base64(&path) -> Result<String>` if not already public.
+- **Louder setup-time warning.** `src/setup.rs:726` currently prints `DKIM: FAIL - DKIM record found but public key does not match local key` as a single line among a block of PASS lines. Make this render in red, and follow with a second line: `⚠ Outbound DKIM signatures will FAIL verification at receivers until DNS matches.` The current UX is easy to miss, as demonstrated in T13.
+- **Optional: refuse to sign on mismatch.** Higher-risk change — operators with in-flight DNS changes would break. Not recommended by default.
+
+### Fix for #9 — shell injection in `on_receive cmd` template expansion
+
+**Root cause.** `src/channel.rs:17-29 substitute_template` does naive `.replace()` substitution, wrapping each value in single quotes via `shell_escape::escape` (line 13-15). When a user template already contains quotes around the placeholder (e.g. `'{from}'`), expansion produces double-quoting: `''U-Zyn Chua <chua@uzyn.com>''`, which `sh -c` then parses `<chua@uzyn.com>` as a redirect. For templates without surrounding quotes, `shell_escape` technically blocks straight injection but the pattern is still fragile — any operator who follows the docs (which show quoted placeholders) gets broken triggers. The command runs via `Command::new("sh").arg("-c").arg(&expanded)` at `src/channel.rs:131`.
+
+**Fix approach: pass values as environment variables.** Drop string substitution for fields that can contain arbitrary user-controlled content (`{from}`, `{subject}`, `{to}`, `{mailbox}`, `{filepath}`). Keep `{id}` and `{date}` as template substitutions since both are aimx-controlled (opaque hex / ISO timestamps safe for filename construction).
+
+**Implementation (size M, ~200 LoC including tests + docs).**
+1. `src/channel.rs`: remove `shell_escape_value` and rewrite `substitute_template` to expand only `{id}` and `{date}`. At `src/channel.rs:131`, switch to `Command::new("sh").arg("-c").arg(&expanded).env("AIMX_FROM", &ctx.from).env("AIMX_SUBJECT", …)` etc. Exhaustively `env()` every field.
+2. Recipes in templates become: `printf 'from=%s\n' "$AIMX_FROM" >> /tmp/log` instead of `printf 'from=%s\n' '{from}'`.
+3. Update `book/channel-recipes.md` and `docs/manual-test.md` T8 recipe to the new pattern. Add a migration note for existing operator configs.
+4. Tests at `src/channel.rs:148-845` — add cases for `U-Zyn Chua <chua@uzyn.com>`, `$(rm -rf /)`, `` `whoami` ``, `foo; ls`, `foo\nbar`.
+5. Backward-compat option (pre-1.0; recommend *hard break*): if a template contains legacy `{from}` / `{subject}` / etc., refuse to load with an error pointing to the migration. Simpler than a deprecated alias.
+
+### Fix for #8 — MCP write ops fail as non-root
+
+**Root cause.** Daemon (`User=root` per systemd unit) writes mailbox `.md` files `root:root 0644` via default umask. MCP server runs as the invoking user (`ubuntu`). `src/mcp.rs:580-624 set_read_status` calls `std::fs::write(&filepath, …)` directly → EACCES. Same applies to any future write-op (`email_mark_unread`, `mailbox_create`, `mailbox_delete`, attachment delete, etc.).
+
+**Fix approach: route all state mutations through the daemon over UDS.** The send-path already follows this pattern (client → UDS → daemon signs + delivers + persists). Extend it to cover state writes.
+
+**Implementation (size M/L, ~400–600 LoC).**
+1. Extend `src/send_protocol.rs` (consider renaming to `uds_protocol.rs` as it grows):
+   - `AIMX/1 MARK-READ <mailbox> <id>`
+   - `AIMX/1 MARK-UNREAD <mailbox> <id>`
+   - `AIMX/1 MAILBOX-CREATE <name>`
+   - `AIMX/1 MAILBOX-DELETE <name>`
+   - Replies: `AIMX/1 OK` or `AIMX/1 ERR <reason>`.
+2. Daemon-side handlers in `src/send_handler.rs` (or a new `src/state_handler.rs`).
+3. Refactor `src/mcp.rs`:
+   - Write ops become thin UDS clients.
+   - Read ops (`email_list`, `email_read`) continue to read files directly (world-readable OK).
+4. Concurrency: per-mailbox `RwLock` in the daemon to prevent races between ingest and MCP mutations.
+5. `aimx mailbox create` / `delete` CLI (currently modifies config.toml directly) also becomes a UDS client when the daemon is running; falls back to direct edit when the daemon isn't running (first-time setup, teardown). This side-benefit resolves finding #1 too (daemon now knows about new mailboxes immediately — no restart needed).
+
+**Alternative (simpler, size S).** Create an `aimx` group; setup adds the operator to it; daemon runs with `Group=aimx UMask=0027`; mailbox files become `0640 root:aimx`. Trade-off: operator must be in the group, `newgrp aimx` or re-login required after setup, and the model doesn't scale cleanly to multi-agent or rootless deployments. UDS route preferred.
+
+### Fix for #7 — `aimx agent-setup claude-code` doesn't register the MCP server
+
+**Root cause.** `src/agent_setup.rs:111-113 claude_code_hint` prints `"Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/)."` This is wrong for `claude -p` (non-interactive) and often wrong for interactive Claude Code too — local plugins aren't auto-activated in `installed_plugins.json`; users must run `claude mcp add` to wire the MCP server into their session. The codex path at `src/agent_setup.rs:115-136` already prints the correct follow-up command.
+
+**Fix approach: update the hint text.** Do NOT shell out to `claude mcp add` — that introduces a hard PATH dependency at setup time and silent-fail risk.
+
+**Implementation (size XS, ~10 LoC).**
+1. Replace the body of `claude_code_hint` (`src/agent_setup.rs:111-113`) with:
+   ```rust
+   fn claude_code_hint(dest: &Path) -> String {
+       format!(
+           "Skill installed at {}.\n\
+            Register the AIMX MCP server with Claude Code by running this command once:\n\
+            \n\
+           \x20 claude mcp add --scope user aimx /usr/local/bin/aimx mcp\n\
+            \n\
+           Restart Claude Code after registration so the new server is loaded.",
+           dest.display()
+       )
+   }
+   ```
+2. Test in `src/agent_setup.rs` tests — assert the hint contains `claude mcp add --scope user aimx`.
+3. Docs: `book/agent-integration.md` claude-code section to mirror this.
+
+### Fix for #4 — `aimx send` requires read access to `/etc/aimx/config.toml`
+
+**Root cause.** `src/send.rs:406-413 build_request` calls `resolve_from_mailbox(&config, &args.from)` (line 218-246). `src/send.rs:467 run` receives `config` from `main.rs` → `Config::load_resolved()` → reads `/etc/aimx/config.toml`. With mode `0640 root:root`, non-root users EACCES before UDS is even touched.
+
+**Fix approach: move `resolve_from_mailbox` to the daemon side.** Client stops needing the config file entirely.
+
+**Implementation (size S, ~80 LoC).**
+1. `src/send_protocol.rs`: remove the `From-Mailbox:` header from the request. Daemon now derives it.
+2. `src/send_handler.rs`: parse `From:` from the raw message, invoke `resolve_from_mailbox` using the daemon's in-memory `Config`. On failure, return `AIMX/1 ERR MAILBOX no mailbox matches From: <addr>`.
+3. `src/send.rs`: delete the `Config::load` / `resolve_from_mailbox` call path from `run_inner`. Client only composes the raw message + opens the UDS.
+4. Revert `/etc/aimx/config.toml` back to `0640 root:root` in setup.
+5. Error message surface — existing tests in `src/send.rs:1037+` need to move to the daemon side.
+
+### Fix for #2 — inbound SPF evaluates to `"none"`
+
+**Root cause.** `src/ingest.rs:453-470 extract_mail_from` reads the RFC 5322 `From:` header, not the RFC 5321 envelope `MAIL FROM`. RFC 7208 §3 requires SPF verification against the envelope MAIL FROM. Envelope MAIL FROM is stored in `src/smtp/session.rs` (`session_state.reverse_path`, ~line 351) but is never threaded to ingest: `src/smtp/session.rs:500` calls `ingest_email(&config, &rcpt_owned, &data, peer.ip())` — four args, no envelope from. `build_spf_output` (`src/ingest.rs:318`) therefore re-extracts from header-From, which is semantically wrong.
+
+**Fix approach: plumb envelope MAIL FROM through ingest.**
+
+**Implementation (size S, ~60 LoC).**
+1. Extend `ingest_email` signature in `src/ingest.rs:31` to accept `envelope_mail_from: Option<&str>`.
+2. `src/smtp/session.rs:500` — pass `session_state.reverse_path.as_deref()`.
+3. `src/ingest.rs build_spf_output` — prefer the envelope value when present; fall back to header-From (current behavior) for stdin-fed `aimx ingest` callers that have no envelope available.
+4. `aimx ingest` CLI (`src/ingest.rs run`) — add `--mail-from <addr>` optional arg so scripted ingestion can still drive SPF correctly.
+5. Test with a real envelope MAIL FROM + a DNS SPF record (integration test; mocked resolver for unit).
+6. Update `book/` docs if SPF behavior is documented there.
+
+### Fix for #5 — `aimx send` accepts any `From:` when wildcard catchall exists
+
+**Root cause.** `src/send.rs:242-245 resolve_from_mailbox` has a wildcard-fallback branch (`mb.address.starts_with('*')`) that matches any sender under the domain. Documented as intentional in `docs/prd.md:330` ("Authorization is out of scope in v0.2"). Practical effect: any UDS client can sign outbound mail as any `bogus@domain`.
+
+**Fix approach (opinionated).** Catchall is for **inbound** routing. Outbound send should always name a concrete, non-wildcard mailbox. Remove the wildcard branch from `resolve_from_mailbox`.
+
+**Implementation (size XS, ~10 LoC).**
+1. Delete lines `src/send.rs:242-245` (wildcard branch).
+2. On the UDS error path, daemon returns `AIMX/1 ERR MAILBOX no mailbox matches From: <addr>`.
+3. Update tests at `src/send.rs:1037+` that currently assert wildcard match succeeds.
+4. Document the behavior change in `book/mailboxes.md` and the test plan.
+
+**Caveat.** This is a behavior change. Operators who were deliberately relying on catchall for outbound need a way to name an explicit mailbox. Acceptable at pre-1.0; flag in CHANGELOG.
+
+### Fix for #1 — `aimx mailbox create` needs a restart hint
+
+**Root cause.** `src/mailbox.rs:164-167` prints only `Mailbox 'foo' created.` Daemon never reloads config (no SIGHUP — intentional per `src/serve.rs:544` test assertion and `docs/prd.md:330`).
+
+**Fix approach (two tiers).**
+
+**Tier 1, immediate (size XS, ~5 LoC).** After `println!("Mailbox '{name}' created.")` in `src/mailbox.rs:166`, add:
+```rust
+println!("Run `sudo systemctl restart aimx` to activate this mailbox.");
+```
+
+**Tier 2, proper (size M).** Have `aimx mailbox create` route via the UDS to the running daemon — the daemon writes to config.toml AND updates its in-memory `Config`. No restart required. This ties into the fix for #8 (daemon becomes the single writer of mailbox state). If tier 2 is adopted, tier 1 is obsolete.
+
+### Fix for #3 — forwarded-message noise in test plan
+
+**Root cause.** Not a defect. Plan wording doesn't specify "compose new" so testers who reply/forward to existing threads introduce `Re:`/`Fwd:` prefixes and `in_reply_to` / `references` chains.
+
+**Fix (docs-only, size XS).** In `docs/manual-test.md` T3 / T5 / T8 / T9, change "Please send a test email from your Gmail account" to "Please compose a new email from your Gmail account (not a reply or forward)".
+
+---
+
+### Priority order for implementation
+
+| Order | Finding | Why first |
+|---|---|---|
+| 1 | #10 (DNS fix + startup check) | Unblocks real-world deliverability immediately. DNS fix is zero-code; startup check is small. |
+| 2 | #9 (env var triggers) | Security; plan's own recipe is broken. |
+| 3 | #7 (agent-setup hint) | Trivial; removes ongoing user confusion. |
+| 4 | #1 (mailbox restart hint, tier 1) | Trivial; unblocks the first-time-user setup failure mode. |
+| 5 | #4 (send stops reading config) | Foundational for the daemon-is-authority refactor (#8 depends on this shape). |
+| 6 | #2 (SPF envelope MAIL FROM) | Visible bug in stored frontmatter; correctness fix. |
+| 7 | #5 (strict send) | Behavior change — group with #4 PR. |
+| 8 | #8 (MCP writes via UDS) | Larger refactor; do after #4 to share UDS plumbing. Subsumes tier 2 of #1. |
+| 9 | #3 (docs nit) | Trivial; fold into any of the above PRs. |
+
+---
+
 ## Deviations from plan (non-defects)
 
 - Session ran on an existing install rather than a fresh VPS; T1 was re-entrance-style.
