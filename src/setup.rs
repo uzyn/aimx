@@ -167,6 +167,11 @@ impl SystemOps for RealSystemOps {
                 let _ = std::process::Command::new("systemctl")
                     .args(["enable", "aimx"])
                     .status();
+                // Clear any stuck "start-limit-hit" state from a prior
+                // failed install attempt so the restart below actually runs.
+                let _ = std::process::Command::new("systemctl")
+                    .args(["reset-failed", "aimx"])
+                    .status();
                 self.restart_service("aimx")?;
             }
             InitSystem::OpenRC => {
@@ -995,12 +1000,14 @@ pub fn finalize_setup(
         println!("DKIM keypair already exists.");
     }
 
+    Ok(())
+}
+
+fn announce_setup_complete(domain: &str) {
     println!(
         "\n{}\n",
         term::success_banner(&format!("Setup complete for {domain}!"))
     );
-
-    Ok(())
 }
 
 /// Create the config dir (default `/etc/aimx`, or `AIMX_CONFIG_DIR` override)
@@ -1201,6 +1208,8 @@ pub fn run_setup(
                 "Existing AIMX configuration detected. Skipping install, proceeding to verification."
             )
         );
+        // Keep config + DKIM state consistent (handles a changed domain on re-entry).
+        finalize_setup(data_dir, &domain, &dkim_selector)?;
     } else {
         // Step 2: Port 25 conflict detection
         match sys.check_port25_occupancy()? {
@@ -1217,7 +1226,7 @@ pub fn run_setup(
             }
         }
 
-        // Step 3: Generate TLS cert and install service file
+        // Step 3: Generate TLS cert
         let cert_dir = Path::new("/etc/ssl/aimx");
         if !sys.file_exists(&cert_dir.join("cert.pem")) {
             println!("Generating self-signed TLS certificate...");
@@ -1227,6 +1236,14 @@ pub fn run_setup(
             println!("TLS certificate already exists.");
         }
 
+        // Step 4: Write config.toml + DKIM keys BEFORE starting the service.
+        // aimx.service exits immediately with "Config file not found" if these
+        // are missing, which systemd then turns into a restart-loop and a
+        // permanently failed unit — causing wait_for_service_ready to time out
+        // and the inbound port-25 check to FAIL with no listener to hit.
+        finalize_setup(data_dir, &domain, &dkim_selector)?;
+
+        // Step 5: Install and start the service (config is now on disk).
         println!("Installing AIMX service...");
         sys.install_service_file(data_dir)?;
         println!("{}", term::success("`aimx serve` started."));
@@ -1236,7 +1253,7 @@ pub fn run_setup(
         if sys.wait_for_service_ready() {
             println!("{}", term::pass_badge());
         } else {
-            println!("timeout (proceeding anyway)");
+            println!("{} (proceeding anyway)", term::fail_badge());
         }
     }
 
@@ -1278,8 +1295,8 @@ pub fn run_setup(
         );
     }
 
-    // Step 6: DKIM keygen and finalize
-    finalize_setup(data_dir, &domain, &dkim_selector)?;
+    // Step 6: Announce success now that the service is running and port 25 is reachable.
+    announce_setup_complete(&domain);
 
     // Step 7: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
@@ -1433,6 +1450,14 @@ mod tests {
         existing_files: HashMap<PathBuf, String>,
         restarted_services: RefCell<Vec<String>>,
         service_file_installed: RefCell<bool>,
+        /// True if `/etc/aimx/config.toml` existed on disk at the moment
+        /// `install_service_file` was called. `None` until install is invoked.
+        /// Guards against re-introducing the bug where aimx.service is started
+        /// before config is written and fails with "Config file not found".
+        config_present_at_install: RefCell<Option<bool>>,
+        /// Same idea for the DKIM private key — aimx.service also refuses to
+        /// start without it.
+        dkim_present_at_install: RefCell<Option<bool>>,
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
@@ -1447,6 +1472,8 @@ mod tests {
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
                 service_file_installed: RefCell::new(false),
+                config_present_at_install: RefCell::new(None),
+                dkim_present_at_install: RefCell::new(None),
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
@@ -1497,6 +1524,14 @@ mod tests {
         }
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
+            // Snapshot the on-disk state that aimx.service would observe when
+            // systemd exec()s it. Real files — not the mock's `written_files`
+            // map — because finalize_setup writes config.toml + DKIM keys via
+            // the real filesystem (tests isolate via AIMX_CONFIG_DIR).
+            let config_present = crate::config::config_path().exists();
+            let dkim_present = crate::config::dkim_dir().join("private.key").exists();
+            *self.config_present_at_install.borrow_mut() = Some(config_present);
+            *self.dkim_present_at_install.borrow_mut() = Some(dkim_present);
             Ok(())
         }
         fn wait_for_service_ready(&self) -> bool {
@@ -2042,6 +2077,44 @@ mod tests {
             *sys.wait_for_ready_calls.borrow(),
             1,
             "fresh setup must wait for the service to be ready before port checks"
+        );
+    }
+
+    #[test]
+    fn fresh_setup_writes_config_and_dkim_before_installing_service() {
+        // Regression guard: on fresh install, aimx.service was being started
+        // BEFORE finalize_setup wrote /etc/aimx/config.toml and the DKIM key.
+        // The daemon would exit immediately with "Config file not found",
+        // systemd would restart-loop 5x, wait_for_service_ready would time
+        // out, and the inbound port-25 check would FAIL with no listener to
+        // hit. Ensure both artefacts are on disk before install_service_file.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let sys = MockSystemOps::default();
+        let net = MockNetworkOps {
+            // Abort before the DNS loop (which reads stdin).
+            outbound_port25: false,
+            ..Default::default()
+        };
+
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        assert!(
+            *sys.service_file_installed.borrow(),
+            "fresh setup must install the service file"
+        );
+        assert_eq!(
+            *sys.config_present_at_install.borrow(),
+            Some(true),
+            "config.toml must exist on disk BEFORE install_service_file runs, \
+             otherwise aimx.service exits with 'Config file not found'"
+        );
+        assert_eq!(
+            *sys.dkim_present_at_install.borrow(),
+            Some(true),
+            "DKIM private key must exist on disk BEFORE install_service_file runs, \
+             otherwise aimx.service exits loading DKIM"
         );
     }
 
