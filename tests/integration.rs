@@ -1112,13 +1112,17 @@ command = "touch {}"
     );
 }
 
-/// S31-2: end-to-end channel-recipe test.
+/// S31-2 / S44-1: end-to-end channel-recipe test.
 ///
 /// Drives the full ingest -> channel-rule-match -> templated shell command
-/// path with an assert-able one-liner that writes `{filepath}` and
-/// `{subject}` into a marker file. A second rule exits non-zero to prove
+/// path with an assert-able one-liner that writes `$AIMX_FILEPATH` and
+/// `$AIMX_SUBJECT` into a marker file. A second rule exits non-zero to prove
 /// that trigger failure does NOT block delivery. This is the smoke test
 /// protecting every recipe in `book/channel-recipes.md` from regressions.
+///
+/// Sprint 44 switched user-controlled fields from `{subject}` / `{filepath}`
+/// substitution to `AIMX_*` env vars (shell-injection fix). The test uses
+/// the new pattern end-to-end.
 #[test]
 fn channel_recipe_end_to_end_with_templated_args() {
     let tmp = TempDir::new().unwrap();
@@ -1132,7 +1136,7 @@ address = "*@agent.example.com"
 
 [[mailboxes.catchall.on_receive]]
 type = "cmd"
-command = 'printf "filepath=%s\nsubject=%s\n" {{filepath}} {{subject}} > {marker}'
+command = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
 
 [[mailboxes.catchall.on_receive]]
 type = "cmd"
@@ -1171,11 +1175,11 @@ command = "false"
     let md_path = md_files[0].to_string_lossy().to_string();
     assert!(
         contents.contains(&format!("filepath={md_path}")),
-        "Marker should contain the expanded {{filepath}} value; got: {contents}"
+        "Marker should contain the $AIMX_FILEPATH value; got: {contents}"
     );
     assert!(
         contents.contains("subject=Plain text test"),
-        "Marker should contain the expanded {{subject}} value; got: {contents}"
+        "Marker should contain the $AIMX_SUBJECT value; got: {contents}"
     );
 }
 

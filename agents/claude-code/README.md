@@ -21,22 +21,29 @@ time (via `include_dir!`) and installed by `aimx agent-setup claude-code`.
 
 ```bash
 aimx agent-setup claude-code
+claude mcp add --scope user aimx /usr/local/bin/aimx mcp
 ```
 
-Default destination: `~/.claude/plugins/aimx/`. After install, restart
-Claude Code — the plugin is auto-discovered from that directory.
+Default destination: `~/.claude/plugins/aimx/`. The plugin itself is
+auto-discovered from that directory, but the MCP server must be registered
+with `claude mcp add` so both the interactive REPL and `claude -p`
+headless invocations (used by channel-trigger recipes) can see it.
+Restart Claude Code after both commands complete.
 
 ## Overriding the data directory
 
 If AIMX was set up with a non-default data directory, re-run the installer
-with `--data-dir`:
+and the MCP registration with `--data-dir`:
 
 ```bash
 aimx --data-dir /custom/path agent-setup claude-code
+claude mcp add --scope user aimx /usr/local/bin/aimx --data-dir /custom/path mcp
 ```
 
 The installer rewrites the plugin's `mcpServers.aimx.args` to include
-`--data-dir /custom/path` before writing `plugin.json` to disk.
+`--data-dir /custom/path` before writing `plugin.json` to disk, and the
+`claude mcp add` command threads the same override into the user-scope
+MCP registry.
 
 ## Channel-trigger recipes
 

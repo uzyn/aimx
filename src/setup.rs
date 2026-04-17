@@ -706,16 +706,9 @@ pub fn verify_spf(net: &dyn NetworkOps, domain: &str, expected_ip: &str) -> DnsV
 }
 
 fn extract_dkim_public_key(record: &str) -> Option<String> {
-    for part in record.split(';') {
-        let part = part.trim();
-        if let Some(value) = part.strip_prefix("p=") {
-            let key = value.trim().replace(' ', "");
-            if !key.is_empty() {
-                return Some(key);
-            }
-        }
-    }
-    None
+    // Single source of truth for DKIM1 `p=` parsing lives in `dkim::` — see
+    // `public_key_spki_base64` / `extract_dkim_p_value` (Sprint 44).
+    crate::dkim::extract_dkim_p_value(record)
 }
 
 pub fn verify_dkim(
@@ -830,47 +823,83 @@ fn dns_record_for_check<'a>(check: &str, records: &'a [DnsRecord]) -> Option<&'a
     }
 }
 
-pub fn display_dns_verification(
+/// Produce the DNS verification output lines without printing anything.
+/// Returned as `(lines, all_pass)` so tests can assert on specific text —
+/// in particular the louder DKIM-mismatch line added in S44-2 — without
+/// capturing stdout.
+pub fn dns_verification_lines(
     results: &[(String, DnsVerifyResult)],
     dns_records: &[DnsRecord],
-) -> bool {
+) -> (Vec<String>, bool) {
+    let mut lines = Vec::new();
+    lines.push(String::new());
+    lines.push("DNS Verification:".to_string());
+    lines.push(String::new());
     let mut all_pass = true;
-    println!("\nDNS Verification:\n");
     for (name, result) in results {
         match result {
-            DnsVerifyResult::Pass => println!("  {name}: {}", term::pass_badge()),
+            DnsVerifyResult::Pass => lines.push(format!("  {name}: {}", term::pass_badge())),
             DnsVerifyResult::Fail(msg) => {
-                println!("  {name}: {} - {msg}", term::fail_badge());
+                lines.push(format!("  {name}: {} - {msg}", term::fail_badge()));
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
-                    println!(
+                    lines.push(format!(
                         "         {} {}  {}  {}",
                         term::dim("→ Add:"),
                         rec.record_type,
                         rec.name,
                         rec.value
-                    );
+                    ));
+                }
+                // S44-2: DKIM failures have an operator-silent consequence
+                // that bit us in finding #10. A single FAIL line in a
+                // column of PASS lines is too easy to skim past — print a
+                // second, semantically-red line spelling out that outbound
+                // signatures will not verify at receivers until the DNS
+                // key matches the on-disk public key.
+                if name == "DKIM" {
+                    lines.push(format!(
+                        "         {} Outbound DKIM signatures will FAIL verification at receivers until DNS matches.",
+                        term::error("!!")
+                    ));
                 }
                 all_pass = false;
             }
             DnsVerifyResult::Missing(msg) => {
-                println!("  {name}: {} - {msg}", term::missing_badge());
+                lines.push(format!("  {name}: {} - {msg}", term::missing_badge()));
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
-                    println!(
+                    lines.push(format!(
                         "         {} {}  {}  {}",
                         term::dim("→ Add:"),
                         rec.record_type,
                         rec.name,
                         rec.value
-                    );
+                    ));
+                }
+                if name == "DKIM" {
+                    lines.push(format!(
+                        "         {} Outbound DKIM signatures will FAIL verification at receivers until DNS matches.",
+                        term::error("!!")
+                    ));
                 }
                 all_pass = false;
             }
             DnsVerifyResult::Warn(msg) => {
-                println!("  {name}: {} - {msg}", term::warn_badge());
+                lines.push(format!("  {name}: {} - {msg}", term::warn_badge()));
             }
         }
     }
-    println!();
+    lines.push(String::new());
+    (lines, all_pass)
+}
+
+pub fn display_dns_verification(
+    results: &[(String, DnsVerifyResult)],
+    dns_records: &[DnsRecord],
+) -> bool {
+    let (lines, all_pass) = dns_verification_lines(results, dns_records);
+    for line in lines {
+        println!("{line}");
+    }
     all_pass
 }
 
@@ -2009,6 +2038,80 @@ mod tests {
             ("SPF".into(), DnsVerifyResult::Missing("No SPF".into())),
         ];
         assert!(!display_dns_verification(&results, &[]));
+    }
+
+    #[test]
+    fn dns_verification_lines_dkim_fail_includes_loud_consequence_note() {
+        // S44-2: a single PASS/FAIL line is too easy to skim past. When
+        // DKIM fails the verifier, the operator must see an explicit note
+        // that every outbound signature will break until DNS matches.
+        let results = vec![
+            ("MX".into(), DnsVerifyResult::Pass),
+            (
+                "DKIM".into(),
+                DnsVerifyResult::Fail("public key does not match local key".into()),
+            ),
+        ];
+        let (lines, all_pass) = dns_verification_lines(&results, &[]);
+        assert!(!all_pass);
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            joined.contains("Outbound DKIM signatures will FAIL verification"),
+            "expected louder consequence line, got:\n{joined}"
+        );
+        assert!(
+            joined.contains("until DNS matches"),
+            "expected actionable remedy, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn dns_verification_lines_dkim_missing_includes_loud_consequence_note() {
+        let results = vec![(
+            "DKIM".into(),
+            DnsVerifyResult::Missing("No DKIM record found".into()),
+        )];
+        let (lines, _) = dns_verification_lines(&results, &[]);
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            joined.contains("Outbound DKIM signatures will FAIL verification"),
+            "expected louder consequence line even for Missing, got:\n{joined}"
+        );
+    }
+
+    #[test]
+    fn dns_verification_lines_non_dkim_fail_has_no_dkim_consequence() {
+        let results = vec![("SPF".into(), DnsVerifyResult::Fail("bad".into()))];
+        let (lines, _) = dns_verification_lines(&results, &[]);
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            !joined.contains("Outbound DKIM signatures"),
+            "DKIM-only copy must not leak onto other failures, got:\n{joined}"
+        );
+    }
+
+    /// Strip ANSI escape sequences so assertions work regardless of
+    /// whether `colored` happens to be enabled in the current test env.
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{001b}' {
+                // Skip CSI: ESC [ ... final-byte(0x40-0x7E)
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    while let Some(&next) = chars.peek() {
+                        chars.next();
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
     }
 
     #[test]

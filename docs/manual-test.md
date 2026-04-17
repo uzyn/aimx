@@ -94,7 +94,7 @@ ls /var/lib/aimx/inbox/
 
 **Handoff to human.**
 
-> Please send a test email from your Gmail account:
+> Please **compose a new email** (do NOT forward or reply to an existing thread — forwarded/replied messages pick up `Fwd:`/`Re:` subject prefixes and carry `In-Reply-To`/`References` headers that add noise to the frontmatter) from your Gmail account:
 > - **To:** `inbox@mail.example.com`
 > - **Subject:** `aimx inbound test 1`
 > - **Body:** anything; include 1 PDF or image attachment to exercise the bundle path.
@@ -181,7 +181,7 @@ aimx send --from bogus@mail.example.com --to chua@uzyn.com --subject x --body x
 
 **Goal.** Different local parts route to their own mailboxes; unknown local-parts fall through to the `catchall` mailbox (no SMTP reject in v1).
 
-**Handoff to human.** Send three emails from Gmail in sequence:
+**Handoff to human.** **Compose three new emails** from Gmail in sequence (do NOT forward or reply to any prior thread — the resulting `Fwd:`/`Re:` prefixes and `In-Reply-To`/`References` headers add noise to the frontmatter this test is inspecting):
 1. To `agent@mail.example.com`, subject `route-test-agent`.
 2. To `test@mail.example.com`, subject `route-test-test`.
 3. To `nobody@mail.example.com`, subject `route-test-nobody` (unknown mailbox).
@@ -298,7 +298,7 @@ trusted_senders = ["chua@uzyn.com"]
 type = "cmd"
 command = '''
 touch /tmp/aimx-trigger-{id}.flag
-printf 'from=%s\nsubject=%s\nfilepath=%s\n' '{from}' '{subject}' '{filepath}' >> /tmp/aimx-trigger.log
+printf 'from=%s\nsubject=%s\nfilepath=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "$AIMX_FILEPATH" >> /tmp/aimx-trigger.log
 '''
 ```
 
@@ -310,7 +310,7 @@ sudo systemctl restart aimx
 rm -f /tmp/aimx-trigger*.flag /tmp/aimx-trigger.log
 ```
 
-**Handoff.** Send an email from `chua@uzyn.com` (from your laptop — trusted sender) to `test@mail.example.com` with subject `trigger-trusted`.
+**Handoff.** **Compose a new email** from `chua@uzyn.com` (from your laptop — trusted sender) to `test@mail.example.com` with subject `trigger-trusted`. Do NOT forward or reply to an existing thread — forwarded/replied messages arrive with `Fwd:`/`Re:` subjects and `In-Reply-To`/`References` headers that pollute the test's frontmatter assertions.
 
 ```bash
 # [VPS]
@@ -335,7 +335,7 @@ Keep the T8 config. Clear state:
 rm -f /tmp/aimx-trigger*.flag /tmp/aimx-trigger.log
 ```
 
-**Handoff.** Send from a Gmail address NOT in `trusted_senders` (e.g. the Gmail used in T3) to `test@mail.example.com` with subject `trigger-untrusted`.
+**Handoff.** **Compose a new email** from a Gmail address NOT in `trusted_senders` (e.g. the Gmail used in T3) to `test@mail.example.com` with subject `trigger-untrusted`. Do NOT forward or reply to any prior thread — we want a clean frontmatter with no `In-Reply-To` / `References` headers.
 
 ```bash
 # [VPS]

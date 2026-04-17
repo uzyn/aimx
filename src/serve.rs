@@ -9,6 +9,192 @@ use crate::smtp::SmtpServer;
 use crate::term;
 use crate::transport::{FileDropTransport, LettreTransport, MailTransport};
 
+/// Resolve DKIM TXT records for the startup sanity check (S44-2). Separated
+/// into a trait so tests can inject a resolver that returns a mismatched
+/// `p=` value without reaching real DNS.
+pub trait DkimTxtResolver {
+    fn resolve_dkim_txt(
+        &self,
+        fqdn: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// Production implementation backed by `hickory-resolver`. Creates the
+/// resolver inside each call — setup is cheap and the check runs once at
+/// startup. Keeps the trait object trivially constructible.
+pub struct HickoryDkimResolver;
+
+impl DkimTxtResolver for HickoryDkimResolver {
+    fn resolve_dkim_txt(
+        &self,
+        fqdn: &str,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        // Synchronous helper: the startup check runs inside the tokio
+        // runtime but treats the DNS lookup as a one-shot with a short
+        // deadline. Build an inline resolver rather than reusing the mx
+        // helper so we can keep the hot path (MX lookups during outbound
+        // delivery) isolated.
+        use hickory_resolver::TokioResolver;
+        let handle = tokio::runtime::Handle::current();
+        let result: Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> =
+            tokio::task::block_in_place(|| {
+                handle.block_on(async move {
+                    let resolver = TokioResolver::builder_tokio()
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("failed to create DNS resolver: {e}").into()
+                        })?
+                        .build();
+                    let lookup = resolver.txt_lookup(fqdn).await.map_err(
+                        |e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("TXT lookup failed for {fqdn}: {e}").into()
+                        },
+                    )?;
+                    let mut records = Vec::new();
+                    for txt in lookup.iter() {
+                        // A TXT record may be split across multiple strings
+                        // by resolvers — join them so the `p=` value parses
+                        // cleanly after whitespace stripping.
+                        let joined: String = txt
+                            .iter()
+                            .map(|b| String::from_utf8_lossy(b).into_owned())
+                            .collect::<Vec<_>>()
+                            .join("");
+                        records.push(joined);
+                    }
+                    Ok(records)
+                })
+            });
+        result
+    }
+}
+
+/// Outcome of the startup DKIM DNS sanity check. Used by tests to assert
+/// which branch the daemon took without having to parse stderr.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DkimStartupCheck {
+    /// DNS `p=` matches the on-disk public key.
+    Match,
+    /// DNS `p=` differs from the on-disk key — receivers will see DKIM fail.
+    Mismatch { dns: String, local: String },
+    /// No `dkim._domainkey.<domain>` TXT record present.
+    NoRecord,
+    /// TXT record exists but has no `p=` tag.
+    NoPTag,
+    /// DNS resolution itself failed (NXDOMAIN, timeout, etc.). Non-fatal —
+    /// may be a transient propagation issue after a fresh setup.
+    ResolveError(String),
+}
+
+/// Pure logic: compare the on-disk SPKI base64 against one or more TXT
+/// records. Extracted so it's unit-testable without a DNS roundtrip.
+pub fn evaluate_dkim_startup(local_spki_b64: &str, txt_records: &[String]) -> DkimStartupCheck {
+    let dkim_records: Vec<&String> = txt_records
+        .iter()
+        .filter(|r| r.contains("v=DKIM1"))
+        .collect();
+    if dkim_records.is_empty() {
+        return DkimStartupCheck::NoRecord;
+    }
+    let mut seen_dns: Option<String> = None;
+    for r in &dkim_records {
+        if let Some(dns_p) = dkim::extract_dkim_p_value(r) {
+            if dns_p == local_spki_b64 {
+                return DkimStartupCheck::Match;
+            }
+            seen_dns = Some(dns_p);
+        }
+    }
+    match seen_dns {
+        Some(dns) => DkimStartupCheck::Mismatch {
+            dns,
+            local: local_spki_b64.to_string(),
+        },
+        None => DkimStartupCheck::NoPTag,
+    }
+}
+
+/// Run the startup DKIM DNS sanity check against `resolver`. Never blocks
+/// startup — every outcome is returned to the caller which logs an
+/// appropriate message and continues binding listeners.
+///
+/// This closes finding #10 from the 2026-04-17 manual test run: the on-disk
+/// private key and the DNS-published public key had drifted, every outbound
+/// signature silently failed at Gmail, and the running daemon had no
+/// visibility into the mismatch.
+pub fn run_dkim_startup_check(
+    resolver: &dyn DkimTxtResolver,
+    domain: &str,
+    selector: &str,
+    dkim_root: &Path,
+) -> DkimStartupCheck {
+    let local_b64 = match dkim::public_key_spki_base64(dkim_root) {
+        Ok(b) => b,
+        Err(e) => return DkimStartupCheck::ResolveError(format!("local key error: {e}")),
+    };
+    let fqdn = format!("{selector}._domainkey.{domain}");
+    match resolver.resolve_dkim_txt(&fqdn) {
+        Ok(records) => evaluate_dkim_startup(&local_b64, &records),
+        Err(e) => DkimStartupCheck::ResolveError(e.to_string()),
+    }
+}
+
+/// Render and emit the warning for a non-Match outcome. On `Match` this
+/// emits nothing. Kept separate from the evaluator so the formatting can be
+/// adjusted without touching the decision logic.
+pub fn log_dkim_startup_check(outcome: &DkimStartupCheck, domain: &str, selector: &str) {
+    let fqdn = format!("{selector}._domainkey.{domain}");
+    match outcome {
+        DkimStartupCheck::Match => {}
+        DkimStartupCheck::Mismatch { dns, local } => {
+            // Loud multi-line warning — this silent-fail mode cost a full
+            // round of manual test time on 2026-04-17.
+            eprintln!(
+                "{} DKIM key mismatch between on-disk private key and DNS-published public key",
+                term::error("ERROR:")
+            );
+            eprintln!(
+                "  DNS record at {fqdn} advertises a different p= value than the \
+                 local public.key."
+            );
+            eprintln!("  Outbound signatures will FAIL DKIM verification at receivers.");
+            eprintln!("  Run `sudo aimx setup {domain}` to republish the DNS record.");
+            eprintln!("  (DNS p= first 32 chars: {}…)", truncate(dns, 32));
+            eprintln!("  (Local p= first 32 chars: {}…)", truncate(local, 32));
+        }
+        DkimStartupCheck::NoRecord => {
+            eprintln!(
+                "{} No DKIM TXT record found at {fqdn} — outbound mail will FAIL DKIM \
+                 verification at receivers. Run `sudo aimx setup {domain}` to publish the record.",
+                term::warn("Warning:")
+            );
+        }
+        DkimStartupCheck::NoPTag => {
+            eprintln!(
+                "{} DKIM TXT record at {fqdn} has no non-empty p= value. Outbound mail will \
+                 FAIL DKIM verification. Re-run `sudo aimx setup {domain}`.",
+                term::warn("Warning:")
+            );
+        }
+        DkimStartupCheck::ResolveError(msg) => {
+            // Non-fatal: DNS may not have propagated yet, or the host may
+            // be offline mid-deploy. Log at warn and move on.
+            eprintln!(
+                "{} DKIM DNS sanity check skipped: {msg}. \
+                 Verify manually with `dig +short TXT {fqdn}` once DNS has propagated.",
+                term::warn("Warning:")
+            );
+        }
+    }
+}
+
+fn truncate(s: &str, n: usize) -> String {
+    if s.len() <= n {
+        s.to_string()
+    } else {
+        s.chars().take(n).collect()
+    }
+}
+
 const DEFAULT_BIND: &str = "0.0.0.0:25";
 const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
 const DEFAULT_TLS_KEY: &str = "/etc/ssl/aimx/key.pem";
@@ -105,6 +291,15 @@ async fn run_serve(
             .into());
         }
     };
+
+    // S44-2: compare the on-disk public key to the DNS-published `p=` value.
+    // Never fatal — DNS may not have propagated yet after a fresh setup. A
+    // mismatch was the silent root cause of finding #10 in the 2026-04-17
+    // manual test run.
+    let resolver = HickoryDkimResolver;
+    let outcome =
+        run_dkim_startup_check(&resolver, &config.domain, &config.dkim_selector, &dkim_root);
+    log_dkim_startup_check(&outcome, &config.domain, &config.dkim_selector);
 
     // Build the SendContext shared across every per-connection UDS task.
     //
@@ -788,6 +983,151 @@ mod tests {
                 std::env::set_var(RUNTIME_DIR_ENV, v);
             }
         }
+    }
+
+    // ----- S44-2 DKIM startup DNS sanity check ------------------------
+
+    struct FakeDkimResolver {
+        result: Result<Vec<String>, String>,
+    }
+
+    impl DkimTxtResolver for FakeDkimResolver {
+        fn resolve_dkim_txt(
+            &self,
+            _fqdn: &str,
+        ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+            match &self.result {
+                Ok(v) => Ok(v.clone()),
+                Err(e) => Err(e.clone().into()),
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_match() {
+        let local = "AAABBBCCC";
+        let record = "v=DKIM1; k=rsa; p=AAABBBCCC".to_string();
+        assert_eq!(
+            evaluate_dkim_startup(local, &[record]),
+            DkimStartupCheck::Match
+        );
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_mismatch() {
+        let local = "LOCALKEY";
+        let record = "v=DKIM1; k=rsa; p=DNSKEY".to_string();
+        match evaluate_dkim_startup(local, &[record]) {
+            DkimStartupCheck::Mismatch { dns, local: l } => {
+                assert_eq!(dns, "DNSKEY");
+                assert_eq!(l, "LOCALKEY");
+            }
+            other => panic!("expected Mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_no_record() {
+        let local = "whatever";
+        // Record present but not a DKIM1 record (e.g. unrelated TXT)
+        let record = "v=spf1 -all".to_string();
+        assert_eq!(
+            evaluate_dkim_startup(local, &[record]),
+            DkimStartupCheck::NoRecord
+        );
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_no_p_tag() {
+        let local = "whatever";
+        let record = "v=DKIM1; k=rsa".to_string();
+        assert_eq!(
+            evaluate_dkim_startup(local, &[record]),
+            DkimStartupCheck::NoPTag
+        );
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_matches_second_record_when_first_mismatches() {
+        // Split DKIM (key rotation in flight) — one matches, one does not.
+        let local = "GOODKEY";
+        let records = vec![
+            "v=DKIM1; k=rsa; p=OLDKEY".to_string(),
+            "v=DKIM1; k=rsa; p=GOODKEY".to_string(),
+        ];
+        assert_eq!(
+            evaluate_dkim_startup(local, &records),
+            DkimStartupCheck::Match
+        );
+    }
+
+    #[test]
+    fn evaluate_dkim_startup_strips_whitespace_in_p_value() {
+        let local = "ABCDEFGHI";
+        // Mimic a DNS resolver that left internal whitespace in the joined
+        // string (sometimes happens with multi-string TXT records).
+        let record = "v=DKIM1; k=rsa; p=ABC DEF GHI".to_string();
+        assert_eq!(
+            evaluate_dkim_startup(local, &[record]),
+            DkimStartupCheck::Match
+        );
+    }
+
+    #[test]
+    fn run_dkim_startup_check_resolve_error_when_dns_fails() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let resolver = FakeDkimResolver {
+            result: Err("simulated NXDOMAIN".into()),
+        };
+        match run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()) {
+            DkimStartupCheck::ResolveError(msg) => {
+                assert!(msg.contains("NXDOMAIN"), "got: {msg}");
+            }
+            other => panic!("expected ResolveError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_dkim_startup_check_match_against_own_key() {
+        // End-to-end: generate a real key, assemble its own DKIM TXT record,
+        // feed that through the fake resolver — the evaluator must say Match.
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let record = crate::dkim::dns_record_value(tmp.path()).unwrap();
+        let resolver = FakeDkimResolver {
+            result: Ok(vec![record]),
+        };
+        assert_eq!(
+            run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()),
+            DkimStartupCheck::Match
+        );
+    }
+
+    #[test]
+    fn run_dkim_startup_check_mismatch_logs_do_not_panic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let resolver = FakeDkimResolver {
+            result: Ok(vec!["v=DKIM1; k=rsa; p=SOMEOTHERKEY".to_string()]),
+        };
+        let outcome = run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path());
+        assert!(matches!(outcome, DkimStartupCheck::Mismatch { .. }));
+        // Smoke: the logging path does not panic on a long base64 payload.
+        log_dkim_startup_check(&outcome, "example.com", "dkim");
+    }
+
+    #[test]
+    fn run_dkim_startup_check_no_record_when_unrelated_txt_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(tmp.path(), false).unwrap();
+        let resolver = FakeDkimResolver {
+            result: Ok(vec!["v=spf1 -all".to_string()]),
+        };
+        assert_eq!(
+            run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()),
+            DkimStartupCheck::NoRecord
+        );
     }
 
     #[cfg(unix)]

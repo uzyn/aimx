@@ -108,8 +108,30 @@ pub fn registry() -> &'static [AgentSpec] {
     ]
 }
 
-fn claude_code_hint(_data_dir: Option<&Path>) -> String {
-    "Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/).".to_string()
+fn claude_code_hint(data_dir: Option<&Path>) -> String {
+    // Claude Code auto-discovers plugins under ~/.claude/plugins/, but the
+    // MCP server bundled with the plugin is NOT activated automatically —
+    // in particular `claude -p` (headless, used by channel-trigger recipes)
+    // needs an explicit `claude mcp add` to register the server in its
+    // MCP registry. Finding #7 from the 2026-04-17 manual test run
+    // surfaced this gap. Mirror Codex's hint structure (install-location
+    // line, blank line, command line, blank line, restart note) so the
+    // two agents read consistently.
+    let extra_args = match data_dir {
+        Some(dd) => format!(" --data-dir {}", posix_single_quote(&dd.to_string_lossy())),
+        None => String::new(),
+    };
+    format!(
+        "Plugin installed at ~/.claude/plugins/aimx/. Register the AIMX MCP \
+         server with Claude Code by running this command once:\n\
+         \n\
+         \x20\x20claude mcp add --scope user aimx /usr/local/bin/aimx{extra_args} mcp\n\
+         \n\
+         Restart Claude Code after registration so the new server is \
+         loaded. (Claude Code auto-discovers the plugin under \
+         ~/.claude/plugins/, but the MCP server must be registered \
+         explicitly — especially for `claude -p` headless invocations.)"
+    )
 }
 
 fn codex_hint(data_dir: Option<&Path>) -> String {
@@ -1238,14 +1260,39 @@ mod tests {
     }
 
     #[test]
-    fn claude_code_activation_hint_is_short_and_deterministic() {
+    fn claude_code_activation_hint_instructs_claude_mcp_add() {
+        // S44-3: Claude Code does NOT auto-activate MCP servers from
+        // plugins/installed_plugins.json (confirmed with claude -p against
+        // aimx plugin on the 2026-04-17 test VPS). The hint must instruct
+        // the operator to run `claude mcp add --scope user aimx …`, mirroring
+        // Codex's hint shape.
         let spec = find_agent("claude-code").unwrap();
         let hint = (spec.activation_hint)(None);
-        assert!(hint.contains("Restart Claude Code"));
-        assert!(hint.contains("auto-discovered"));
-        // Data-dir override should not change Claude Code's hint — the MCP
-        // args are baked into plugin.json, not the hint.
-        assert_eq!(hint, (spec.activation_hint)(Some(Path::new("/x"))));
+        assert!(
+            hint.contains("claude mcp add --scope user aimx"),
+            "hint must instruct `claude mcp add`: {hint}"
+        );
+        assert!(
+            hint.contains("/usr/local/bin/aimx"),
+            "hint must include the aimx binary path: {hint}"
+        );
+        assert!(hint.contains("Restart Claude Code"), "got: {hint}");
+        // No `--data-dir` argument when the default data dir is used.
+        assert!(!hint.contains("--data-dir"), "got: {hint}");
+    }
+
+    #[test]
+    fn claude_code_activation_hint_embeds_data_dir_override() {
+        let spec = find_agent("claude-code").unwrap();
+        let hint = (spec.activation_hint)(Some(Path::new("/custom/data")));
+        assert!(
+            hint.contains("--data-dir '/custom/data'"),
+            "hint must splice --data-dir with POSIX single-quote escaping: {hint}"
+        );
+        assert!(
+            hint.contains("claude mcp add --scope user aimx"),
+            "got: {hint}"
+        );
     }
 
     #[test]
