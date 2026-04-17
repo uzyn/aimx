@@ -22,13 +22,22 @@ pub(crate) fn run_verify(
     let port25 = detect_port25(sys);
 
     if matches!(port25, Port25Status::Free) {
-        return run_with_temp_server(&net);
+        return with_temp_smtp_listener(|| run_with_net(&net, &Port25Status::Free));
     }
 
     run_with_net(&net, &port25)
 }
 
-fn run_with_temp_server(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
+/// Bind a minimal SMTP listener on `0.0.0.0:25` for the duration of `f`,
+/// then tear it down. Used by the preflight probe during `aimx setup`
+/// (before aimx.service is installed) and by `aimx verify` (when nothing
+/// is holding the port). The listener speaks just enough SMTP — 220 banner,
+/// EHLO/HELO, QUIT — for the remote `/probe` endpoint to confirm the port
+/// is reachable.
+pub(crate) fn with_temp_smtp_listener<F, R>(f: F) -> Result<R, Box<dyn std::error::Error>>
+where
+    F: FnOnce() -> Result<R, Box<dyn std::error::Error>>,
+{
     let rt =
         tokio::runtime::Runtime::new().map_err(|e| format!("Failed to create runtime: {e}"))?;
 
@@ -36,8 +45,8 @@ fn run_with_temp_server(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
         Ok(l) => l,
         Err(e) => {
             return Err(format!(
-                "Cannot bind port 25 for verification: {e}\n\
-                 Run with sudo or ensure port 25 is available. `sudo aimx verify`"
+                "Cannot bind port 25 for preflight: {e}\n\
+                 Run with sudo or ensure port 25 is available."
             )
             .into());
         }
@@ -47,7 +56,7 @@ fn run_with_temp_server(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
     let _guard = rt.enter();
     let handle = rt.spawn(run_temp_smtp_listener(listener, shutdown_rx));
 
-    let result = run_with_net(net, &Port25Status::Free);
+    let result = f();
 
     let _ = shutdown_tx.send(true);
     rt.block_on(async {
@@ -292,6 +301,12 @@ mod tests {
         }
         fn wait_for_service_ready(&self) -> bool {
             true
+        }
+        fn with_temp_smtp_listener(
+            &self,
+            f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            f()
         }
     }
 

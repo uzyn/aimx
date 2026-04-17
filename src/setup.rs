@@ -31,6 +31,18 @@ pub trait SystemOps {
     /// Poll `127.0.0.1:25` until a TCP connection succeeds or the timeout
     /// elapses. Returns `true` if the port became reachable, `false` on timeout.
     fn wait_for_service_ready(&self) -> bool;
+    /// Run `f` while a minimal SMTP responder is bound to `0.0.0.0:25`, then
+    /// tear it down. Used for the port-25 inbound preflight during `aimx setup`
+    /// before the real aimx.service has been installed. The default impl
+    /// performs a real bind (requires root / a free :25); `MockSystemOps`
+    /// overrides this to just invoke `f`, so unit tests don't contend for a
+    /// real port.
+    fn with_temp_smtp_listener(
+        &self,
+        f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        crate::verify::with_temp_smtp_listener(f)
+    }
 }
 
 pub trait NetworkOps {
@@ -166,6 +178,11 @@ impl SystemOps for RealSystemOps {
                     .status();
                 let _ = std::process::Command::new("systemctl")
                     .args(["enable", "aimx"])
+                    .status();
+                // Clear any stuck "start-limit-hit" state from a prior
+                // failed install attempt so the restart below actually runs.
+                let _ = std::process::Command::new("systemctl")
+                    .args(["reset-failed", "aimx"])
                     .status();
                 self.restart_service("aimx")?;
             }
@@ -995,12 +1012,14 @@ pub fn finalize_setup(
         println!("DKIM keypair already exists.");
     }
 
+    Ok(())
+}
+
+fn announce_setup_complete(domain: &str) {
     println!(
         "\n{}\n",
         term::success_banner(&format!("Setup complete for {domain}!"))
     );
-
-    Ok(())
 }
 
 /// Create the config dir (default `/etc/aimx`, or `AIMX_CONFIG_DIR` override)
@@ -1194,6 +1213,25 @@ pub fn run_setup(
     // Re-entrant detection: if already configured, skip install/configure steps
     let already_configured = is_already_configured(sys, data_dir);
 
+    // Step 2: Port 25 conflict check. Always run — even on re-entrant invocations,
+    // this surfaces an unexpected foreign process bound to :25.
+    let port25_status = sys.check_port25_occupancy()?;
+    match &port25_status {
+        Port25Status::Free => {}
+        Port25Status::Aimx => {
+            if !already_configured {
+                println!("`aimx serve` is already running on port 25. Proceeding with setup.");
+            }
+        }
+        Port25Status::OtherProcess(name) => {
+            return Err(format!(
+                "Port 25 is occupied by {name}. \
+                 Stop the process and run `aimx setup` again."
+            )
+            .into());
+        }
+    }
+
     if already_configured {
         println!(
             "{}",
@@ -1202,22 +1240,7 @@ pub fn run_setup(
             )
         );
     } else {
-        // Step 2: Port 25 conflict detection
-        match sys.check_port25_occupancy()? {
-            Port25Status::Free => {}
-            Port25Status::Aimx => {
-                println!("`aimx serve` is already running on port 25. Proceeding with setup.");
-            }
-            Port25Status::OtherProcess(name) => {
-                return Err(format!(
-                    "Port 25 is occupied by {name}. \
-                     Stop the process and run `aimx setup` again."
-                )
-                .into());
-            }
-        }
-
-        // Step 3: Generate TLS cert and install service file
+        // Step 3: Generate TLS cert
         let cert_dir = Path::new("/etc/ssl/aimx");
         if !sys.file_exists(&cert_dir.join("cert.pem")) {
             println!("Generating self-signed TLS certificate...");
@@ -1226,62 +1249,25 @@ pub fn run_setup(
         } else {
             println!("TLS certificate already exists.");
         }
-
-        println!("Installing AIMX service...");
-        sys.install_service_file(data_dir)?;
-        println!("{}", term::success("`aimx serve` started."));
-
-        print!("  Waiting for aimx serve to be ready... ");
-        io::stdout().flush()?;
-        if sys.wait_for_service_ready() {
-            println!("{}", term::pass_badge());
-        } else {
-            println!("timeout (proceeding anyway)");
-        }
     }
 
-    // Step 4-5: Port checks (run on both fresh and re-entrant invocations)
-    let mut port_failed = false;
-
-    print!("  Outbound port 25... ");
-    io::stdout().flush()?;
-    match check_outbound(net) {
-        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
-        PreflightResult::Fail(msg) => {
-            println!("{}", term::fail_badge());
-            eprintln!("\n  {msg}");
-            eprintln!("\n  Compatible VPS providers with port 25 open:");
-            for p in COMPATIBLE_PROVIDERS {
-                eprintln!("    - {p}");
-            }
-            port_failed = true;
-        }
-    }
-
-    print!("  Inbound port 25... ");
-    io::stdout().flush()?;
-    match check_inbound(net) {
-        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
-        PreflightResult::Fail(msg) => {
-            println!("{}", term::fail_badge());
-            eprintln!("\n  {msg}");
-            port_failed = true;
-        }
-    }
-
-    if port_failed {
-        return Err(
-            "Port 25 checks failed. Your VPS provider may block SMTP traffic.\n\
-             `aimx serve` started but port 25 is not reachable.\n\
-             Fix the issues above and run `sudo aimx setup` again."
-                .into(),
-        );
-    }
-
-    // Step 6: DKIM keygen and finalize
+    // Step 4: Write config.toml + DKIM keys. Idempotent on re-entry (handles
+    // domain changes). Must happen before the aimx.service install at the end,
+    // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector)?;
 
-    // Step 7: DNS guidance and verification (section [DNS])
+    // Step 5: Port 25 preflight — confirm the VPS allows SMTP traffic before
+    // the user spends time setting up DNS. On a fresh install aimx.service is
+    // not yet bound to :25, so we stand up a minimal SMTP responder for the
+    // duration of the probe and tear it down afterwards. On re-entry (Aimx)
+    // the real daemon is already bound and answers the probe directly.
+    if matches!(port25_status, Port25Status::Aimx) {
+        run_port25_preflight(net)?;
+    } else {
+        sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
+    }
+
+    // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
     let (ipv4_detected, ipv6_detected) = net.get_server_ips()?;
     let server_ipv4 = ipv4_detected
@@ -1361,6 +1347,84 @@ pub fn run_setup(
     // Write (or refresh) the agent-facing README inside the data directory.
     crate::datadir_readme::write(data_dir)?;
 
+    // Step 8: Install and start aimx.service as the final step, once all
+    // preflight + DNS guidance is out of the way. Setup concludes with the
+    // daemon bound to :25 and verified healthy — or a loud error.
+    if !already_configured {
+        install_and_verify_service(sys, data_dir)?;
+    }
+
+    announce_setup_complete(&domain);
+
+    Ok(())
+}
+
+/// Install the systemd/OpenRC service file, restart the daemon, and poll
+/// `127.0.0.1:25` until it accepts a TCP connection. Errors out if the
+/// daemon doesn't bind within the readiness window — setup's last step
+/// must either leave `aimx serve` running or tell the operator exactly
+/// what went wrong.
+fn install_and_verify_service(
+    sys: &dyn SystemOps,
+    data_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\nStarting aimx serve...");
+    sys.install_service_file(data_dir)?;
+
+    print!("  Waiting for aimx serve to bind port 25... ");
+    io::stdout().flush()?;
+    if sys.wait_for_service_ready() {
+        println!("{}", term::pass_badge());
+        println!("{}", term::success("`aimx serve` is running."));
+        Ok(())
+    } else {
+        println!("{}", term::fail_badge());
+        Err(
+            "aimx.service did not bind port 25 within the readiness window.\n\
+             Check `sudo journalctl -u aimx` for errors, then run `sudo aimx setup` again."
+                .into(),
+        )
+    }
+}
+
+/// Probe outbound and inbound port 25. Returns `Err` if either leg fails.
+/// Prints a PASS/FAIL line for each check so the operator can see progress.
+fn run_port25_preflight(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::Error>> {
+    let mut port_failed = false;
+
+    print!("  Outbound port 25... ");
+    io::stdout().flush()?;
+    match check_outbound(net) {
+        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+        PreflightResult::Fail(msg) => {
+            println!("{}", term::fail_badge());
+            eprintln!("\n  {msg}");
+            eprintln!("\n  Compatible VPS providers with port 25 open:");
+            for p in COMPATIBLE_PROVIDERS {
+                eprintln!("    - {p}");
+            }
+            port_failed = true;
+        }
+    }
+
+    print!("  Inbound port 25... ");
+    io::stdout().flush()?;
+    match check_inbound(net) {
+        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+        PreflightResult::Fail(msg) => {
+            println!("{}", term::fail_badge());
+            eprintln!("\n  {msg}");
+            port_failed = true;
+        }
+    }
+
+    if port_failed {
+        return Err(
+            "Port 25 checks failed. Your VPS provider may block SMTP traffic.\n\
+             Fix the issues above and run `sudo aimx setup` again."
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -1502,6 +1566,13 @@ mod tests {
         fn wait_for_service_ready(&self) -> bool {
             *self.wait_for_ready_calls.borrow_mut() += 1;
             self.service_ready
+        }
+        fn with_temp_smtp_listener(
+            &self,
+            f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            // Mock: no real bind — the network probe is mocked too.
+            f()
         }
     }
 
@@ -2013,20 +2084,57 @@ mod tests {
     }
 
     #[test]
-    fn fresh_setup_waits_for_service_ready_after_install() {
-        // S42-2: after installing + restarting aimx, setup must poll for the
-        // daemon to bind port 25 before running the outbound/inbound probes.
-        // We force outbound to fail so the run returns early (before the DNS
-        // retry loop, which reads stdin); the assertion is that by that point
-        // `wait_for_service_ready` has been called exactly once, after the
-        // service file install.
+    fn fresh_setup_defers_install_until_after_preflight() {
+        // `aimx setup` installs aimx.service as the FINAL step, after the
+        // port-25 preflight has passed. If preflight fails we must NOT put a
+        // service file on disk and ask systemd to start a daemon we already
+        // know the network won't route to.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
-        let sys = MockSystemOps {
-            service_ready: true,
+        let sys = MockSystemOps::default();
+        let net = MockNetworkOps {
+            // Preflight fails at the outbound leg.
+            outbound_port25: false,
             ..Default::default()
         };
+
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+
+        let err = result.expect_err("preflight failure must bubble up");
+        assert!(
+            err.to_string().contains("Port 25 checks failed"),
+            "expected port-25 error, got: {err}"
+        );
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "install_service_file must NOT run when the preflight fails"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            0,
+            "wait_for_service_ready must NOT run when the preflight fails"
+        );
+    }
+
+    #[test]
+    fn fresh_setup_writes_config_and_dkim_before_preflight() {
+        // finalize_setup (config.toml + DKIM private key) must run before the
+        // port-25 preflight, so that by the time install_and_verify_service
+        // runs at the end of setup, aimx.service has a loadable config and a
+        // DKIM key on disk. This is what the original bug violated — aimx
+        // serve was being started before finalize_setup, exiting with
+        // "Config file not found" and restart-looping into permanent failure.
+        //
+        // We can't reach install_and_verify_service here without mocking
+        // stdin (DNS retry loop reads it), so we force a preflight failure
+        // and assert both artefacts are already on disk by that point.
+        // Combined with the run_setup source ordering (preflight → DNS →
+        // install), this proves the invariant end-to-end.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let sys = MockSystemOps::default();
         let net = MockNetworkOps {
             outbound_port25: false,
             ..Default::default()
@@ -2035,21 +2143,20 @@ mod tests {
         let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
 
         assert!(
-            *sys.service_file_installed.borrow(),
-            "fresh setup must call install_service_file"
+            crate::config::config_path().exists(),
+            "config.toml must exist on disk after finalize_setup"
         );
-        assert_eq!(
-            *sys.wait_for_ready_calls.borrow(),
-            1,
-            "fresh setup must wait for the service to be ready before port checks"
+        assert!(
+            crate::config::dkim_dir().join("private.key").exists(),
+            "DKIM private key must exist on disk after finalize_setup"
         );
     }
 
     #[test]
-    fn fresh_setup_proceeds_when_service_ready_times_out() {
-        // S42-2: a timed-out wait must not abort setup — the existing port-check
-        // failure path still surfaces the problem. Force outbound to fail so
-        // run_setup returns without hitting the DNS loop.
+    fn install_and_verify_service_errors_when_service_never_binds() {
+        // Once preflight + DNS have passed and the final install step runs,
+        // a readiness timeout must surface a loud error — NOT silently
+        // "proceed anyway" and leave the user with a failed systemd unit.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
@@ -2057,29 +2164,34 @@ mod tests {
             service_ready: false,
             ..Default::default()
         };
-        let net = MockNetworkOps {
-            outbound_port25: false,
-            ..Default::default()
-        };
-
-        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
-
+        let err = install_and_verify_service(&sys, tmp.path())
+            .expect_err("readiness timeout must be an error");
+        assert!(
+            err.to_string().contains("did not bind port 25"),
+            "expected 'did not bind port 25' in error, got: {err}"
+        );
         assert!(
             *sys.service_file_installed.borrow(),
-            "fresh setup must call install_service_file"
+            "install_service_file must have run before wait_for_service_ready"
         );
         assert_eq!(
             *sys.wait_for_ready_calls.borrow(),
             1,
             "wait_for_service_ready must be called exactly once"
         );
-        // Setup proceeded past the wait loop and ran the port checks; because
-        // outbound was mocked to fail, it errors out at the port-check summary.
-        let err = result.expect_err("port-check failure must bubble up");
-        assert!(
-            err.to_string().contains("Port 25 checks failed"),
-            "expected port-check failure message, got: {err}"
-        );
+    }
+
+    #[test]
+    fn install_and_verify_service_succeeds_when_daemon_binds() {
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let sys = MockSystemOps {
+            service_ready: true,
+            ..Default::default()
+        };
+        install_and_verify_service(&sys, tmp.path()).expect("must succeed");
+        assert!(*sys.service_file_installed.borrow());
+        assert_eq!(*sys.wait_for_ready_calls.borrow(), 1);
     }
 
     #[test]
