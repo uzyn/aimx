@@ -6,7 +6,7 @@ aimx is a self-hosted email server for AI agents. This plan manually verifies an
 
 **Test domain assumption.** Replace `mail.example.com` with your real test domain everywhere below. The plan uses `inbox`, `agent`, and `test` as mailbox names.
 
-**Notation.** `[VPS]` = run on the aimx VPS. `[LOCAL]` = run on your laptop (where `claude` / `codex` are installed). `[GMAIL]` = user action in Gmail web UI.
+**Notation.** `[VPS]` = run on the aimx VPS (the same machine where `claude` / `codex` are installed — aimx is designed for a host dedicated to AI agents). `[GMAIL]` = user action in Gmail web UI. Commands run as root unless the step says otherwise; `aimx send` and `aimx agent-setup` refuse to run as root, so run those as a non-root user on the VPS.
 
 ---
 
@@ -14,9 +14,9 @@ aimx is a self-hosted email server for AI agents. This plan manually verifies an
 
 1. Fresh Linux VPS with public IPv4, port 25 unblocked by the provider.
 2. DNS zone editable for the test domain.
-3. `chua@uzyn.com` mailbox available on your laptop (to observe outbound).
-4. A Gmail account available (to observe inbound external deliverability).
-5. `claude` and `codex` CLIs installed and logged in on your laptop.
+3. Access to the `chua@uzyn.com` mailbox from anywhere (to observe outbound).
+4. A Gmail account (to observe inbound external deliverability).
+5. `claude` and `codex` CLIs installed and logged in **on the VPS**, under a non-root user (the same user that will run `aimx send` and `aimx agent-setup`).
 
 ```bash
 # [VPS] sanity — port 25 not already bound
@@ -197,7 +197,7 @@ sudo journalctl -u aimx -n 200 --no-pager | grep -i 'nobody\|reject\|550'
 **Goal.** The Claude Code skill is installed, the MCP server starts, and Claude can list and send email.
 
 ```bash
-# [LOCAL]
+# [VPS] run as the non-root user that owns the claude install
 aimx agent-setup claude-code
 ls -la ~/.claude/plugins/aimx/
 # expect: plugin.json + skills/ + references/
@@ -206,14 +206,14 @@ ls -la ~/.claude/plugins/aimx/
 Restart Claude Code (exit and relaunch), then test:
 
 ```bash
-# [LOCAL] list inbox via MCP
+# [VPS] list inbox via MCP
 claude -p "Use the aimx MCP tools. Call email_list with mailbox='inbox' and unread=true. Summarize what's there."
 ```
 
 **Acceptance — list.** Claude responds with a summary matching the emails delivered in T3/T5.
 
 ```bash
-# [LOCAL] send via MCP
+# [VPS] send via MCP
 claude -p "Use the aimx MCP tool email_send to send from inbox@mail.example.com to chua@uzyn.com. Subject: 'aimx claude MCP test'. Body: 'Sent via Claude MCP.'"
 ```
 
@@ -225,7 +225,7 @@ claude -p "Use the aimx MCP tool email_send to send from inbox@mail.example.com 
 - Recipient receives the mail with DKIM=pass.
 
 ```bash
-# [LOCAL] read + mark_read
+# [VPS] read + mark_read
 claude -p "List unread mail in 'inbox'. Read the most recent one, summarize in one sentence, then mark it read."
 ```
 
@@ -236,7 +236,7 @@ claude -p "List unread mail in 'inbox'. Read the most recent one, summarize in o
 ## T7 — Codex CLI agent integration
 
 ```bash
-# [LOCAL]
+# [VPS] run as the non-root user that owns the codex install
 aimx agent-setup codex
 ls -la ~/.codex/plugins/aimx/
 ```
@@ -244,7 +244,7 @@ ls -la ~/.codex/plugins/aimx/
 Follow any printed `codex mcp add ...` step verbatim, then restart Codex.
 
 ```bash
-# [LOCAL]
+# [VPS]
 codex exec "Use the aimx MCP tools. Call email_list with mailbox='inbox' and unread=true. Summarize."
 
 codex exec "Use the aimx MCP tool email_send to send from inbox@mail.example.com to chua@uzyn.com. Subject: 'aimx codex MCP test'. Body: 'Sent via Codex MCP.'"
