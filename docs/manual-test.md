@@ -35,11 +35,10 @@ sudo ss -tlnp sport :25
 sudo aimx setup mail.example.com
 ```
 
-**Interactive steps to answer.**
-- Confirm domain when prompted.
-- Accept default verify host (`https://check.aimx.email`).
-- When asked to install the service, choose yes.
-- Capture the printed DKIM TXT record (the `dkim._domainkey.mail.example.com` line).
+**What setup prints (no interactive prompts when the domain is passed as an argument).**
+- Passing the domain on the command line skips the domain prompt. Verify host and service installation are non-interactive (CLI flags / unconditional).
+- Capture the printed DKIM TXT record (the `dkim._domainkey.mail.example.com` line) — you will publish this to DNS below.
+- Note the `[DNS]`, `[MCP]`, and `[Deliverability]` sections; keep the terminal scrollback for reference.
 
 **Then publish DNS.** In your DNS provider, add:
 - `A mail.example.com → <VPS ipv4>`
@@ -85,7 +84,7 @@ sudo aimx mailbox list
 ls /var/lib/aimx/inbox/
 ```
 
-**Acceptance.** Three mailbox directories exist under `/var/lib/aimx/inbox/` and `/var/lib/aimx/sent/`.
+**Acceptance.** Four mailbox directories exist under `/var/lib/aimx/inbox/` and `/var/lib/aimx/sent/`: `catchall/` (created by `aimx setup` as the default fallback — see `src/setup.rs`), plus `inbox/`, `agent/`, and `test/` just created. The `catchall` mailbox also appears in `aimx mailbox list` and in `/etc/aimx/config.toml`.
 
 ---
 
@@ -101,13 +100,17 @@ ls /var/lib/aimx/inbox/
 > - **Body:** anything; include 1 PDF or image attachment to exercise the bundle path.
 
 ```bash
+# [VPS] Drop a mark file BEFORE asking the human to hit send, so we can
+# use it as a stable "-newer" reference. /tmp's mtime is not stable.
+touch /tmp/.aimx-t3-mark
+
 # [VPS] watch the inbox directory while the email is in flight
 watch -n 1 'ls -la /var/lib/aimx/inbox/inbox/'
 
 # After it arrives:
 ls /var/lib/aimx/inbox/inbox/
 # Read the newest file (flat .md or bundle dir)
-sudo find /var/lib/aimx/inbox/inbox/ -name '*.md' -newer /tmp -print
+sudo find /var/lib/aimx/inbox/inbox/ -name '*.md' -newer /tmp/.aimx-t3-mark -print
 sudo cat /var/lib/aimx/inbox/inbox/<newest>
 ```
 
@@ -166,13 +169,17 @@ sudo systemctl start aimx
 # Unknown mailbox (daemon ERR, exit 1)
 aimx send --from bogus@mail.example.com --to chua@uzyn.com --subject x --body x
 # expect: AIMX/1 ERR MAILBOX ..., exit 1
+#
+# Note: if you instead see `AIMX/1 ERR DOMAIN ...`, your From: domain does
+# not match the configured aimx domain. Check the `domain =` line in
+# /etc/aimx/config.toml and re-try with a local-part under that domain.
 ```
 
 ---
 
 ## T5 — Inbound routing into specific mailboxes
 
-**Goal.** Different local parts route to their own mailboxes; catch-all or rejection behavior is predictable.
+**Goal.** Different local parts route to their own mailboxes; unknown local-parts fall through to the `catchall` mailbox (no SMTP reject in v1).
 
 **Handoff to human.** Send three emails from Gmail in sequence:
 1. To `agent@mail.example.com`, subject `route-test-agent`.
@@ -183,12 +190,16 @@ aimx send --from bogus@mail.example.com --to chua@uzyn.com --subject x --body x
 # [VPS]
 ls /var/lib/aimx/inbox/agent/
 ls /var/lib/aimx/inbox/test/
-sudo journalctl -u aimx -n 200 --no-pager | grep -i 'nobody\|reject\|550'
+# Unknown local-parts route silently to the `catchall` mailbox created by
+# `aimx setup` (see `Config::resolve_mailbox` in src/config.rs). There is
+# no SMTP-level 550 for an unknown local-part in v1.
+ls /var/lib/aimx/inbox/catchall/ | grep route-test-nobody
+sudo cat /var/lib/aimx/inbox/catchall/*route-test-nobody*.md | head -40
 ```
 
 **Acceptance.**
 - `agent/` and `test/` each contain the respective message.
-- The `nobody@` message is either (a) rejected at SMTP (check Gmail for a bounce), or (b) routed to a configured catch-all. Document which behavior you observe so the expectation is explicit.
+- The `nobody@` message appears under `/var/lib/aimx/inbox/catchall/` with correct frontmatter (this is the v1 catch-all behavior — there is no SMTP reject for unknown local-parts).
 
 ---
 
@@ -200,7 +211,12 @@ sudo journalctl -u aimx -n 200 --no-pager | grep -i 'nobody\|reject\|550'
 # [VPS] run as the non-root user that owns the claude install
 aimx agent-setup claude-code
 ls -la ~/.claude/plugins/aimx/
-# expect: plugin.json + skills/ + references/
+# expect (dot-directory is only visible with -la):
+#   .claude-plugin/plugin.json
+#   skills/aimx/SKILL.md
+#   skills/aimx/references/*.md
+ls -la ~/.claude/plugins/aimx/.claude-plugin/
+ls    ~/.claude/plugins/aimx/skills/aimx/
 ```
 
 Restart Claude Code (exit and relaunch), then test:
@@ -238,10 +254,20 @@ claude -p "List unread mail in 'inbox'. Read the most recent one, summarize in o
 ```bash
 # [VPS] run as the non-root user that owns the codex install
 aimx agent-setup codex
-ls -la ~/.codex/plugins/aimx/
+ls -la ~/.codex/skills/aimx/
+# expect: SKILL.md + references/*.md
+#
+# Note: Codex CLI does NOT auto-discover plugins under ~/.codex/plugins/
+# (validated against Codex CLI 0.117.0). MCP wiring lives in
+# ~/.codex/config.toml and is populated by the `codex mcp add` step below.
 ```
 
-Follow any printed `codex mcp add ...` step verbatim, then restart Codex.
+Follow the printed `codex mcp add aimx -- /usr/local/bin/aimx mcp` step verbatim, then restart Codex. Confirm registration with:
+
+```bash
+grep -A2 '\[mcp_servers.aimx\]' ~/.codex/config.toml
+# expect: command = "/usr/local/bin/aimx" and args = ["mcp"]
+```
 
 ```bash
 # [VPS]
@@ -260,7 +286,7 @@ codex exec "List unread mail in mailbox 'inbox'. Read the most recent one, summa
 
 **Goal.** A configured `on_receive` shell command runs when a trusted sender emails, and receives the expanded template variables.
 
-Edit `/etc/aimx/config.toml` to add:
+Edit `/etc/aimx/config.toml` to **update the existing `[mailboxes.test]` section** (created by `aimx mailbox create test` in T2). Set `trust` and `trusted_senders` on the existing table, and append the `on_receive` sub-table under it:
 
 ```toml
 [mailboxes.test]
@@ -275,6 +301,8 @@ touch /tmp/aimx-trigger-{id}.flag
 printf 'from=%s\nsubject=%s\nfilepath=%s\n' '{from}' '{subject}' '{filepath}' >> /tmp/aimx-trigger.log
 '''
 ```
+
+> Do NOT paste this as a second block. TOML does not allow two `[mailboxes.test]` tables in the same file — having both the T2-created block and a new block produces undefined parse behavior. Replace the fields on the existing table in-place.
 
 ```bash
 # [VPS]
@@ -298,7 +326,7 @@ sudo grep '^trusted' /var/lib/aimx/inbox/test/*trigger-trusted*.md
 
 ---
 
-## T9 — Channel trigger does NOT fire on UNTRUSTED sender
+## T9 — Off-allowlist sender: trigger gate vs. `trusted` field
 
 Keep the T8 config. Clear state:
 
@@ -311,17 +339,17 @@ rm -f /tmp/aimx-trigger*.flag /tmp/aimx-trigger.log
 
 ```bash
 # [VPS]
-ls /tmp/aimx-trigger-*.flag 2>/dev/null || echo "no flag — PASS"
+ls /tmp/aimx-trigger-*.flag 2>/dev/null
 sudo ls /var/lib/aimx/inbox/test/ | grep trigger-untrusted
 sudo grep '^trusted' /var/lib/aimx/inbox/test/*trigger-untrusted*.md
 ```
 
-**Acceptance.**
-- No flag file was created.
-- The email IS still stored in the mailbox (delivery is independent of trigger).
-- Frontmatter `trusted = "false"` (mailbox is `verified` but sender not on allowlist, even if DKIM passed).
+**Acceptance (v1 semantics — trigger gate is wider than the `trusted` field).**
+- A `/tmp/aimx-trigger-<id>.flag` file **is** created, because Gmail's DKIM passes and the v1 trigger gate fires on "allowlisted OR DKIM-pass" (see `src/channel.rs::should_execute_triggers` and the parity test in `src/trust.rs`).
+- The email is stored in the mailbox with frontmatter `trusted = "false"` — the `trusted` field is strictly stronger (requires allowlisted AND DKIM-pass), so an off-allowlist Gmail sender yields `trusted = "false"` even though the trigger fired.
+- The `.md` contains `dkim = "pass"` but `trusted = "false"`.
 
-> **Subtlety to note.** The channel-trigger gate is looser than the `trusted` frontmatter field: a trigger fires when the sender is on `trusted_senders` OR DKIM passes. Because Gmail's DKIM passes, a stricter test of "untrusted means no trigger" requires a sender whose DKIM fails (rare from real providers). If the trigger DOES fire despite the sender being off-allowlist, that is expected behavior under current v1 semantics — document what you observe and decide whether to tighten the gate in a follow-up.
+> **Subtlety confirmed.** This test demonstrates the documented asymmetry: the channel-trigger gate is deliberately wider than the `trusted` frontmatter field. To observe "untrusted → no trigger fires", you would need a sender whose DKIM fails, which is rare from real providers. If you want that stricter behavior, that is a future tightening (tracked as a v1.x follow-up). Today, this output is **expected**, not a regression.
 
 ---
 
@@ -375,7 +403,7 @@ sudo grep '^trusted' /var/lib/aimx/inbox/inbox/*.md
 sudo reboot
 ```
 
-Wait 60s, reconnect, then:
+Wait until SSH reconnects (typically ~30-90s depending on provider), then:
 
 ```bash
 # [VPS]
@@ -416,11 +444,23 @@ sudo aimx setup mail.example.com
 ## Teardown (optional)
 
 ```bash
+# systemd hosts:
 sudo systemctl disable --now aimx
-sudo rm -rf /etc/aimx /var/lib/aimx /run/aimx /etc/ssl/aimx
 sudo rm -f /etc/systemd/system/aimx.service
 sudo systemctl daemon-reload
-rm -rf ~/.claude/plugins/aimx ~/.codex/plugins/aimx
+
+# OpenRC hosts (substitute for the systemd block above):
+#   sudo rc-service aimx stop
+#   sudo rc-update del aimx
+#   sudo rm -f /etc/init.d/aimx
+
+# Shared cleanup (both init systems):
+sudo rm -rf /etc/aimx /var/lib/aimx /run/aimx /etc/ssl/aimx
+rm -rf ~/.claude/plugins/aimx ~/.codex/skills/aimx
+
+# Codex MCP registration lives in ~/.codex/config.toml — remove it with:
+#   codex mcp remove aimx
+# (or hand-edit ~/.codex/config.toml to drop the [mcp_servers.aimx] table).
 ```
 
 ---
@@ -435,7 +475,7 @@ rm -rf ~/.claude/plugins/aimx ~/.codex/plugins/aimx
 - [ ] T6 — Claude Code: list + send + read/mark via MCP
 - [ ] T7 — Codex CLI: list + send + read/mark via MCP
 - [ ] T8 — Trigger fires on trusted sender
-- [ ] T9 — Trigger does NOT fire on untrusted sender
+- [ ] T9 — Off-allowlist sender: trigger fires via DKIM-pass, `trusted = "false"`
 - [ ] T10 — Trigger does NOT fire on outbound
 - [ ] T11 — Trust model: `none`, `"true"`, `"false"` all observed
 - [ ] T12 — Reboot survival
@@ -451,6 +491,6 @@ rm -rf ~/.claude/plugins/aimx ~/.codex/plugins/aimx
 - `/var/lib/aimx/sent/<mailbox>/` — sent copies
 - `/var/lib/aimx/README.md` — datadir layout guide
 - `/run/aimx/send.sock` — UDS for `aimx send`
-- `~/.claude/plugins/aimx/` — Claude Code plugin
-- `~/.codex/plugins/aimx/` — Codex plugin
+- `~/.claude/plugins/aimx/` — Claude Code plugin (manifest at `.claude-plugin/plugin.json`, skill at `skills/aimx/SKILL.md`)
+- `~/.codex/skills/aimx/` — Codex skill (Codex CLI does NOT auto-discover `~/.codex/plugins/`; MCP wiring is in `~/.codex/config.toml` via `codex mcp add`)
 - `sudo journalctl -u aimx -f` — daemon logs
