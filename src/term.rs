@@ -84,40 +84,44 @@ pub fn missing_badge() -> ColoredString {
 mod tests {
     use super::*;
     use colored::control;
+    use std::sync::Mutex;
 
-    fn strip_ansi_test<F: FnOnce()>(f: F) {
-        // Force color off for this test regardless of TTY / NO_COLOR state.
-        control::set_override(false);
-        f();
-        control::unset_override();
-    }
+    // `colored::control::set_override` mutates process-global state, so any two
+    // tests that toggle it must not run concurrently.
+    static COLOR_OVERRIDE_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn no_color_strips_ansi_from_helpers() {
-        strip_ansi_test(|| {
-            let outputs = [
-                success("done").to_string(),
-                error("bad").to_string(),
-                warn("careful").to_string(),
-                info("hello").to_string(),
-                header("[DNS]").to_string(),
-                highlight("aimx").to_string(),
-                dim("hint").to_string(),
-                pass_badge().to_string(),
-                fail_badge().to_string(),
-                warn_badge().to_string(),
-            ];
-            for s in &outputs {
-                assert!(
-                    !s.contains('\x1b'),
-                    "expected no ANSI escape in {s:?} when color is disabled"
-                );
-            }
-        });
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        control::set_override(false);
+        let outputs = [
+            success("done").to_string(),
+            error("bad").to_string(),
+            warn("careful").to_string(),
+            info("hello").to_string(),
+            header("[DNS]").to_string(),
+            highlight("aimx").to_string(),
+            dim("hint").to_string(),
+            pass_badge().to_string(),
+            fail_badge().to_string(),
+            warn_badge().to_string(),
+        ];
+        control::unset_override();
+        for s in &outputs {
+            assert!(
+                !s.contains('\x1b'),
+                "expected no ANSI escape in {s:?} when color is disabled"
+            );
+        }
     }
 
     #[test]
     fn helpers_produce_ansi_when_color_forced_on() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         control::set_override(true);
         let s = success("ok").to_string();
         control::unset_override();
