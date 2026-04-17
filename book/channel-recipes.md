@@ -23,7 +23,7 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 
 | Agent | MCP supported? | Channel-trigger CLI | Non-interactive / approval flag | Notes |
 |-------|----------------|---------------------|---------------------------------|-------|
-| Claude Code | Yes (`aimx agent-setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits; pipe the email via `$(cat {filepath})`. |
+| Claude Code | Yes (`aimx agent-setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits; pipe the email via `$(cat "$AIMX_FILEPATH")`. |
 | Codex CLI | Yes (`aimx agent-setup codex`) | `codex exec "<prompt>"` | `--dangerously-bypass-approvals-and-sandbox` (or `--full-auto`) | `exec` is the non-interactive subcommand. `--full-auto` enables auto-approval within sandbox; the bypass flag goes further. |
 | OpenCode | Yes (`aimx agent-setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
 | Gemini CLI | Yes (`aimx agent-setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
