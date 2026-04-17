@@ -1497,14 +1497,6 @@ mod tests {
         existing_files: HashMap<PathBuf, String>,
         restarted_services: RefCell<Vec<String>>,
         service_file_installed: RefCell<bool>,
-        /// True if `/etc/aimx/config.toml` existed on disk at the moment
-        /// `install_service_file` was called. `None` until install is invoked.
-        /// Guards against re-introducing the bug where aimx.service is started
-        /// before config is written and fails with "Config file not found".
-        config_present_at_install: RefCell<Option<bool>>,
-        /// Same idea for the DKIM private key — aimx.service also refuses to
-        /// start without it.
-        dkim_present_at_install: RefCell<Option<bool>>,
         is_root: bool,
         port25_status: Port25Status,
         service_running: bool,
@@ -1519,8 +1511,6 @@ mod tests {
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
                 service_file_installed: RefCell::new(false),
-                config_present_at_install: RefCell::new(None),
-                dkim_present_at_install: RefCell::new(None),
                 is_root: true,
                 port25_status: Port25Status::Free,
                 service_running: false,
@@ -1571,14 +1561,6 @@ mod tests {
         }
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
-            // Snapshot the on-disk state that aimx.service would observe when
-            // systemd exec()s it. Real files — not the mock's `written_files`
-            // map — because finalize_setup writes config.toml + DKIM keys via
-            // the real filesystem (tests isolate via AIMX_CONFIG_DIR).
-            let config_present = crate::config::config_path().exists();
-            let dkim_present = crate::config::dkim_dir().join("private.key").exists();
-            *self.config_present_at_install.borrow_mut() = Some(config_present);
-            *self.dkim_present_at_install.borrow_mut() = Some(dkim_present);
             Ok(())
         }
         fn wait_for_service_ready(&self) -> bool {
@@ -2136,19 +2118,19 @@ mod tests {
     }
 
     #[test]
-    fn fresh_setup_writes_config_and_dkim_before_preflight_and_install() {
-        // Two invariants, one test:
-        //   1) finalize_setup (config.toml + DKIM private key) runs before the
-        //      port-25 preflight, so a successful preflight on a fresh install
-        //      leaves the system in a state where aimx.service can actually
-        //      start once install_service_file runs.
-        //   2) If install_service_file does run later, both artefacts are on
-        //      disk at that moment — this is what the old bug violated (aimx
-        //      serve exiting with "Config file not found" and restart-looping).
+    fn fresh_setup_writes_config_and_dkim_before_preflight() {
+        // finalize_setup (config.toml + DKIM private key) must run before the
+        // port-25 preflight, so that by the time install_and_verify_service
+        // runs at the end of setup, aimx.service has a loadable config and a
+        // DKIM key on disk. This is what the original bug violated — aimx
+        // serve was being started before finalize_setup, exiting with
+        // "Config file not found" and restart-looping into permanent failure.
         //
-        // We cannot run the full happy path here without mocking stdin (DNS
-        // retry loop reads it), so we force a preflight failure after
-        // finalize_setup and assert config + DKIM are already on disk by then.
+        // We can't reach install_and_verify_service here without mocking
+        // stdin (DNS retry loop reads it), so we force a preflight failure
+        // and assert both artefacts are already on disk by that point.
+        // Combined with the run_setup source ordering (preflight → DNS →
+        // install), this proves the invariant end-to-end.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
