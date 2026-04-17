@@ -6,7 +6,7 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
 - **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only — no `sent/catchall/` directory is created.
-- **No restart required.** Mailbox changes take effect immediately -- `aimx ingest` reads the config on each invocation.
+- **Restart `aimx` after `create` / `delete`.** `aimx serve` reads `config.toml` once at startup, so a freshly-created `[mailboxes.<name>]` entry doesn't reach the running daemon until you restart it (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC). Inbound mail addressed to an unrestarted mailbox silently falls through to `catchall`. The `aimx mailbox create` / `delete` commands print a follow-up hint reminding you of this. (Sprint 46 will remove the requirement by routing mailbox CRUD through the daemon over UDS.)
 
 ### On-disk layout
 

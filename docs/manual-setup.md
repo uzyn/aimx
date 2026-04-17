@@ -393,14 +393,14 @@ trusted_senders = ["*@yourcompany.com"]
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'echo "New email from {from}: {subject}" >> /tmp/email.log'
+command = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 
 [mailboxes.support.on_receive.match]
 from = "*@gmail.com"
 subject = "urgent"
 ```
 
-Available template variables in commands: `{filepath}`, `{from}`, `{to}`, `{subject}`, `{mailbox}`, `{id}`, `{date}`.
+Available template placeholders in commands: `{id}` and `{date}` (aimx-controlled, substituted literally). User-controlled fields are passed as environment variables: `$AIMX_FROM`, `$AIMX_TO`, `$AIMX_SUBJECT`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`. Quote env-var expansions (`"$AIMX_SUBJECT"`) to stay safe against shell metacharacters in sender-supplied values. Configs that still reference legacy `{from}`/`{subject}`/`{to}`/`{mailbox}`/`{filepath}` placeholders are rejected at load time (Sprint 44).
 
 Trust policies:
 - `trust = "none"` (default) — triggers fire for all emails

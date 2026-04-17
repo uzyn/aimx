@@ -190,7 +190,7 @@ address = "*@agent.yourdomain.com"
 # Notify on any incoming email
 [[mailboxes.catchall.on_receive]]
 type = "cmd"
-command = 'ntfy pub agent-mail "New email: {subject} from {from}"'
+command = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
 
 # ----------------------------
 # Named mailbox with trust policy
@@ -207,12 +207,12 @@ trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 # Log all incoming emails
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'echo "{date} | {from} | {subject}" >> /var/log/aimx-support.log'
+command = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log'
 
 # Trigger agent on emails from Gmail with attachments
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'claude -p "Process this email: $(cat {filepath})"'
+command = 'claude -p "Process this email: $(cat "$AIMX_FILEPATH")"'
 
 [mailboxes.support.on_receive.match]
 from = "*@gmail.com"

@@ -164,6 +164,7 @@ pub fn count_messages(dir: &Path) -> usize {
 fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
     create_mailbox(config, name)?;
     println!("{}", term::success(&format!("Mailbox '{name}' created.")));
+    print_restart_hint();
     Ok(())
 }
 
@@ -217,7 +218,53 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
 
     delete_mailbox(config, name)?;
     println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
+    print_restart_hint();
     Ok(())
+}
+
+/// Dispatch table: init system -> the canonical restart command. OpenRC is
+/// hard-coded here because there's no neutral abstraction across systemd
+/// and OpenRC for the *restart* verb beyond `serve::service`'s existing
+/// dispatch tables; keeping it inline keeps the hint readable without
+/// threading the full init-system check through more modules.
+pub(crate) fn restart_hint_command(init: &crate::serve::service::InitSystem) -> &'static str {
+    match init {
+        crate::serve::service::InitSystem::OpenRC => "sudo rc-service aimx restart",
+        // Systemd and Unknown both land here — systemd is far more common,
+        // and on an unknown init the systemd wording is a better fallback
+        // than saying nothing (operator can translate once).
+        _ => "sudo systemctl restart aimx",
+    }
+}
+
+/// Build the lines of the restart-hint banner without printing them.
+/// Exposed for tests so we can assert on content without capturing stdout.
+pub(crate) fn restart_hint_lines(init: &crate::serve::service::InitSystem) -> Vec<String> {
+    let cmd = restart_hint_command(init);
+    vec![
+        format!(
+            "{} Restart the daemon for the change to take effect:",
+            term::warn("Hint:")
+        ),
+        format!("  {}", term::highlight(cmd)),
+    ]
+}
+
+/// Print the service-restart hint after a `mailbox create` / `delete`.
+///
+/// S44-4: `aimx serve` loads `Config` once at startup (`src/serve.rs`),
+/// so a fresh `[mailboxes.<name>]` entry in `config.toml` doesn't reach the
+/// running daemon until it restarts. Without this hint an operator who
+/// creates a new mailbox will see inbound mail silently route to
+/// `catchall` until they learn to restart the service. Sprint 46 will
+/// remove the need by routing mailbox CRUD through the daemon over UDS;
+/// until then the hint is the tier-1 fix for finding #1 from the
+/// 2026-04-17 manual test run.
+fn print_restart_hint() {
+    let init = crate::serve::service::detect_init_system();
+    for line in restart_hint_lines(&init) {
+        println!("{line}");
+    }
 }
 
 #[cfg(test)]
@@ -475,5 +522,80 @@ mod tests {
         let result = create_mailbox(&config, "foo\\bar");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("path separator"));
+    }
+
+    // ----- S44-4 restart hint ------------------------------------------
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let mut chars = s.chars().peekable();
+        while let Some(c) = chars.next() {
+            if c == '\u{001b}' && chars.peek() == Some(&'[') {
+                chars.next();
+                while let Some(&next) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn restart_hint_command_systemd_default() {
+        assert_eq!(
+            restart_hint_command(&crate::serve::service::InitSystem::Systemd),
+            "sudo systemctl restart aimx"
+        );
+    }
+
+    #[test]
+    fn restart_hint_command_openrc() {
+        assert_eq!(
+            restart_hint_command(&crate::serve::service::InitSystem::OpenRC),
+            "sudo rc-service aimx restart"
+        );
+    }
+
+    #[test]
+    fn restart_hint_command_unknown_falls_back_to_systemd() {
+        // Better to print systemd wording than to say nothing — operators on
+        // niche init systems can translate once.
+        assert_eq!(
+            restart_hint_command(&crate::serve::service::InitSystem::Unknown),
+            "sudo systemctl restart aimx"
+        );
+    }
+
+    #[test]
+    fn restart_hint_lines_include_restart_verb_and_command() {
+        let lines = restart_hint_lines(&crate::serve::service::InitSystem::Systemd);
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            joined.contains("Restart the daemon"),
+            "hint must mention restart: {joined}"
+        );
+        assert!(
+            joined.contains("sudo systemctl restart aimx"),
+            "hint must include the command: {joined}"
+        );
+    }
+
+    #[test]
+    fn restart_hint_lines_openrc_uses_rc_service() {
+        let lines = restart_hint_lines(&crate::serve::service::InitSystem::OpenRC);
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            joined.contains("sudo rc-service aimx restart"),
+            "OpenRC hint must use rc-service: {joined}"
+        );
+        assert!(
+            !joined.contains("systemctl"),
+            "OpenRC hint must not reference systemctl: {joined}"
+        );
     }
 }

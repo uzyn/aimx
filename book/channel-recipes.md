@@ -11,9 +11,11 @@ For the underlying mechanics (match filters, template variables, trust policies)
 A channel-trigger recipe is a `[[mailboxes.<name>.on_receive]]` block whose `command` invokes an AI agent non-interactively against an incoming email. The recipe pattern is always:
 
 1. Email lands in the mailbox, AIMX writes the `.md` file to disk.
-2. AIMX fires the shell `command` with template variables expanded (`{filepath}`, `{from}`, `{subject}`, etc.).
-3. The agent reads the email body (typically by `cat`-ing `{filepath}`) and takes action — replying, filing a ticket, updating a calendar, whatever.
+2. AIMX fires the shell `command`. User-controlled header values are delivered as env vars (`AIMX_FROM`, `AIMX_SUBJECT`, `AIMX_TO`, `AIMX_MAILBOX`, `AIMX_FILEPATH`); the two aimx-controlled placeholders `{id}` and `{date}` are substituted into the command string.
+3. The agent reads the email body (typically by `cat`-ing `"$AIMX_FILEPATH"`) and takes action — replying, filing a ticket, updating a calendar, whatever.
 4. Exit code is logged; a non-zero exit does not block delivery.
+
+> **Why env vars, not `{from}`/`{subject}` substitution?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into the command string — even with shell-escape quoting — is fragile. Delivering them as env vars and expanding with `"$AIMX_FROM"` inside double quotes is safe no matter what the sender puts in the header. The legacy `{from}`, `{subject}`, `{to}`, `{mailbox}`, `{filepath}` placeholders are rejected at config-load time with a migration hint.
 
 Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `aider`) is on the `PATH` of the user running `aimx serve`. Since `aimx serve` runs as a system user under systemd/OpenRC, you will typically either install the agent CLI system-wide or set an explicit absolute path in the command.
 
@@ -21,7 +23,7 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 
 | Agent | MCP supported? | Channel-trigger CLI | Non-interactive / approval flag | Notes |
 |-------|----------------|---------------------|---------------------------------|-------|
-| Claude Code | Yes (`aimx agent-setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits; pipe the email via `$(cat {filepath})`. |
+| Claude Code | Yes (`aimx agent-setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits; pipe the email via `$(cat "$AIMX_FILEPATH")`. |
 | Codex CLI | Yes (`aimx agent-setup codex`) | `codex exec "<prompt>"` | `--dangerously-bypass-approvals-and-sandbox` (or `--full-auto`) | `exec` is the non-interactive subcommand. `--full-auto` enables auto-approval within sandbox; the bypass flag goes further. |
 | OpenCode | Yes (`aimx agent-setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
 | Gemini CLI | Yes (`aimx agent-setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
@@ -53,17 +55,17 @@ type = "cmd"
 command = '''
 claude -p "You received a new email. Read it and file a summary ticket.
 
-Email path: {filepath}
-Subject: {subject}
-From: {from}
+Email path: $AIMX_FILEPATH
+Subject: $AIMX_SUBJECT
+From: $AIMX_FROM
 
-Use the Read tool to open {filepath}, then call the appropriate MCP tool." \
+Use the Read tool to open \"$AIMX_FILEPATH\", then call the appropriate MCP tool." \
   --permission-mode=bypassPermissions \
   >> /var/log/aimx/claude.log 2>&1
 '''
 ```
 
-- `{filepath}` is shell-escaped by AIMX, so the path is safe even if the directory name has quotes or spaces.
+- `"$AIMX_FILEPATH"` is always safe — the shell quotes the value, so paths with spaces or unusual characters are handled correctly.
 - `claude -p` exits when the turn completes; the trigger finishes quickly.
 - Redirect stdout and stderr to a log file because the trigger runs detached under `aimx serve` — there is no TTY to print to.
 - Pair with `trust = "verified"` so only DKIM-passing senders can steer Claude.
@@ -87,9 +89,9 @@ type = "cmd"
 command = '''
 codex exec "Triage this email and update the issue tracker.
 
-Email file: {filepath}
-From: {from}
-Subject: {subject}" \
+Email file: $AIMX_FILEPATH
+From: $AIMX_FROM
+Subject: $AIMX_SUBJECT" \
   --full-auto \
   >> /var/log/aimx/codex.log 2>&1
 '''
@@ -116,10 +118,10 @@ trust = "verified"
 [[mailboxes.research.on_receive]]
 type = "cmd"
 command = '''
-opencode run "A new research email arrived. Read {filepath} and append a digest entry to docs/digest.md.
+opencode run "A new research email arrived. Read \"$AIMX_FILEPATH\" and append a digest entry to docs/digest.md.
 
-From: {from}
-Subject: {subject}" \
+From: $AIMX_FROM
+Subject: $AIMX_SUBJECT" \
   >> /var/log/aimx/opencode.log 2>&1
 '''
 ```
@@ -144,7 +146,7 @@ trust = "verified"
 [[mailboxes.notes.on_receive]]
 type = "cmd"
 command = '''
-gemini -p "A new note arrived by email. Read {filepath} and file it into my notes." \
+gemini -p "A new note arrived by email. Read \"$AIMX_FILEPATH\" and file it into my notes." \
   --yolo \
   >> /var/log/aimx/gemini.log 2>&1
 '''
@@ -170,10 +172,10 @@ trust = "verified"
 [[mailboxes.ops.on_receive]]
 type = "cmd"
 command = '''
-goose run -t "Ops email arrived. Read {filepath}, check if action is required, and page on-call if so.
+goose run -t "Ops email arrived. Read \"$AIMX_FILEPATH\", check if action is required, and page on-call if so.
 
-Subject: {subject}
-From: {from}" \
+Subject: $AIMX_SUBJECT
+From: $AIMX_FROM" \
   >> /var/log/aimx/goose.log 2>&1
 '''
 ```
@@ -200,7 +202,7 @@ trusted_senders = ["*@yourcompany.com"]
 type = "cmd"
 command = '''
 openclaw agent \
-    --message "An email arrived at $(basename {filepath}). Read it at {filepath}, summarize the sender's request, and respond via the aimx MCP tools if a reply is appropriate." \
+    --message "An email arrived at $(basename \"$AIMX_FILEPATH\"). Read it at \"$AIMX_FILEPATH\", summarize the sender's request, and respond via the aimx MCP tools if a reply is appropriate." \
     --deliver \
     --json \
     >> /var/log/aimx/openclaw.log 2>&1
@@ -236,7 +238,7 @@ type = "cmd"
 command = '''
 cd /srv/repos/myapp && \
 aider --yes-always \
-      --message "Bug report arrived by email. Read {filepath}, reproduce the issue if possible, apply a fix, and commit." \
+      --message "Bug report arrived by email. Read \"$AIMX_FILEPATH\", reproduce the issue if possible, apply a fix, and commit." \
       >> /var/log/aimx/aider.log 2>&1
 '''
 ```
