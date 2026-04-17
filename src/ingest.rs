@@ -23,9 +23,9 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
     // Manual stdin path: no SMTP session, so received_from_ip is the
-    // unspecified sentinel (0.0.0.0).
+    // unspecified sentinel (0.0.0.0) and there is no envelope MAIL FROM.
     let sentinel_ip: IpAddr = "0.0.0.0".parse().unwrap();
-    ingest_email(&config, rcpt, &raw, sentinel_ip)
+    ingest_email(&config, rcpt, &raw, sentinel_ip, None)
 }
 
 pub fn ingest_email(
@@ -33,6 +33,7 @@ pub fn ingest_email(
     rcpt: &str,
     raw: &[u8],
     received_from_ip: IpAddr,
+    envelope_mail_from: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let local_part = extract_local_part(rcpt);
     let mailbox = config.resolve_mailbox(local_part);
@@ -147,7 +148,7 @@ pub fn ingest_email(
     let prepared_attachments = prepare_attachments(&message);
     let has_attachments = !prepared_attachments.is_empty();
 
-    let auth_results = verify_auth(raw);
+    let auth_results = verify_auth(raw, received_from_ip, envelope_mail_from);
 
     let trusted_value = config
         .mailboxes
@@ -260,7 +261,7 @@ fn create_resolver() -> Option<mail_auth::MessageAuthenticator> {
         .ok()
 }
 
-fn verify_auth(raw: &[u8]) -> AuthResults {
+fn verify_auth(raw: &[u8], peer_ip: IpAddr, envelope_mail_from: Option<&str>) -> AuthResults {
     let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(_) => return AuthResults::default(),
@@ -281,11 +282,21 @@ fn verify_auth(raw: &[u8]) -> AuthResults {
 
         let dkim_result = dkim_output_to_string(&dkim_output, auth_msg.is_some());
 
-        let spf_output = build_spf_output(raw, &resolver).await;
+        let (spf_ip, spf_mail_from) = select_spf_inputs(raw, peer_ip, envelope_mail_from);
+        let spf_output = build_spf_output(spf_ip, spf_mail_from.as_deref(), &resolver).await;
         let spf_result = spf_output_to_string(&spf_output);
 
         let dmarc_result = match &auth_msg {
-            Some(msg) => verify_dmarc_async(msg, &dkim_output, &spf_output, raw, &resolver).await,
+            Some(msg) => {
+                verify_dmarc_async(
+                    msg,
+                    &dkim_output,
+                    &spf_output,
+                    spf_mail_from.as_deref(),
+                    &resolver,
+                )
+                .await
+            }
             None => "none".to_string(),
         };
 
@@ -295,6 +306,31 @@ fn verify_auth(raw: &[u8]) -> AuthResults {
             dmarc: dmarc_result,
         }
     })
+}
+
+/// Decide which IP and MAIL FROM to feed into the SPF check.
+///
+/// When the SMTP session gives us an authoritative peer IP and envelope
+/// MAIL FROM (reverse_path), we use those — they're what RFC 7208 actually
+/// requires for SPF. Header parsing is only a best-effort fallback for the
+/// manual `aimx ingest` stdin path, where we have no envelope context.
+fn select_spf_inputs(
+    raw: &[u8],
+    peer_ip: IpAddr,
+    envelope_mail_from: Option<&str>,
+) -> (Option<IpAddr>, Option<String>) {
+    let ip = if peer_ip.is_unspecified() {
+        extract_received_ip(raw)
+    } else {
+        Some(peer_ip)
+    };
+
+    let mail_from = match envelope_mail_from {
+        Some(s) if !s.is_empty() => Some(s.to_string()),
+        _ => extract_mail_from(raw),
+    };
+
+    (ip, mail_from)
 }
 
 fn dkim_output_to_string(results: &[mail_auth::DkimOutput<'_>], parsed: bool) -> String {
@@ -316,17 +352,18 @@ fn dkim_output_to_string(results: &[mail_auth::DkimOutput<'_>], parsed: bool) ->
 }
 
 async fn build_spf_output(
-    raw: &[u8],
+    ip: Option<IpAddr>,
+    mail_from: Option<&str>,
     resolver: &mail_auth::MessageAuthenticator,
 ) -> mail_auth::SpfOutput {
-    let ip = match extract_received_ip(raw) {
+    let ip = match ip {
         Some(ip) => ip,
         None => return mail_auth::SpfOutput::new(String::new()),
     };
 
-    let mail_from = extract_mail_from(raw).unwrap_or_default();
+    let mail_from = mail_from.unwrap_or_default();
 
-    let helo_domain = match spf_domain(&mail_from) {
+    let helo_domain = match spf_domain(mail_from) {
         Some(d) => d.to_string(),
         None => return mail_auth::SpfOutput::new(String::new()),
     };
@@ -336,7 +373,7 @@ async fn build_spf_output(
             ip,
             &helo_domain,
             &helo_domain,
-            &mail_from,
+            mail_from,
         ))
         .await
 }
@@ -356,11 +393,11 @@ async fn verify_dmarc_async(
     auth_msg: &mail_auth::AuthenticatedMessage<'_>,
     dkim_output: &[mail_auth::DkimOutput<'_>],
     spf_output: &mail_auth::SpfOutput,
-    raw: &[u8],
+    mail_from: Option<&str>,
     resolver: &mail_auth::MessageAuthenticator,
 ) -> String {
-    let mail_from = extract_mail_from(raw).unwrap_or_default();
-    let mail_from_domain = spf_domain(&mail_from).unwrap_or("");
+    let mail_from = mail_from.unwrap_or_default();
+    let mail_from_domain = spf_domain(mail_from).unwrap_or("");
 
     let params = mail_auth::dmarc::verify::DmarcParameters {
         message: auth_msg,
@@ -897,7 +934,14 @@ mod tests {
     fn ingest_plain_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 1);
@@ -919,7 +963,14 @@ mod tests {
     fn ingest_writes_to_inbox_subdir() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         assert!(tmp.path().join("inbox").join("alice").exists());
         assert!(!tmp.path().join("alice").exists());
@@ -929,7 +980,14 @@ mod tests {
     fn ingest_filename_uses_utc_slug_format() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let name = entries[0]
@@ -954,7 +1012,14 @@ mod tests {
     fn ingest_html_only() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", html_only_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            html_only_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -999,7 +1064,14 @@ mod tests {
     fn ingest_multipart_prefers_text() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", multipart_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            multipart_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1011,7 +1083,14 @@ mod tests {
     fn ingest_routes_unknown_to_catchall() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "unknown@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "unknown@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         assert!(inbox(tmp.path(), "catchall").exists());
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
@@ -1022,7 +1101,14 @@ mod tests {
     fn frontmatter_valid_toml() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1053,8 +1139,22 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 2, "got entries: {entries:?}");
@@ -1065,7 +1165,14 @@ mod tests {
     fn attachment_creates_bundle_directory() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            attachment_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         assert!(!alice.join("attachments").exists());
@@ -1105,6 +1212,7 @@ mod tests {
             "alice@test.com",
             multi_attachment_eml(),
             sentinel_ip(),
+            None,
         )
         .unwrap();
 
@@ -1125,8 +1233,22 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
-        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
-        ingest_email(&config, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            attachment_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            attachment_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -1145,7 +1267,14 @@ mod tests {
     fn no_attachments_flat_markdown() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let dirs: Vec<_> = std::fs::read_dir(&alice)
@@ -1307,7 +1436,7 @@ mod tests {
             malicious content\r\n\
             --evilbound--\r\n";
 
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -1356,7 +1485,7 @@ mod tests {
             #!/bin/sh\r\n\
             --b1--\r\n";
 
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -1438,7 +1567,14 @@ mod tests {
     fn unsigned_email_has_dkim_none_spf_none_dmarc_none() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1543,7 +1679,14 @@ mod tests {
     fn frontmatter_includes_dkim_spf_dmarc_fields() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1588,7 +1731,7 @@ mod tests {
         let config = test_config(tmp.path());
         let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
 
-        ingest_email(&config, "agent@test.com", raw, sentinel_ip()).unwrap();
+        ingest_email(&config, "agent@test.com", raw, sentinel_ip(), None).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
@@ -1665,7 +1808,14 @@ mod tests {
         for _ in 0..8 {
             let cfg = Arc::clone(&config);
             handles.push(thread::spawn(move || {
-                ingest_email(&cfg, "alice@test.com", attachment_eml(), sentinel_ip()).unwrap();
+                ingest_email(
+                    &cfg,
+                    "alice@test.com",
+                    attachment_eml(),
+                    sentinel_ip(),
+                    None,
+                )
+                .unwrap();
             }));
         }
         for h in handles {
@@ -1696,8 +1846,22 @@ mod tests {
     fn rapid_same_subject_ingests_get_unique_paths() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 2);
@@ -1725,11 +1889,61 @@ mod tests {
     }
 
     #[test]
+    fn select_spf_inputs_prefers_envelope_over_headers() {
+        // When the SMTP session hands us a real peer IP and envelope MAIL FROM,
+        // those take precedence over anything we could scrape from Received:
+        // or From: headers. This is the fix for the reported SPF=none bug:
+        // messages delivered from Gmail (peer IP within _spf.google.com) with
+        // envelope sender `chua@uzyn.com` must verify against the authoritative
+        // envelope values, not whatever shows up in the message body.
+        let raw = b"Received: from some.internal.relay.example.com ([10.0.0.1])\r\n\
+            From: Spoofed <spoof@evil.example>\r\n\
+            To: agent@test.com\r\n\
+            \r\n\
+            body\r\n";
+
+        let peer_ip: IpAddr = "209.85.219.48".parse().unwrap();
+        let (ip, mail_from) = select_spf_inputs(raw, peer_ip, Some("chua@uzyn.com"));
+        assert_eq!(ip, Some(peer_ip));
+        assert_eq!(mail_from.as_deref(), Some("chua@uzyn.com"));
+    }
+
+    #[test]
+    fn select_spf_inputs_falls_back_to_headers_for_manual_stdin() {
+        // `aimx ingest` stdin path has no SMTP session, so peer_ip is the
+        // 0.0.0.0 sentinel and envelope_mail_from is None. In that case we
+        // fall back to parsing Received: and From: headers — best-effort,
+        // matching pre-fix behavior.
+        let raw = b"Received: from mail.example.com (mail.example.com [203.0.113.5])\r\n\
+            From: Alice <alice@example.com>\r\n\
+            To: agent@test.com\r\n\
+            \r\n\
+            body\r\n";
+
+        let sentinel: IpAddr = "0.0.0.0".parse().unwrap();
+        let (ip, mail_from) = select_spf_inputs(raw, sentinel, None);
+        assert_eq!(ip, Some("203.0.113.5".parse().unwrap()));
+        assert_eq!(mail_from.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
+    fn select_spf_inputs_empty_envelope_string_falls_back() {
+        // Defensive: an empty envelope string (should not happen — session
+        // resets reverse_path to "" after RSET — but be explicit) falls back
+        // to header parsing rather than producing an empty mail_from.
+        let raw = b"From: Alice <alice@example.com>\r\nTo: t@test.com\r\n\r\n";
+        let peer_ip: IpAddr = "203.0.113.5".parse().unwrap();
+        let (ip, mail_from) = select_spf_inputs(raw, peer_ip, Some(""));
+        assert_eq!(ip, Some(peer_ip));
+        assert_eq!(mail_from.as_deref(), Some("alice@example.com"));
+    }
+
+    #[test]
     fn frontmatter_new_fields_populated() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         let ip: IpAddr = "203.0.113.50".parse().unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml(), ip).unwrap();
+        ingest_email(&config, "alice@test.com", plain_text_eml(), ip, None).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1761,7 +1975,14 @@ mod tests {
     fn frontmatter_received_from_ip_omitted_for_sentinel() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1784,7 +2005,7 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1808,7 +2029,7 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip()).unwrap();
+        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1823,7 +2044,14 @@ mod tests {
     fn frontmatter_optional_headers_omitted_when_absent() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1843,8 +2071,22 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml(), sentinel_ip()).unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+        ingest_email(
+            &config,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         assert_eq!(entries.len(), 2);
