@@ -312,8 +312,13 @@ fn verify_auth(raw: &[u8], peer_ip: IpAddr, envelope_mail_from: Option<&str>) ->
 ///
 /// When the SMTP session gives us an authoritative peer IP and envelope
 /// MAIL FROM (reverse_path), we use those — they're what RFC 7208 actually
-/// requires for SPF. Header parsing is only a best-effort fallback for the
-/// manual `aimx ingest` stdin path, where we have no envelope context.
+/// requires for SPF. Header parsing is a best-effort fallback triggered
+/// when either value is missing: the manual `aimx ingest` stdin path (no
+/// envelope at all) and RFC 5321 null-sender bounces (`MAIL FROM:<>`),
+/// where `reverse_path` is empty. The null-sender case is strictly wrong
+/// per RFC 7208 §2.4 (SPF should be checked against the HELO/EHLO domain
+/// for a null sender); threading `ehlo_hostname` through to fix that is
+/// tracked as a follow-up.
 fn select_spf_inputs(
     raw: &[u8],
     peer_ip: IpAddr,
