@@ -46,7 +46,7 @@ command = 'ntfy pub agent-mail "Email from $AIMX_FROM: $AIMX_SUBJECT"'
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'claude -p "Handle this email: $(cat \"$AIMX_FILEPATH\")"'
+command = 'claude -p "Handle this email: $(cat "$AIMX_FILEPATH")"'
 ```
 
 ## Trigger context: env vars and placeholders
@@ -168,7 +168,7 @@ command = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
 ```toml
 [[mailboxes.schedule.on_receive]]
 type = "cmd"
-command = 'claude -p "Handle this scheduling request: $(cat \"$AIMX_FILEPATH\")"'
+command = 'claude -p "Handle this scheduling request: $(cat "$AIMX_FILEPATH")"'
 ```
 
 ### Log to file
@@ -199,7 +199,7 @@ trusted_senders = ["*@vendor.com"]
 
 [[mailboxes.accounting.on_receive]]
 type = "cmd"
-command = 'claude -p "Process this invoice: $(cat \"$AIMX_FILEPATH\")"'
+command = 'claude -p "Process this invoice: $(cat "$AIMX_FILEPATH")"'
 
 [mailboxes.accounting.on_receive.match]
 has_attachment = true

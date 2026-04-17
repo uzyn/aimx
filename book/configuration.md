@@ -212,7 +212,7 @@ command = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.l
 # Trigger agent on emails from Gmail with attachments
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"'
+command = 'claude -p "Process this email: $(cat "$AIMX_FILEPATH")"'
 
 [mailboxes.support.on_receive.match]
 from = "*@gmail.com"
