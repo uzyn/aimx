@@ -2,8 +2,8 @@
 
 **Sprint cadence:** 2.5 days per sprint
 **Team:** Solo developer with heavy AI augmentation (Claude Code)
-**Total sprints:** 45 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup + 1 CLI UX fixes + 1 pre-launch README + hardening sweep)
-**Timeline:** ~122.5 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days, CLI UX fixes: ~2.5 days, pre-launch sweep: ~2.5 days)
+**Total sprints:** 45 (6 original + 2 post-audit hardening + 1 YAML→TOML migration + 2 verifier/setup overhaul + 2 post-Sprint-11 bug fixes + 2 verifier ops + 1 deployment + 1 service rename + 1 setup UX + 5 embedded SMTP + 1 verify cleanup + 1 DKIM permissions fix + 1 IPv6 support + 1 systemd unit hardening + 1 CLI color consistency + 1 CI binary releases + 3 agent integration + 1 channel-trigger cookbook + 1 non-blocking cleanup + 1 scope-reversal (33.1) + 8 v0.2 pre-launch reshape + 1 post-v0.2 backlog cleanup + 1 CLI UX fixes + 1 pre-launch README + hardening sweep + 3 post-launch hardening)
+**Timeline:** ~130 calendar days (v1: ~92 days, v0.2 reshape: ~22.5 days, post-v0.2 cleanup: ~2.5 days, CLI UX fixes: ~2.5 days, pre-launch sweep: ~2.5 days, post-launch hardening: ~7.5 days)
 **v1 Scope:** Full PRD scope including verifier service. Sprint 1 targets earliest possible idea validation on a real VPS. Sprints 7–8 address findings from post-v1 code review audit. Sprints 10–11 overhaul the verifier service (remove email echo, add EHLO probe) and rewrite the setup flow (root check, MTA conflict detection, install-before-check). Sprints 12–13 fix critical bugs found during post-Sprint-11 debugging: Caddy self-probe loop / XFF SSRF risk in the verifier service, and the preflight chicken-and-egg problem on fresh VPSes. Sprints 14–15 are review-driven operational quality work on the verifier service (request logging, Docker packaging). Sprint 17 renames the verify service to verifier across all code, Docker, CI, and documentation. Sprints 19–23 replace OpenSMTPD with an embedded SMTP server (hand-rolled tokio listener for inbound, lettre + hickory-resolver for outbound) and update all documentation, making aimx a true single-binary solution with no external runtime dependencies and cross-platform Unix support. Sprint 24 cleans up `aimx verify` (EHLO-only checks, sudo requirement, remove `/reach` endpoint, AIMX capitalization). Sprint 27 hardens the generated systemd unit with restart rate-limiting, resource limits, and network-readiness dependencies. Sprint 27.5 unifies user-facing CLI output under a single semantic color palette. (Sprint 27.6 — CI binary release workflow — is deferred to the Non-blocking Review Backlog until we're production-ready.) Sprints 28–30 ship per-agent integration packages (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw) plus the `aimx agent-setup <agent>` installer that drops a plugin/skill/recipe into the agent's standard location without mutating its primary config. Sprint 31 adds a channel-trigger cookbook covering email→agent invocation patterns for every supported agent. Sprint 32 is a non-blocking cleanup sprint consolidating review feedback across v1.
 
 **v0.2 Scope (pre-launch reshape, Sprints 33–40 + 33.1 scope-reversal):** Five tightly-coupled themes that reshape AIMX into its launch form. Sprint 33 splits the filesystem (config + DKIM secrets to `/etc/aimx/`, data stays at `/var/lib/aimx/` but world-readable). Sprint 33.1 (scope reversal, inserted after Sprint 33 merged) drops PTR/reverse-DNS handling (operator responsibility, out of aimx scope) and drops the `aimx` system group introduced in S33-4 — authorization on the UDS send socket is explicitly out of scope for v0.2 and the socket becomes world-writable (`0o666`). Sprints 34–35 shrink the trust boundary: DKIM signing and outbound delivery move inside `aimx serve`, exposed to clients over a world-writable Unix domain socket at `/run/aimx/send.sock`; the DKIM private key becomes root-only (`600`) and is never read by non-root processes. Sprint 36 reshapes the datadir (`inbox/` vs `sent/` split per mailbox, `YYYY-MM-DD-HHMMSS-<slug>.md` filenames with a deterministic slug algorithm, Zola-style attachment bundles). Sprint 37 expands the inbound frontmatter schema (new fields: `thread_id`, `received_at`, `received_from_ip`, `size_bytes`, `delivered_to`, `list_id`, `auto_submitted`, `dmarc`, `labels`) and adds DMARC verification. Sprint 38 surfaces the per-mailbox trust evaluation as a new always-written `trusted` frontmatter field (the v1 per-mailbox trust model — `trust: none|verified` + `trusted_senders` — is preserved unchanged; `trusted` is the *result*, not a new *policy*) and persists sent mail with a full outbound block. Sprint 39 restructures the shared agent primer into a progressive-disclosure skill bundle (`agents/common/aimx-primer.md` + `references/`), standardizes author metadata to `U-Zyn Chua <chua@uzyn.com>`, and reverses an earlier draft's storage-layout redaction policy. Sprint 40 ships the baked-in `/var/lib/aimx/README.md` agent-facing layout guide (versioned via `include_str!`, refreshed on `aimx serve` startup when the version differs), replaces stale `/var/log/aimx.log` references with `journalctl -u aimx`, and brings every affected `book/` chapter and `CLAUDE.md` up to date. No migration tooling is written — v0.2 ships pre-launch, with no existing installs to upgrade.
@@ -168,6 +168,225 @@ Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-n
 
 ---
 
+## Sprint 44 — Post-launch Security + Quick Fixes (Days 123–125.5) [NOT STARTED]
+
+**Goal:** Close the four highest-priority findings from the 2026-04-17 manual test run with small, targeted patches: shell-injection fix in channel triggers (security), operator-visible DKIM sanity check at daemon startup, corrected Claude Code plugin hint, and a restart-hint on `aimx mailbox create`. Also fix the docs nit that caused forwarded-message noise in the test log. Finding #2 (SPF envelope MAIL FROM) already shipped in commit `cd22428` and is excluded. Finding #10 is mostly an operator-side DNS republish; only its two small code add-ons (startup DKIM sanity check + louder setup warning) are in scope here.
+
+**Dependencies:** Sprint 43 (all pre-launch work complete). Independent of Sprint 45 / 46.
+
+**Design notes:**
+- Shell-injection fix uses env-vars instead of string substitution for user-controlled template fields (`{from}`, `{subject}`, `{to}`, `{mailbox}`, `{filepath}`) — passing them via `.env()` on the `sh -c` `Command` escapes everything automatically. `{id}` and `{date}` stay as template substitutions (aimx-controlled, opaque/safe). This is a hard break for existing operator configs; pre-launch, so we refuse-to-load with a migration error rather than maintaining a compat shim.
+- DKIM startup check: daemon resolves `dkim._domainkey.{config.domain}` once at startup, compares the DNS `p=` value to the SPKI-base64 of the loaded public key, and logs a loud warning on mismatch. **Does not** block startup — DNS may not yet have propagated right after setup and we don't want a crash loop. Also upgrades the setup-time mismatch line to red + adds a second line explaining the receiver-side consequence, so operators don't breeze past it (as happened in T13).
+
+#### S44-1: Env-var channel-trigger expansion (fix shell injection)
+
+**Context:** Finding #9 from the manual test run (P0 security). `src/channel.rs:17-29 substitute_template` substitutes `{from}`, `{subject}`, etc. into a pre-quoted shell command via `.replace()` + `shell_escape::escape`. Any user-controlled header (e.g. `From: U-Zyn Chua <chua@uzyn.com>`) breaks the quoting, AND a crafted `From:` could embed `$()`, backticks, redirects, or `; cmd` to run arbitrary commands as root (daemon runs as root) on every matching trigger. The shipping recipe in `book/channel-recipes.md` reproduces the bug for any real-world `Name <addr>` From. Fix: drop `shell_escape_value`; pass user-controlled values as env vars (`AIMX_FROM`, `AIMX_SUBJECT`, `AIMX_TO`, `AIMX_MAILBOX`, `AIMX_FILEPATH`) on the `Command`; keep `{id}` and `{date}` as template substitutions since both are aimx-controlled (opaque hex / ISO-8601, safe). Templates referencing legacy `{from}` / `{subject}` / `{to}` / `{mailbox}` / `{filepath}` must refuse to load with a clear error pointing at the migration (pre-launch, no compat shim).
+
+**Priority:** P0 (security)
+
+- [ ] `src/channel.rs`: `substitute_template` rewritten to only expand `{id}` and `{date}`; `shell_escape_value` deleted
+- [ ] Command spawn point uses `Command::new("sh").arg("-c").arg(&script).env("AIMX_FROM", …).env("AIMX_SUBJECT", …).env("AIMX_TO", …).env("AIMX_MAILBOX", …).env("AIMX_FILEPATH", …)` — every user-controlled field goes via env
+- [ ] Config loader rejects any `on_receive.cmd` containing `{from}`/`{subject}`/`{to}`/`{mailbox}`/`{filepath}` with an error naming the offending mailbox + the env-var migration
+- [ ] `book/channel-recipes.md` rewritten to use `"$AIMX_FROM"`, `"$AIMX_SUBJECT"`, etc. for every recipe (all agents + the shell-log example)
+- [ ] `docs/manual-test.md` T8 recipe updated to the env-var pattern
+- [ ] New unit tests covering injection attempts: `U-Zyn Chua <chua@uzyn.com>` (angle-bracket redirect, the T8 repro), `` `whoami` ``, `$(rm -rf /)`, `foo; ls`, `foo\nbar`, subject with embedded single/double quotes — all must run the intended command with the payload safely landing in the env var
+- [ ] New unit test: config with a legacy placeholder in `on_receive.cmd` fails to load with the migration error
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S44-2: DKIM DNS sanity check at daemon startup + louder setup warning
+
+**Context:** Finding #10 from the manual test run (P0; root cause of #6). On the test VPS the on-disk DKIM private key and the DNS-published DKIM public key had drifted: every outbound signature failed verification at Gmail, silently. Setup's DNS check catches the mismatch but prints it as a single line lost among PASS lines, and the running daemon never re-checks. Code fix has two parts: (a) at `aimx serve` startup, after the DKIM key is loaded in `src/serve.rs`, resolve `dkim._domainkey.{config.domain}` via the already-configured `hickory-resolver`, compare the DNS `p=` value to the SPKI-base64 of the on-disk public key, and log a **loud** mismatch warning to stderr + journald. Must NOT block startup — DNS may not have propagated in a fresh setup, and we don't want to crash-loop. (b) at `aimx setup` (`src/setup.rs verify_dkim`), upgrade the mismatch line to the semantic red helper and follow with a second line stating receiver-side consequence.
+
+**Priority:** P0
+
+- [ ] Helper `public_key_spki_base64(path: &Path) -> Result<String>` in `src/dkim.rs` (extract from existing setup code if already derived there; otherwise new); unit-tested against a fixture key
+- [ ] `src/serve.rs` startup: after DKIM key load and before binding listeners, resolve TXT `dkim._domainkey.{config.domain}` via the existing resolver; if DNS resolution fails, log at `warn` and continue (transient, non-fatal); if DNS `p=` differs from on-disk SPKI, log a multi-line warning to stderr + journal stating mismatch detected, receiver DKIM will fail, and suggesting `aimx setup` to republish DNS
+- [ ] Startup never blocks or exits on mismatch — daemon proceeds to bind SMTP + UDS listeners normally
+- [ ] `src/setup.rs verify_dkim` mismatch branch: render the FAIL line via `term::error_red` (or existing semantic helper) and append a second line: "⚠ Outbound DKIM signatures will FAIL verification at receivers until DNS matches."
+- [ ] Integration test: spin `aimx serve` with a mocked resolver returning a mismatched `p=`; assert the startup log contains the mismatch warning; assert the daemon still binds both listeners and accepts mail
+- [ ] Integration test: spin `aimx serve` with a resolver that fails the DKIM TXT lookup; assert startup logs a `warn` and continues
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S44-3: `aimx agent-setup claude-code` hint fix
+
+**Context:** Finding #7 from the manual test run (P1). `src/agent_setup.rs:111-113 claude_code_hint` prints `"Plugin installed. Restart Claude Code to pick it up (it is auto-discovered from ~/.claude/plugins/)."` — but Claude Code does NOT auto-activate local plugins in `installed_plugins.json`, and `claude -p` especially cannot see the MCP server without an explicit `claude mcp add`. Codex's hint text at `src/agent_setup.rs:115-136` already does this correctly. Mirror the Codex pattern for claude-code. Do not shell out to `claude mcp add` — keeps the tool loosely coupled and avoids PATH dependency at setup time.
+
+**Priority:** P1
+
+- [ ] `claude_code_hint` rewritten to instruct the operator to run `claude mcp add --scope user aimx /usr/local/bin/aimx mcp`, mirroring Codex's hint structure (install-location line, blank line, command line, blank line, restart note)
+- [ ] Existing `src/agent_setup.rs` tests that assert on the hint string updated; new assertion that the hint contains `claude mcp add --scope user aimx`
+- [ ] `book/agent-integration.md` Claude Code section updated to document the `claude mcp add` step explicitly (remove the "auto-discovered" claim that current docs may mirror)
+- [ ] `agents/claude-code/README.md` updated similarly
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S44-4: `aimx mailbox create` / `delete` prints service-restart hint
+
+**Context:** Finding #1 tier-1 from the manual test run (P2 DX). `aimx mailbox create foo` writes `[mailboxes.foo]` to `/etc/aimx/config.toml` but the running daemon holds a Config cloned at startup (`src/serve.rs:139`) — no SIGHUP, no inotify. Inbound mail to `foo@domain` silently routes to `catchall` until the operator restarts the daemon. The command's success line gives no hint this is required. Tier-1 fix: print a follow-up line after the success line for both `create` and `delete`. Tier-2 (route mailbox CRUD via UDS so the daemon picks up changes live) is Sprint 46; tier-1 ships now because it's one line and eliminates the silent-misroute surprise for anyone who installs from a Sprint 44 binary.
+
+**Priority:** P2
+
+- [ ] After `println!("Mailbox '{name}' created.")` in `src/mailbox.rs`, print a follow-up hint line pointing the operator at `sudo systemctl restart aimx` (or the OpenRC equivalent) to activate the new mailbox; use the existing `SystemOps` abstraction if it exposes a service-manager hint, otherwise hard-code systemd-first wording with a note about OpenRC
+- [ ] Same hint printed after `Mailbox '{name}' deleted.`
+- [ ] Existing `src/mailbox.rs` tests updated to assert on the hint's presence; new test for the delete path
+- [ ] `book/mailboxes.md` documents the restart requirement so the hint isn't surprising; note Sprint 46 will remove it
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S44-5: `docs/manual-test.md` — specify "compose new" for email steps
+
+**Context:** Finding #3 from the manual test run (P4, docs-only). Testers forwarded/replied to earlier messages in T3/T5/T8/T9, producing `Fwd:`/`Re:` subjects and `in_reply_to`/`references` headers that added noise to the result log. Plan wording didn't specify compose-new vs. reply-to-thread. Trivial docs fix.
+
+**Priority:** P3
+
+- [ ] T3, T5, T8, T9 steps in `docs/manual-test.md` updated to specify "compose a new email" rather than "send a test email", with an explicit note against forwarding/replying to prior threads for clean frontmatter
+- [ ] No code changes; `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` still clean
+
+---
+
+## Sprint 45 — Strict Outbound + MCP Writes via Daemon (Days 125.5–128) [NOT STARTED]
+
+**Goal:** Remove the privilege-separation and correctness gaps on the send path: (a) `aimx send` stops reading `/etc/aimx/config.toml` entirely — the daemon resolves the sender mailbox from its in-memory `Config`; (b) outbound is tightened to reject both foreign-domain From and any From whose local part doesn't map to an explicitly configured non-wildcard mailbox; (c) MCP write ops (`email_mark_read`, `email_mark_unread`) stop touching mailbox files directly and route through new UDS state-mutation verbs on `aimx serve`. This closes findings #4, #5, and #8 from the 2026-04-17 manual test run. Mailbox CRUD over UDS (finding #1 tier-2) is Sprint 46.
+
+**Dependencies:** Sprint 44 (shell-injection fix + DKIM startup check land first). Sprint 45 touches `src/send.rs`, `src/send_handler.rs`, `src/send_protocol.rs`, `src/mcp.rs`, and `src/main.rs`.
+
+**Design notes:**
+- FR-18d (PRD) is tightened: the From mailbox must resolve to a configured non-wildcard mailbox whose address is under `config.domain`. Catchall (`*@domain`) is inbound-only. FR-18e (new) covers the UDS state-mutation verbs introduced this sprint.
+- `aimx send` becomes thinner: it no longer loads `config.toml` at all. Daemon receives raw RFC 5322 bytes, parses `From:` itself, runs resolution against its in-memory Config, and rejects with a typed error (`ERR DOMAIN …` or `ERR MAILBOX …`) on failure.
+- UDS protocol scaffolding this sprint adds only the MARK verbs (`MARK-READ`, `MARK-UNREAD`). Sprint 46 adds the MAILBOX-CRUD verbs on top of the same codec.
+- Per-mailbox `RwLock<()>` in the daemon prevents races between inbound ingest and MCP mutations on the same mailbox (both paths rewrite the same `.md` file).
+- Socket permissions and authorization remain unchanged per FR-18b — any local process can invoke the new verbs, same as `SEND` today.
+
+#### S45-1: `aimx send` stops reading `config.toml`; daemon resolves From mailbox
+
+**Context:** Finding #4 from the manual test run (P0; blocks non-root send on a default install). `src/send.rs build_request` calls `resolve_from_mailbox(&config, &args.from)`, and `main.rs` loads `config.toml` before dispatching to `send::run` — fails with EACCES on the default `0640 root:root` install when run as a non-root operator. The manual test session chmod'd config to 0644 as a workaround; that's exactly the privilege-separation regression v0.2 tried to avoid. Fix: daemon derives the mailbox from the submitted message's `From:` header using its own in-memory Config; the client never touches the config file or the DKIM directory. Also drop the `From-Mailbox:` header from the `AIMX/1 SEND` request since the daemon now derives it.
+
+**Priority:** P0
+
+- [ ] `src/send_protocol.rs`: remove `From-Mailbox:` from the SEND request encoder and parser; pre-launch, no compat shim
+- [ ] `src/send_handler.rs handle_send_inner`: parse `From:` from the raw message, call `resolve_from_mailbox(&self.config, &from)`; on miss or domain mismatch, return `AIMX/1 ERR <code> …` per FR-18c code set (threaded with S45-2)
+- [ ] `src/send.rs run`: delete the `Config::load` / `resolve_from_mailbox` call path; client only composes the raw message and opens UDS
+- [ ] `src/main.rs`: drop the config-load step before `send::run` dispatch (send becomes a path that needs no config file access)
+- [ ] `src/setup.rs`: confirm `/etc/aimx/config.toml` install mode is `0640 root:root` (manual-test workaround is obsolete once the client doesn't read it)
+- [ ] `src/send.rs` unit tests for mailbox resolution move to `src/send_handler.rs`
+- [ ] New integration test: run `aimx send` as a non-root user against a `0640` config; assert success and verify the client never opens the config file (strace-style check optional; at minimum assert the Permission denied error from the manual-test session no longer reproduces)
+- [ ] `book/mailboxes.md` and `CLAUDE.md` updated — `aimx send` is no longer documented as reading config
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S45-2: Strict outbound — concrete mailbox + configured domain only
+
+**Context:** Finding #5 from the manual test run + user clarification 2026-04-18 (PRD FR-18d tightened). `resolve_from_mailbox` currently falls back to the wildcard catchall (`*@domain`), so `aimx send --from bogus@domain` succeeds and lands in `sent/catchall/`. Catchall is inbound-routing only; outbound must name a concrete, configured mailbox. User-added constraint: From domain must equal `config.domain` — no sending from a domain aimx isn't authorized for (no DKIM key exists for foreign domains anyway; reject early with a clear error instead of letting the signer fail obliquely). PRD FR-18d already carries the updated semantics after the 2026-04-18 edit; this story enforces them in code.
+
+**Priority:** P0
+
+- [ ] `src/send.rs resolve_from_mailbox` (or its new home in `src/send_handler.rs` after S45-1): delete the wildcard fallback branch (`mb.address.starts_with('*')`)
+- [ ] Before the mailbox lookup, explicitly verify `From:` domain (case-insensitive) equals `config.domain`; on mismatch return `AIMX/1 ERR DOMAIN sender domain '<x>' does not match aimx domain '<config.domain>'`
+- [ ] Mailbox-miss path returns `AIMX/1 ERR MAILBOX no mailbox matches From: <addr>` with guidance pointing at `aimx mailbox create`
+- [ ] `book/mailboxes.md` documents the inbound-only semantics of catchall and the concrete-mailbox requirement for outbound; remove any prior implication that catchall can sign outbound
+- [ ] `book/channels.md` cross-reference updated if it referenced the old wildcard behavior
+- [ ] Existing tests that asserted wildcard outbound success are flipped to assert the ERR path
+- [ ] New tests: foreign-domain From (rejected with DOMAIN error); concrete-mailbox send under the configured domain (succeeds); bogus local-part under the configured domain (rejected with MAILBOX error); case-insensitive domain match (`From: x@Agent.Example.Com` matches `domain = "agent.example.com"`)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S45-3: UDS protocol scaffolding — `MARK-READ` and `MARK-UNREAD` verbs
+
+**Context:** Groundwork for S45-4 (and for Sprint 46's MAILBOX-CRUD verbs). Extends the `AIMX/1` codec in `src/send_protocol.rs` with two new verbs. Framing mirrors `SEND` exactly (verb line → headers → blank line → body), with `Content-Length: 0` since these carry no body:
+
+```
+Client → Server:
+  AIMX/1 MARK-READ\n
+  Mailbox: <name>\n
+  Id: <id>\n
+  Folder: inbox|sent\n
+  Content-Length: 0\n
+  \n
+
+Server → Client:
+  AIMX/1 OK\n
+or
+  AIMX/1 ERR <code> <reason>\n
+```
+
+`MARK-UNREAD` has the same shape. Protocol parsing dispatches on the verb token after `AIMX/1 `. Unknown verb → `ERR PROTOCOL`. Consider renaming `src/send_protocol.rs` → `src/uds_protocol.rs` now that it owns more than just SEND; judgment call for the implementer.
+
+**Priority:** P0
+
+- [ ] Request parser recognises three verbs (`SEND`, `MARK-READ`, `MARK-UNREAD`) and produces a tagged enum; unknown verb returns `ERR PROTOCOL unknown verb '<x>'`
+- [ ] Writer helpers mirror `write_request` for each new verb (client side), with typed argument structs
+- [ ] Response codes stay in the FR-18c set (`OK`, `ERR` with codes from `MAILBOX | DOMAIN | SIGN | DELIVERY | TEMP | MALFORMED | PROTOCOL`); `PROTOCOL` added for codec-level failures
+- [ ] Codec unit tests per new verb: happy-path round-trip, malformed header lines, missing required headers (`Mailbox`, `Id`, `Folder`), unknown `Folder` value, empty-body requirement enforced
+- [ ] Optional file rename to `src/uds_protocol.rs` (update `mod.rs` and all imports if done)
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S45-4: MCP write ops route through daemon; per-mailbox concurrency guard
+
+**Context:** Finding #8 from the manual test run (P1, but demoted to P0 because it leaves MCP effectively read-only as non-root). `src/mcp.rs set_read_status` (called by `email_mark_read`) does `std::fs::write(&filepath, …)` directly → fails with EACCES because the MCP server runs as the invoking non-root user and mailbox files are `root:root 0644`. Route all write ops through the daemon via the MARK verbs from S45-3. Read ops (`email_list`, `email_read`) continue to read files directly — files are world-readable by design.
+
+**Priority:** P0
+
+- [ ] `src/mcp.rs email_mark_read`: become a thin UDS client — open `/run/aimx/send.sock`, send `MARK-READ`, parse `AIMX/1 OK` / `AIMX/1 ERR <reason>`, surface helpful errors (e.g. "aimx daemon not running — start with `sudo systemctl start aimx`")
+- [ ] `src/mcp.rs email_mark_unread`: same pattern via `MARK-UNREAD`
+- [ ] New `src/state_handler.rs` (or extend `src/send_handler.rs` — judgment call) with `handle_mark_read`, `handle_mark_unread` implementations that do the actual frontmatter rewrite, reusing the existing frontmatter serializer
+- [ ] Daemon acquires a per-mailbox `RwLock<()>` for the duration of the frontmatter rewrite; stored on the daemon state (keyed by mailbox name, lazily-inserted); ingest's append path also takes the same lock so MARK-READ and inbound ingest on the same mailbox cannot interleave a half-written file
+- [ ] ERR paths covered: mailbox not configured, id not found, folder invalid, write failure
+- [ ] Integration test: `email_mark_read` invoked as non-root succeeds; frontmatter `read = true` is persisted; file retains its original ownership (root:root 0644)
+- [ ] Integration test: concurrent ingest + `MARK-READ` on the same mailbox don't corrupt either file (use tokio `tokio::join!` or spawn pair)
+- [ ] `book/mcp.md` mentions the daemon-mediated write path so users understand why `aimx serve` must be running for MCP writes
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 46 — Mailbox CRUD via UDS (Daemon Picks Up Changes Live) (Days 128–130.5) [NOT STARTED]
+
+**Goal:** Make `aimx mailbox create` / `delete` route through the daemon over UDS so the daemon's in-memory `Config` updates atomically with `config.toml` on disk. Inbound mail to a just-created mailbox routes correctly on the very next SMTP session — no `systemctl restart aimx` required. This closes finding #1 tier-2 from the 2026-04-17 manual test run (the silent-misroute behavior Sprint 44's hint warned about) and finishes the daemon-as-single-writer architecture started in Sprint 45.
+
+**Dependencies:** Sprint 45 (UDS protocol codec for MARK verbs; Sprint 46 extends the same codec). Sprint 44's restart-hint in `src/mailbox.rs` is suppressed when the UDS path succeeds (kept as fallback for when daemon is stopped).
+
+**Design notes:**
+- Two new UDS verbs on top of Sprint 45's codec:
+  ```
+  AIMX/1 MAILBOX-CREATE\n + Name: <name>\n + Content-Length: 0\n + \n
+  AIMX/1 MAILBOX-DELETE\n + Name: <name>\n + Content-Length: 0\n + \n
+  ```
+  Responses reuse `OK` / `ERR <code>` (codes: `MAILBOX` for name conflicts / not-found, `VALIDATION` for name validation failures, `NONEMPTY` for delete with files present).
+- Client behaviour (`src/mailbox.rs`): try UDS first; on `ECONNREFUSED`/`ENOENT`/`EACCES` on the socket, fall back to direct `config.toml` edit + print the Sprint 44 restart hint. When UDS succeeds, suppress the hint — the daemon has picked up the change live.
+- Daemon-side atomic write: `config.toml` rewritten via write-temp-then-rename; in-memory `Config` swapped under a `RwLock<Arc<Config>>` only after the rename succeeds. Failure leaves both disk and memory in the pre-call state.
+- Directory lifecycle: `MAILBOX-CREATE` creates `inbox/<name>/` and `sent/<name>/` if absent. `MAILBOX-DELETE` refuses (returns `ERR NONEMPTY`) when either directory contains files — operator must archive/remove first (matches current CLI semantics).
+- Consider whether `Config` should become `Arc<ArcSwap<Config>>` (via the `arc-swap` crate) to avoid a write-lock during ingest — judgment call for the implementer; `RwLock<Arc<Config>>` is simpler and acceptable if ingest latency stays well under 1 ms.
+
+#### S46-1: UDS `MAILBOX-CREATE` — daemon writes config.toml + hot-swaps Config
+
+**Context:** Closes finding #1 tier-2 for the create path. Daemon-side handler validates the name (existing `Config::validate_mailbox_name` rules — no `..`, no `/`, non-empty, etc.), atomically appends `[mailboxes.<name>]` with default fields (`trust = "none"`, empty `on_receive`, empty `trusted_senders`) to `config.toml` via write-temp-then-rename, creates `inbox/<name>/` and `sent/<name>/` directories, and swaps the daemon's in-memory `Config`. Client-side `aimx mailbox create` tries UDS first and falls back to direct edit + Sprint 44's restart hint if the socket is absent.
+
+**Priority:** P1
+
+- [ ] `src/send_protocol.rs` (or `uds_protocol.rs`): add `MAILBOX-CREATE` verb parser + writer
+- [ ] `src/state_handler.rs` `handle_mailbox_create`: validate name; read current config.toml; append stanza; write-temp-then-rename to atomically update disk; create the two directories; swap `RwLock<Arc<Config>>`; return `AIMX/1 OK` on success; on any validation or IO failure return a typed `ERR`
+- [ ] `src/mailbox.rs create`: attempt UDS `MAILBOX-CREATE` first; on socket-missing (`ENOENT`/`ECONNREFUSED`/`EACCES`) fall back to direct `config.toml` edit + restart-hint print (Sprint 44 behavior); when UDS succeeds, suppress the restart hint
+- [ ] The rest of the daemon (send handler, ingest path) reads Config via the `RwLock<Arc<Config>>` accessor — verify all existing `config.mailboxes.get(…)` call sites thread through correctly
+- [ ] Integration test: daemon running → `aimx mailbox create foo` via UDS → immediately send Gmail to `foo@domain` → assert the .md lands in `inbox/foo/` (not catchall), no restart required
+- [ ] Integration test: daemon stopped → `aimx mailbox create foo` falls back to direct config edit + restart-hint present in stdout
+- [ ] Integration test: concurrent `MAILBOX-CREATE foo` + inbound mail targeting a pre-existing mailbox — neither blocks the other for longer than the write-lock critical section (~microseconds)
+- [ ] Name-validation tests: `..`, empty string, `/`-containing, duplicate name (already exists) — each returns a distinct `ERR` with the reason
+- [ ] `book/mailboxes.md` updated — restart is no longer required when daemon is running
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+#### S46-2: UDS `MAILBOX-DELETE` — safety check + daemon swap
+
+**Context:** Closes finding #1 tier-2 for the delete path. Symmetric to S46-1 but with a safety check: refuse to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files. Operator must archive or manually remove the files first (matches current CLI semantics per `src/mailbox.rs`). When UDS succeeds, daemon removes the `[mailboxes.<name>]` stanza from config.toml and swaps its in-memory `Config`. Directories are left on disk (operator owns cleanup) — safer than silently deleting files.
+
+**Priority:** P1
+
+- [ ] `src/send_protocol.rs` (or `uds_protocol.rs`): add `MAILBOX-DELETE` verb parser + writer
+- [ ] `src/state_handler.rs` `handle_mailbox_delete`: verify mailbox exists; scan `inbox/<name>/` and `sent/<name>/` for any files — if non-empty return `AIMX/1 ERR NONEMPTY mailbox <name> has <n> files; archive or remove them first`; on success remove the stanza via write-temp-then-rename and swap `Config`
+- [ ] `src/mailbox.rs delete`: attempt UDS `MAILBOX-DELETE` first; fall back to direct edit + restart-hint when socket absent
+- [ ] Refuse to delete the `catchall` mailbox via UDS (matches existing CLI guardrail); direct-edit fallback preserves whatever the current rule is
+- [ ] Integration test: daemon running → create mailbox `qux` → delete via UDS → assert `[mailboxes.qux]` is gone from config.toml and the daemon rejects subsequent inbound to `qux@domain` (routes to catchall)
+- [ ] Integration test: mailbox with files → `MAILBOX-DELETE` returns `ERR NONEMPTY`; operator then clears files and retry succeeds
+- [ ] `book/mailboxes.md` documents the NONEMPTY safety behavior and the symmetric live-update semantics
+- [ ] Sprint 44's restart-hint suppression applies to the delete path too
+- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
 ## Summary Table
 
 | Sprint | Days | Focus | Key Output | Status |
@@ -220,6 +439,9 @@ Fix: `sanitize_attachment_filename(raw: &str, index: usize) -> String` — NFC-n
 | 41 | 115–117.5 | Post-v0.2 Backlog Cleanup | Outbound frontmatter fixes, SPF dedup, UDS slow-loris timeout, typed transport errors, DNS error surfacing, test DKIM cache, stale dead_code sweep | Done |
 | 42 | 118–120.5 | CLI UX: Config Errors + Setup Race + Version Hash | Helpful error when config missing, wait-for-ready loop in `aimx setup` before port checks, git commit hash in `aimx --version` | Done |
 | 43 | 120.5–123 | Pre-launch README Sweep + Hardening | `README.md` v0.2 sweep, `status` uses `SystemOps`, HTML body size cap, bracketed-only `Received:` IP parse, typed lettre error classification, `dkim-keygen` permission-denied UX, attachment filename safety + NFC normalization | Done |
+| 44 | 123–125.5 | Post-launch Security + Quick Fixes | Env-var channel-trigger expansion (shell-injection fix), DKIM DNS sanity check at daemon startup + louder setup warning, Claude Code agent-setup hint fix, `aimx mailbox create/delete` restart hint, manual-test.md compose-new clarification | Not started |
+| 45 | 125.5–128 | Strict Outbound + MCP Writes via Daemon | `aimx send` stops reading config.toml (daemon resolves From), strict outbound (concrete mailbox + configured domain only, wildcard is inbound-only), UDS `MARK-READ`/`MARK-UNREAD` verbs + MCP write ops via daemon with per-mailbox RwLock | Not started |
+| 46 | 128–130.5 | Mailbox CRUD via UDS (Daemon Picks Up Changes Live) | UDS `MAILBOX-CREATE`/`MAILBOX-DELETE` verbs + daemon hot-swaps `Arc<Config>`, `aimx mailbox create/delete` route through daemon first and suppress restart hint on success, directory lifecycle + NONEMPTY safety on delete | Not started |
 
 ## Deferred to v2
 
