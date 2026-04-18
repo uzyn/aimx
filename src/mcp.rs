@@ -493,8 +493,14 @@ fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
         Some(r) => r,
         None => return MarkOutcome::Malformed(format!("unexpected response: {line:?}")),
     };
-    if rest == "OK" || rest.starts_with("OK ") {
+    // MARK verbs use a bare `AIMX/1 OK` ack — any trailing payload is a
+    // protocol violation. Reject it as Malformed rather than silently
+    // succeeding so the client notices if the daemon ever drifts.
+    if rest == "OK" {
         return MarkOutcome::Ok;
+    }
+    if rest.starts_with("OK ") {
+        return MarkOutcome::Malformed(format!("unexpected payload after OK: {line:?}"));
     }
     if let Some(err_body) = rest.strip_prefix("ERR ") {
         let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
@@ -1239,6 +1245,45 @@ mod tests {
     fn validate_email_id_accepts_valid() {
         assert!(validate_email_id("2025-06-01-001").is_ok());
         assert!(validate_email_id("2025-01-01-999").is_ok());
+    }
+
+    #[test]
+    fn parse_ack_response_accepts_bare_ok() {
+        assert!(matches!(
+            parse_ack_response(b"AIMX/1 OK\n"),
+            MarkOutcome::Ok
+        ));
+        // Trailing CR is tolerated (line-end normalisation).
+        assert!(matches!(
+            parse_ack_response(b"AIMX/1 OK\r\n"),
+            MarkOutcome::Ok
+        ));
+    }
+
+    #[test]
+    fn parse_ack_response_rejects_trailing_payload_on_ok() {
+        // MARK verbs use a bare `AIMX/1 OK` ack; any trailing payload is
+        // a protocol violation and must surface as Malformed, not Ok.
+        match parse_ack_response(b"AIMX/1 OK extra junk\n") {
+            MarkOutcome::Malformed(reason) => {
+                assert!(
+                    reason.contains("unexpected payload after OK"),
+                    "reason was {reason:?}"
+                );
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ack_response_parses_err_code() {
+        match parse_ack_response(b"AIMX/1 ERR NOTFOUND email missing\n") {
+            MarkOutcome::Err { code, reason } => {
+                assert_eq!(code, ErrCode::NotFound);
+                assert_eq!(reason, "email missing");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 
     #[test]

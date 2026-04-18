@@ -8,11 +8,17 @@
 //! touching the files directly.
 //!
 //! Concurrency model: a per-mailbox `RwLock<()>` guards the "read →
-//! rewrite" critical section. The lock is shared with `ingest::INGEST_*`
-//! semantics — for now each write takes the write side, which is
-//! sufficient because the only other writer to a mailbox is the inbound
-//! ingest path. The map is lazily populated so tests that never touch a
+//! rewrite" critical section against other MARK calls on the same
+//! mailbox. The map is lazily populated so tests that never touch a
 //! mailbox never allocate a lock for it.
+//!
+//! Note: this lock is **independent** of the process-wide
+//! `ingest::INGEST_WRITE_LOCK` (a blocking `std::sync::Mutex`). MARK and
+//! inbound ingest do not serialize against each other — safety relies on
+//! the fact that ingest allocates a fresh filename (timestamp + slug)
+//! while MARK rewrites an existing file, so the two paths write to
+//! disjoint paths in practice. Sprint 46 is tracked to unify both writers
+//! under a single per-mailbox lock.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -20,6 +26,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
 use crate::frontmatter::InboundFrontmatter;
+use crate::mcp::resolve_email_path;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
 /// Per-connection shared state for the MARK verbs (and future state-
@@ -77,20 +84,6 @@ fn validate_id(id: &str) -> Result<(), AckResponse> {
     Ok(())
 }
 
-/// Resolve the on-disk path for an email id under `<folder>/<mailbox>/`,
-/// handling both flat `<id>.md` and Zola bundle `<id>/<id>.md` layouts.
-fn resolve_email_path(mailbox_dir: &Path, id: &str) -> Option<PathBuf> {
-    let flat = mailbox_dir.join(format!("{id}.md"));
-    if flat.exists() {
-        return Some(flat);
-    }
-    let bundle_md = mailbox_dir.join(id).join(format!("{id}.md"));
-    if bundle_md.exists() {
-        return Some(bundle_md);
-    }
-    None
-}
-
 fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
     let sub = match folder {
         MarkFolder::Inbox => "inbox",
@@ -100,10 +93,13 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 }
 
 /// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the per-mailbox
-/// write lock around the read → rewrite critical section so the update is
-/// atomic with respect to inbound ingest writes on the same mailbox
-/// (inbound takes the same lock shape via `INGEST_WRITE_LOCK` today;
-/// moving both to a shared map is tracked as follow-up).
+/// write lock so concurrent MARK calls on the same mailbox serialize
+/// around the read → rewrite critical section. Does **not** serialize
+/// against inbound ingest (which uses a separate process-wide
+/// `INGEST_WRITE_LOCK`); the two writers are safe today only because
+/// they target disjoint paths — ingest writes freshly-allocated
+/// filenames while MARK rewrites existing files. Sprint 46 is tracked
+/// to unify both writers under a shared per-mailbox lock.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
@@ -400,5 +396,66 @@ mod tests {
         let fm: InboundFrontmatter =
             toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
         assert!(fm.read);
+    }
+
+    #[tokio::test]
+    async fn mark_rejects_truncated_frontmatter_as_io_error() {
+        // Target file exists but has only one `+++` delimiter so the
+        // splitn(3) produces fewer than 3 parts. Handler must surface
+        // this as `ErrCode::Io` rather than panicking or silently
+        // rewriting garbage.
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox").join("alice");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("2025-06-01-002.md"),
+            "+++\nid = \"2025-06-01-002\"\nno closing delimiter here\n",
+        )
+        .unwrap();
+
+        let sctx = ctx(tmp.path());
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-002".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        match handle_mark(&sctx, &req).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Io);
+                assert!(
+                    reason.contains("malformed frontmatter"),
+                    "expected 'malformed frontmatter' in reason, got: {reason}"
+                );
+            }
+            other => panic!("expected Err(Io), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_rejects_unparseable_frontmatter_toml_as_io_error() {
+        // File has the `+++` delimiters but the TOML body is malformed.
+        // Handler must return `ErrCode::Io` (read-failure-after-lock
+        // contract).
+        let tmp = TempDir::new().unwrap();
+        let inbox = tmp.path().join("inbox").join("alice");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::write(
+            inbox.join("2025-06-01-003.md"),
+            "+++\nthis is = not valid = toml\n+++\n\nbody\n",
+        )
+        .unwrap();
+
+        let sctx = ctx(tmp.path());
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-003".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        match handle_mark(&sctx, &req).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Io),
+            other => panic!("expected Err(Io), got {other:?}"),
+        }
     }
 }
