@@ -317,6 +317,9 @@ mod tests {
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("gather_status must not touch install_service_file")
         }
+        fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch uninstall_service_file")
+        }
         fn wait_for_service_ready(&self) -> bool {
             unreachable!("gather_status must not touch wait_for_service_ready")
         }

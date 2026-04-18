@@ -28,6 +28,11 @@ pub trait SystemOps {
     fn check_root(&self) -> bool;
     fn check_port25_occupancy(&self) -> Result<Port25Status, Box<dyn std::error::Error>>;
     fn install_service_file(&self, data_dir: &Path) -> Result<(), Box<dyn std::error::Error>>;
+    /// Stop + disable the `aimx` service and remove its init-system service
+    /// file. Service-control commands are best-effort (service may already be
+    /// stopped); file removal is the authoritative step. Returns an error when
+    /// the init system is unsupported.
+    fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>>;
     /// Poll `127.0.0.1:25` until a TCP connection succeeds or the timeout
     /// elapses. Returns `true` if the port became reachable, `false` on timeout.
     fn wait_for_service_ready(&self) -> bool;
@@ -201,6 +206,49 @@ impl SystemOps for RealSystemOps {
             InitSystem::Unknown => {
                 return Err("Could not detect init system (systemd or OpenRC). \
                      Start aimx serve manually."
+                    .into());
+            }
+        }
+        Ok(())
+    }
+
+    fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::serve::service::{InitSystem, detect_init_system};
+
+        match detect_init_system() {
+            InitSystem::Systemd => {
+                let _ = std::process::Command::new("systemctl")
+                    .args(["stop", "aimx"])
+                    .status();
+                let _ = std::process::Command::new("systemctl")
+                    .args(["disable", "aimx"])
+                    .status();
+                let unit_path = Path::new("/etc/systemd/system/aimx.service");
+                if unit_path.exists() {
+                    std::fs::remove_file(unit_path)?;
+                }
+                let _ = std::process::Command::new("systemctl")
+                    .args(["daemon-reload"])
+                    .status();
+                let _ = std::process::Command::new("systemctl")
+                    .args(["reset-failed", "aimx"])
+                    .status();
+            }
+            InitSystem::OpenRC => {
+                let _ = std::process::Command::new("rc-service")
+                    .args(["aimx", "stop"])
+                    .status();
+                let _ = std::process::Command::new("rc-update")
+                    .args(["del", "aimx", "default"])
+                    .status();
+                let script_path = Path::new("/etc/init.d/aimx");
+                if script_path.exists() {
+                    std::fs::remove_file(script_path)?;
+                }
+            }
+            InitSystem::Unknown => {
+                return Err("Could not detect init system (systemd or OpenRC). \
+                     Remove /etc/systemd/system/aimx.service or /etc/init.d/aimx manually."
                     .into());
             }
         }
@@ -1589,6 +1637,10 @@ mod tests {
         }
         fn install_service_file(&self, _data_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = true;
+            Ok(())
+        }
+        fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
+            *self.service_file_installed.borrow_mut() = false;
             Ok(())
         }
         fn wait_for_service_ready(&self) -> bool {
