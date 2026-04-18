@@ -17,8 +17,9 @@
 //! inbound ingest do not serialize against each other — safety relies on
 //! the fact that ingest allocates a fresh filename (timestamp + slug)
 //! while MARK rewrites an existing file, so the two paths write to
-//! disjoint paths in practice. Sprint 46 is tracked to unify both writers
-//! under a single per-mailbox lock.
+//! disjoint paths in practice. Unifying both writers under a single
+//! per-mailbox lock is tracked in the Non-blocking Review Backlog for a
+//! future sprint.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -35,6 +36,13 @@ use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 /// config.toml rewrite does not race with an in-flight MARK).
 pub struct StateContext {
     /// Data directory root — `<data_dir>/inbox/<mailbox>/<id>.md` etc.
+    ///
+    /// Invariant: `data_dir == config_handle.load().data_dir` for the
+    /// life of the daemon. `data_dir` is captured once at startup and
+    /// never changes; the `Config` swap path (MAILBOX-CRUD in
+    /// `mailbox_handler.rs`) deliberately never rewrites `data_dir`, so
+    /// this snapshot and the live handle's `data_dir` cannot diverge in
+    /// practice.
     pub data_dir: PathBuf,
     /// Live handle to the daemon's `Config`. MARK-* uses it to validate
     /// that the referenced mailbox exists at the time of the call (rather
@@ -101,8 +109,9 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 /// against inbound ingest (which uses a separate process-wide
 /// `INGEST_WRITE_LOCK`); the two writers are safe today only because
 /// they target disjoint paths — ingest writes freshly-allocated
-/// filenames while MARK rewrites existing files. Sprint 46 is tracked
-/// to unify both writers under a shared per-mailbox lock.
+/// filenames while MARK rewrites existing files. Unifying both writers
+/// under a shared per-mailbox lock is in the Non-blocking Review
+/// Backlog for a future sprint.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;

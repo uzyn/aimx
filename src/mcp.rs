@@ -172,7 +172,11 @@ impl AimxMcpServer {
         // semantics (removes the directory tree) and runs only when the
         // daemon is unreachable.
         match submit_mailbox_crud_via_daemon(&params.name, false) {
-            Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
+            Ok(()) => Ok(format!(
+                "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
+                 directories remain on disk — run `rmdir` to tidy up if desired.",
+                params.name
+            )),
             Err(MailboxCrudFallback::SocketMissing) => {
                 let config = self.load_config()?;
                 mailbox::delete_mailbox(&config, &params.name).map_err(|e| e.to_string())?;

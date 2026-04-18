@@ -238,6 +238,10 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     match crate::mcp::submit_mailbox_crud_via_daemon(name, false) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
+            println!(
+                "  Empty inbox/{name}/ and sent/{name}/ directories remain on disk; \
+                 run `rmdir` to tidy up if desired."
+            );
             Ok(())
         }
         Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {

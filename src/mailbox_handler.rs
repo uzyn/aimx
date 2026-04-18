@@ -26,14 +26,32 @@
 //!
 //! Locking: a per-mailbox `RwLock<()>` (acquired via `StateContext`) is
 //! taken for the duration of the write so a MARK-* request on the same
-//! mailbox can't see the file system half-created / half-deleted.
+//! mailbox can't see the file system half-created / half-deleted. In
+//! addition, a **process-wide** [`CONFIG_WRITE_LOCK`] serializes the
+//! `load → modify → write → store` critical section across *all* mailbox
+//! names — without it, two concurrent `MAILBOX-CREATE alice` +
+//! `MAILBOX-CREATE bob` requests hold disjoint per-mailbox locks and can
+//! interleave their loads + writes, clobbering one stanza on disk and in
+//! memory. The global mutex closes that lost-update race while still
+//! letting MARK-* and inbound ingest (which don't touch `config.toml`)
+//! proceed independently.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::send_protocol::{AckResponse, ErrCode, MailboxCrudRequest};
 use crate::state_handler::StateContext;
+
+/// Process-wide mutex around the `config.toml` read-modify-write critical
+/// section. Symmetric in spirit to `send_handler::SENT_WRITE_LOCK`: a
+/// single short-lived `std::sync::Mutex` that serializes *only* the
+/// load-modify-write-store sequence so two concurrent
+/// `MAILBOX-CREATE`/`DELETE` requests on different mailbox names cannot
+/// clobber each other. Held only for the duration of the critical
+/// section (not across the full request lifetime).
+static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Shared context for MAILBOX-CREATE / MAILBOX-DELETE. Kept separate from
 /// `StateContext` so the state-lock map is not accidentally bypassed (the
@@ -74,6 +92,15 @@ pub async fn handle_mailbox_crud(
 
     let lock = state_ctx.lock_for(&req.name);
     let _guard = lock.write().await;
+
+    // Serialize the load → modify → write → store critical section across
+    // *all* mailbox names. The per-mailbox lock above keeps MARK-* on the
+    // same mailbox from racing; this global lock keeps
+    // `MAILBOX-CREATE alice` + `MAILBOX-CREATE bob` from losing one of
+    // the two stanzas via interleaved load-write-store sequences.
+    let _config_guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if req.create {
         handle_create(state_ctx, mb_ctx, &req.name)
@@ -608,5 +635,68 @@ mod tests {
 
         let reread = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
         assert!(reread.contains("read = true"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_create_different_names_both_stanzas_survive() {
+        // Regression test for the lost-update race on `config.toml`:
+        // two concurrent `MAILBOX-CREATE` calls on *different* names
+        // held disjoint per-mailbox locks and could interleave their
+        // load-modify-write sequences, clobbering one stanza. The
+        // process-wide `CONFIG_WRITE_LOCK` closes the race — every
+        // stanza must survive on disk and in the live handle.
+        //
+        // We fan out to many concurrent names to give the scheduler a
+        // realistic chance of interleaving without the lock — a
+        // single-pair test is too easy for tokio's multi-thread runtime
+        // to serialize accidentally.
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let state_ctx = std::sync::Arc::new(state_ctx);
+        let mb_ctx = std::sync::Arc::new(mb_ctx);
+
+        let names: Vec<String> = (0..16).map(|i| format!("mbox{i:02}")).collect();
+        let mut handles = Vec::with_capacity(names.len());
+        for name in &names {
+            let s = state_ctx.clone();
+            let m = mb_ctx.clone();
+            let n = name.clone();
+            handles.push(tokio::spawn(async move {
+                let req = MailboxCrudRequest {
+                    name: n,
+                    create: true,
+                };
+                handle_mailbox_crud(&s, &m, &req).await
+            }));
+        }
+        for h in handles {
+            assert!(matches!(h.await.unwrap(), AckResponse::Ok));
+        }
+
+        // Every stanza survives on disk.
+        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        for name in &names {
+            assert!(
+                reloaded.mailboxes.contains_key(name),
+                "{name} missing on disk: {:?}",
+                reloaded.mailboxes.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // Every stanza survives in the live handle.
+        let in_mem = mb_ctx.config_handle.load();
+        for name in &names {
+            assert!(
+                in_mem.mailboxes.contains_key(name),
+                "{name} missing in handle: {:?}",
+                in_mem.mailboxes.keys().collect::<Vec<_>>()
+            );
+        }
+
+        // Every directory pair exists.
+        for name in &names {
+            assert!(tmp.path().join("inbox").join(name).is_dir());
+            assert!(tmp.path().join("sent").join(name).is_dir());
+        }
     }
 }
