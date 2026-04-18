@@ -162,10 +162,24 @@ pub fn count_messages(dir: &Path) -> usize {
 }
 
 fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    create_mailbox(config, name)?;
-    println!("{}", term::success(&format!("Mailbox '{name}' created.")));
-    print_restart_hint();
-    Ok(())
+    // Sprint 46: try the UDS path first so the daemon hot-swaps its
+    // in-memory Config. On socket-missing (daemon stopped, fresh
+    // install), fall back to direct on-disk edit + the Sprint 44
+    // restart-hint banner. When UDS succeeds we suppress the hint — the
+    // daemon already picked up the change.
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, true) {
+        Ok(()) => {
+            println!("{}", term::success(&format!("Mailbox '{name}' created.")));
+            Ok(())
+        }
+        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+            create_mailbox(config, name)?;
+            println!("{}", term::success(&format!("Mailbox '{name}' created.")));
+            print_restart_hint();
+            Ok(())
+        }
+        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
+    }
 }
 
 fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -216,10 +230,24 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
     }
 
-    delete_mailbox(config, name)?;
-    println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
-    print_restart_hint();
-    Ok(())
+    // Sprint 46: prefer the UDS path so the daemon hot-swaps Config. The
+    // daemon refuses to delete a non-empty mailbox (ERR NONEMPTY); we
+    // surface that error verbatim rather than falling back to the
+    // direct-edit path, because "daemon says no" is not a socket-missing
+    // condition. Fall back to direct edit only when the socket is absent.
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, false) {
+        Ok(()) => {
+            println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
+            Ok(())
+        }
+        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+            delete_mailbox(config, name)?;
+            println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
+            print_restart_hint();
+            Ok(())
+        }
+        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
+    }
 }
 
 /// Dispatch table: init system -> the canonical restart command. OpenRC is

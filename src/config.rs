@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
@@ -178,6 +179,69 @@ impl Config {
         } else {
             "catchall".to_string()
         }
+    }
+}
+
+/// Shared, swappable handle to the daemon's in-memory `Config`.
+///
+/// Sprint 46: `aimx serve` no longer treats `Config` as immutable. The
+/// MAILBOX-CREATE / MAILBOX-DELETE UDS verbs rewrite `config.toml` and then
+/// replace the daemon's in-memory snapshot so inbound mail routes correctly
+/// on the very next SMTP session — no restart required.
+///
+/// The concurrency model is deliberately boring: a single
+/// `RwLock<Arc<Config>>`. Readers (ingest, send handler, state handler) take
+/// a read lock just long enough to clone the inner `Arc`, then release it
+/// and use their own snapshot for the rest of the request. Writers
+/// (MAILBOX-CREATE / MAILBOX-DELETE) take the write lock only to swap the
+/// inner `Arc` after `config.toml` has been atomically renamed into place.
+///
+/// `RwLock<Arc<Config>>` was chosen over `arc_swap::ArcSwap<Config>`
+/// intentionally: a fresh dependency for lock-free reads isn't worth it
+/// given the critical section is an `Arc::clone` and the write path runs
+/// only on mailbox CRUD. If ingest latency ever shows up in a profile the
+/// swap is local.
+#[derive(Clone)]
+pub struct ConfigHandle {
+    inner: Arc<RwLock<Arc<Config>>>,
+}
+
+impl ConfigHandle {
+    /// Create a fresh handle wrapping `config`.
+    pub fn new(config: Config) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(Arc::new(config))),
+        }
+    }
+
+    /// Borrow the current `Config` snapshot. The returned `Arc<Config>` is a
+    /// stable view — a subsequent `store` by another task will not mutate
+    /// the snapshot the caller already holds.
+    pub fn load(&self) -> Arc<Config> {
+        let guard = self
+            .inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Arc::clone(&guard)
+    }
+
+    /// Atomically swap the stored `Config` for `new`. Previous snapshots
+    /// remain valid — callers that already `load`ed continue to see the
+    /// pre-swap view until they call `load` again.
+    pub fn store(&self, new: Config) {
+        let mut guard = self
+            .inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Arc::new(new);
+    }
+}
+
+impl std::fmt::Debug for ConfigHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigHandle")
+            .field("domain", &self.load().domain)
+            .finish_non_exhaustive()
     }
 }
 

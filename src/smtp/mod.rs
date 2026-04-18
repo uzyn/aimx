@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
 
+#[cfg(test)]
 use crate::config::Config;
+use crate::config::ConfigHandle;
 
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
@@ -18,7 +20,11 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 100;
 pub const DEFAULT_MAX_COMMANDS_BEFORE_DATA: usize = 50;
 
 pub struct SmtpServer {
-    config: Arc<Config>,
+    /// Sprint 46: the daemon's in-memory `Config` is now live-swappable.
+    /// Each inbound SMTP session resolves routing against the current
+    /// snapshot via `config_handle.load()`, so a `MAILBOX-CREATE` over UDS
+    /// is visible on the next RCPT TO without a restart.
+    config_handle: ConfigHandle,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     max_message_size: usize,
     idle_timeout: Duration,
@@ -28,9 +34,19 @@ pub struct SmtpServer {
 }
 
 impl SmtpServer {
+    /// Legacy constructor that wraps a freshly-built `ConfigHandle` around
+    /// `config`. Retained only for tests — production always owns the
+    /// handle outside the server so `aimx serve` can share one `Config`
+    /// across the SMTP listener, the send handler, the state handler, and
+    /// the mailbox handler.
+    #[cfg(test)]
     pub fn new(config: Config) -> Self {
+        Self::with_handle(ConfigHandle::new(config))
+    }
+
+    pub fn with_handle(config_handle: ConfigHandle) -> Self {
         Self {
-            config: Arc::new(config),
+            config_handle,
             tls_acceptor: None,
             max_message_size: DEFAULT_MAX_MESSAGE_SIZE,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
@@ -81,7 +97,10 @@ impl SmtpServer {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let semaphore = Arc::new(Semaphore::new(self.max_connections));
-        let hostname = self.config.domain.clone();
+        // Sprint 46: `hostname` is derived from the live handle and
+        // refreshed per-accept so if the operator ever hot-swaps the domain
+        // (not supported in v0.2, but the plumbing is cheap) we pick it up.
+        // `self.config_handle.load().domain` was the previous one-shot read.
 
         loop {
             tokio::select! {
@@ -102,9 +121,11 @@ impl SmtpServer {
                         }
                     };
 
-                    let config = Arc::clone(&self.config);
+                    let config_handle = self.config_handle.clone();
                     let tls_acceptor = self.tls_acceptor.clone();
-                    let hostname = hostname.clone();
+                    // Re-read the hostname from the current snapshot so it
+                    // tracks any live Config swap.
+                    let hostname = config_handle.load().domain.clone();
                     let max_message_size = self.max_message_size;
                     let idle_timeout = self.idle_timeout;
                     let total_timeout = self.total_timeout;
@@ -113,7 +134,7 @@ impl SmtpServer {
                     tokio::spawn(async move {
                         let _permit = permit;
                         let params = session::SessionParams {
-                            config,
+                            config_handle,
                             tls_acceptor,
                             hostname,
                             peer_addr,

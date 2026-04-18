@@ -25,19 +25,22 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
+use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mcp::resolve_email_path;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
-/// Per-connection shared state for the MARK verbs (and future state-
-/// mutation verbs added in Sprint 46+).
+/// Per-connection shared state for the MARK verbs (and the Sprint 46
+/// MAILBOX-CRUD verbs, which share the per-mailbox lock map so their
+/// config.toml rewrite does not race with an in-flight MARK).
 pub struct StateContext {
     /// Data directory root — `<data_dir>/inbox/<mailbox>/<id>.md` etc.
     pub data_dir: PathBuf,
-    /// Mailboxes known at daemon startup. The MARK handlers gate on
-    /// presence here before touching the filesystem so a typo'd mailbox
-    /// name produces `ERR MAILBOX` instead of `ERR NOTFOUND` on the file.
-    pub mailboxes: std::collections::HashSet<String>,
+    /// Live handle to the daemon's `Config`. MARK-* uses it to validate
+    /// that the referenced mailbox exists at the time of the call (rather
+    /// than at startup); MAILBOX-* uses it to append / remove stanzas and
+    /// hot-swap the in-memory snapshot.
+    pub config_handle: ConfigHandle,
     /// Per-mailbox lock map. `Mutex` because the map-level mutation
     /// (lazy insert) is short; the per-mailbox `RwLock` handles the
     /// actual file write ordering.
@@ -45,17 +48,17 @@ pub struct StateContext {
 }
 
 impl StateContext {
-    pub fn new(data_dir: PathBuf, mailboxes: std::collections::HashSet<String>) -> Self {
+    pub fn new(data_dir: PathBuf, config_handle: ConfigHandle) -> Self {
         Self {
             data_dir,
-            mailboxes,
+            config_handle,
             locks: Mutex::new(HashMap::new()),
         }
     }
 
     /// Acquire (lazy-inserting if needed) the per-mailbox write lock.
     /// Returned guard is released when dropped.
-    fn lock_for(&self, mailbox: &str) -> Arc<RwLock<()>> {
+    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<RwLock<()>> {
         let mut map = self
             .locks
             .lock()
@@ -105,7 +108,14 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
         return e;
     }
 
-    if !ctx.mailboxes.contains(&req.mailbox) {
+    // Sprint 46: mailbox existence is resolved live through the handle so
+    // a freshly-created mailbox is immediately target-able from MARK.
+    if !ctx
+        .config_handle
+        .load()
+        .mailboxes
+        .contains_key(&req.mailbox)
+    {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
             reason: format!("mailbox '{}' does not exist", req.mailbox),
@@ -193,7 +203,6 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
 mod tests {
     use super::*;
     use crate::frontmatter::InboundFrontmatter;
-    use std::collections::HashSet;
     use tempfile::TempDir;
 
     fn sample_meta(id: &str, read: bool) -> InboundFrontmatter {
@@ -234,9 +243,25 @@ mod tests {
     }
 
     fn ctx(data_dir: &Path) -> StateContext {
-        let mut boxes = HashSet::new();
-        boxes.insert("alice".to_string());
-        StateContext::new(data_dir.to_path_buf(), boxes)
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        StateContext::new(data_dir.to_path_buf(), ConfigHandle::new(config))
     }
 
     #[tokio::test]

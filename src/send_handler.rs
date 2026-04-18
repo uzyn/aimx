@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
+use crate::config::ConfigHandle;
 use crate::dkim;
 use crate::frontmatter::{
     DeliveryStatus, OutboundFrontmatter, compute_thread_id, format_outbound_frontmatter,
@@ -46,19 +47,19 @@ pub struct RegisteredMailbox {
 /// Heap-allocated once at daemon startup and cloned (cheap — `Arc` clones)
 /// into each task. Holding the DKIM key in an `Arc` here is what lets us
 /// load it exactly once despite accepting concurrent sends.
+///
+/// Sprint 46: the `mailboxes` / `primary_domain` fields used to be snapshot
+/// copies from `Config` taken at startup. They are now resolved live via
+/// `config_handle` so a `MAILBOX-CREATE` over UDS is immediately visible to
+/// subsequent `SEND` requests without a restart.
 pub struct SendContext {
     /// DKIM private key, loaded once at `aimx serve` startup.
     pub dkim_key: Arc<RsaPrivateKey>,
-    /// Primary domain from `/etc/aimx/config.toml`. Compared case-
-    /// insensitively against the submitted `From:` header.
-    pub primary_domain: String,
     /// DKIM selector (`dkim._domainkey.<domain>`).
     pub dkim_selector: String,
-    /// Mailboxes registered in config, keyed by mailbox name. The From:
-    /// header on the submitted message must resolve to a concrete (non-
-    /// wildcard) entry — catchall is inbound-routing only per FR-18d
-    /// (tightened in Sprint 45).
-    pub mailboxes: HashMap<String, RegisteredMailbox>,
+    /// Live handle to the daemon's `Config`. Read briefly at the top of
+    /// `handle_send` to capture the snapshot used for this request.
+    pub config_handle: ConfigHandle,
     /// Transport used for final MX delivery. In production this is a
     /// `LettreTransport`; tests inject a mock.
     pub transport: Arc<dyn MailTransport + Send + Sync>,
@@ -88,6 +89,21 @@ pub(crate) async fn handle_send_with_signer<F>(
 where
     F: FnOnce(&[u8], &RsaPrivateKey, &str, &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>,
 {
+    // Sprint 46: snapshot the live config at the start of the request. Any
+    // MAILBOX-CREATE/DELETE that lands after this point still runs — the
+    // swap just doesn't affect the decision for *this* particular send.
+    let config = ctx.config_handle.load();
+    let primary_domain = config.domain.as_str();
+    let mailboxes = config.mailboxes.iter().map(|(name, mb)| {
+        (
+            name.clone(),
+            RegisteredMailbox {
+                address: mb.address.clone(),
+            },
+        )
+    });
+    let mailboxes: HashMap<String, RegisteredMailbox> = mailboxes.collect();
+
     let headers = scan_headers(
         &req.body,
         &[
@@ -140,17 +156,16 @@ where
         }
     };
 
-    if !sender_domain.eq_ignore_ascii_case(&ctx.primary_domain) {
+    if !sender_domain.eq_ignore_ascii_case(primary_domain) {
         return SendResponse::Err {
             code: ErrCode::Domain,
             reason: format!(
-                "sender domain '{sender_domain}' does not match aimx domain '{}'",
-                ctx.primary_domain
+                "sender domain '{sender_domain}' does not match aimx domain '{primary_domain}'"
             ),
         };
     }
 
-    let from_mailbox = match resolve_concrete_mailbox(&ctx.mailboxes, &bare_from) {
+    let from_mailbox = match resolve_concrete_mailbox(&mailboxes, &bare_from) {
         Some(name) => name,
         None => {
             return SendResponse::Err {
@@ -198,7 +213,7 @@ where
     let (message_id, body_bytes) = match headers.get("Message-ID") {
         Some(v) => (v.clone(), req.body.clone()),
         None => {
-            let synthetic = format!("<{}@{}>", Uuid::new_v4(), ctx.primary_domain);
+            let synthetic = format!("<{}@{}>", Uuid::new_v4(), primary_domain);
             let injected = inject_message_id_header(&req.body, &synthetic);
             (synthetic, injected)
         }
@@ -207,7 +222,7 @@ where
     let signed = match signer(
         &body_bytes,
         &ctx.dkim_key,
-        &ctx.primary_domain,
+        primary_domain,
         &ctx.dkim_selector,
     ) {
         Ok(bytes) => bytes,
@@ -577,25 +592,39 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         dkim::generate_keypair(tmp.path(), false).unwrap();
         let key = dkim::load_private_key(tmp.path()).unwrap();
-        let mut boxes = HashMap::new();
-        boxes.insert(
-            "catchall".to_string(),
-            RegisteredMailbox {
-                address: "*@example.com".to_string(),
-            },
-        );
-        boxes.insert(
-            "alice".to_string(),
-            RegisteredMailbox {
-                address: "alice@example.com".to_string(),
-            },
-        );
         let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".to_string(),
+            data_dir: dir.clone(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let config_handle = ConfigHandle::new(config);
         SendContext {
             dkim_key: Arc::new(key),
-            primary_domain: "example.com".to_string(),
             dkim_selector: "dkim".to_string(),
-            mailboxes: boxes,
+            config_handle,
             transport,
             data_dir: dir,
         }

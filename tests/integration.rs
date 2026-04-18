@@ -490,8 +490,16 @@ struct McpClient {
 
 impl McpClient {
     fn spawn(data_dir: &Path) -> Self {
+        // Sprint 46: MCP mailbox create/delete now try the daemon's UDS
+        // socket first. Tests that don't spawn their own daemon must point
+        // AIMX_RUNTIME_DIR at an empty tempdir so the socket isn't found
+        // (otherwise the test would speak to whatever production daemon
+        // happens to be running on the CI/dev host).
+        let runtime = data_dir.join("run");
+        std::fs::create_dir_all(&runtime).ok();
         let mut child = StdCommand::new(aimx_binary_path())
             .env("AIMX_CONFIG_DIR", data_dir)
+            .env("AIMX_RUNTIME_DIR", &runtime)
             .arg("--data-dir")
             .arg(data_dir)
             .arg("mcp")
@@ -2693,6 +2701,231 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
         let fm = read_frontmatter(md);
         let _ = fm.as_table().expect("frontmatter must parse to table");
     }
+
+    stop_serve(daemon);
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 46: mailbox CRUD via UDS (daemon hot-swaps Arc<Config>). These
+// integration tests exercise the end-to-end flow:
+//   - `aimx mailbox create foo` against a running daemon → inbound SMTP to
+//     `foo@<domain>` routes to `inbox/foo/`, not catchall, with no restart.
+//   - `aimx mailbox create foo` against a stopped daemon → falls back to
+//     direct on-disk edit + prints the Sprint 44 restart-hint banner.
+//   - `aimx mailbox delete foo` refuses when the mailbox still has files,
+//     then succeeds after the files are removed.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Create a fresh mailbox via the CLI, which should route through UDS
+    // and succeed without printing the restart hint.
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("create")
+        .arg("eve")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Mailbox 'eve' created"),
+        "expected success message, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Restart the daemon"),
+        "UDS path must suppress the restart-hint banner: {stdout}"
+    );
+
+    // The daemon should already see the new mailbox in its in-memory
+    // Config — send a fresh inbound SMTP message addressed to
+    // `eve@agent.example.com` and verify it lands in `inbox/eve/` rather
+    // than in catchall.
+    let email = concat!(
+        "From: sender@example.com\r\n",
+        "To: eve@agent.example.com\r\n",
+        "Subject: Hi Eve\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <eve-hot-swap@example.com>\r\n",
+        "\r\n",
+        "hello eve\r\n",
+    );
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["eve@agent.example.com"],
+        email,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let eve_dir = inbox(tmp.path(), "eve");
+    let md_files = find_md_files(&eve_dir);
+    assert!(
+        !md_files.is_empty(),
+        "new mailbox 'eve' must receive the inbound message without restart"
+    );
+
+    // Catchall must be empty (aside from any pre-existing content from
+    // setup_test_env — which creates the dir but not any messages).
+    let catchall = inbox(tmp.path(), "catchall");
+    let catchall_md = find_md_files(&catchall);
+    assert!(
+        catchall_md.is_empty(),
+        "catchall must not receive eve's mail once the live-swap applied: \
+         catchall contents = {catchall_md:?}"
+    );
+
+    // config.toml on disk reflects the new mailbox stanza.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        config_text.contains("[mailboxes.eve]"),
+        "config.toml should contain the new stanza: {config_text}"
+    );
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Point at an empty runtime dir — no socket present, so UDS fails with
+    // NotFound and the CLI falls back to direct on-disk edit.
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
+
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("create")
+        .arg("eve")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Mailbox 'eve' created"),
+        "expected success message, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("Restart the daemon"),
+        "fallback path must print the restart hint: {stdout}"
+    );
+
+    // Fallback wrote the stanza too.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(config_text.contains("[mailboxes.eve]"));
+    assert!(tmp.path().join("inbox").join("eve").is_dir());
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
+
+    // Create a mailbox via UDS.
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("create")
+        .arg("qux")
+        .assert()
+        .success();
+
+    // Drop a file in the new mailbox so delete is refused.
+    let qux_inbox = inbox(tmp.path(), "qux");
+    std::fs::write(qux_inbox.join("2025-01-01-120000-held.md"), "content").unwrap();
+
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("delete")
+        .arg("--yes")
+        .arg("qux")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("NONEMPTY") && stderr.contains("qux"),
+        "delete must be refused with NONEMPTY error, got stderr: {stderr}"
+    );
+
+    // The stanza must still be there.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(config_text.contains("[mailboxes.qux]"));
+
+    // Remove the file and retry — delete now succeeds, stanza is gone,
+    // subsequent mail addressed to qux@domain falls through to catchall.
+    std::fs::remove_file(qux_inbox.join("2025-01-01-120000-held.md")).unwrap();
+
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("delete")
+        .arg("--yes")
+        .arg("qux")
+        .assert()
+        .success();
+
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        !config_text.contains("[mailboxes.qux]"),
+        "stanza should be removed after successful delete: {config_text}"
+    );
+
+    // Inbound to qux@... now falls through to catchall because the daemon
+    // already picked up the swap.
+    let email = concat!(
+        "From: sender@example.com\r\n",
+        "To: qux@agent.example.com\r\n",
+        "Subject: Fallthrough\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <qux-gone@example.com>\r\n",
+        "\r\n",
+        "gone\r\n",
+    );
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["qux@agent.example.com"],
+        email,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let catchall_md = find_md_files(&inbox(tmp.path(), "catchall"));
+    assert!(
+        !catchall_md.is_empty(),
+        "mail to a deleted mailbox must fall through to catchall after the swap"
+    );
 
     stop_serve(daemon);
 }

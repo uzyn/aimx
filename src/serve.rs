@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::config::Config;
+use crate::config::{Config, ConfigHandle};
 use crate::dkim;
+use crate::mailbox_handler::MailboxContext;
 use crate::send_handler::SendContext;
 use crate::send_protocol;
 use crate::smtp::SmtpServer;
@@ -323,33 +324,36 @@ async fn run_serve(
         }
         None => Arc::new(LettreTransport::new(config.enable_ipv6)),
     };
+
+    // Sprint 46: wrap the starting Config in a live, swappable handle.
+    // Every daemon-side context (send, state, mailbox, SMTP server) reads
+    // through this same handle so MAILBOX-CREATE/DELETE is reflected
+    // everywhere at once on a successful atomic `config.toml` write.
+    let data_dir = config.data_dir.clone();
+    let dkim_selector = config.dkim_selector.clone();
+    let config_handle = ConfigHandle::new(config);
+
     let send_ctx = Arc::new(SendContext {
         dkim_key,
-        primary_domain: config.domain.clone(),
-        dkim_selector: config.dkim_selector.clone(),
-        mailboxes: config
-            .mailboxes
-            .iter()
-            .map(|(name, mb)| {
-                (
-                    name.clone(),
-                    crate::send_handler::RegisteredMailbox {
-                        address: mb.address.clone(),
-                    },
-                )
-            })
-            .collect(),
+        dkim_selector,
+        config_handle: config_handle.clone(),
         transport,
-        data_dir: config.data_dir.clone(),
+        data_dir: data_dir.clone(),
     });
 
-    // Shared state context for MARK-READ / MARK-UNREAD verbs (Sprint 45).
-    let state_ctx = Arc::new(StateContext::new(
-        config.data_dir.clone(),
-        config.mailboxes.keys().cloned().collect(),
+    // Shared state context for MARK-READ / MARK-UNREAD verbs (Sprint 45)
+    // and the per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE
+    // (Sprint 46).
+    let state_ctx = Arc::new(StateContext::new(data_dir.clone(), config_handle.clone()));
+
+    // Sprint 46: MailboxContext owns the on-disk config.toml path + the
+    // handle it writes through.
+    let mb_ctx = Arc::new(MailboxContext::new(
+        crate::config::config_path(),
+        config_handle.clone(),
     ));
 
-    let server = SmtpServer::new(config);
+    let server = SmtpServer::with_handle(config_handle.clone());
     let server = if tls_available {
         server.with_tls(cert, key)?
     } else {
@@ -407,7 +411,7 @@ async fn run_serve(
     let uds_shutdown = shutdown_rx.clone();
     let uds_socket_path = socket_path.clone();
     let uds_handle = tokio::spawn(async move {
-        run_send_listener(uds_listener, send_ctx, state_ctx, uds_shutdown).await;
+        run_send_listener(uds_listener, send_ctx, state_ctx, mb_ctx, uds_shutdown).await;
         // Clean up the socket file on clean shutdown so the next start does
         // not trip the "stale socket" fallback path.
         let _ = std::fs::remove_file(&uds_socket_path);
@@ -459,6 +463,7 @@ async fn run_send_listener(
     listener: tokio::net::UnixListener,
     send_ctx: Arc<SendContext>,
     state_ctx: Arc<StateContext>,
+    mb_ctx: Arc<MailboxContext>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
@@ -474,8 +479,9 @@ async fn run_send_listener(
                         );
                         let send_ctx = Arc::clone(&send_ctx);
                         let state_ctx = Arc::clone(&state_ctx);
+                        let mb_ctx = Arc::clone(&mb_ctx);
                         tokio::spawn(async move {
-                            handle_uds_connection(stream, send_ctx, state_ctx).await;
+                            handle_uds_connection(stream, send_ctx, state_ctx, mb_ctx).await;
                         });
                     }
                     Err(e) => {
@@ -502,18 +508,22 @@ async fn handle_uds_connection(
     stream: tokio::net::UnixStream,
     send_ctx: Arc<SendContext>,
     state_ctx: Arc<StateContext>,
+    mb_ctx: Arc<MailboxContext>,
 ) {
-    handle_uds_connection_with_timeout(stream, send_ctx, state_ctx, UDS_REQUEST_TIMEOUT).await;
+    handle_uds_connection_with_timeout(stream, send_ctx, state_ctx, mb_ctx, UDS_REQUEST_TIMEOUT)
+        .await;
 }
 
 /// One-frame-per-connection dispatcher. Reads a single `AIMX/1` request
-/// (SEND, MARK-READ, MARK-UNREAD) within `timeout`, runs the matching
-/// handler, and writes the framed response. The same slow-loris defence
-/// and parse-failure drain logic applies to every verb.
+/// (SEND, MARK-READ, MARK-UNREAD, MAILBOX-CREATE, MAILBOX-DELETE) within
+/// `timeout`, runs the matching handler, and writes the framed response.
+/// The same slow-loris defence and parse-failure drain logic applies to
+/// every verb.
 async fn handle_uds_connection_with_timeout(
     stream: tokio::net::UnixStream,
     send_ctx: Arc<SendContext>,
     state_ctx: Arc<StateContext>,
+    mb_ctx: Arc<MailboxContext>,
     timeout: std::time::Duration,
 ) {
     use send_protocol::{AckResponse, ErrCode, ParseError, Request, SendResponse};
@@ -533,6 +543,12 @@ async fn handle_uds_connection_with_timeout(
             ),
             Ok(Ok(Request::Mark(req))) => (
                 Reply::Ack(crate::state_handler::handle_mark(&state_ctx, &req).await),
+                false,
+            ),
+            Ok(Ok(Request::MailboxCrud(req))) => (
+                Reply::Ack(
+                    crate::mailbox_handler::handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+                ),
                 false,
             ),
             Ok(Err(ParseError::ClosedBeforeRequest)) => {
@@ -1224,42 +1240,69 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn build_test_send_ctx(data_dir: &Path) -> Arc<crate::send_handler::SendContext> {
+    fn build_test_config(data_dir: &Path) -> crate::config::Config {
         use std::collections::HashMap;
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        crate::config::Config {
+            domain: "example.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn build_test_send_ctx_with_handle(
+        data_dir: &Path,
+        handle: ConfigHandle,
+    ) -> Arc<crate::send_handler::SendContext> {
         let dkim_tmp = tempfile::TempDir::new().unwrap();
         crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
         let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
-        let mut mboxes = HashMap::new();
-        mboxes.insert(
-            "catchall".to_string(),
-            crate::send_handler::RegisteredMailbox {
-                address: "*@example.com".to_string(),
-            },
-        );
-        mboxes.insert(
-            "alice".to_string(),
-            crate::send_handler::RegisteredMailbox {
-                address: "alice@example.com".to_string(),
-            },
-        );
         let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
         Arc::new(crate::send_handler::SendContext {
             dkim_key: Arc::new(key),
-            primary_domain: "example.com".to_string(),
             dkim_selector: "dkim".to_string(),
-            mailboxes: mboxes,
+            config_handle: handle,
             transport,
             data_dir: data_dir.to_path_buf(),
         })
     }
 
     #[cfg(unix)]
-    fn build_test_state_ctx(data_dir: &Path) -> Arc<StateContext> {
-        use std::collections::HashSet;
-        let mut mboxes = HashSet::new();
-        mboxes.insert("alice".to_string());
-        mboxes.insert("catchall".to_string());
-        Arc::new(StateContext::new(data_dir.to_path_buf(), mboxes))
+    fn build_test_state_ctx_with_handle(
+        data_dir: &Path,
+        handle: ConfigHandle,
+    ) -> Arc<StateContext> {
+        Arc::new(StateContext::new(data_dir.to_path_buf(), handle))
+    }
+
+    #[cfg(unix)]
+    fn build_test_mailbox_ctx(
+        config_path: std::path::PathBuf,
+        handle: ConfigHandle,
+    ) -> Arc<MailboxContext> {
+        Arc::new(MailboxContext::new(config_path, handle))
     }
 
     #[cfg(unix)]
@@ -1272,12 +1315,14 @@ mod tests {
         rt.block_on(async {
             let listener = bind_send_socket(&sock).unwrap();
 
-            let send_ctx = build_test_send_ctx(tmp.path());
-            let state_ctx = build_test_state_ctx(tmp.path());
+            let handle_cfg = ConfigHandle::new(build_test_config(tmp.path()));
+            let send_ctx = build_test_send_ctx_with_handle(tmp.path(), handle_cfg.clone());
+            let state_ctx = build_test_state_ctx_with_handle(tmp.path(), handle_cfg.clone());
+            let mb_ctx = build_test_mailbox_ctx(tmp.path().join("config.toml"), handle_cfg.clone());
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let handle = tokio::spawn(async move {
-                run_send_listener(listener, send_ctx, state_ctx, shutdown_rx).await;
+                run_send_listener(listener, send_ctx, state_ctx, mb_ctx, shutdown_rx).await;
             });
 
             // Connect from the same process.
@@ -1314,7 +1359,6 @@ mod tests {
     #[test]
     fn uds_end_to_end_signed_delivery() {
         use std::collections::HashMap;
-        use std::collections::HashSet;
         use std::sync::Mutex;
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1350,29 +1394,46 @@ mod tests {
             });
             let transport: Arc<dyn MailTransport + Send + Sync> = captor.clone();
 
-            let mut mboxes = HashMap::new();
-            mboxes.insert(
+            let mut mailboxes = HashMap::new();
+            mailboxes.insert(
                 "alice".to_string(),
-                crate::send_handler::RegisteredMailbox {
+                crate::config::MailboxConfig {
                     address: "alice@example.com".to_string(),
+                    on_receive: vec![],
+                    trust: "none".to_string(),
+                    trusted_senders: vec![],
                 },
             );
+            let config = crate::config::Config {
+                domain: "example.com".to_string(),
+                data_dir: tmp.path().to_path_buf(),
+                dkim_selector: "dkim".to_string(),
+                mailboxes,
+                verify_host: None,
+                enable_ipv6: false,
+            };
+            let handle_cfg = ConfigHandle::new(config);
+
             let send_ctx = Arc::new(crate::send_handler::SendContext {
                 dkim_key: Arc::new(key),
-                primary_domain: "example.com".to_string(),
                 dkim_selector: "dkim".to_string(),
-                mailboxes: mboxes,
+                config_handle: handle_cfg.clone(),
                 transport,
                 data_dir: tmp.path().to_path_buf(),
             });
 
-            let mut state_mboxes = HashSet::new();
-            state_mboxes.insert("alice".to_string());
-            let state_ctx = Arc::new(StateContext::new(tmp.path().to_path_buf(), state_mboxes));
+            let state_ctx = Arc::new(StateContext::new(
+                tmp.path().to_path_buf(),
+                handle_cfg.clone(),
+            ));
+            let mb_ctx = Arc::new(MailboxContext::new(
+                tmp.path().join("config.toml"),
+                handle_cfg.clone(),
+            ));
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let handle = tokio::spawn(async move {
-                run_send_listener(listener, send_ctx, state_ctx, shutdown_rx).await;
+                run_send_listener(listener, send_ctx, state_ctx, mb_ctx, shutdown_rx).await;
             });
 
             // Build a minimal RFC 5322 body.
@@ -1433,19 +1494,23 @@ mod tests {
         rt.block_on(async {
             let listener = bind_send_socket(&sock).unwrap();
 
-            let send_ctx = build_test_send_ctx(tmp.path());
-            let state_ctx = build_test_state_ctx(tmp.path());
+            let handle_cfg = ConfigHandle::new(build_test_config(tmp.path()));
+            let send_ctx = build_test_send_ctx_with_handle(tmp.path(), handle_cfg.clone());
+            let state_ctx = build_test_state_ctx_with_handle(tmp.path(), handle_cfg.clone());
+            let mb_ctx = build_test_mailbox_ctx(tmp.path().join("config.toml"), handle_cfg.clone());
 
             // Accept one connection and handle it with a 1-second timeout.
             let accept_handle = {
                 let send_ctx = Arc::clone(&send_ctx);
                 let state_ctx = Arc::clone(&state_ctx);
+                let mb_ctx = Arc::clone(&mb_ctx);
                 tokio::spawn(async move {
                     let (stream, _) = listener.accept().await.unwrap();
                     handle_uds_connection_with_timeout(
                         stream,
                         send_ctx,
                         state_ctx,
+                        mb_ctx,
                         std::time::Duration::from_secs(1),
                     )
                     .await;

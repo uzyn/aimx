@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio_rustls::TlsAcceptor;
 
-use crate::config::Config;
+use crate::config::ConfigHandle;
 
 const MAX_COMMAND_LINE_LENGTH: usize = 1024;
 
@@ -25,7 +25,10 @@ enum CommandLoopExit {
 }
 
 pub struct SessionParams {
-    pub config: Arc<Config>,
+    /// Sprint 46: the SMTP session resolves routing against whatever the
+    /// handle currently holds, so a MAILBOX-CREATE that lands between EHLO
+    /// and DATA is honoured by the same transaction.
+    pub config_handle: ConfigHandle,
     pub tls_acceptor: Option<Arc<TlsAcceptor>>,
     pub hostname: String,
     pub peer_addr: SocketAddr,
@@ -482,7 +485,11 @@ impl SmtpSession {
         data: &[u8],
         session_state: &mut SessionState,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        let config = Arc::clone(&self.params.config);
+        // Sprint 46: snapshot the current Config at message-delivery time
+        // so each RCPT routes against the freshest mailbox table. The
+        // snapshot is stable for the duration of this message's ingest —
+        // within a single DATA payload every RCPT uses the same view.
+        let config = self.params.config_handle.load();
         // One allocation shared across all recipients via refcount. For large
         // DATA payloads (up to message_max) with many RCPT TOs, this avoids
         // an N-way copy of the full message.
