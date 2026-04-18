@@ -86,7 +86,7 @@ pub enum Command {
     },
 
     /// Check port 25 connectivity (outbound, inbound)
-    Verify {
+    Portcheck {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]
         verify_host: Option<String>,

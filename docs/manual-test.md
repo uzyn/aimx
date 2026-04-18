@@ -57,14 +57,14 @@ sudo systemctl status aimx --no-pager
 sudo ss -tlnp sport :25          # aimx listening on :25
 ls -la /run/aimx/send.sock       # UDS present, mode 0666
 sudo aimx status                 # summary output
-sudo aimx verify                 # port 25 reachability probe
+sudo aimx portcheck              # port 25 reachability probe
 ```
 
 **Acceptance criteria.**
 - `systemctl status aimx` → `active (running)`.
 - `ss` shows aimx on `:25`.
 - `/run/aimx/send.sock` exists with mode `srw-rw-rw-`.
-- `aimx verify` reports port 25 reachable.
+- `aimx portcheck` reports port 25 reachable.
 - `/etc/aimx/config.toml` exists and contains your domain.
 - `/etc/aimx/dkim/private.key` is `0600 root:root`.
 - `/var/lib/aimx/README.md` was generated.
