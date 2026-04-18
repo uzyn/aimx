@@ -63,7 +63,7 @@ pub enum Command {
     /// Uninstall the aimx daemon service (config and data are retained)
     Uninstall {
         /// Skip the confirmation prompt
-        #[arg(long)]
+        #[arg(short = 'y', long)]
         yes: bool,
     },
 
@@ -170,7 +170,7 @@ pub enum MailboxCommand {
         name: String,
 
         /// Skip confirmation prompt
-        #[arg(long)]
+        #[arg(short = 'y', long)]
         yes: bool,
     },
 }
