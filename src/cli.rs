@@ -60,6 +60,13 @@ pub enum Command {
         verify_host: Option<String>,
     },
 
+    /// Uninstall the aimx daemon service (config and data are retained)
+    Uninstall {
+        /// Skip the confirmation prompt
+        #[arg(long)]
+        yes: bool,
+    },
+
     /// Show server status, mailbox counts, and configuration
     Status,
 
