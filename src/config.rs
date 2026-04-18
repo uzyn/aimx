@@ -43,6 +43,19 @@ pub struct Config {
     #[serde(default = "default_dkim_selector")]
     pub dkim_selector: String,
 
+    /// Default trust policy applied to every mailbox that does not set
+    /// its own `trust`. Allowed values: `"none"` (default) or `"verified"`.
+    /// A per-mailbox value fully replaces this default for that mailbox.
+    #[serde(default = "default_trust")]
+    pub trust: String,
+
+    /// Default sender allowlist applied to every mailbox that does not
+    /// set its own `trusted_senders`. Glob patterns matched against the
+    /// lowercased `From:` address. A per-mailbox value fully replaces this
+    /// list (no merging).
+    #[serde(default)]
+    pub trusted_senders: Vec<String>,
+
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
 
@@ -60,11 +73,36 @@ pub struct MailboxConfig {
     #[serde(default)]
     pub on_receive: Vec<OnReceiveRule>,
 
-    #[serde(default = "default_trust")]
-    pub trust: String,
+    /// Per-mailbox override for the global [`Config::trust`] default.
+    /// `None` means "inherit the global default"; `Some("none" | "verified")`
+    /// replaces it. Use [`MailboxConfig::effective_trust`] to resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
 
-    #[serde(default)]
-    pub trusted_senders: Vec<String>,
+    /// Per-mailbox override for the global [`Config::trusted_senders`]
+    /// default. `None` means "inherit"; `Some(vec)` replaces the global
+    /// list entirely (no merging). Use
+    /// [`MailboxConfig::effective_trusted_senders`] to resolve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_senders: Option<Vec<String>>,
+}
+
+impl MailboxConfig {
+    /// Resolve the effective trust policy for this mailbox, falling back
+    /// to `config.trust` when the mailbox's own `trust` is `None`.
+    pub fn effective_trust<'a>(&'a self, config: &'a Config) -> &'a str {
+        self.trust.as_deref().unwrap_or(&config.trust)
+    }
+
+    /// Resolve the effective trusted-senders list for this mailbox.
+    /// Replace semantics: a `Some(vec)` on the mailbox entirely replaces
+    /// the global list, even if empty.
+    pub fn effective_trusted_senders<'a>(&'a self, config: &'a Config) -> &'a [String] {
+        match &self.trusted_senders {
+            Some(list) => list.as_slice(),
+            None => config.trusted_senders.as_slice(),
+        }
+    }
 }
 
 fn default_trust() -> String {
@@ -417,8 +455,8 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
 
@@ -426,6 +464,8 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
             domain: "test.com".to_string(),
             data_dir: tmp.path().to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -460,10 +500,11 @@ trusted_senders = ["*@company.com", "boss@gmail.com"]
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         let secure = &config.mailboxes["secure"];
-        assert_eq!(secure.trust, "verified");
-        assert_eq!(secure.trusted_senders.len(), 2);
-        assert_eq!(secure.trusted_senders[0], "*@company.com");
-        assert_eq!(secure.trusted_senders[1], "boss@gmail.com");
+        assert_eq!(secure.trust.as_deref(), Some("verified"));
+        let senders = secure.trusted_senders.as_ref().unwrap();
+        assert_eq!(senders.len(), 2);
+        assert_eq!(senders[0], "*@company.com");
+        assert_eq!(senders[1], "boss@gmail.com");
     }
 
     #[test]
@@ -475,9 +516,139 @@ domain = "test.com"
 address = "*@test.com"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust, "none");
+        assert!(config.trusted_senders.is_empty());
         let catchall = &config.mailboxes["catchall"];
-        assert_eq!(catchall.trust, "none");
-        assert!(catchall.trusted_senders.is_empty());
+        assert!(catchall.trust.is_none());
+        assert!(catchall.trusted_senders.is_none());
+        assert_eq!(catchall.effective_trust(&config), "none");
+        assert!(catchall.effective_trusted_senders(&config).is_empty());
+    }
+
+    #[test]
+    fn parse_global_trust_defaults() {
+        let toml_str = r#"
+domain = "test.com"
+trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.catchall]
+address = "*@test.com"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.trust, "verified");
+        assert_eq!(config.trusted_senders, vec!["*@company.com".to_string()]);
+        let catchall = &config.mailboxes["catchall"];
+        assert!(catchall.trust.is_none());
+        assert!(catchall.trusted_senders.is_none());
+        assert_eq!(catchall.effective_trust(&config), "verified");
+        assert_eq!(
+            catchall.effective_trusted_senders(&config),
+            ["*@company.com".to_string()].as_slice()
+        );
+    }
+
+    #[test]
+    fn mailbox_trust_overrides_global() {
+        let toml_str = r#"
+domain = "test.com"
+trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.public]
+address = "hello@test.com"
+trust = "none"
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let public = &config.mailboxes["public"];
+        assert_eq!(public.effective_trust(&config), "none");
+        // trusted_senders is still inherited (only `trust` was overridden).
+        assert_eq!(
+            public.effective_trusted_senders(&config),
+            ["*@company.com".to_string()].as_slice()
+        );
+    }
+
+    #[test]
+    fn mailbox_trusted_senders_replaces_global() {
+        let toml_str = r#"
+domain = "test.com"
+trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.strict]
+address = "strict@test.com"
+trusted_senders = ["boss@gmail.com"]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let strict = &config.mailboxes["strict"];
+        // trust inherited, senders fully replaced.
+        assert_eq!(strict.effective_trust(&config), "verified");
+        assert_eq!(
+            strict.effective_trusted_senders(&config),
+            ["boss@gmail.com".to_string()].as_slice()
+        );
+    }
+
+    #[test]
+    fn mailbox_empty_trusted_senders_kills_global_list() {
+        let toml_str = r#"
+domain = "test.com"
+trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.sealed]
+address = "sealed@test.com"
+trusted_senders = []
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let sealed = &config.mailboxes["sealed"];
+        assert!(sealed.effective_trusted_senders(&config).is_empty());
+    }
+
+    #[test]
+    fn save_omits_unset_mailbox_trust_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: PathBuf::from("/tmp/x"),
+            dkim_selector: "dkim".to_string(),
+            trust: "verified".to_string(),
+            trusted_senders: vec!["*@company.com".to_string()],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        config.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        // Top-level defaults are written; per-mailbox None fields are absent.
+        assert!(on_disk.contains("trust = \"verified\""));
+        assert!(on_disk.contains("trusted_senders = [\"*@company.com\"]"));
+        // The mailbox section must not re-emit the inherited values.
+        let mailbox_section = on_disk
+            .split("[mailboxes.catchall]")
+            .nth(1)
+            .expect("mailbox section present");
+        assert!(
+            !mailbox_section.contains("trust ="),
+            "unset mailbox trust should not serialize: {mailbox_section}"
+        );
+        assert!(
+            !mailbox_section.contains("trusted_senders"),
+            "unset mailbox trusted_senders should not serialize: {mailbox_section}"
+        );
     }
 
     #[test]
