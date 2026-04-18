@@ -3,21 +3,14 @@ use crate::config::Config;
 use crate::frontmatter::{
     AttachmentMeta, AuthResults, InboundFrontmatter, compute_thread_id, format_frontmatter,
 };
+use crate::mailbox_locks::MailboxLocks;
 use crate::slug::{allocate_filename, slugify};
 use crate::trust;
 use mail_parser::{MessageParser, MimeHeaders};
 use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-
-/// Process-scoped lock guarding the inbound critical section: filename
-/// allocation, bundle directory creation, attachment writes, and the
-/// final `.md` write. The aimx daemon is the single writer to
-/// `<data_dir>/inbox/`, so a process Mutex is sufficient — no
-/// filesystem-level lock needed. Symmetric to the outbound `Mutex<()>`
-/// planned for FR-19b.
-static INGEST_WRITE_LOCK: Mutex<()> = Mutex::new(());
+use std::sync::Arc;
 
 pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut raw = Vec::new();
@@ -25,11 +18,25 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
     // Manual stdin path: no SMTP session, so received_from_ip is the
     // unspecified sentinel (0.0.0.0) and there is no envelope MAIL FROM.
     let sentinel_ip: IpAddr = "0.0.0.0".parse().unwrap();
-    ingest_email(&config, rcpt, &raw, sentinel_ip, None)
+    // Sprint 47: the manual stdin caller owns a fresh lock map — it's a
+    // short-lived process with a single ingest so contention isn't
+    // possible. The daemon path shares its map across all writers.
+    let locks = Arc::new(MailboxLocks::new());
+    ingest_email(&config, &locks, rcpt, &raw, sentinel_ip, None)
 }
 
+/// Inbound ingest entry point.
+///
+/// Sprint 47 (S47-4) unified the inbound write path with the MARK-* /
+/// MAILBOX-* write paths under a single per-mailbox
+/// `tokio::sync::Mutex<()>` from [`MailboxLocks`]. The critical section
+/// below is taken via `blocking_lock()` because `ingest_email` runs from
+/// a synchronous context (manual stdin path, or the SMTP session's
+/// `spawn_blocking` worker) — `blocking_lock()` is sound on a blocking
+/// thread, but never from an async runtime thread (which would panic).
 pub fn ingest_email(
     config: &Config,
+    locks: &MailboxLocks,
     rcpt: &str,
     raw: &[u8],
     received_from_ip: IpAddr,
@@ -168,9 +175,17 @@ pub fn ingest_email(
     let slug = slugify(&subject);
     let timestamp = chrono::Utc::now();
 
-    let _guard = INGEST_WRITE_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    // S47-4: the per-mailbox lock shared with MARK-* and MAILBOX-* is
+    // the outer lock of the two-tier hierarchy (see
+    // `crate::mailbox_locks`). Acquired via `blocking_lock()` because
+    // `ingest_email` runs from a synchronous context (stdin caller, or
+    // the SMTP session's `spawn_blocking` worker). The lock covers the
+    // full filename-allocation + bundle-creation + attachment-write +
+    // final `.md` write sequence — readers of the mailbox directory
+    // observe either the pre-state or the post-state, never a half-
+    // written bundle.
+    let lock = locks.lock_for(&mailbox);
+    let _guard = lock.blocking_lock();
 
     let md_path = allocate_filename(&inbox_dir, timestamp, &slug, has_attachments);
     let parent_dir = md_path
@@ -812,6 +827,14 @@ mod tests {
         "0.0.0.0".parse().unwrap()
     }
 
+    /// Sprint 47 (S47-4): most tests exercise a single ingest in
+    /// isolation, so they own a fresh `MailboxLocks`. Tests that
+    /// exercise concurrent ingest + MARK on the same mailbox (see the
+    /// integration suite) pass in a shared `MailboxLocks` instead.
+    fn test_locks() -> MailboxLocks {
+        MailboxLocks::new()
+    }
+
     fn plain_text_eml() -> &'static [u8] {
         b"From: sender@example.com\r\n\
           To: alice@test.com\r\n\
@@ -941,6 +964,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -970,6 +994,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -987,6 +1012,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1019,6 +1045,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             html_only_eml(),
             sentinel_ip(),
@@ -1071,6 +1098,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             multipart_eml(),
             sentinel_ip(),
@@ -1090,6 +1118,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "unknown@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1108,6 +1137,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1146,6 +1176,7 @@ mod tests {
 
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1154,6 +1185,7 @@ mod tests {
         .unwrap();
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1172,6 +1204,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             attachment_eml(),
             sentinel_ip(),
@@ -1214,6 +1247,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             multi_attachment_eml(),
             sentinel_ip(),
@@ -1240,6 +1274,7 @@ mod tests {
 
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             attachment_eml(),
             sentinel_ip(),
@@ -1248,6 +1283,7 @@ mod tests {
         .unwrap();
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             attachment_eml(),
             sentinel_ip(),
@@ -1274,6 +1310,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1441,7 +1478,15 @@ mod tests {
             malicious content\r\n\
             --evilbound--\r\n";
 
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            eml,
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -1490,7 +1535,15 @@ mod tests {
             #!/bin/sh\r\n\
             --b1--\r\n";
 
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            eml,
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let alice = inbox(tmp.path(), "alice");
         let bundles: Vec<_> = std::fs::read_dir(&alice)
@@ -1574,6 +1627,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1686,6 +1740,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1736,7 +1791,15 @@ mod tests {
         let config = test_config(tmp.path());
         let raw = include_bytes!("../tests/fixtures/gmail_dkim_signed.eml");
 
-        ingest_email(&config, "agent@test.com", raw, sentinel_ip(), None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "agent@test.com",
+            raw,
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
@@ -1808,13 +1871,16 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = Arc::new(test_config(tmp.path()));
+        let locks = Arc::new(MailboxLocks::new());
 
         let mut handles = Vec::new();
         for _ in 0..8 {
             let cfg = Arc::clone(&config);
+            let locks = Arc::clone(&locks);
             handles.push(thread::spawn(move || {
                 ingest_email(
                     &cfg,
+                    &locks,
                     "alice@test.com",
                     attachment_eml(),
                     sentinel_ip(),
@@ -1853,6 +1919,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1861,6 +1928,7 @@ mod tests {
         .unwrap();
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -1948,7 +2016,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         let ip: IpAddr = "203.0.113.50".parse().unwrap();
-        ingest_email(&config, "alice@test.com", plain_text_eml(), ip, None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            plain_text_eml(),
+            ip,
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -1982,6 +2058,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -2010,7 +2087,15 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            eml,
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -2034,7 +2119,15 @@ mod tests {
 
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
-        ingest_email(&config, "alice@test.com", eml, sentinel_ip(), None).unwrap();
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            eml,
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
 
         let entries = collect_md_files(&inbox(tmp.path(), "alice"));
         let content = std::fs::read_to_string(&entries[0]).unwrap();
@@ -2051,6 +2144,7 @@ mod tests {
         let config = test_config(tmp.path());
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -2078,6 +2172,7 @@ mod tests {
 
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),
@@ -2086,6 +2181,7 @@ mod tests {
         .unwrap();
         ingest_email(
             &config,
+            &test_locks(),
             "alice@test.com",
             plain_text_eml(),
             sentinel_ip(),

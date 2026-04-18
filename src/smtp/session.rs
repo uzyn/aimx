@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader
 use tokio_rustls::TlsAcceptor;
 
 use crate::config::ConfigHandle;
+use crate::mailbox_locks::MailboxLocks;
 
 const MAX_COMMAND_LINE_LENGTH: usize = 1024;
 
@@ -36,6 +37,10 @@ pub struct SessionParams {
     pub idle_timeout: Duration,
     pub total_timeout: Duration,
     pub max_commands_before_data: usize,
+    /// Sprint 47 (S47-4): shared per-mailbox write-lock map. The SMTP
+    /// session passes it into `ingest_email` so inbound writes serialize
+    /// against the MARK-* and MAILBOX-* paths that hold the same lock.
+    pub mailbox_locks: Arc<MailboxLocks>,
 }
 
 pub struct SmtpSession {
@@ -503,6 +508,7 @@ impl SmtpSession {
             let rcpt_owned = rcpt.clone();
             let peer = self.params.peer_addr;
             let reverse_path = session_state.reverse_path.clone();
+            let locks = Arc::clone(&self.params.mailbox_locks);
 
             let result = tokio::task::spawn_blocking(move || {
                 let envelope = if reverse_path.is_empty() {
@@ -510,8 +516,15 @@ impl SmtpSession {
                 } else {
                     Some(reverse_path.as_str())
                 };
-                crate::ingest::ingest_email(&config, &rcpt_owned, &data, peer.ip(), envelope)
-                    .map_err(|e| e.to_string())
+                crate::ingest::ingest_email(
+                    &config,
+                    &locks,
+                    &rcpt_owned,
+                    &data,
+                    peer.ip(),
+                    envelope,
+                )
+                .map_err(|e| e.to_string())
             })
             .await;
 

@@ -31,6 +31,47 @@ impl DkimTxtResolver for HickoryDkimResolver {
         &self,
         fqdn: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
+        // S47-1: `block_in_place` + `Handle::current().block_on(...)` only
+        // works from a multi-threaded tokio runtime. `aimx serve` always
+        // uses the multi-thread flavour via `tokio::runtime::Runtime::new()`,
+        // but a future caller that switches to the current-thread flavour
+        // would hit a runtime panic on the first DKIM TXT lookup. Debug-
+        // assert the flavour at entry so the coupling is documented and
+        // caught in test builds rather than at startup in production.
+        use tokio::runtime::RuntimeFlavor;
+        debug_assert!(
+            matches!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                RuntimeFlavor::MultiThread
+            ),
+            "HickoryDkimResolver::resolve_dkim_txt requires a multi-thread tokio runtime \
+             because it uses `block_in_place` + `Handle::block_on`. `aimx serve` meets this \
+             contract; if you're calling it from a current-thread runtime, async-ify the \
+             trait instead."
+        );
+
+        // S47-1 (test-only): `AIMX_TEST_DKIM_RESOLVER_OVERRIDE` lets the
+        // integration test spin a real `aimx serve` against a canned
+        // resolver result without touching DNS. Format:
+        //   `"ok:<txt1>||<txt2>"`  — resolver returns Ok(vec![...])
+        //   `"err:<message>"`       — resolver returns Err
+        //   `"no-record"`           — resolver returns Ok(vec![]) (empty)
+        // Gated by the env var so production binaries never short-circuit.
+        if let Some(override_val) = std::env::var_os("AIMX_TEST_DKIM_RESOLVER_OVERRIDE") {
+            let s = override_val.to_string_lossy().into_owned();
+            if let Some(err_msg) = s.strip_prefix("err:") {
+                return Err(err_msg.to_string().into());
+            }
+            if s == "no-record" {
+                return Ok(Vec::new());
+            }
+            if let Some(rest) = s.strip_prefix("ok:") {
+                let records: Vec<String> = rest.split("||").map(|s| s.to_string()).collect();
+                return Ok(records);
+            }
+            // Unrecognized format — let the real resolver run.
+        }
+
         // Synchronous helper: the startup check runs inside the tokio
         // runtime but treats the DNS lookup as a one-shot with a short
         // deadline. Build an inline resolver rather than reusing the mx
@@ -341,10 +382,20 @@ async fn run_serve(
         data_dir: data_dir.clone(),
     });
 
+    // Sprint 47: a single `MailboxLocks` map is shared across every
+    // writer (inbound ingest, MARK-*, MAILBOX-*) so they all serialize
+    // on the same per-mailbox `tokio::sync::Mutex<()>`. See
+    // `crate::mailbox_locks` for the lock hierarchy.
+    let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
+
     // Shared state context for MARK-READ / MARK-UNREAD verbs (Sprint 45)
     // and the per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE
-    // (Sprint 46).
-    let state_ctx = Arc::new(StateContext::new(data_dir.clone(), config_handle.clone()));
+    // (Sprint 46), plus inbound ingest (Sprint 47).
+    let state_ctx = Arc::new(StateContext::with_locks(
+        data_dir.clone(),
+        config_handle.clone(),
+        Arc::clone(&mailbox_locks),
+    ));
 
     // Sprint 46: MailboxContext owns the on-disk config.toml path + the
     // handle it writes through.
@@ -353,7 +404,8 @@ async fn run_serve(
         config_handle.clone(),
     ));
 
-    let server = SmtpServer::with_handle(config_handle.clone());
+    let server = SmtpServer::with_handle(config_handle.clone())
+        .with_mailbox_locks(Arc::clone(&mailbox_locks));
     let server = if tls_available {
         server.with_tls(cert, key)?
     } else {
