@@ -24,6 +24,7 @@ mod status;
 mod term;
 mod transport;
 mod trust;
+mod uninstall;
 mod verify;
 
 use clap::Parser;
@@ -47,6 +48,11 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let sys = setup::RealSystemOps;
             let net = build_network_ops(verify_host.as_deref())?;
             setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
+        }
+        // Uninstall also runs pre-config: config may be missing or unreadable.
+        Command::Uninstall { yes } => {
+            let sys = setup::RealSystemOps;
+            uninstall::run(yes, &sys)
         }
         // Verify does not read config for storage — only `verify_host`.
         Command::Verify { verify_host } => verify::run(verify_host.as_deref()),
@@ -98,6 +104,7 @@ fn dispatch_with_config(
         ),
         Command::Status => status::run(config),
         Command::Setup { .. }
+        | Command::Uninstall { .. }
         | Command::Verify { .. }
         | Command::Mcp
         | Command::Send(_)
