@@ -148,7 +148,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
   The frontmatter field is `trusted` (distinct from the mailbox config field `trust`) to reflect that the value is the result of the evaluation, not the policy itself. `trusted == "true"` is equivalent to "this email passed the trigger gate for this mailbox," so the channel manager's gating logic (FR-35/36/37) can be expressed as `if mailbox.trust == "verified" then require trusted == "true"`.
 
 ### 6.8 Verifier Service
-- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
+- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx portcheck` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
 - FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing `aimx` clients to test outbound port 25 connectivity via EHLO handshake. _Note: outbound check now performs EHLO handshake directly from the client, not via `/reach`._
 - FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
@@ -175,14 +175,14 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.9 CLI Commands
 - FR-41: `aimx setup [domain]` — interactive setup wizard. When domain is omitted, prompt interactively for domain and confirm DNS access.
 - FR-41b: ~~Pre-seed OpenSMTPD debconf answers.~~ _Removed: OpenSMTPD replaced by embedded SMTP server. Setup now generates a systemd/OpenRC service file for `aimx serve`._
-- FR-42: ~~`aimx preflight` — run port 25 reachability checks (outbound and inbound) without installing.~~ _Removed: preflight functionality merged into `aimx verify`._
+- FR-42: ~~`aimx preflight` — run port 25 reachability checks (outbound and inbound) without installing.~~ _Removed: preflight functionality merged into `aimx portcheck`._
 - FR-42b: `aimx serve` — start the embedded SMTP listener daemon. Options: `--bind` (default `0.0.0.0:25`), `--tls-cert`, `--tls-key`. Runs until SIGTERM/SIGINT.
 - FR-43: `aimx ingest <rcpt>` — delivery command for manual/pipe usage (reads raw email from stdin). Also called in-process by `aimx serve`.
 - FR-44: `aimx send` — compose, sign, and send email.
 - FR-45: `aimx mcp` — start MCP server in stdio mode.
 - FR-46: `aimx mailbox create|list|delete <name>` — mailbox management.
 - FR-47: `aimx status` — show server status, mailbox counts, recent activity.
-- FR-48: `aimx verify` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
+- FR-48: `aimx portcheck` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
 - FR-48b: `aimx agent-setup <agent> [--list] [--force] [--print]` — install per-agent plugin/skill/recipe (see §6.10). Runs as the current user.
 
 ## 7. Non-Functional Requirements
@@ -308,7 +308,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | M5: Inbound Trust | Gate triggers on sender verification | DKIM/SPF verification during ingest, per-mailbox trust policy, trusted_senders allowlist |
 | M6: Setup Wizard | One-command setup | `aimx setup`, preflight checks, service file generation, DNS guidance, verification |
 | M7: Verifier Service | Hosted verification endpoint | `check.aimx.email` probe + reach endpoints, self-hostable |
-| M8: Polish | CLI completeness and docs | `aimx status`, `aimx verify`, README, usage docs |
+| M8: Polish | CLI completeness and docs | `aimx status`, `aimx portcheck`, README, usage docs |
 | M9: Embedded SMTP | Replace OpenSMTPD with built-in SMTP | `aimx serve` daemon, hand-rolled tokio SMTP receiver, lettre outbound, systemd/OpenRC service |
 
 ## 10. Risks and Mitigations
