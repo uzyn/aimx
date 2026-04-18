@@ -1,21 +1,18 @@
 //! Daemon-side handlers for `AIMX/1` state-mutation verbs.
 //!
-//! Sprint 45 introduces `MARK-READ` and `MARK-UNREAD`. Both rewrite the
-//! target email's TOML frontmatter in place so the `read` field persists
-//! across restarts. Files on disk are owned by `root:root 0644` — writable
-//! only by the daemon, which runs as root — so the MCP server (running as
-//! the invoking non-root user) routes through these verbs instead of
+//! `MARK-READ` and `MARK-UNREAD` rewrite the target email's TOML
+//! frontmatter in place so the `read` field persists across restarts.
+//! Files on disk are owned by `root:root 0644` — writable only by the
+//! daemon, which runs as root — so the MCP server (running as the
+//! invoking non-root user) routes through these verbs instead of
 //! touching the files directly.
 //!
-//! # Concurrency model (unified in Sprint 47 / S47-4)
+//! # Concurrency model
 //!
 //! MARK-*, inbound ingest, and MAILBOX-* all acquire the **same**
 //! per-mailbox `tokio::sync::Mutex<()>` from the shared
 //! [`crate::mailbox_locks::MailboxLocks`] map before touching any file
-//! under that mailbox's tree. The shared lock replaces the pre-Sprint-47
-//! split regime (ingest's process-wide `std::sync::Mutex` +
-//! state_handler's own per-mailbox `tokio::sync::RwLock` map) whose
-//! safety relied on the two paths writing disjoint filenames.
+//! under that mailbox's tree.
 //!
 //! Lock hierarchy (see [`crate::mailbox_locks`] for the full rationale):
 //!
@@ -36,9 +33,9 @@ use crate::mailbox_locks::MailboxLocks;
 use crate::mcp::resolve_email_path;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
-/// Per-connection shared state for the MARK verbs (and the Sprint 46
-/// MAILBOX-CRUD verbs, which share the per-mailbox lock map so their
-/// config.toml rewrite does not race with an in-flight MARK).
+/// Per-connection shared state for the MARK verbs (and the MAILBOX-CRUD
+/// verbs, which share the per-mailbox lock map so their config.toml
+/// rewrite does not race with an in-flight MARK).
 pub struct StateContext {
     /// Data directory root — `<data_dir>/inbox/<mailbox>/<id>.md` etc.
     ///
@@ -120,16 +117,16 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 
 /// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the shared
 /// per-mailbox write lock (see [`crate::mailbox_locks`]) for the full
-/// read → rewrite critical section. Sprint 47 unified this lock with the
-/// inbound-ingest writer so MARK and ingest now serialize against each
+/// read → rewrite critical section. The lock is shared with the
+/// inbound-ingest writer so MARK and ingest serialize against each
 /// other — not just against other MARK calls.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
     }
 
-    // Sprint 46: mailbox existence is resolved live through the handle so
-    // a freshly-created mailbox is immediately target-able from MARK.
+    // Mailbox existence is resolved live through the handle so a
+    // freshly-created mailbox is immediately target-able from MARK.
     if !ctx
         .config_handle
         .load()

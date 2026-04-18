@@ -1,11 +1,10 @@
 //! Daemon-side outbound SMTP transport.
 //!
-//! As of Sprint 35, `aimx send` no longer signs or delivers mail — it opens
+//! `aimx send` does not sign or deliver mail itself — it opens
 //! `/run/aimx/send.sock` and hands a composed RFC 5322 message to `aimx serve`.
-//! The signing + direct-SMTP delivery code that used to live in
-//! `src/send.rs` now lives here, behind the [`MailTransport`] trait so the
-//! send handler (`src/send_handler.rs`) can be unit-tested without touching
-//! the network.
+//! Signing and direct-SMTP delivery live here, behind the [`MailTransport`]
+//! trait so the send handler (`src/send_handler.rs`) can be unit-tested
+//! without touching the network.
 
 /// Typed transport error surface.
 ///
@@ -294,8 +293,8 @@ fn classify_lettre_error(host: &str, e: &lettre::transport::smtp::Error) -> Tran
 /// Test-only transport that writes every outbound message to a file and
 /// returns a canned success. Enabled by the `AIMX_TEST_MAIL_DROP` env var —
 /// when set, `aimx serve` swaps `LettreTransport` for `FileDropTransport`
-/// pointing at the given path. Used by the Sprint 35 end-to-end test
-/// (which cannot reach real MX inside CI).
+/// pointing at the given path. Used by the end-to-end send test (which
+/// cannot reach real MX inside CI).
 pub struct FileDropTransport {
     path: std::path::PathBuf,
 }

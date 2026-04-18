@@ -53,9 +53,9 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' already exists").into());
     }
 
-    // Sprint 36: a mailbox lives in both `inbox/<name>/` and
-    // `sent/<name>/`. Create them atomically — if the second one fails,
-    // clean up the first so we never leave half a mailbox on disk.
+    // A mailbox lives in both `inbox/<name>/` and `sent/<name>/`. Create
+    // them atomically — if the second one fails, clean up the first so we
+    // never leave half a mailbox on disk.
     let inbox = config.inbox_dir(name);
     std::fs::create_dir_all(&inbox)?;
 
@@ -95,12 +95,12 @@ pub fn list_mailboxes(config: &Config) -> Vec<(String, usize, usize)> {
     result
 }
 
-/// Sprint 36: union of (a) mailboxes registered in `config.mailboxes` and
-/// (b) directories under `<data_dir>/inbox/`. Operators who restore an
-/// inbox dir out-of-band, or unregister a mailbox while keeping its
-/// messages on disk, still see the directory listed (the CLI/MCP can
-/// surface unregistered ones with a marker if needed). The catchall is
-/// always kept in config so it is always surfaced.
+/// Union of (a) mailboxes registered in `config.mailboxes` and (b)
+/// directories under `<data_dir>/inbox/`. Operators who restore an inbox
+/// dir out-of-band, or unregister a mailbox while keeping its messages
+/// on disk, still see the directory listed (the CLI/MCP can surface
+/// unregistered ones with a marker if needed). The catchall is always
+/// kept in config so it is always surfaced.
 pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
     use std::collections::BTreeSet;
 
@@ -136,7 +136,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
-    // Sprint 36: remove both inbox and sent directories.
+    // Remove both inbox and sent directories.
     let inbox = config.inbox_dir(name);
     if inbox.exists() {
         std::fs::remove_dir_all(&inbox)?;
@@ -180,11 +180,11 @@ pub fn count_messages(dir: &Path) -> usize {
 }
 
 fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    // Sprint 46: try the UDS path first so the daemon hot-swaps its
-    // in-memory Config. On socket-missing (daemon stopped, fresh
-    // install), fall back to direct on-disk edit + the Sprint 44
-    // restart-hint banner. When UDS succeeds we suppress the hint — the
-    // daemon already picked up the change.
+    // Try the UDS path first so the daemon hot-swaps its in-memory
+    // Config. On socket-missing (daemon stopped, fresh install), fall
+    // back to direct on-disk edit + the restart-hint banner. When UDS
+    // succeeds we suppress the hint — the daemon already picked up the
+    // change.
     match crate::mcp::submit_mailbox_crud_via_daemon(name, true) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' created.")));
@@ -248,11 +248,11 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
     }
 
-    // Sprint 46: prefer the UDS path so the daemon hot-swaps Config. The
-    // daemon refuses to delete a non-empty mailbox (ERR NONEMPTY); we
-    // surface that error verbatim rather than falling back to the
-    // direct-edit path, because "daemon says no" is not a socket-missing
-    // condition. Fall back to direct edit only when the socket is absent.
+    // Prefer the UDS path so the daemon hot-swaps Config. The daemon
+    // refuses to delete a non-empty mailbox (ERR NONEMPTY); we surface
+    // that error verbatim rather than falling back to the direct-edit
+    // path, because "daemon says no" is not a socket-missing condition.
+    // Fall back to direct edit only when the socket is absent.
     match crate::mcp::submit_mailbox_crud_via_daemon(name, false) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
@@ -307,14 +307,14 @@ pub(crate) fn restart_hint_lines(init: &crate::serve::service::InitSystem) -> Ve
 
 /// Print the service-restart hint after a `mailbox create` / `delete`.
 ///
-/// S44-4: `aimx serve` loads `Config` once at startup (`src/serve.rs`),
-/// so a fresh `[mailboxes.<name>]` entry in `config.toml` doesn't reach the
-/// running daemon until it restarts. Without this hint an operator who
-/// creates a new mailbox will see inbound mail silently route to
-/// `catchall` until they learn to restart the service. Sprint 46 will
-/// remove the need by routing mailbox CRUD through the daemon over UDS;
-/// until then the hint is the tier-1 fix for finding #1 from the
-/// 2026-04-17 manual test run.
+/// `aimx serve` keeps a swappable `Config` handle: the daemon UDS path
+/// (the preferred path) hot-swaps `Config` so the running daemon picks
+/// up the new mailbox without a restart. This direct-edit path runs only
+/// when the daemon is unreachable (stopped, fresh install) — in that
+/// case the on-disk `[mailboxes.<name>]` entry is in place but the
+/// daemon will not see it until it starts (or restarts), so we print
+/// this hint to prevent inbound mail from silently routing to
+/// `catchall`.
 fn print_restart_hint() {
     let init = crate::serve::service::detect_init_system();
     for line in restart_hint_lines(&init) {
@@ -401,7 +401,7 @@ mod tests {
 
         create_mailbox(&config, "alice").unwrap();
 
-        // Sprint 36: both `inbox/<name>/` and `sent/<name>/` exist.
+        // Both `inbox/<name>/` and `sent/<name>/` exist.
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
         let reloaded = Config::load_resolved().unwrap();
@@ -459,9 +459,9 @@ mod tests {
 
     #[test]
     fn list_surfaces_stray_inbox_dir_without_config_entry() {
-        // Sprint 36 review fix: `mailbox_list` must scan `inbox/*/` so an
-        // inbox directory left by a backup restore (or an unregistered
-        // mailbox) still appears in the listing.
+        // `mailbox_list` must scan `inbox/*/` so an inbox directory left
+        // by a backup restore (or an unregistered mailbox) still appears
+        // in the listing.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);

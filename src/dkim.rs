@@ -39,7 +39,7 @@ fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 
 /// Generate a 2048-bit RSA DKIM keypair at `<dkim_root>/{private,public}.key`.
 ///
-/// v0.2 permissions (Sprint 33 S33-3):
+/// v0.2 permissions:
 /// - Private key: `0o600` (root-only; `aimx serve` reads it in-process)
 /// - Public key:  `0o644` (world-readable — it's advertised via DNS)
 ///
@@ -139,9 +139,9 @@ pub fn dns_record_value(dkim_root: &Path) -> Result<String, Box<dyn std::error::
 /// Read the DKIM public key PEM at `<dkim_root>/public.key` and return its
 /// SPKI-DER base64 — i.e. the `p=` value in the DKIM1 TXT record.
 ///
-/// Extracted from [`dns_record_value`] in Sprint 44 so the daemon's startup
-/// DNS sanity check (S44-2) can compare the DNS-published `p=` against the
-/// on-disk key without duplicating the PEM-parse logic.
+/// Used by both the setup-time DNS-record advertiser and the daemon's
+/// startup DNS sanity check (which compares the DNS-published `p=`
+/// against the on-disk key) so they share one PEM-parse path.
 pub fn public_key_spki_base64(dkim_root: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let (_, public_path) = dkim_paths(dkim_root);
     let pem = std::fs::read_to_string(&public_path)
@@ -182,11 +182,10 @@ pub fn extract_dkim_p_value(record: &str) -> Option<String> {
 
 /// Load the RSA DKIM private key from `<dkim_root>/private.key`.
 ///
-/// v0.2 (Sprint 33 S33-3) tightened the private key to `0o600`. When a
-/// non-root process hits `PermissionDenied`, the error message steers
-/// the caller back to `aimx send` (which in Sprint 34 delegates to the
-/// `aimx serve` UDS socket for DKIM signing) rather than suggesting a
-/// permissions hack.
+/// The private key is `0o600` (root-only). When a non-root process hits
+/// `PermissionDenied`, the error message steers the caller back to
+/// `aimx send` (which delegates to the `aimx serve` UDS socket for DKIM
+/// signing) rather than suggesting a permissions hack.
 pub fn load_private_key(dkim_root: &Path) -> Result<RsaPrivateKey, Box<dyn std::error::Error>> {
     let (private_path, _) = dkim_paths(dkim_root);
     let pem = std::fs::read_to_string(&private_path).map_err(|e| {
@@ -556,9 +555,8 @@ mod tests {
         let mode = metadata.permissions().mode() & 0o777;
         assert_eq!(
             mode, 0o600,
-            "v0.2: DKIM private key must be root-only (0o600) — \
-             Sprint 33 reverses the 0o644 relaxation from Sprint 25 \
-             because signing moves inside the `aimx serve` daemon."
+            "v0.2: DKIM private key must be root-only (0o600) because \
+             signing happens inside the `aimx serve` daemon."
         );
     }
 

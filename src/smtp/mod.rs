@@ -21,10 +21,10 @@ pub const DEFAULT_MAX_CONNECTIONS: usize = 100;
 pub const DEFAULT_MAX_COMMANDS_BEFORE_DATA: usize = 50;
 
 pub struct SmtpServer {
-    /// Sprint 46: the daemon's in-memory `Config` is now live-swappable.
-    /// Each inbound SMTP session resolves routing against the current
-    /// snapshot via `config_handle.load()`, so a `MAILBOX-CREATE` over UDS
-    /// is visible on the next RCPT TO without a restart.
+    /// The daemon's in-memory `Config` is live-swappable. Each inbound
+    /// SMTP session resolves routing against the current snapshot via
+    /// `config_handle.load()`, so a `MAILBOX-CREATE` over UDS is visible
+    /// on the next RCPT TO without a restart.
     config_handle: ConfigHandle,
     tls_acceptor: Option<Arc<tokio_rustls::TlsAcceptor>>,
     max_message_size: usize,
@@ -32,12 +32,11 @@ pub struct SmtpServer {
     total_timeout: Duration,
     max_connections: usize,
     max_commands_before_data: usize,
-    /// Sprint 47 (S47-4): shared with `StateContext` and `MailboxContext`
-    /// so inbound ingest, MARK-*, and MAILBOX-* all serialize on the
-    /// same per-mailbox `tokio::sync::Mutex<()>`. Defaults to a
-    /// freshly-constructed map for tests that only exercise the SMTP
-    /// path; `aimx serve` calls `with_mailbox_locks` to inject the
-    /// daemon-wide map.
+    /// Shared with `StateContext` and `MailboxContext` so inbound ingest,
+    /// MARK-*, and MAILBOX-* all serialize on the same per-mailbox
+    /// `tokio::sync::Mutex<()>`. Defaults to a freshly-constructed map
+    /// for tests that only exercise the SMTP path; `aimx serve` calls
+    /// `with_mailbox_locks` to inject the daemon-wide map.
     mailbox_locks: Arc<MailboxLocks>,
 }
 
@@ -114,10 +113,9 @@ impl SmtpServer {
         mut shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let semaphore = Arc::new(Semaphore::new(self.max_connections));
-        // Sprint 46: `hostname` is derived from the live handle and
-        // refreshed per-accept so if the operator ever hot-swaps the domain
-        // (not supported in v0.2, but the plumbing is cheap) we pick it up.
-        // `self.config_handle.load().domain` was the previous one-shot read.
+        // `hostname` is derived from the live handle and refreshed
+        // per-accept so if the operator ever hot-swaps the domain (not
+        // supported in v0.2, but the plumbing is cheap) we pick it up.
 
         loop {
             tokio::select! {

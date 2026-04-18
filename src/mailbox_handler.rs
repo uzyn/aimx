@@ -1,12 +1,11 @@
 //! Daemon-side handlers for the `MAILBOX-CREATE` and `MAILBOX-DELETE`
 //! verbs of the `AIMX/1` UDS protocol.
 //!
-//! Sprint 46: `aimx mailbox create` / `delete` routed through the daemon
-//! over UDS means the in-memory `Config` is hot-swapped under a
-//! `RwLock<Arc<Config>>` whenever `config.toml` on disk changes, so
-//! inbound mail to a just-created mailbox routes correctly on the very
-//! next SMTP session. No restart, no "silent fall through to catchall"
-//! surprise.
+//! `aimx mailbox create` / `delete` route through the daemon over UDS so
+//! the in-memory `Config` is hot-swapped under a `RwLock<Arc<Config>>`
+//! whenever `config.toml` on disk changes. Inbound mail to a just-created
+//! mailbox routes correctly on the very next SMTP session — no restart,
+//! no "silent fall through to catchall" surprise.
 //!
 //! Correctness model:
 //!
@@ -26,15 +25,15 @@
 //!
 //! Locking: acquired in the order the
 //! [`crate::mailbox_locks`] module documents. The **outer** per-mailbox
-//! `tokio::sync::Mutex<()>` (shared with inbound ingest and MARK-* as of
-//! Sprint 47) is taken for the duration of the write so no other writer
-//! on the same mailbox can see the file system half-created /
-//! half-deleted. The **inner** process-wide [`CONFIG_WRITE_LOCK`]
-//! serializes the `load → modify → write → store` critical section
-//! across *all* mailbox names — without it, two concurrent
-//! `MAILBOX-CREATE alice` + `MAILBOX-CREATE bob` requests hold disjoint
-//! per-mailbox locks and can interleave their loads + writes, clobbering
-//! one stanza on disk and in memory. Always outer → inner.
+//! `tokio::sync::Mutex<()>` (shared with inbound ingest and MARK-*) is
+//! taken for the duration of the write so no other writer on the same
+//! mailbox can see the file system half-created / half-deleted. The
+//! **inner** process-wide [`CONFIG_WRITE_LOCK`] serializes the
+//! `load → modify → write → store` critical section across *all* mailbox
+//! names — without it, two concurrent `MAILBOX-CREATE alice` +
+//! `MAILBOX-CREATE bob` requests hold disjoint per-mailbox locks and can
+//! interleave their loads + writes, clobbering one stanza on disk and in
+//! memory. Always outer → inner.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
