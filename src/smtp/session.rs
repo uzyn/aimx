@@ -26,9 +26,9 @@ enum CommandLoopExit {
 }
 
 pub struct SessionParams {
-    /// Sprint 46: the SMTP session resolves routing against whatever the
-    /// handle currently holds, so a MAILBOX-CREATE that lands between EHLO
-    /// and DATA is honoured by the same transaction.
+    /// The SMTP session resolves routing against whatever the handle
+    /// currently holds, so a MAILBOX-CREATE that lands between EHLO and
+    /// DATA is honoured by the same transaction.
     pub config_handle: ConfigHandle,
     pub tls_acceptor: Option<Arc<TlsAcceptor>>,
     pub hostname: String,
@@ -37,9 +37,9 @@ pub struct SessionParams {
     pub idle_timeout: Duration,
     pub total_timeout: Duration,
     pub max_commands_before_data: usize,
-    /// Sprint 47 (S47-4): shared per-mailbox write-lock map. The SMTP
-    /// session passes it into `ingest_email` so inbound writes serialize
-    /// against the MARK-* and MAILBOX-* paths that hold the same lock.
+    /// Shared per-mailbox write-lock map. The SMTP session passes it
+    /// into `ingest_email` so inbound writes serialize against the
+    /// MARK-* and MAILBOX-* paths that hold the same lock.
     pub mailbox_locks: Arc<MailboxLocks>,
 }
 
@@ -490,10 +490,10 @@ impl SmtpSession {
         data: &[u8],
         session_state: &mut SessionState,
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Sprint 46: snapshot the current Config at message-delivery time
-        // so each RCPT routes against the freshest mailbox table. The
-        // snapshot is stable for the duration of this message's ingest —
-        // within a single DATA payload every RCPT uses the same view.
+        // Snapshot the current Config at message-delivery time so each
+        // RCPT routes against the freshest mailbox table. The snapshot is
+        // stable for the duration of this message's ingest — within a
+        // single DATA payload every RCPT uses the same view.
         let config = self.params.config_handle.load();
         // One allocation shared across all recipients via refcount. For large
         // DATA payloads (up to message_max) with many RCPT TOs, this avoids

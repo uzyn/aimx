@@ -18,22 +18,22 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
     // Manual stdin path: no SMTP session, so received_from_ip is the
     // unspecified sentinel (0.0.0.0) and there is no envelope MAIL FROM.
     let sentinel_ip: IpAddr = "0.0.0.0".parse().unwrap();
-    // Sprint 47: the manual stdin caller owns a fresh lock map — it's a
-    // short-lived process with a single ingest so contention isn't
-    // possible. The daemon path shares its map across all writers.
+    // The manual stdin caller owns a fresh lock map — it's a short-lived
+    // process with a single ingest so contention isn't possible. The
+    // daemon path shares its map across all writers.
     let locks = Arc::new(MailboxLocks::new());
     ingest_email(&config, &locks, rcpt, &raw, sentinel_ip, None)
 }
 
 /// Inbound ingest entry point.
 ///
-/// Sprint 47 (S47-4) unified the inbound write path with the MARK-* /
-/// MAILBOX-* write paths under a single per-mailbox
-/// `tokio::sync::Mutex<()>` from [`MailboxLocks`]. The critical section
-/// below is taken via `blocking_lock()` because `ingest_email` runs from
-/// a synchronous context (manual stdin path, or the SMTP session's
-/// `spawn_blocking` worker) — `blocking_lock()` is sound on a blocking
-/// thread, but never from an async runtime thread (which would panic).
+/// The inbound write path is unified with the MARK-* / MAILBOX-* write
+/// paths under a single per-mailbox `tokio::sync::Mutex<()>` from
+/// [`MailboxLocks`]. The critical section below is taken via
+/// `blocking_lock()` because `ingest_email` runs from a synchronous
+/// context (manual stdin path, or the SMTP session's `spawn_blocking`
+/// worker) — `blocking_lock()` is sound on a blocking thread, but never
+/// from an async runtime thread (which would panic).
 pub fn ingest_email(
     config: &Config,
     locks: &MailboxLocks,
@@ -827,10 +827,10 @@ mod tests {
         "0.0.0.0".parse().unwrap()
     }
 
-    /// Sprint 47 (S47-4): most tests exercise a single ingest in
-    /// isolation, so they own a fresh `MailboxLocks`. Tests that
-    /// exercise concurrent ingest + MARK on the same mailbox (see the
-    /// integration suite) pass in a shared `MailboxLocks` instead.
+    /// Most tests exercise a single ingest in isolation, so they own a
+    /// fresh `MailboxLocks`. Tests that exercise concurrent ingest + MARK
+    /// on the same mailbox (see the integration suite) pass in a shared
+    /// `MailboxLocks` instead.
     fn test_locks() -> MailboxLocks {
         MailboxLocks::new()
     }
