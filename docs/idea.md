@@ -384,7 +384,7 @@ aimx mailbox create <n>     Create a new mailbox (via UDS — daemon picks up li
 aimx mailbox list           List all mailboxes
 aimx mailbox delete <n>     Delete a mailbox
 aimx status                 Show server status, mailbox counts, recent activity
-aimx verify                 Check port 25 connectivity via the verifier service
+aimx portcheck              Check port 25 connectivity via the verifier service
 aimx dkim-keygen            Regenerate the DKIM keypair (requires root)
 aimx agent-setup <agent>    Install the aimx plugin/skill into a supported agent
 ```
