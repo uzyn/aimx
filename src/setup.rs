@@ -1015,12 +1015,17 @@ Alternatively, just reply to an email from {domain} — Gmail will learn it's no
     )
 }
 
+/// Finalize the on-disk install: ensure `data_dir` exists, create or
+/// update `config.toml`, and generate the DKIM keypair if missing.
+///
+/// `trust_defaults` is honoured only on **fresh installs**. When `config.toml`
+/// already exists the existing top-level `trust` / `trusted_senders` are
+/// preserved, and `trust_defaults` is ignored — pass `None` in that case.
 pub fn finalize_setup(
     data_dir: &Path,
     domain: &str,
     dkim_selector: &str,
-    default_trust: &str,
-    default_trusted_senders: &[String],
+    trust_defaults: Option<(String, Vec<String>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
     install_config_dir()?;
@@ -1056,6 +1061,8 @@ pub fn finalize_setup(
         }
         cfg
     } else {
+        let (default_trust, default_trusted_senders) =
+            trust_defaults.unwrap_or_else(|| ("none".to_string(), vec![]));
         let mut mailboxes = HashMap::new();
         mailboxes.insert(
             "catchall".to_string(),
@@ -1070,8 +1077,8 @@ pub fn finalize_setup(
             domain: domain.to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: dkim_selector.to_string(),
-            trust: default_trust.to_string(),
-            trusted_senders: default_trusted_senders.to_vec(),
+            trust: default_trust,
+            trusted_senders: default_trusted_senders,
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1382,27 +1389,20 @@ pub fn run_setup(
     }
 
     // Prompt for the default trust policy only on fresh installs. On
-    // re-entry the existing top-level values in config.toml are preserved —
-    // `finalize_setup` ignores the defaults passed in when a config already
-    // exists.
-    let (default_trust, default_trusted_senders) = if config_path.exists() {
-        ("none".to_string(), vec![])
+    // re-entry, pass `None` so `finalize_setup` preserves the existing
+    // top-level values in config.toml.
+    let trust_defaults = if config_path.exists() {
+        None
     } else {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
-        prompt_default_trust(&mut reader)?
+        Some(prompt_default_trust(&mut reader)?)
     };
 
     // Step 4: Write config.toml + DKIM keys. Idempotent on re-entry (handles
     // domain changes). Must happen before the aimx.service install at the end,
     // because the daemon refuses to start without a loadable config and DKIM key.
-    finalize_setup(
-        data_dir,
-        &domain,
-        &dkim_selector,
-        &default_trust,
-        &default_trusted_senders,
-    )?;
+    finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
     // Step 5: Port 25 preflight — confirm the VPS allows SMTP traffic before
     // the user spends time setting up DNS. On a fresh install aimx.service is
@@ -2483,7 +2483,7 @@ mod tests {
     fn config_dir_exists_after_finalize() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "mode.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "mode.example.com", "dkim", None).unwrap();
 
         // Config file resolved via AIMX_CONFIG_DIR lives inside tmp.
         let cfg_path = crate::config::config_path();
@@ -2494,7 +2494,7 @@ mod tests {
     fn finalize_creates_data_dir_and_config() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         assert!(crate::config::config_path().exists());
         assert!(tmp.path().join("catchall").exists());
@@ -2511,11 +2511,11 @@ mod tests {
     fn finalize_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let key1 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
@@ -2529,12 +2529,12 @@ mod tests {
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
@@ -2545,9 +2545,9 @@ mod tests {
     fn finalize_updates_domain_if_changed() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "old.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "old.example.com", "dkim", None).unwrap();
 
-        finalize_setup(tmp.path(), "new.example.com", "dkim", "none", &[]).unwrap();
+        finalize_setup(tmp.path(), "new.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "new.example.com");
@@ -2839,8 +2839,7 @@ mod tests {
             tmp.path(),
             "trust.example.com",
             "dkim",
-            "verified",
-            &["*@company.com".to_string()],
+            Some(("verified".to_string(), vec!["*@company.com".to_string()])),
         )
         .unwrap();
 
@@ -2863,16 +2862,28 @@ mod tests {
             tmp.path(),
             "trust.example.com",
             "dkim",
-            "verified",
-            &["*@company.com".to_string()],
+            Some(("verified".to_string(), vec!["*@company.com".to_string()])),
         )
         .unwrap();
-        // Re-entry claims `none` — the on-disk value must survive.
-        finalize_setup(tmp.path(), "trust.example.com", "dkim", "none", &[]).unwrap();
+        // Re-entry passes None — the on-disk value must survive regardless.
+        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
 
         let on_disk = Config::load(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "verified");
         assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
+    }
+
+    #[test]
+    fn finalize_setup_none_defaults_produce_trust_none() {
+        // When the operator omits the prompt (e.g. non-interactive path or
+        // tests), `None` should behave identically to `Some((\"none\", []))`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "none");
+        assert!(on_disk.trusted_senders.is_empty());
     }
 
     #[test]

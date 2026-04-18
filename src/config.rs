@@ -46,14 +46,14 @@ pub struct Config {
     /// Default trust policy applied to every mailbox that does not set
     /// its own `trust`. Allowed values: `"none"` (default) or `"verified"`.
     /// A per-mailbox value fully replaces this default for that mailbox.
-    #[serde(default = "default_trust")]
+    #[serde(default = "default_trust", skip_serializing_if = "is_default_trust")]
     pub trust: String,
 
     /// Default sender allowlist applied to every mailbox that does not
     /// set its own `trusted_senders`. Glob patterns matched against the
     /// lowercased `From:` address. A per-mailbox value fully replaces this
     /// list (no merging).
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_senders: Vec<String>,
 
     #[serde(default)]
@@ -109,6 +109,10 @@ fn default_trust() -> String {
     "none".to_string()
 }
 
+fn is_default_trust(s: &str) -> bool {
+    s == "none"
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct OnReceiveRule {
     #[serde(rename = "type")]
@@ -135,6 +139,31 @@ fn default_dkim_selector() -> String {
     "dkim".to_string()
 }
 
+/// Allowed values for `Config::trust` and per-mailbox `MailboxConfig::trust`.
+/// Validated at config load time (`Config::load`) so typos fail fast with a
+/// clear error rather than silently fail-closed at runtime via
+/// [`crate::trust::evaluate_trust`] / [`crate::channel::should_execute_triggers`].
+pub const VALID_TRUST_VALUES: &[&str] = &["none", "verified"];
+
+fn validate_trust_values(config: &Config) -> Result<(), String> {
+    if !VALID_TRUST_VALUES.contains(&config.trust.as_str()) {
+        return Err(format!(
+            "invalid top-level trust value '{}': expected one of {:?}",
+            config.trust, VALID_TRUST_VALUES
+        ));
+    }
+    for (name, mb) in &config.mailboxes {
+        if let Some(t) = mb.trust.as_deref()
+            && !VALID_TRUST_VALUES.contains(&t)
+        {
+            return Err(format!(
+                "invalid trust value '{t}' on mailbox '{name}': expected one of {VALID_TRUST_VALUES:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path).map_err(|e| {
@@ -154,6 +183,7 @@ impl Config {
         // them. Pre-launch hard break; no compat shim.
         crate::channel::validate_on_receive_commands(&config.mailboxes)
             .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+        validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         Ok(config)
     }
 
@@ -354,6 +384,83 @@ from = "*@gmail.com"
 subject = "urgent"
 has_attachment = true
 "#
+    }
+
+    #[test]
+    fn load_rejects_invalid_global_trust_value() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+trust = "verfied"
+
+[mailboxes.catchall]
+address = "*@test.com"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid top-level trust value 'verfied'"),
+            "error should name the offender: {err}"
+        );
+        assert!(
+            err.contains("\"none\"") && err.contains("\"verified\""),
+            "error should list allowed values: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_invalid_mailbox_trust_value() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+trust = "strict"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid trust value 'strict'"),
+            "error should name the offender: {err}"
+        );
+        assert!(
+            err.contains("support"),
+            "error should name the mailbox: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_valid_trust_values() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.catchall]
+address = "*@test.com"
+
+[mailboxes.public]
+address = "hello@test.com"
+trust = "none"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.trust, "verified");
+        assert_eq!(cfg.mailboxes["public"].trust.as_deref(), Some("none"));
     }
 
     #[test]
@@ -604,6 +711,33 @@ trusted_senders = []
         let config: Config = toml::from_str(toml_str).unwrap();
         let sealed = &config.mailboxes["sealed"];
         assert!(sealed.effective_trusted_senders(&config).is_empty());
+    }
+
+    #[test]
+    fn save_omits_default_top_level_trust_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: PathBuf::from("/tmp/x"),
+            dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes: HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        config.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("trust = "),
+            "default trust should not serialize: {on_disk}"
+        );
+        assert!(
+            !on_disk.contains("trusted_senders"),
+            "default trusted_senders should not serialize: {on_disk}"
+        );
     }
 
     #[test]
