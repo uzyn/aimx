@@ -769,8 +769,13 @@ fn mcp_email_list_nonexistent_mailbox_error() {
     client.shutdown();
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_email_mark_read_unread() {
+    // Sprint 45: MCP's email_mark_read / email_mark_unread tools route
+    // through `aimx serve` over UDS so they work without write access to
+    // the root-owned mailbox files. The test spawns the daemon first and
+    // points both the daemon and the MCP client at the same runtime dir.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -783,7 +788,34 @@ fn mcp_email_mark_read_unread() {
         false,
     );
 
-    let mut client = McpClient::spawn(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    let runtime = tmp.path().join("run");
+    let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx mcp");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut client = McpClient {
+        child,
+        stdin,
+        reader: BufReader::new(stdout),
+        id: 0,
+    };
     client.initialize();
 
     let resp = client.call_tool(
@@ -791,7 +823,10 @@ fn mcp_email_mark_read_unread() {
         serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
     );
     let text = get_tool_text(&resp);
-    assert!(text.contains("marked as read"));
+    assert!(
+        text.contains("marked as read"),
+        "expected 'marked as read' in response; got: {text}"
+    );
 
     let content =
         std::fs::read_to_string(inbox(tmp.path(), "alice").join("2025-06-01-001.md")).unwrap();
@@ -802,11 +837,74 @@ fn mcp_email_mark_read_unread() {
         serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
     );
     let text = get_tool_text(&resp);
-    assert!(text.contains("marked as unread"));
+    assert!(
+        text.contains("marked as unread"),
+        "expected 'marked as unread' in response; got: {text}"
+    );
 
     let content =
         std::fs::read_to_string(inbox(tmp.path(), "alice").join("2025-06-01-001.md")).unwrap();
     assert!(content.contains("read = false"));
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// Sprint 45: when the daemon is not running, email_mark_read returns a
+/// helpful error pointing the operator at `systemctl start aimx`.
+#[cfg(unix)]
+#[test]
+fn mcp_email_mark_without_daemon_reports_missing_socket() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(
+        &alice_dir,
+        "2025-06-01-001",
+        "sender@example.com",
+        "Hello",
+        false,
+    );
+
+    // Point AIMX_RUNTIME_DIR at an empty dir — the UDS socket will not exist.
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
+
+    let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx mcp");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut client = McpClient {
+        child,
+        stdin,
+        reader: BufReader::new(stdout),
+        id: 0,
+    };
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_mark_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "expected a tool error when daemon absent, got: {resp:?}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("aimx daemon not running"),
+        "expected daemon-not-running hint, got: {text}"
+    );
 
     client.shutdown();
 }
@@ -2046,6 +2144,9 @@ fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
     // configured primary domain (`agent.example.com`). This must be
     // rejected with `ERR DOMAIN` before any MX lookup happens, proving
     // both the wire parser and the handler wiring end-to-end.
+    //
+    // Sprint 45: the `From-Mailbox:` header is gone — the daemon parses
+    // `From:` out of the body and resolves the mailbox itself.
     let body = b"From: alice@not-the-domain.example\r\n\
                  To: user@gmail.com\r\n\
                  Subject: Hi\r\n\
@@ -2053,10 +2154,7 @@ fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
                  Message-ID: <integ-abc@not-the-domain.example>\r\n\
                  \r\n\
                  hello\r\n";
-    let header = format!(
-        "AIMX/1 SEND\nFrom-Mailbox: alice\nContent-Length: {}\n\n",
-        body.len()
-    );
+    let header = format!("AIMX/1 SEND\nContent-Length: {}\n\n", body.len());
 
     let mut client = UnixStream::connect(&sock).expect("connect UDS");
     client.write_all(header.as_bytes()).unwrap();
@@ -2432,4 +2530,169 @@ fn send_without_daemon_reports_missing_socket() {
         stderr_out.contains("aimx daemon not running"),
         "stderr must carry the daemon-not-running message; got: {stderr_out}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 45 — MCP write ops via daemon.
+//
+// `email_mark_read` / `email_mark_unread` route through `aimx serve` over
+// the UDS. These tests spawn the daemon + MCP as sibling subprocesses and
+// exercise concurrency: an inbound SMTP delivery racing an MCP MARK-READ
+// call on the same mailbox must leave both files intact.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn mcp_mark_read_concurrent_with_inbound_ingest() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Pre-seed one email so MARK-READ has a target.
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(
+        &alice_dir,
+        "2025-06-01-001",
+        "sender@example.com",
+        "Hello",
+        false,
+    );
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let runtime = tmp.path().join("run");
+    let sock = runtime.join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Kick off an inbound SMTP transaction in parallel with the MARK-READ.
+    let smtp_handle = std::thread::spawn(move || {
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        let mut stream = TcpStream::connect(format!("127.0.0.1:{port}")).unwrap();
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+            .unwrap();
+
+        let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap(); // 220 greeting
+
+        let send = |stream: &mut TcpStream, s: &str| {
+            stream.write_all(s.as_bytes()).unwrap();
+        };
+        let readl = |reader: &mut std::io::BufReader<TcpStream>| {
+            let mut l = String::new();
+            reader.read_line(&mut l).unwrap();
+            l
+        };
+
+        send(&mut stream, "EHLO test\r\n");
+        // Drain multi-line EHLO response.
+        loop {
+            let l = readl(&mut reader);
+            if l.len() > 3 && l.as_bytes()[3] != b'-' {
+                break;
+            }
+        }
+        send(&mut stream, "MAIL FROM:<other@example.com>\r\n");
+        readl(&mut reader);
+        send(&mut stream, "RCPT TO:<alice@agent.example.com>\r\n");
+        readl(&mut reader);
+        send(&mut stream, "DATA\r\n");
+        readl(&mut reader);
+        let msg = concat!(
+            "From: other@example.com\r\n",
+            "To: alice@agent.example.com\r\n",
+            "Subject: Concurrent ingest\r\n",
+            "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+            "Message-ID: <concurrent-ingest@example.com>\r\n",
+            "\r\n",
+            "inbound body\r\n",
+            ".\r\n",
+        );
+        send(&mut stream, msg);
+        readl(&mut reader);
+        send(&mut stream, "QUIT\r\n");
+        let _ = readl(&mut reader);
+        // Drain remaining bytes
+        let mut buf = Vec::new();
+        let _ = reader.get_mut().read_to_end(&mut buf);
+    });
+
+    // Fire the MARK-READ via MCP concurrently.
+    let mark_handle = {
+        let tmp_path = tmp.path().to_path_buf();
+        let runtime = runtime.clone();
+        std::thread::spawn(move || {
+            let mut child = StdCommand::new(aimx_binary_path())
+                .env("AIMX_CONFIG_DIR", &tmp_path)
+                .env("AIMX_RUNTIME_DIR", &runtime)
+                .arg("--data-dir")
+                .arg(&tmp_path)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("Failed to spawn aimx mcp");
+            let stdin = child.stdin.take().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let mut client = McpClient {
+                child,
+                stdin,
+                reader: BufReader::new(stdout),
+                id: 0,
+            };
+            client.initialize();
+            let resp = client.call_tool(
+                "email_mark_read",
+                serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+            );
+            let text = get_tool_text(&resp);
+            assert!(
+                text.contains("marked as read"),
+                "expected 'marked as read' in MCP response; got: {text}"
+            );
+            client.shutdown();
+        })
+    };
+
+    smtp_handle.join().unwrap();
+    mark_handle.join().unwrap();
+
+    // Verify both files exist and are internally consistent.
+    let seed_content =
+        std::fs::read_to_string(alice_dir.join("2025-06-01-001.md")).expect("seed email readable");
+    assert!(
+        seed_content.contains("read = true"),
+        "seed email should have been marked read: {seed_content}"
+    );
+    assert!(
+        seed_content.starts_with("+++"),
+        "seed email must retain valid frontmatter delimiters"
+    );
+
+    // Inbound ingest should have produced a second .md file in the same
+    // mailbox. Find it and assert its frontmatter parses cleanly.
+    let entries: Vec<_> = find_md_files(&alice_dir);
+    assert!(
+        entries.len() >= 2,
+        "expected >=2 .md files after concurrent ingest + MARK-READ, got {}",
+        entries.len()
+    );
+    for md in &entries {
+        let content = std::fs::read_to_string(md).unwrap();
+        assert!(
+            content.starts_with("+++"),
+            "every .md must retain valid frontmatter delimiters after concurrent access: {}",
+            md.display()
+        );
+        let fm = read_frontmatter(md);
+        let _ = fm.as_table().expect("frontmatter must parse to table");
+    }
+
+    stop_serve(daemon);
 }

@@ -141,7 +141,7 @@ Mark an email as read.
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
-Updates `read = true` in the email's frontmatter.
+Updates `read = true` in the email's frontmatter. The MCP server is non-root so it routes the write through `aimx serve` over the local UDS (`/run/aimx/send.sock`) rather than touching the root-owned mailbox file directly. If `aimx serve` is not running the tool returns an error hint to start the daemon.
 
 ---
 
@@ -155,7 +155,7 @@ Mark an email as unread.
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
-Updates `read = false` in the email's frontmatter.
+Updates `read = false` in the email's frontmatter. Same daemon-mediated write path as `email_mark_read` — requires a running `aimx serve`.
 
 ## Frontmatter reference
 

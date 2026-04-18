@@ -17,6 +17,7 @@ mod serve;
 mod setup;
 mod slug;
 mod smtp;
+mod state_handler;
 mod status;
 mod term;
 mod transport;
@@ -61,6 +62,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             force,
             print,
         } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
+        // Sprint 45: `aimx send` is a pure UDS client — it never reads
+        // config.toml. The daemon parses the `From:` header itself and
+        // resolves the sender mailbox against its in-memory Config.
+        Command::Send(args) => send::run(args),
         // Everything else loads Config once here and takes it by value.
         other => {
             let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
@@ -75,7 +80,6 @@ fn dispatch_with_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
-        Command::Send(args) => send::run(args, config),
         Command::Mailbox(cmd) => mailbox::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
@@ -94,6 +98,7 @@ fn dispatch_with_config(
         Command::Setup { .. }
         | Command::Verify { .. }
         | Command::Mcp
+        | Command::Send(_)
         | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
     }
 }
