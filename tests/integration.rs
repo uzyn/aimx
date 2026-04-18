@@ -148,7 +148,7 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("serve"))
-        .stdout(predicate::str::contains("verify"))
+        .stdout(predicate::str::contains("portcheck"))
         .stdout(predicate::str::contains("dkim-keygen"));
 }
 
@@ -1508,13 +1508,13 @@ fn status_help_works() {
 }
 
 #[test]
-fn verify_help_works() {
+fn portcheck_help_works() {
     Command::cargo_bin("aimx")
         .unwrap()
-        .args(["verify", "--help"])
+        .args(["portcheck", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("verify"));
+        .stdout(predicate::str::contains("port 25"));
 }
 
 #[test]
