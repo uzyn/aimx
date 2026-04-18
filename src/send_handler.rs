@@ -48,10 +48,9 @@ pub struct RegisteredMailbox {
 /// into each task. Holding the DKIM key in an `Arc` here is what lets us
 /// load it exactly once despite accepting concurrent sends.
 ///
-/// Sprint 46: the `mailboxes` / `primary_domain` fields used to be snapshot
-/// copies from `Config` taken at startup. They are now resolved live via
-/// `config_handle` so a `MAILBOX-CREATE` over UDS is immediately visible to
-/// subsequent `SEND` requests without a restart.
+/// The `mailboxes` / `primary_domain` fields are resolved live via
+/// `config_handle` so a `MAILBOX-CREATE` over UDS is immediately visible
+/// to subsequent `SEND` requests without a restart.
 pub struct SendContext {
     /// DKIM private key, loaded once at `aimx serve` startup.
     pub dkim_key: Arc<RsaPrivateKey>,
@@ -89,7 +88,7 @@ pub(crate) async fn handle_send_with_signer<F>(
 where
     F: FnOnce(&[u8], &RsaPrivateKey, &str, &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>,
 {
-    // Sprint 46: snapshot the live config at the start of the request. Any
+    // Snapshot the live config at the start of the request. Any
     // MAILBOX-CREATE/DELETE that lands after this point still runs — the
     // swap just doesn't affect the decision for *this* particular send.
     let config = ctx.config_handle.load();
@@ -127,14 +126,14 @@ where
         }
     };
 
-    // Sprint 45: daemon resolves the sender mailbox from the submitted
-    // `From:` itself — the client no longer sends `From-Mailbox:` and no
-    // longer reads `/etc/aimx/config.toml`.
+    // The daemon resolves the sender mailbox from the submitted `From:`
+    // itself — the client does not send `From-Mailbox:` and does not read
+    // `/etc/aimx/config.toml`.
     //
-    // FR-18d (tightened): the sender domain must equal the configured
-    // primary domain (case-insensitive) AND the local part must resolve to
-    // an explicitly configured non-wildcard mailbox. Catchall (`*@domain`)
-    // is inbound-routing only and never accepted as an outbound sender.
+    // FR-18d: the sender domain must equal the configured primary domain
+    // (case-insensitive) AND the local part must resolve to an explicitly
+    // configured non-wildcard mailbox. Catchall (`*@domain`) is
+    // inbound-routing only and never accepted as an outbound sender.
 
     let bare_from = match extract_bare_address(&from_header) {
         Some(addr) => addr,
@@ -206,10 +205,10 @@ where
     };
 
     // If Message-ID is absent we synthesize one ourselves rather than
-    // erroring out: the sprint's error table never listed Message-ID as a
-    // required client header, and `AIMX/1 OK <message-id>` still needs
-    // something to echo. Using the configured primary domain matches the
-    // DKIM `d=` tag and avoids leaking a recipient-side hostname.
+    // erroring out: Message-ID is not a required client header, and
+    // `AIMX/1 OK <message-id>` still needs something to echo. Using the
+    // configured primary domain matches the DKIM `d=` tag and avoids
+    // leaking a recipient-side hostname.
     let (message_id, body_bytes) = match headers.get("Message-ID") {
         Some(v) => (v.clone(), req.body.clone()),
         None => {
@@ -294,9 +293,8 @@ where
 /// Resolve the sender local part to a concrete registered mailbox name.
 /// Tries (in order): exact `address` match → mailbox name equal to the
 /// local part (for the common case where name == local). Returns `None`
-/// when nothing concrete matches. The catchall fallback (`*@domain`) from
-/// the pre-Sprint-45 handler was removed — catchall is inbound-only per
-/// FR-18d (tightened).
+/// when nothing concrete matches. There is no catchall (`*@domain`)
+/// fallback — catchall is inbound-only per FR-18d.
 fn resolve_concrete_mailbox(
     mailboxes: &HashMap<String, RegisteredMailbox>,
     bare_from: &str,

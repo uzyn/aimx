@@ -136,9 +136,8 @@ impl Config {
 
     /// Load the config and apply an optional `--data-dir` / `AIMX_DATA_DIR`
     /// override for the storage path. `config.data_dir` is the source of
-    /// truth post-Sprint 33; this helper lets the CLI flag still redirect
-    /// storage (its documented purpose) without touching the config file on
-    /// disk.
+    /// truth on disk; this helper lets the CLI flag still redirect storage
+    /// (its documented purpose) without touching the config file on disk.
     pub fn load_resolved_with_data_dir(
         data_dir_override: Option<&Path>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -151,10 +150,10 @@ impl Config {
 
     /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
     ///
-    /// Since Sprint 36 the datadir splits inbound mail into `inbox/` and
-    /// outbound sent copies into `sent/`. `mailbox_dir` remains a shorthand
-    /// for the inbox path (which is what every legacy reader cared about);
-    /// callers that want the outbound side use [`Config::sent_dir`].
+    /// The datadir splits inbound mail into `inbox/` and outbound sent
+    /// copies into `sent/`. `mailbox_dir` remains a shorthand for the
+    /// inbox path; callers that want the outbound side use
+    /// [`Config::sent_dir`].
     pub fn mailbox_dir(&self, name: &str) -> PathBuf {
         self.inbox_dir(name)
     }
@@ -166,9 +165,9 @@ impl Config {
 
     /// Path to a mailbox's sent directory (`<data_dir>/sent/<name>/`).
     ///
-    /// Sent storage is populated by `aimx serve` in Sprint 38; the directory
-    /// is still created on `mailbox create` so the layout is consistent
-    /// from day one.
+    /// Sent storage is populated by `aimx serve` on outbound delivery;
+    /// the directory is still created on `mailbox create` so the layout
+    /// is consistent from day one.
     pub fn sent_dir(&self, name: &str) -> PathBuf {
         self.data_dir.join("sent").join(name)
     }
@@ -184,10 +183,10 @@ impl Config {
 
 /// Shared, swappable handle to the daemon's in-memory `Config`.
 ///
-/// Sprint 46: `aimx serve` no longer treats `Config` as immutable. The
-/// MAILBOX-CREATE / MAILBOX-DELETE UDS verbs rewrite `config.toml` and then
-/// replace the daemon's in-memory snapshot so inbound mail routes correctly
-/// on the very next SMTP session — no restart required.
+/// `aimx serve` does not treat `Config` as immutable. The
+/// MAILBOX-CREATE / MAILBOX-DELETE UDS verbs rewrite `config.toml` and
+/// then replace the daemon's in-memory snapshot so inbound mail routes
+/// correctly on the very next SMTP session — no restart required.
 ///
 /// The concurrency model is deliberately boring: a single
 /// `RwLock<Arc<Config>>`. Readers (ingest, send handler, state handler) take

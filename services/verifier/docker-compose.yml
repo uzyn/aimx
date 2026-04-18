@@ -5,7 +5,7 @@
 # terminates TLS on 443 and reverse-proxies to 127.0.0.1:3025, injecting the
 # trusted X-AIMX-Client-IP header.
 #
-# Sprint 12 added a Layer 3 trust check that only reads the X-AIMX-Client-IP
+# The verifier enforces a Layer 3 trust check that only reads the X-AIMX-Client-IP
 # header when the TCP peer is loopback — Docker's userland proxy would present
 # peer IPs as the bridge gateway (a private IP), which the Layer 4 target guard
 # rejects. Host networking keeps both services' loopback view identical to a
@@ -24,7 +24,7 @@ services:
     #   BIND_ADDR=127.0.0.1:3025   (HTTP behind Caddy)
     #   SMTP_BIND_ADDR=0.0.0.0:25  (built-in SMTP responder)
     # Uncomment and edit to override. Do NOT expose HTTP directly to the
-    # public internet — the Sprint 12 trust model requires Caddy in front.
+    # public internet — the trust model requires Caddy in front.
     environment:
       # BIND_ADDR: "127.0.0.1:3025"
       # SMTP_BIND_ADDR: "0.0.0.0:25"

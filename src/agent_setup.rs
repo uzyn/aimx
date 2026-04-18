@@ -137,10 +137,9 @@ fn claude_code_hint(data_dir: Option<&Path>) -> String {
 fn codex_hint(data_dir: Option<&Path>) -> String {
     // Codex CLI's only MCP wiring path is `~/.codex/config.toml` under
     // `[mcp_servers.<name>]`, managed via `codex mcp add`. It does NOT
-    // auto-discover plugins under `~/.codex/plugins/` — validated
-    // against Codex CLI 0.117.0 in Sprint 33.1. We install the skill
-    // file, then print the canonical `codex mcp add` command for the
-    // user to run once.
+    // auto-discover plugins under `~/.codex/plugins/` (validated against
+    // Codex CLI 0.117.0). We install the skill file, then print the
+    // canonical `codex mcp add` command for the user to run once.
     let extra_args = match data_dir {
         Some(dd) => format!(" --data-dir {}", posix_single_quote(&dd.to_string_lossy())),
         None => String::new(),
@@ -1131,18 +1130,15 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_sprint_29_agents() {
+    fn registry_contains_codex_opencode_gemini_agents() {
         for name in ["codex", "opencode", "gemini"] {
-            assert!(
-                find_agent(name).is_some(),
-                "registry missing sprint-29 agent: {name}"
-            );
+            assert!(find_agent(name).is_some(), "registry missing agent: {name}");
         }
     }
 
     #[test]
     fn install_codex_lays_out_expected_files() {
-        // Sprint 33.1: Codex CLI does not auto-discover plugins under
+        // Codex CLI does not auto-discover plugins under
         // `~/.codex/plugins/`. Its MCP wiring lives in `~/.codex/config.toml`,
         // managed via `codex mcp add`. The installer therefore ships a flat
         // skill at `~/.codex/skills/aimx/SKILL.md` (same shape as Gemini and
@@ -1176,9 +1172,9 @@ mod tests {
 
     #[test]
     fn codex_activation_hint_includes_codex_mcp_add_command() {
-        // Regression guard for the Sprint 33.1 reshape: the hint must
-        // instruct the user to run the canonical Codex MCP registration
-        // command, not (as before) just say "restart Codex".
+        // Regression guard: the hint must instruct the user to run the
+        // canonical Codex MCP registration command, not just say
+        // "restart Codex".
         let spec = find_agent("codex").unwrap();
         let hint = (spec.activation_hint)(None);
         assert!(hint.contains("codex mcp add aimx"));
@@ -1481,9 +1477,9 @@ mod tests {
 
     #[test]
     fn assembled_codex_skill_is_header_plus_primer_byte_for_byte() {
-        // Sprint 33.1: Codex ships as a flat skill now (no plugin
-        // manifest), so the assembled file is at the package root as
-        // `SKILL.md`, not nested under `skills/aimx/`.
+        // Codex ships as a flat skill (no plugin manifest), so the
+        // assembled file is at the package root as `SKILL.md`, not nested
+        // under `skills/aimx/`.
         let source = AGENTS_DIR.get_dir("codex").unwrap();
         let files = assemble_plugin_files(source, None).unwrap();
 
@@ -1525,12 +1521,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_sprint_30_agents() {
+    fn registry_contains_goose_openclaw_agents() {
         for name in ["goose", "openclaw"] {
-            assert!(
-                find_agent(name).is_some(),
-                "registry missing sprint-30 agent: {name}"
-            );
+            assert!(find_agent(name).is_some(), "registry missing agent: {name}");
         }
     }
 
@@ -1914,7 +1907,7 @@ mod tests {
             .contents();
         let text = std::str::from_utf8(primer).expect("primer must be valid UTF-8");
         let line_count = text.lines().count();
-        // Sprint 39 target: 300–500 lines (soft cap).
+        // Target: 300–500 lines (soft cap).
         assert!(
             (300..=500).contains(&line_count),
             "main primer has {line_count} lines; target range is 300–500"

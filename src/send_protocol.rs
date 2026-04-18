@@ -40,23 +40,23 @@
 //! case-insensitive. Unknown headers are silently ignored so the protocol
 //! can be extended without breaking older clients.
 //!
-//! Sprint 45 notes:
-//! - The `From-Mailbox:` header in `SEND` was removed. The daemon now parses
-//!   the `From:` header from the submitted message body itself and resolves
-//!   the sender mailbox against its in-memory Config. This lets `aimx send`
+//! Notes on `SEND`:
+//! - There is no `From-Mailbox:` header. The daemon parses the `From:`
+//!   header from the submitted message body itself and resolves the
+//!   sender mailbox against its in-memory Config. This lets `aimx send`
 //!   run as a non-root user without needing read access to `config.toml`.
-//! - `MARK-READ` / `MARK-UNREAD` are new state-mutation verbs used by the
-//!   MCP server so `email_mark_read` / `email_mark_unread` work without the
-//!   MCP process needing write access to the root-owned mailbox files.
 //!
-//! Sprint 46 notes:
+//! Notes on state-mutation verbs:
+//! - `MARK-READ` / `MARK-UNREAD` let the MCP server invoke
+//!   `email_mark_read` / `email_mark_unread` without the MCP process
+//!   needing write access to the root-owned mailbox files.
 //! - `MAILBOX-CREATE` / `MAILBOX-DELETE` join the same codec, carrying a
-//!   single `Name:` header. The daemon side handles `config.toml`
-//!   rewrite-and-rename plus the in-memory `RwLock<Arc<Config>>` swap, which
-//!   is why `aimx mailbox create/delete` no longer require a daemon restart
-//!   for inbound routing to pick up the change. Error codes reuse the
-//!   existing set plus `VALIDATION` (name validation failures) and
-//!   `NONEMPTY` (delete refused because the mailbox still holds files).
+//!   single `Name:` header. The daemon handles `config.toml`
+//!   rewrite-and-rename plus the in-memory `RwLock<Arc<Config>>` swap,
+//!   which is why `aimx mailbox create/delete` does not require a daemon
+//!   restart for inbound routing to pick up the change. Error codes
+//!   reuse the existing set plus `VALIDATION` (name validation failures)
+//!   and `NONEMPTY` (delete refused because the mailbox still holds files).
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -69,9 +69,9 @@ pub const DEFAULT_MAX_BODY_SIZE: usize = 25 * 1024 * 1024;
 /// Keeps the parser's memory footprint bounded even on pathological input.
 const MAX_HEADER_LINE: usize = 8 * 1024;
 
-/// Decoded `AIMX/1 SEND` request. Sprint 45 removed the `From-Mailbox:`
-/// header — the daemon parses `From:` out of `body` and resolves the
-/// sender mailbox itself against its in-memory Config.
+/// Decoded `AIMX/1 SEND` request. There is no `From-Mailbox:` header —
+/// the daemon parses `From:` out of `body` and resolves the sender
+/// mailbox itself against its in-memory Config.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SendRequest {
     pub body: Vec<u8>,
@@ -150,12 +150,13 @@ pub enum ErrCode {
     /// I/O failure while performing the requested mutation (read error,
     /// write error, parse error on the persisted frontmatter).
     Io,
-    /// Input validation failure (Sprint 46): the submitted mailbox name
-    /// violated one of `validate_mailbox_name`'s rules (empty, `..`, path
-    /// separator, NUL, etc.).
+    /// Input validation failure on a `MAILBOX-CREATE` / `MAILBOX-DELETE`
+    /// request: the submitted mailbox name violated one of
+    /// `validate_mailbox_name`'s rules (empty, `..`, path separator, NUL,
+    /// etc.).
     Validation,
-    /// Delete refused because the target directory still contains files
-    /// (Sprint 46). Operator must archive / remove files first — the
+    /// `MAILBOX-DELETE` refused because the target directory still
+    /// contains files. Operator must archive / remove files first — the
     /// daemon never silently removes mail on delete.
     NonEmpty,
 }
