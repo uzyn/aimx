@@ -923,8 +923,8 @@ mod tests {
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         mailboxes.insert(
@@ -932,14 +932,16 @@ mod tests {
             MailboxConfig {
                 address: "alice@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         Config {
             domain: "test.com".to_string(),
             data_dir: tmp.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,

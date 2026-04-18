@@ -160,7 +160,7 @@ pub fn ingest_email(
     let trusted_value = config
         .mailboxes
         .get(&mailbox)
-        .map(|mb| trust::evaluate_trust(mb, &auth_results, &from))
+        .map(|mb| trust::evaluate_trust(config, mb, &auth_results, &from))
         .unwrap_or(trust::TrustedValue::None);
 
     let received_at = chrono::Utc::now().to_rfc3339();
@@ -258,7 +258,7 @@ pub fn ingest_email(
             filepath: &md_path,
             metadata: &meta,
         };
-        channel::execute_triggers(mailbox_config, &ctx);
+        channel::execute_triggers(config, mailbox_config, &ctx);
     }
 
     Ok(())
@@ -800,8 +800,8 @@ mod tests {
             MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         mailboxes.insert(
@@ -809,14 +809,16 @@ mod tests {
             MailboxConfig {
                 address: "alice@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         Config {
             domain: "test.com".to_string(),
             data_dir: tmp.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,

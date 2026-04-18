@@ -1019,6 +1019,8 @@ pub fn finalize_setup(
     data_dir: &Path,
     domain: &str,
     dkim_selector: &str,
+    default_trust: &str,
+    default_trusted_senders: &[String],
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
     install_config_dir()?;
@@ -1046,8 +1048,8 @@ pub fn finalize_setup(
                 MailboxConfig {
                     address: format!("*@{domain}"),
                     on_receive: vec![],
-                    trust: "none".to_string(),
-                    trusted_senders: vec![],
+                    trust: None,
+                    trusted_senders: None,
                 },
             );
             install_config_file(&cfg, &config_path)?;
@@ -1060,14 +1062,16 @@ pub fn finalize_setup(
             MailboxConfig {
                 address: format!("*@{domain}"),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         let cfg = Config {
             domain: domain.to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: dkim_selector.to_string(),
+            trust: default_trust.to_string(),
+            trusted_senders: default_trusted_senders.to_vec(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1195,6 +1199,56 @@ fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Err("Domain must have at least two labels (e.g. example.com)".into());
     }
     Ok(())
+}
+
+/// Interactively prompt for the global default trust policy and — if the
+/// operator picks `verified` — an optional `trusted_senders` allowlist.
+///
+/// Returns `(policy, senders)`:
+/// - policy: `"none"` (default) or `"verified"`.
+/// - senders: empty for `none`; for `verified`, parsed from a single line
+///   split on commas and whitespace.
+pub fn prompt_default_trust(
+    reader: &mut dyn BufRead,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    println!();
+    println!("Default trust policy for inbound email:");
+    println!("  none     - accept all inbound, channel triggers always fire (default)");
+    println!("  verified - channel triggers only fire when DKIM passes OR sender is allowlisted");
+    println!("Each mailbox can override this default later by setting `trust` in config.toml.");
+    print!("Trust policy [none]: ");
+    io::stdout().flush()?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mode = line.trim().to_ascii_lowercase();
+    let mode = if mode.is_empty() {
+        "none".to_string()
+    } else {
+        mode
+    };
+    if mode != "none" && mode != "verified" {
+        return Err(format!("invalid trust policy '{mode}', expected 'none' or 'verified'").into());
+    }
+
+    if mode == "none" {
+        return Ok((mode, vec![]));
+    }
+
+    print!(
+        "Trusted senders (comma- or space-separated globs, e.g. '*@company.com, boss@gmail.com'), \
+         leave blank for none: "
+    );
+    io::stdout().flush()?;
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let senders: Vec<String> = line
+        .trim()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok((mode, senders))
 }
 
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
@@ -1327,10 +1381,28 @@ pub fn run_setup(
         }
     }
 
+    // Prompt for the default trust policy only on fresh installs. On
+    // re-entry the existing top-level values in config.toml are preserved —
+    // `finalize_setup` ignores the defaults passed in when a config already
+    // exists.
+    let (default_trust, default_trusted_senders) = if config_path.exists() {
+        ("none".to_string(), vec![])
+    } else {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        prompt_default_trust(&mut reader)?
+    };
+
     // Step 4: Write config.toml + DKIM keys. Idempotent on re-entry (handles
     // domain changes). Must happen before the aimx.service install at the end,
     // because the daemon refuses to start without a loadable config and DKIM key.
-    finalize_setup(data_dir, &domain, &dkim_selector)?;
+    finalize_setup(
+        data_dir,
+        &domain,
+        &dkim_selector,
+        &default_trust,
+        &default_trusted_senders,
+    )?;
 
     // Step 5: Port 25 preflight — confirm the VPS allows SMTP traffic before
     // the user spends time setting up DNS. On a fresh install aimx.service is
@@ -2411,7 +2483,7 @@ mod tests {
     fn config_dir_exists_after_finalize() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "mode.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "mode.example.com", "dkim", "none", &[]).unwrap();
 
         // Config file resolved via AIMX_CONFIG_DIR lives inside tmp.
         let cfg_path = crate::config::config_path();
@@ -2422,7 +2494,7 @@ mod tests {
     fn finalize_creates_data_dir_and_config() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
 
         assert!(crate::config::config_path().exists());
         assert!(tmp.path().join("catchall").exists());
@@ -2439,11 +2511,11 @@ mod tests {
     fn finalize_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
 
         let key1 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
 
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
@@ -2457,12 +2529,12 @@ mod tests {
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
 
         let config = Config::load_resolved().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", "none", &[]).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
@@ -2473,9 +2545,9 @@ mod tests {
     fn finalize_updates_domain_if_changed() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "old.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "old.example.com", "dkim", "none", &[]).unwrap();
 
-        finalize_setup(tmp.path(), "new.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "new.example.com", "dkim", "none", &[]).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "new.example.com");
@@ -2694,6 +2766,114 @@ mod tests {
     }
 
     // S18.1 — Interactive domain prompt tests
+
+    #[test]
+    fn prompt_default_trust_defaults_to_none_on_enter() {
+        let input = b"\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_none_explicit() {
+        let input = b"none\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_no_senders() {
+        let input = b"verified\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_with_senders() {
+        let input = b"verified\n*@company.com, boss@gmail.com\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(
+            senders,
+            vec!["*@company.com".to_string(), "boss@gmail.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_senders_whitespace_only() {
+        let input = b"verified\n  \t \n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_is_case_insensitive() {
+        let input = b"VERIFIED\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, _) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+    }
+
+    #[test]
+    fn prompt_default_trust_rejects_unknown_policy() {
+        let input = b"strict\n";
+        let mut reader = io::Cursor::new(input);
+        let err = prompt_default_trust(&mut reader).unwrap_err().to_string();
+        assert!(err.contains("strict"), "error should name input: {err}");
+    }
+
+    #[test]
+    fn finalize_setup_writes_default_trust_on_fresh_install() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(
+            tmp.path(),
+            "trust.example.com",
+            "dkim",
+            "verified",
+            &["*@company.com".to_string()],
+        )
+        .unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "verified");
+        assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
+        // Catchall mailbox inherits; its own fields remain unset.
+        let catchall = on_disk.mailboxes.get("catchall").unwrap();
+        assert!(catchall.trust.is_none());
+        assert!(catchall.trusted_senders.is_none());
+        assert_eq!(catchall.effective_trust(&on_disk), "verified");
+    }
+
+    #[test]
+    fn finalize_setup_preserves_existing_trust_on_reentry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        // Fresh install picks `verified`.
+        finalize_setup(
+            tmp.path(),
+            "trust.example.com",
+            "dkim",
+            "verified",
+            &["*@company.com".to_string()],
+        )
+        .unwrap();
+        // Re-entry claims `none` — the on-disk value must survive.
+        finalize_setup(tmp.path(), "trust.example.com", "dkim", "none", &[]).unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "verified");
+        assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
+    }
 
     #[test]
     fn prompt_domain_accepts_valid_domain_with_confirmation() {
