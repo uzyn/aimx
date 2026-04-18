@@ -106,6 +106,16 @@ At the DNS verification step, you can:
 - Press **Enter** to re-check DNS records (useful when you've just updated DNS in another tab)
 - Press **q** to finish and verify later with `sudo aimx setup <domain>`
 
+### Uninstalling
+
+To reverse `aimx setup`, stop the daemon and remove its init-system service file:
+
+```bash
+sudo aimx uninstall
+```
+
+Pass `--yes` to skip the confirmation prompt. Uninstall is intentionally non-destructive: it leaves your config (`/etc/aimx/`) and mailbox data (`/var/lib/aimx/`) in place so a subsequent `aimx setup` reuses them. If you also want to wipe those, remove them manually with `rm -rf`.
+
 ## DNS configuration
 
 After the setup wizard displays the required DNS records, add them at your domain registrar:
