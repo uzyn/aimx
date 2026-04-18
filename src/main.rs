@@ -7,6 +7,7 @@ mod dkim;
 mod frontmatter;
 mod ingest;
 mod mailbox;
+mod mailbox_handler;
 mod mcp;
 mod mx;
 mod platform;

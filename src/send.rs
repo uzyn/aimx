@@ -270,6 +270,8 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
             "PROTOCOL" => ErrCode::Protocol,
             "NOTFOUND" => ErrCode::NotFound,
             "IO" => ErrCode::Io,
+            "VALIDATION" => ErrCode::Validation,
+            "NONEMPTY" => ErrCode::NonEmpty,
             _ => {
                 return SubmitOutcome::Malformed(format!(
                     "unknown ERR code {code_str:?} in response"

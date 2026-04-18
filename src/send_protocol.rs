@@ -24,6 +24,12 @@
 //!   Content-Length: 0\n
 //!   \n
 //!
+//! Client → Server (MAILBOX-CREATE / MAILBOX-DELETE):
+//!   AIMX/1 MAILBOX-CREATE\n
+//!   Name: <mailbox-name>\n
+//!   Content-Length: 0\n
+//!   \n
+//!
 //! Server → Client:
 //!   AIMX/1 OK [<message-id>]\n
 //! or
@@ -42,6 +48,15 @@
 //! - `MARK-READ` / `MARK-UNREAD` are new state-mutation verbs used by the
 //!   MCP server so `email_mark_read` / `email_mark_unread` work without the
 //!   MCP process needing write access to the root-owned mailbox files.
+//!
+//! Sprint 46 notes:
+//! - `MAILBOX-CREATE` / `MAILBOX-DELETE` join the same codec, carrying a
+//!   single `Name:` header. The daemon side handles `config.toml`
+//!   rewrite-and-rename plus the in-memory `RwLock<Arc<Config>>` swap, which
+//!   is why `aimx mailbox create/delete` no longer require a daemon restart
+//!   for inbound routing to pick up the change. Error codes reuse the
+//!   existing set plus `VALIDATION` (name validation failures) and
+//!   `NONEMPTY` (delete refused because the mailbox still holds files).
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -95,12 +110,24 @@ pub struct MarkRequest {
     pub read: bool,
 }
 
-/// One decoded `AIMX/1` request, tagged by verb. Extending the protocol
-/// (e.g. Sprint 46's MAILBOX-CRUD verbs) adds a new variant here.
+/// Decoded `AIMX/1 MAILBOX-CREATE` / `AIMX/1 MAILBOX-DELETE` request.
+///
+/// Both verbs share the same shape (a single `Name:` header and an empty
+/// body); the enum selection is encoded in `create` so the codec stays a
+/// single flat struct rather than two near-identical types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MailboxCrudRequest {
+    pub name: String,
+    /// `true` for `MAILBOX-CREATE`, `false` for `MAILBOX-DELETE`.
+    pub create: bool,
+}
+
+/// One decoded `AIMX/1` request, tagged by verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Send(SendRequest),
     Mark(MarkRequest),
+    MailboxCrud(MailboxCrudRequest),
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -123,6 +150,14 @@ pub enum ErrCode {
     /// I/O failure while performing the requested mutation (read error,
     /// write error, parse error on the persisted frontmatter).
     Io,
+    /// Input validation failure (Sprint 46): the submitted mailbox name
+    /// violated one of `validate_mailbox_name`'s rules (empty, `..`, path
+    /// separator, NUL, etc.).
+    Validation,
+    /// Delete refused because the target directory still contains files
+    /// (Sprint 46). Operator must archive / remove files first — the
+    /// daemon never silently removes mail on delete.
+    NonEmpty,
 }
 
 impl ErrCode {
@@ -137,6 +172,8 @@ impl ErrCode {
             ErrCode::Protocol => "PROTOCOL",
             ErrCode::NotFound => "NOTFOUND",
             ErrCode::Io => "IO",
+            ErrCode::Validation => "VALIDATION",
+            ErrCode::NonEmpty => "NONEMPTY",
         }
     }
 }
@@ -233,6 +270,12 @@ where
             .map(Request::Send),
         "MARK-READ" => parse_mark_headers(reader, true).await.map(Request::Mark),
         "MARK-UNREAD" => parse_mark_headers(reader, false).await.map(Request::Mark),
+        "MAILBOX-CREATE" => parse_mailbox_crud_headers(reader, true)
+            .await
+            .map(Request::MailboxCrud),
+        "MAILBOX-DELETE" => parse_mailbox_crud_headers(reader, false)
+            .await
+            .map(Request::MailboxCrud),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -252,6 +295,9 @@ where
         Request::Send(r) => Ok(r),
         Request::Mark(_) => Err(ParseError::Malformed(
             "expected SEND verb, got MARK-*".to_string(),
+        )),
+        Request::MailboxCrud(_) => Err(ParseError::Malformed(
+            "expected SEND verb, got MAILBOX-*".to_string(),
         )),
     }
 }
@@ -428,6 +474,76 @@ where
     })
 }
 
+async fn parse_mailbox_crud_headers<R>(
+    reader: &mut R,
+    create: bool,
+) -> Result<MailboxCrudRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut name: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let name_norm = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match name_norm.as_str() {
+            "name" => {
+                if name.is_some() {
+                    return Err(ParseError::Malformed("duplicate Name header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Name value".into()));
+                }
+                name = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n != 0 {
+                    return Err(ParseError::Malformed(format!(
+                        "MAILBOX verb must have Content-Length: 0, got {n}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers are ignored for forward-compatibility.
+            }
+        }
+    }
+
+    let name = name.ok_or_else(|| ParseError::Malformed("missing required header: Name".into()))?;
+    // Content-Length is optional for MAILBOX-CRUD verbs — 0 is implicit.
+    let _ = content_length;
+
+    Ok(MailboxCrudRequest { name, create })
+}
+
 /// Read a single `\n`-terminated line from `reader`, returning it without the
 /// trailing `\n`. Returns `Ok(None)` when the stream ends cleanly before any
 /// byte arrives. Enforces [`MAX_HEADER_LINE`] to bound memory on garbage
@@ -547,6 +663,30 @@ where
         sanitize_inline(&request.mailbox),
         sanitize_inline(&request.id),
         request.folder.as_str(),
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 MAILBOX-CREATE` or `AIMX/1 MAILBOX-DELETE` request
+/// frame. Verb chosen by `request.create` (`true` → MAILBOX-CREATE,
+/// `false` → MAILBOX-DELETE).
+pub async fn write_mailbox_crud_request<W>(
+    writer: &mut W,
+    request: &MailboxCrudRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let verb = if request.create {
+        "MAILBOX-CREATE"
+    } else {
+        "MAILBOX-DELETE"
+    };
+    let header = format!(
+        "AIMX/1 {verb}\nName: {}\nContent-Length: 0\n\n",
+        sanitize_inline(&request.name),
     );
     writer.write_all(header.as_bytes()).await?;
     writer.flush().await?;
@@ -780,6 +920,8 @@ mod tests {
             (ErrCode::Protocol, "PROTOCOL"),
             (ErrCode::NotFound, "NOTFOUND"),
             (ErrCode::Io, "IO"),
+            (ErrCode::Validation, "VALIDATION"),
+            (ErrCode::NonEmpty, "NONEMPTY"),
         ] {
             let (mut client, mut server) = duplex(256);
             write_response(
@@ -963,6 +1105,144 @@ mod tests {
                 assert!(!r.read);
             }
             other => panic!("expected Mark, got {other:?}"),
+        }
+    }
+
+    // ----- MAILBOX-CREATE / MAILBOX-DELETE verbs ---------------------
+
+    #[tokio::test]
+    async fn parses_mailbox_create_request() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nContent-Length: 0\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::MailboxCrud(r) => {
+                assert_eq!(r.name, "alice");
+                assert!(r.create);
+            }
+            other => panic!("expected MailboxCrud, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_mailbox_delete_request() {
+        let input = b"AIMX/1 MAILBOX-DELETE\nName: alice\nContent-Length: 0\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::MailboxCrud(r) => {
+                assert_eq!(r.name, "alice");
+                assert!(!r.create);
+            }
+            other => panic!("expected MailboxCrud, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_without_content_length_accepted() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::MailboxCrud(r) => assert_eq!(r.name, "alice"),
+            other => panic!("expected MailboxCrud, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_missing_name_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_empty_name_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: \nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("empty Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_duplicate_name_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nName: bob\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("duplicate Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_nonzero_content_length_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nContent-Length: 5\n\nhello";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Content-Length: 0"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_header_names_case_insensitive() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nname: alice\ncontent-length: 0\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::MailboxCrud(r) => assert_eq!(r.name, "alice"),
+            other => panic!("expected MailboxCrud, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_request_roundtrip() {
+        for create in [true, false] {
+            let req = MailboxCrudRequest {
+                name: "alice".to_string(),
+                create,
+            };
+            let (mut client, mut server) = duplex(1024);
+            let w = {
+                let req = req.clone();
+                tokio::spawn(async move {
+                    write_mailbox_crud_request(&mut client, &req).await.unwrap();
+                })
+            };
+            let parsed = parse_request(&mut server).await.unwrap();
+            w.await.unwrap();
+            match parsed {
+                Request::MailboxCrud(r) => {
+                    assert_eq!(r.name, "alice");
+                    assert_eq!(r.create, create);
+                }
+                other => panic!("expected MailboxCrud, got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_verb_selection_in_wire_format() {
+        // Explicit verb-selection: `create=true` serializes to
+        // MAILBOX-CREATE, `create=false` serializes to MAILBOX-DELETE.
+        for (create, verb) in [
+            (true, b"AIMX/1 MAILBOX-CREATE".as_slice()),
+            (false, b"AIMX/1 MAILBOX-DELETE".as_slice()),
+        ] {
+            let req = MailboxCrudRequest {
+                name: "alice".to_string(),
+                create,
+            };
+            let (mut client, mut server) = duplex(1024);
+            write_mailbox_crud_request(&mut client, &req).await.unwrap();
+            drop(client);
+            let mut buf = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
+                .await
+                .unwrap();
+            assert!(
+                buf.starts_with(verb),
+                "expected prefix {:?}, got {:?}",
+                String::from_utf8_lossy(verb),
+                String::from_utf8_lossy(&buf)
+            );
         }
     }
 

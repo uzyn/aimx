@@ -3,7 +3,9 @@ use crate::config::Config;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
-use crate::send_protocol::{self, ErrCode, MarkFolder, MarkRequest, SendRequest};
+use crate::send_protocol::{
+    self, ErrCode, MailboxCrudRequest, MarkFolder, MarkRequest, SendRequest,
+};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -115,9 +117,23 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<MailboxCreateParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
-        mailbox::create_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
-        Ok(format!("Mailbox '{}' created successfully.", params.name))
+        // Sprint 46: prefer the daemon UDS path — the daemon atomically
+        // rewrites config.toml and hot-swaps its in-memory Config so a
+        // following inbound mail routes correctly with no restart. Fall
+        // back to direct on-disk edit only when the socket isn't reachable
+        // (daemon stopped, first-time setup, etc.).
+        match submit_mailbox_crud_via_daemon(&params.name, true) {
+            Ok(()) => Ok(format!("Mailbox '{}' created successfully.", params.name)),
+            Err(MailboxCrudFallback::SocketMissing) => {
+                let config = self.load_config()?;
+                mailbox::create_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Mailbox '{}' created successfully (daemon not running — restart aimx to apply the change).",
+                    params.name
+                ))
+            }
+            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+        }
     }
 
     #[tool(
@@ -150,9 +166,27 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<MailboxDeleteParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
-        mailbox::delete_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
-        Ok(format!("Mailbox '{}' deleted.", params.name))
+        // Sprint 46: daemon-side delete refuses when the inbox/sent
+        // directories still contain files (returns ERR NONEMPTY). The
+        // fallback direct-on-disk path below matches the CLI's current
+        // semantics (removes the directory tree) and runs only when the
+        // daemon is unreachable.
+        match submit_mailbox_crud_via_daemon(&params.name, false) {
+            Ok(()) => Ok(format!(
+                "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
+                 directories remain on disk — run `rmdir` to tidy up if desired.",
+                params.name
+            )),
+            Err(MailboxCrudFallback::SocketMissing) => {
+                let config = self.load_config()?;
+                mailbox::delete_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
+                Ok(format!(
+                    "Mailbox '{}' deleted (daemon not running — restart aimx to apply the change).",
+                    params.name
+                ))
+            }
+            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+        }
     }
 
     #[tool(
@@ -462,6 +496,98 @@ enum MarkOutcome {
     Malformed(String),
 }
 
+/// Outcome of a mailbox CRUD submission that didn't succeed via UDS.
+/// Tracks socket-missing distinctly from daemon-side errors so the MCP
+/// tool can decide whether to fall back to the direct on-disk edit or
+/// surface the daemon's reason verbatim.
+pub(crate) enum MailboxCrudFallback {
+    /// Socket not present / not connectable (daemon stopped, socket
+    /// cleaned up, first-time setup). Callers fall back to direct edit.
+    SocketMissing,
+    /// Daemon connected and answered but reported an error (validation,
+    /// NONEMPTY, IO, etc.). Caller should surface this verbatim.
+    Daemon(String),
+}
+
+/// Submit a `MAILBOX-CREATE` / `MAILBOX-DELETE` request over UDS.
+pub(crate) fn submit_mailbox_crud_via_daemon(
+    name: &str,
+    create: bool,
+) -> Result<(), MailboxCrudFallback> {
+    let request = MailboxCrudRequest {
+        name: name.to_string(),
+        create,
+    };
+    let socket = crate::serve::send_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<MarkOutcome, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_mailbox_crud_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_mailbox_crud_request(&socket, &request))
+        }
+    };
+
+    match io_result {
+        Ok(MarkOutcome::Ok) => Ok(()),
+        Ok(MarkOutcome::Err { code, reason }) => Err(MailboxCrudFallback::Daemon(format!(
+            "[{}] {reason}",
+            code.as_str()
+        ))),
+        Ok(MarkOutcome::Malformed(reason)) => Err(MailboxCrudFallback::Daemon(format!(
+            "Malformed response from aimx daemon: {reason}"
+        ))),
+        Err(e) => {
+            if is_socket_missing(&e) {
+                Err(MailboxCrudFallback::SocketMissing)
+            } else {
+                Err(MailboxCrudFallback::Daemon(format!(
+                    "Failed to connect to aimx daemon at {}: {e}",
+                    socket.display()
+                )))
+            }
+        }
+    }
+}
+
+async fn submit_mailbox_crud_request(
+    socket_path: &std::path::Path,
+    request: &MailboxCrudRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_mailbox_crud_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+/// `true` when the I/O error indicates the daemon socket is not reachable
+/// (not present, connection refused, permission denied). Callers use this
+/// to decide whether to fall back to a direct on-disk edit.
+fn is_socket_missing(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::PermissionDenied
+    )
+}
+
 async fn submit_mark_request(
     socket_path: &std::path::Path,
     request: &MarkRequest,
@@ -514,6 +640,9 @@ fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
             "PROTOCOL" => ErrCode::Protocol,
             "NOTFOUND" => ErrCode::NotFound,
             "IO" => ErrCode::Io,
+            // Sprint 46 additions: MAILBOX-CRUD verbs report these codes.
+            "VALIDATION" => ErrCode::Validation,
+            "NONEMPTY" => ErrCode::NonEmpty,
             _ => {
                 return MarkOutcome::Malformed(format!(
                     "unknown ERR code {code_str:?} in response"

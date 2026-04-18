@@ -6,7 +6,8 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
 - **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only — no `sent/catchall/` directory is created.
-- **Restart `aimx` after `create` / `delete`.** `aimx serve` reads `config.toml` once at startup, so a freshly-created `[mailboxes.<name>]` entry doesn't reach the running daemon until you restart it (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC). Inbound mail addressed to an unrestarted mailbox silently falls through to `catchall`. The `aimx mailbox create` / `delete` commands print a follow-up hint reminding you of this. (Sprint 46 will remove the requirement by routing mailbox CRUD through the daemon over UDS.)
+- **No restart needed — the daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailbox create` / `delete` route through the daemon's UDS socket (`/run/aimx/send.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
+- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files — it returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailbox delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
 
 ### On-disk layout
 
@@ -60,7 +61,12 @@ Shows all mailboxes with their addresses and message counts (total and unread).
 aimx mailbox delete support
 ```
 
-Deletes the mailbox directory and all its emails. Prompts for confirmation. Use `--yes` to skip the prompt.
+Prompts for confirmation; use `--yes` to skip the prompt. When the daemon is
+running, the request routes through its UDS socket and the daemon refuses
+to delete a mailbox that still contains files (error `NONEMPTY`) — archive
+or remove them first, then retry. When the daemon is stopped, delete goes
+through the direct-edit fallback which removes the directory tree and
+prints a restart-hint banner.
 
 Mailboxes can also be managed via [MCP tools](mcp.md#mailbox-tools) (`mailbox_list`, `mailbox_create`, `mailbox_delete`).
 
