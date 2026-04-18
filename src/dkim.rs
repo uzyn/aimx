@@ -30,9 +30,8 @@ fn wrap_dkim_write_error(dkim_root: &Path, err: std::io::Error) -> Box<dyn std::
 /// Resolve `<dkim_root>/{private,public}.key`.
 ///
 /// `dkim_root` is treated as the directory containing the DKIM keys
-/// themselves — callers should pass `config_dir().join("dkim")` for the
-/// v0.2 layout. The legacy `<data_dir>/dkim` layout is no longer written
-/// by any production path; only tests now supply arbitrary tempdir roots.
+/// themselves — callers pass `config_dir().join("dkim")` in production,
+/// and tests may supply arbitrary tempdir roots.
 fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (dkim_root.join("private.key"), dkim_root.join("public.key"))
 }

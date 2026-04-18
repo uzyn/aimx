@@ -263,7 +263,7 @@ impl LettreTransport {
 
 /// Classify a `lettre::transport::smtp::Error` into a typed `TransportError`.
 ///
-/// Mapping (documented so future lettre upgrades don't silently drift):
+/// Mapping:
 /// - `is_permanent()` → `Permanent` (SMTP 5xx reply; recipient rejected the
 ///   message outright — do not retry)
 /// - `is_transient()` → `Temp` (SMTP 4xx reply; recipient asked us to retry)
@@ -274,9 +274,6 @@ impl LettreTransport {
 /// - `is_response()` / `is_client()` → `Temp` (protocol hiccup; the message
 ///   was not rejected on its merits)
 /// - anything else (network/connection/unknown) → `Temp`
-///
-/// Previously this classification was substring-matched against
-/// `e.to_string()`, which was brittle across lettre versions; see S43-5.
 fn classify_lettre_error(host: &str, e: &lettre::transport::smtp::Error) -> TransportError {
     let msg = e.to_string();
     if e.is_permanent() {

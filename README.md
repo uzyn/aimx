@@ -279,8 +279,6 @@ Two aimx-controlled fields are also substituted as **template placeholders** dir
 | `{id}` | Email ID / filename stem (e.g., `2025-04-15-103000-hello`) |
 | `{date}` | Email date |
 
-Configs that reference the legacy `{from}`, `{to}`, `{subject}`, `{mailbox}`, or `{filepath}` placeholders are rejected at config load with a migration hint — replace each with its `$AIMX_*` equivalent inside double quotes.
-
 ### Trust policy
 
 Trust policies control whether channel triggers fire based on sender authentication:
