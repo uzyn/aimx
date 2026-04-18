@@ -71,7 +71,7 @@ These are NOT a Cargo workspace — they have independent `Cargo.toml` files and
 - `frontmatter.rs` — `InboundFrontmatter` and `OutboundFrontmatter` structs with section-ordered serialization. `compute_thread_id()` derives the 16-hex-char thread root hash. `format_outbound_frontmatter()` for sent copies.
 - `datadir_readme.rs` — baked-in `/var/lib/aimx/README.md` template with version-gated refresh. `write()` (unconditional, called by setup), `refresh_if_outdated()` (called by serve startup).
 - `smtp/` — embedded SMTP server module: `mod.rs` (listener accept loop), `session.rs` (per-connection SMTP state machine: EHLO, MAIL FROM, RCPT TO, DATA, STARTTLS, QUIT, RSET, NOOP), `tls.rs` (STARTTLS upgrade via tokio-rustls), `tests.rs` (unit tests).
-- `verify.rs` — `aimx verify`: checks port 25 connectivity via the verifier service.
+- `portcheck.rs` — `aimx portcheck`: checks port 25 connectivity via the verifier service.
 - `cli.rs` — `clap` CLI surface: the `Cli` parser and `Command` enum enumerating every subcommand and its flags. `main.rs` matches on `Command` to dispatch.
 - `config.rs` — `Config` struct + `ConfigHandle` (`RwLock<Arc<Config>>`) used by the daemon for live hot-swap of mailbox config. `config_path()` and `dkim_dir()` resolve paths and honor `AIMX_CONFIG_DIR` for tests.
 - `mailbox.rs` — `aimx mailbox create | list | delete`: client-side logic. Create/delete try the daemon UDS first (`MAILBOX-CREATE` / `MAILBOX-DELETE`) so inbound routing picks up the change without a restart, and fall back to a direct `config.toml` edit + restart hint when the socket is absent.
