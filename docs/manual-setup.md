@@ -5,7 +5,7 @@ This guide walks through every step needed to launch AIMX, from deploying the ve
 - **Part A** — Deploy the verifier service (done once, before anything else)
 - **Part B** — Set up an AIMX mail server (done per server)
 
-The verifier service must be running before any mail server can complete setup, because `aimx setup` and `aimx verify` both call its HTTP `/probe` endpoint (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25 via EHLO handshake). Both commands use `/probe` (full SMTP EHLO handshake).
+The verifier service must be running before any mail server can complete setup, because `aimx setup` and `aimx portcheck` both call its HTTP `/probe` endpoint (to test inbound port 25) and connect to its built-in port 25 listener (to test outbound port 25 via EHLO handshake). Both commands use `/probe` (full SMTP EHLO handshake).
 
 ---
 
@@ -13,7 +13,7 @@ The verifier service must be running before any mail server can complete setup, 
 
 The aimx-verifier service provides two functions, both exposed from a single binary:
 
-1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
+1. **Port probe** (`GET /probe`) — HTTPS endpoint that opens a TCP connection back to the caller's own IP on port 25 and performs a full SMTP EHLO handshake. Used by `aimx setup` and `aimx portcheck` to confirm a real SMTP server is responding. The probe always targets the caller's IP; there is no way to probe an arbitrary address.
 2. **Port 25 listener** — Built-in TCP listener on `:25` that implements a minimal but correct SMTP exchange: banner → `EHLO`/`HELO` → `250` → `QUIT` → `221 Bye`. Used by `aimx` clients to test that their outbound port 25 is not blocked by their VPS provider via EHLO handshake. This is a plain tokio listener built into the `aimx-verifier` binary — **no MTA is required on the verifier server**.
 
 `/probe` identifies the caller via Caddy's `X-AIMX-Client-IP` header (injected by the canonical `Caddyfile`). Direct exposure of the backend without Caddy is not supported — see the security note in `services/verifier/README.md`.
@@ -151,7 +151,7 @@ The listener implements a minimal but correct SMTP exchange (banner → `EHLO`/`
 
 **Functional `/probe` test:**
 
-The `/probe` endpoint always probes the caller's own IP — there is no `?ip=` parameter. To exercise it end-to-end, run `sudo aimx verify` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verifier service reached back and completed a full EHLO handshake.
+The `/probe` endpoint always probes the caller's own IP — there is no `?ip=` parameter. To exercise it end-to-end, run `sudo aimx portcheck` (which hits `/probe`) from a real mail server with port 25 open. A `PASS` on the "Inbound port 25" line means the verifier service reached back and completed a full EHLO handshake.
 
 A `curl` from the mail server is useful for debugging:
 
@@ -168,10 +168,10 @@ The default verify host is `https://check.aimx.email`. If you deployed your own 
 verify_host = "https://check.yourdomain.com"
 ```
 
-…or per-invocation with the `--verify-host` flag (accepted by `sudo aimx verify` and `sudo aimx setup`):
+…or per-invocation with the `--verify-host` flag (accepted by `sudo aimx portcheck` and `sudo aimx setup`):
 
 ```bash
-sudo aimx verify --verify-host https://check.yourdomain.com
+sudo aimx portcheck --verify-host https://check.yourdomain.com
 sudo aimx setup agent.yourdomain.com --verify-host https://check.yourdomain.com
 ```
 
@@ -246,7 +246,7 @@ sudo iptables -A INPUT -p tcp --dport 25 -j ACCEPT
 Run verify to confirm your server is ready before setup:
 
 ```bash
-sudo aimx verify
+sudo aimx portcheck
 ```
 
 This checks two things:
@@ -261,7 +261,7 @@ Both should show PASS.
 The default verify host is `https://check.aimx.email`. To point at a self-hosted instance instead (see Part A), set `verify_host` in `config.toml` or pass `--verify-host` on the command line:
 
 ```bash
-sudo aimx verify --verify-host https://check.yourdomain.com
+sudo aimx portcheck --verify-host https://check.yourdomain.com
 ```
 
 The same flag is accepted by `aimx setup`, and takes precedence over the config value.
@@ -282,7 +282,7 @@ The setup wizard performs these steps automatically:
 6. Displays the DNS records you need to add (see next step)
 7. After you add the records and press Enter, resolves and validates each one
 
-Setup ends after DNS verification. There is no end-to-end email test — run `sudo aimx verify` later to re-check port 25 connectivity.
+Setup ends after DNS verification. There is no end-to-end email test — run `sudo aimx portcheck` later to re-check port 25 connectivity.
 
 ### B6: DNS Configuration
 
@@ -339,10 +339,10 @@ dig +short TXT _dmarc.agent.yourdomain.com
 **Automated verification:**
 
 ```bash
-sudo aimx verify
+sudo aimx portcheck
 ```
 
-`aimx verify` runs two checks: outbound port 25 (EHLO handshake to the verifier service's built-in TCP listener) and inbound port 25 (via `/probe`, which connects back to your server). It does not send an actual email or wait for an echo reply.
+`aimx portcheck` runs two checks: outbound port 25 (EHLO handshake to the verifier service's built-in TCP listener) and inbound port 25 (via `/probe`, which connects back to your server). It does not send an actual email or wait for an echo reply.
 
 **Check server status:**
 
@@ -457,7 +457,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 | Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see compatible providers table) |
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` |
-| `sudo aimx verify` shows inbound FAIL | The verifier service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, `aimx serve` down, or DNS `A` record not yet resolving) | `sudo systemctl status aimx`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
+| `sudo aimx portcheck` shows inbound FAIL | The verifier service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, `aimx serve` down, or DNS `A` record not yet resolving) | `sudo systemctl status aimx`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
 | Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all DNS records, configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or misconfigured | `sudo systemctl status aimx` and `journalctl -u aimx -e` |
 | Emails not being delivered to mailbox | Ingest misconfigured | Check config and mailbox setup with `aimx status` |
@@ -465,7 +465,7 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 **Useful commands:**
 
 ```bash
-sudo aimx verify            # Re-run port 25 checks
+sudo aimx portcheck            # Re-run port 25 checks
 aimx status                 # Show config, mailboxes, and message counts
 sudo systemctl status aimx  # Check aimx serve service status
 journalctl -u aimx -e       # View aimx serve logs

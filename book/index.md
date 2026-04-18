@@ -46,7 +46,7 @@ sudo cp target/release/aimx /usr/local/bin/
 sudo aimx setup agent.yourdomain.com
 
 # 3. Verify
-sudo aimx verify
+sudo aimx portcheck
 ```
 
 See the full [Getting Started](getting-started.md) guide for details.

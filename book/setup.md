@@ -46,10 +46,10 @@ aimx --version
 Before running setup, you can verify port 25 connectivity:
 
 ```bash
-sudo aimx verify
+sudo aimx portcheck
 ```
 
-`aimx verify` requires root. When `aimx serve` is running, it performs an outbound EHLO handshake plus an inbound EHLO handshake probe. When nothing is on port 25 (fresh VPS), it spawns a temporary listener and runs checks. If port 25 is occupied by another process, verify tells you to stop it before setup.
+`aimx portcheck` requires root. When `aimx serve` is running, it performs an outbound EHLO handshake plus an inbound EHLO handshake probe. When nothing is on port 25 (fresh VPS), it spawns a temporary listener and runs checks. If port 25 is occupied by another process, portcheck tells you to stop it before setup.
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
@@ -176,7 +176,7 @@ dig +short TXT _dmarc.agent.yourdomain.com
 Run the automated verification:
 
 ```bash
-sudo aimx verify
+sudo aimx portcheck
 ```
 
 This tests outbound port 25 connectivity (via EHLO handshake) and inbound SMTP reachability (via EHLO probe). Requires root.
@@ -295,7 +295,7 @@ If you prefer not to use the public instance:
 
    Or override it per-invocation with `--verify-host`:
    ```
-   sudo aimx verify --verify-host https://verify.yourdomain.com
+   sudo aimx portcheck --verify-host https://verify.yourdomain.com
    ```
 
 The verifier service provides:

@@ -12,6 +12,7 @@ mod mailbox_locks;
 mod mcp;
 mod mx;
 mod platform;
+mod portcheck;
 mod send;
 mod send_handler;
 mod send_protocol;
@@ -25,7 +26,6 @@ mod term;
 mod transport;
 mod trust;
 mod uninstall;
-mod verify;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -54,8 +54,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let sys = setup::RealSystemOps;
             uninstall::run(yes, &sys)
         }
-        // Verify does not read config for storage — only `verify_host`.
-        Command::Verify { verify_host } => verify::run(verify_host.as_deref()),
+        // Portcheck does not read config for storage — only `verify_host`.
+        Command::Portcheck { verify_host } => portcheck::run(verify_host.as_deref()),
         // MCP server reloads config on each tool call; pass the override through.
         Command::Mcp => {
             let rt = tokio::runtime::Runtime::new()
@@ -105,7 +105,7 @@ fn dispatch_with_config(
         Command::Status => status::run(config),
         Command::Setup { .. }
         | Command::Uninstall { .. }
-        | Command::Verify { .. }
+        | Command::Portcheck { .. }
         | Command::Mcp
         | Command::Send(_)
         | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
@@ -117,6 +117,6 @@ fn build_network_ops(
 ) -> Result<setup::RealNetworkOps, Box<dyn std::error::Error>> {
     let config = config::Config::load_resolved().ok();
     let host =
-        verify::resolve_verify_host(cli_override, config.as_ref(), setup::DEFAULT_VERIFY_HOST);
+        portcheck::resolve_verify_host(cli_override, config.as_ref(), setup::DEFAULT_VERIFY_HOST);
     setup::RealNetworkOps::from_verify_host(host)
 }
