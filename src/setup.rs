@@ -554,6 +554,14 @@ pub const DIG_TIMEOUT_SECS: u32 = 2;
 /// is bounded by `DIG_TIMEOUT_SECS`, not `DIG_TIMEOUT_SECS × DIG_TRIES`.
 pub const DIG_TRIES: u32 = 1;
 
+// Compile-time check: keep the per-query dig budget tight so a pathological
+// resolver can't stall `aimx status` for minutes. If someone bumps these
+// constants past ~5s per query, the build fails here rather than at runtime.
+const _: () = assert!(
+    DIG_TIMEOUT_SECS * DIG_TRIES <= 5,
+    "per-query dig budget must stay tight — see DIG_TIMEOUT_SECS × DIG_TRIES"
+);
+
 /// Build the argv vec for a `dig +short <TYPE> <domain>` invocation with
 /// the tight timeout/try bounds declared above. Extracted so the bounds
 /// are applied uniformly and are unit-testable without shelling out.
@@ -2551,15 +2559,10 @@ mod tests {
             args.iter().any(|a| a == "example.com"),
             "dig args must include the domain, got {args:?}"
         );
-
-        // Worst-case per-query budget: DIG_TIMEOUT_SECS × DIG_TRIES seconds.
-        // Keep this below ~5s so the full six-query block stays under ~30s
-        // even if every query times out.
-        assert!(
-            DIG_TIMEOUT_SECS * DIG_TRIES <= 5,
-            "per-query dig budget must stay tight, got {}s",
-            DIG_TIMEOUT_SECS * DIG_TRIES
-        );
+        // The constant-only `DIG_TIMEOUT_SECS * DIG_TRIES <= 5` invariant is
+        // enforced as a compile-time `const _: () = assert!(..)` near the
+        // constants themselves, not as a runtime assertion here — clippy's
+        // `assertions_on_constants` lint complains about the runtime form.
     }
 
     #[test]
