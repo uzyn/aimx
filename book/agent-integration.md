@@ -48,7 +48,7 @@ Key properties:
 ## Supported agents
 
 The matrix below tracks what is available in the current `aimx` binary. It
-grows as more agents are landed in subsequent sprints.
+grows as more agents are added.
 
 | Agent | Install command | Destination | Activation | Progressive disclosure |
 |-------|-----------------|-------------|------------|------------------------|
