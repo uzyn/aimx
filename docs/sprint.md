@@ -433,7 +433,7 @@ or
 
 - [ ] Consolidate `validate_mailbox_name` into a single canonical helper (one of `src/mailbox.rs`, `src/mailbox_handler.rs`, or `src/config.rs` — whichever already owns mailbox-name invariants), tighten to reject whitespace and any character outside a safe local-part class (`[a-z0-9._-]`, case-folded), and thread both call sites through it
 - [ ] New unit tests cover: `"hello world"` rejected, `"a b"` rejected, `"..foo"` rejected, `""` rejected, `"good-mailbox.1"` accepted
-- [ ] `write_config_atomic`: either adopt a TOML-editing crate (e.g. `toml_edit`) that preserves comments and unknown stanzas, OR document the current behavior with a comment + add a test asserting a known-unknown stanza survives (whichever the implementer judges less risky for v1)
+- [ ] `write_config_atomic`: either adopt a TOML-editing crate (e.g. `toml_edit`) that preserves comments and unknown stanzas, OR document the current behavior with a comment + add a test asserting a known-unknown stanza survives (whichever the implementer judges less risky for v1) <!-- Chose the document-current-behaviour path. The "stanza survives" wording conflates the two paths; on the documented path the stanza is dropped (v1 contract). Test `unknown_stanza_is_dropped_on_rewrite` pins this so any future regression toward a preserving editor without updating the doc comment will trip. -->
 - [ ] `create_failure_at_disk_write_leaves_handle_and_disk_unchanged`: rewrite to make the temp write succeed and the rename fail (read-only target dir on the parent, or equivalent), so the test genuinely exercises the rollback-on-rename-failure branch; assertion remains: disk + handle unchanged
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 

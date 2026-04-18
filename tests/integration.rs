@@ -3301,17 +3301,35 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
 
     // Guard against deadlock: require both threads to finish within a
     // bounded wall-clock budget. We use a watchdog thread to panic if
-    // the sum exceeds 20s — tests normally complete in <1s.
-    let watchdog = std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(20));
-        // If this runs, the joins below are still pending → deadlock.
-        panic!("Sprint 47 deadlock watchdog fired: MAILBOX-CREATE + ingest did not converge");
-    });
+    // the sum exceeds 20s — tests normally complete in <1s. The flag
+    // lets us dismiss the watchdog promptly on success instead of
+    // leaving a detached thread sleeping for 20s then panicking in the
+    // background (see Sprint 47 review).
+    let watchdog_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = {
+        let cancel = std::sync::Arc::clone(&watchdog_cancel);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            // If this runs, the joins below are still pending → deadlock.
+            panic!("Sprint 47 deadlock watchdog fired: MAILBOX-CREATE + ingest did not converge");
+        })
+    };
 
     create_handle.join().unwrap();
     ingest_handle.join().unwrap();
-    // Successful joins reached here — dismiss the watchdog.
-    drop(watchdog);
+    // Successful joins reached here — dismiss the watchdog promptly so
+    // it exits rather than lingering in the background.
+    watchdog_cancel.store(true, std::sync::atomic::Ordering::Release);
+    watchdog.join().unwrap();
 
     // config.toml reflects the create.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();

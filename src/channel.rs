@@ -714,6 +714,29 @@ mod tests {
         assert!(content.contains("Hello World"), "got: {content:?}");
     }
 
+    /// RAII guard that sets an env var on construction and removes it on
+    /// drop. Used by `execute_triggers_clears_parent_env` so a panicking
+    /// assertion still cleans up the sentinel — `std::env::set_var` is
+    /// process-global, and leaking a sentinel across tests is nasty.
+    struct EnvVarGuard {
+        name: &'static str,
+    }
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
     #[test]
     fn execute_triggers_clears_parent_env() {
         // S47-2: `execute_triggers` calls `.env_clear()` before selectively
@@ -722,19 +745,18 @@ mod tests {
         //
         // This test intentionally uses a unique variable name and is not
         // parallelized against other env-var-touching tests because
-        // `std::env::set_var` mutates process-global state. Each assertion
-        // is scoped to what this test owns.
+        // `std::env::set_var` mutates process-global state. The RAII
+        // `EnvVarGuard` ensures the sentinel is removed even if an
+        // assertion panics.
         let tmp = tempfile::TempDir::new().unwrap();
         let log = tmp.path().join("env.log");
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        // Set a sentinel on the parent process. If env_clear is working the
-        // sentinel must be empty in the child.
-        unsafe {
-            std::env::set_var("AIMX_LEAK_TEST", "sentinel-should-not-leak");
-        }
+        // Set a sentinel on the parent process. The guard removes it on
+        // drop — panic-safe.
+        let _sentinel = EnvVarGuard::set("AIMX_LEAK_TEST", "sentinel-should-not-leak");
 
         let config = MailboxConfig {
             address: "*@test.com".to_string(),
@@ -753,12 +775,6 @@ mod tests {
 
         execute_triggers(&config, &ctx);
 
-        // Clean up the sentinel before assertions so a test failure doesn't
-        // leave the process env dirty for downstream tests in the same crate.
-        unsafe {
-            std::env::remove_var("AIMX_LEAK_TEST");
-        }
-
         let content = std::fs::read_to_string(&log).unwrap();
         assert!(
             content.contains("leak=[]"),
@@ -769,6 +785,7 @@ mod tests {
             content.contains("path_set=yes"),
             "PATH must be preserved for the trigger: {content:?}"
         );
+        // `_sentinel` dropped here → `AIMX_LEAK_TEST` removed.
     }
 
     /// Helper: fire a single-shot trigger that writes `$AIMX_*` env vars to
