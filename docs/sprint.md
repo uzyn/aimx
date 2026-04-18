@@ -392,7 +392,7 @@ or
 
 ---
 
-## Sprint 47 — Post-v1 Non-blocking Cleanup (Days 130.5–133) [IN PROGRESS]
+## Sprint 47 — Post-v1 Non-blocking Cleanup (Days 130.5–133) [DONE]
 
 **Goal:** Close the 8 non-blocking improvements accumulated across Sprints 44–46 reviews. All are low-risk hardening items — a defense-in-depth pass before v1 tag. No new features; no PRD changes. Grouped into four thematic stories.
 
@@ -409,9 +409,9 @@ or
 
 **Priority:** P3
 
-- [ ] New integration test in `tests/integration.rs` spins `aimx serve` against a mock `DkimTxtResolver` and asserts the startup log contains the expected mismatch warning in the `Mismatch` case and a `warn`-level message in the `ResolveError` case; assert both listeners bind afterwards
-- [ ] `HickoryDkimResolver::resolve_dkim_txt` either (a) adds `debug_assert!(matches!(Handle::current().runtime_flavor(), RuntimeFlavor::MultiThread))` with a short comment explaining why, or (b) `async fn resolve_dkim_txt` so `run_serve` can `.await` — whichever fits cleaner
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New integration test in `tests/integration.rs` spins `aimx serve` against a mock `DkimTxtResolver` and asserts the startup log contains the expected mismatch warning in the `Mismatch` case and a `warn`-level message in the `ResolveError` case; assert both listeners bind afterwards <!-- Two integration tests added, wired through new `AIMX_TEST_DKIM_RESOLVER_OVERRIDE` env var so the live `run_serve` path is exercised. -->
+- [x] `HickoryDkimResolver::resolve_dkim_txt` either (a) adds `debug_assert!(matches!(Handle::current().runtime_flavor(), RuntimeFlavor::MultiThread))` with a short comment explaining why, or (b) `async fn resolve_dkim_txt` so `run_serve` can `.await` — whichever fits cleaner <!-- Chose (a): `debug_assert!` on the runtime flavor at entry. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S47-2: Exhaustiveness & defense-in-depth hardening
 
@@ -419,11 +419,11 @@ or
 
 **Priority:** P3
 
-- [ ] `restart_hint_command`: replace the `_` fallback with an explicit `InitSystem::Unknown =>` arm (or mark `InitSystem` `#[non_exhaustive]`) so adding a new init-system variant fails to compile until the match is updated
-- [ ] Add a test that destructures every current `InitSystem` variant and asserts the expected hint string (so the exhaustive check is validated at compile time, not only in production)
-- [ ] `execute_triggers` in `src/channel.rs`: call `.env_clear()` on the `Command`, then re-add `PATH`, `HOME`, plus the five `AIMX_*` vars; short inline comment explaining why
-- [ ] New unit test asserts an unrelated env var set on the parent process (e.g. `AIMX_LEAK_TEST=sentinel`) does NOT appear in the trigger's environment
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `restart_hint_command`: replace the `_` fallback with an explicit `InitSystem::Unknown =>` arm (or mark `InitSystem` `#[non_exhaustive]`) so adding a new init-system variant fails to compile until the match is updated
+- [x] Add a test that destructures every current `InitSystem` variant and asserts the expected hint string (so the exhaustive check is validated at compile time, not only in production)
+- [x] `execute_triggers` in `src/channel.rs`: call `.env_clear()` on the `Command`, then re-add `PATH`, `HOME`, plus the five `AIMX_*` vars; short inline comment explaining why
+- [x] New unit test asserts an unrelated env var set on the parent process (e.g. `AIMX_LEAK_TEST=sentinel`) does NOT appear in the trigger's environment <!-- Cycle 2: replaced raw `set_var`/`remove_var` with an RAII `EnvVarGuard` so the sentinel is cleaned up even if an assertion panics. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S47-3: Validation tightening + TOML-rewrite preservation + stronger rename-failure test
 
@@ -431,11 +431,11 @@ or
 
 **Priority:** P3
 
-- [ ] Consolidate `validate_mailbox_name` into a single canonical helper (one of `src/mailbox.rs`, `src/mailbox_handler.rs`, or `src/config.rs` — whichever already owns mailbox-name invariants), tighten to reject whitespace and any character outside a safe local-part class (`[a-z0-9._-]`, case-folded), and thread both call sites through it
-- [ ] New unit tests cover: `"hello world"` rejected, `"a b"` rejected, `"..foo"` rejected, `""` rejected, `"good-mailbox.1"` accepted
-- [ ] `write_config_atomic`: either adopt a TOML-editing crate (e.g. `toml_edit`) that preserves comments and unknown stanzas, OR document the current behavior with a comment + add a test asserting a known-unknown stanza survives (whichever the implementer judges less risky for v1) <!-- Chose the document-current-behaviour path. The "stanza survives" wording conflates the two paths; on the documented path the stanza is dropped (v1 contract). Test `unknown_stanza_is_dropped_on_rewrite` pins this so any future regression toward a preserving editor without updating the doc comment will trip. -->
-- [ ] `create_failure_at_disk_write_leaves_handle_and_disk_unchanged`: rewrite to make the temp write succeed and the rename fail (read-only target dir on the parent, or equivalent), so the test genuinely exercises the rollback-on-rename-failure branch; assertion remains: disk + handle unchanged
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Consolidate `validate_mailbox_name` into a single canonical helper (one of `src/mailbox.rs`, `src/mailbox_handler.rs`, or `src/config.rs` — whichever already owns mailbox-name invariants), tighten to reject whitespace and any character outside a safe local-part class (`[a-z0-9._-]`, case-folded), and thread both call sites through it
+- [x] New unit tests cover: `"hello world"` rejected, `"a b"` rejected, `"..foo"` rejected, `""` rejected, `"good-mailbox.1"` accepted
+- [x] `write_config_atomic`: either adopt a TOML-editing crate (e.g. `toml_edit`) that preserves comments and unknown stanzas, OR document the current behavior with a comment + add a test asserting a known-unknown stanza survives (whichever the implementer judges less risky for v1) <!-- Chose the document-current-behaviour path. The "stanza survives" wording conflates the two paths; on the documented path the stanza is dropped (v1 contract). Test `unknown_stanza_is_dropped_on_rewrite` pins this so any future regression toward a preserving editor without updating the doc comment will trip. -->
+- [x] `create_failure_at_disk_write_leaves_handle_and_disk_unchanged`: rewrite to make the temp write succeed and the rename fail (read-only target dir on the parent, or equivalent), so the test genuinely exercises the rollback-on-rename-failure branch; assertion remains: disk + handle unchanged <!-- Implementer used a non-empty-directory target to force `rename(2)` failure rather than a read-only dir; same effect. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S47-4: Unify ingest + MARK writers under one per-mailbox lock
 
@@ -443,13 +443,14 @@ or
 
 **Priority:** P2
 
-- [ ] Introduce a single shared per-mailbox lock map (most likely in `src/state_handler.rs` or a new `src/mailbox_locks.rs`) keyed by mailbox name, exposed via an `Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>` accessor pattern (or an `ArcSwap<HashMap<..>>` if hot-path reads dominate)
-- [ ] `ingest.rs`: replace the `INGEST_WRITE_LOCK` with an async acquisition of the per-mailbox lock before the file-allocation + write critical section; remove the old global mutex
-- [ ] `state_handler.rs` MARK-* handlers: acquire the same per-mailbox lock (replacing the current `RwLock` map) before read-modify-write of the target `.md` file
-- [ ] Update the module-level comment in `src/state_handler.rs` (currently documents the two-lock regime) to reflect the unified model; point to the lock hierarchy (per-mailbox lock outer, `CONFIG_WRITE_LOCK` inner)
-- [ ] Integration test: concurrent ingest + `MARK-READ` on the same mailbox AND on the same target file (once the file exists) — assert no torn writes and no half-written frontmatter on either side
-- [ ] Integration test: concurrent `MAILBOX-CREATE` + ingest to the just-created mailbox — assert ordering holds (the config-write happens, then ingest sees the new mailbox; no deadlock on the two locks)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Introduce a single shared per-mailbox lock map (most likely in `src/state_handler.rs` or a new `src/mailbox_locks.rs`) keyed by mailbox name, exposed via an `Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>` accessor pattern (or an `ArcSwap<HashMap<..>>` if hot-path reads dominate) <!-- Implemented as new `src/mailbox_locks.rs` with `MailboxLocks` type. -->
+- [x] `ingest.rs`: replace the `INGEST_WRITE_LOCK` with an async acquisition of the per-mailbox lock before the file-allocation + write critical section; remove the old global mutex
+- [x] `state_handler.rs` MARK-* handlers: acquire the same per-mailbox lock (replacing the current `RwLock` map) before read-modify-write of the target `.md` file
+- [x] Update the module-level comment in `src/state_handler.rs` (currently documents the two-lock regime) to reflect the unified model; point to the lock hierarchy (per-mailbox lock outer, `CONFIG_WRITE_LOCK` inner)
+- [x] Integration test: concurrent ingest + `MARK-READ` on the same mailbox AND on the same target file (once the file exists) — assert no torn writes and no half-written frontmatter on either side
+- [x] Integration test: concurrent `MAILBOX-CREATE` + ingest to the just-created mailbox — assert ordering holds (the config-write happens, then ingest sees the new mailbox; no deadlock on the two locks) <!-- Cycle 2: lingering watchdog thread fixed via `Arc<AtomicBool>` cancel flag + `.join()` rather than `drop(JoinHandle)`. -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Extra: `MAILBOX-*` handlers also acquire the unified per-mailbox lock; `StateContext` carries an `Arc<MailboxLocks>` shared across all daemon contexts so SEND, MARK, and MAILBOX-CRUD coordinate cleanly
 
 ---
 
@@ -508,7 +509,7 @@ or
 | 44 | 123–125.5 | Post-launch Security + Quick Fixes | Env-var channel-trigger expansion (shell-injection fix), DKIM DNS sanity check at daemon startup + louder setup warning, Claude Code agent-setup hint fix, `aimx mailbox create/delete` restart hint, manual-test.md compose-new clarification | Done |
 | 45 | 125.5–128 | Strict Outbound + MCP Writes via Daemon | `aimx send` stops reading config.toml (daemon resolves From), strict outbound (concrete mailbox + configured domain only, wildcard is inbound-only), UDS `MARK-READ`/`MARK-UNREAD` verbs + MCP write ops via daemon with per-mailbox RwLock | Done |
 | 46 | 128–130.5 | Mailbox CRUD via UDS (Daemon Picks Up Changes Live) | UDS `MAILBOX-CREATE`/`MAILBOX-DELETE` verbs + daemon hot-swaps `Arc<Config>`, `aimx mailbox create/delete` route through daemon first and suppress restart hint on success, directory lifecycle + NONEMPTY safety on delete | Done |
-| 47 | 130.5–133 | Post-v1 Non-blocking Cleanup | DKIM startup integration test + runtime-flavor contract, exhaustive `InitSystem` match + `.env_clear()` defense-in-depth, `validate_mailbox_name` tightening + `write_config_atomic` preservation + stronger rename-failure test, unify ingest + MARK writers under one per-mailbox lock | In progress |
+| 47 | 130.5–133 | Post-v1 Non-blocking Cleanup | DKIM startup integration test + runtime-flavor contract, exhaustive `InitSystem` match + `.env_clear()` defense-in-depth, `validate_mailbox_name` tightening + `write_config_atomic` preservation + stronger rename-failure test, unify ingest + MARK writers under one per-mailbox lock | Done |
 
 ## Deferred to v2
 
