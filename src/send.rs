@@ -5,11 +5,16 @@
 //! opens `/run/aimx/send.sock`, writes a single `AIMX/1 SEND` request frame,
 //! and maps the daemon's response to a stable CLI exit code + user message.
 //!
+//! Sprint 45 further shrinks the client: `aimx send` no longer reads
+//! `/etc/aimx/config.toml` at all. The daemon parses `From:` out of the
+//! submitted message body and resolves the sender mailbox from its
+//! in-memory Config. This lets a non-root operator run `aimx send` on a
+//! default install where `config.toml` is `0640 root:root`.
+//!
 //! Signing and MX delivery live in `aimx serve` (see `send_handler.rs` and
 //! `transport.rs`).
 
 use crate::cli::SendArgs;
-use crate::config::Config;
 use crate::send_protocol::{self, ErrCode, SendRequest};
 use crate::serve::send_socket_path;
 use crate::term;
@@ -188,68 +193,6 @@ pub fn build_references(original_references: Option<&str>, original_message_id: 
     }
 }
 
-/// Extract the mailbox name (local part) from an RFC 5322 `From:` header.
-/// Handles both `user@host` and `"Name" <user@host>` forms. Returns `None`
-/// if the address has no local part.
-fn extract_mailbox_name(from: &str) -> Option<String> {
-    let s = from.trim();
-    let bare = if let Some(start) = s.rfind('<') {
-        let tail = &s[start + 1..];
-        let end = tail.find('>').unwrap_or(tail.len());
-        &tail[..end]
-    } else {
-        s
-    };
-    let at = bare.find('@')?;
-    let local = bare[..at].trim();
-    if local.is_empty() {
-        None
-    } else {
-        Some(local.to_string())
-    }
-}
-
-/// Resolve the registered `from_mailbox` name for a composed `From:` header.
-///
-/// Prefers an exact mailbox whose `address` equals the bare sender address;
-/// falls back to matching by local part (so `aimx send --from foo@domain`
-/// picks the mailbox named `foo` when it exists); finally falls back to the
-/// catchall entry if one is configured.
-fn resolve_from_mailbox(config: &Config, from_header: &str) -> Result<String, String> {
-    let bare = {
-        let s = from_header.trim();
-        if let Some(start) = s.rfind('<') {
-            let tail = &s[start + 1..];
-            let end = tail.find('>').unwrap_or(tail.len());
-            tail[..end].trim().to_string()
-        } else {
-            s.to_string()
-        }
-    };
-
-    for (name, mb) in &config.mailboxes {
-        if mb.address.eq_ignore_ascii_case(&bare) {
-            return Ok(name.clone());
-        }
-    }
-
-    if let Some(local) = extract_mailbox_name(from_header)
-        && config.mailboxes.contains_key(&local)
-    {
-        return Ok(local);
-    }
-
-    for (name, mb) in &config.mailboxes {
-        if mb.address.starts_with('*') {
-            return Ok(name.clone());
-        }
-    }
-
-    Err(format!(
-        "no mailbox in /etc/aimx/config.toml matches From: {bare}"
-    ))
-}
-
 /// CLI exit codes exposed by `aimx send`. Kept as named constants so the
 /// unit tests and downstream tooling can reference them symbolically.
 pub const EXIT_OK: i32 = 0;
@@ -324,6 +267,9 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
             "DELIVERY" => ErrCode::Delivery,
             "TEMP" => ErrCode::Temp,
             "MALFORMED" => ErrCode::Malformed,
+            "PROTOCOL" => ErrCode::Protocol,
+            "NOTFOUND" => ErrCode::NotFound,
+            "IO" => ErrCode::Io,
             _ => {
                 return SubmitOutcome::Malformed(format!(
                     "unknown ERR code {code_str:?} in response"
@@ -402,23 +348,24 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
     }
 }
 
-/// Build the `AIMX/1 SEND` request frame from composed CLI args + config.
-pub fn build_request(args: &SendArgs, config: &Config) -> Result<SendRequest, String> {
+/// Build the `AIMX/1 SEND` request frame from composed CLI args. Since
+/// Sprint 45 the request carries no `From-Mailbox:` header — the daemon
+/// parses the `From:` header out of the body itself and resolves the
+/// mailbox against its in-memory Config.
+pub fn build_request(args: &SendArgs) -> Result<SendRequest, String> {
     let composed = compose_message(args).map_err(|e| e.to_string())?;
-    let from_mailbox = resolve_from_mailbox(config, &args.from)?;
     Ok(SendRequest {
-        from_mailbox,
         body: composed.message,
     })
 }
 
-fn run_inner(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+fn run_inner(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
     if current_is_root() {
         let code = render_root_refusal(&mut io::stderr());
         std::process::exit(code);
     }
 
-    let request = match build_request(&args, &config) {
+    let request = match build_request(&args) {
         Ok(r) => r,
         Err(e) => {
             return Err(e.into());
@@ -464,8 +411,8 @@ fn handle_connect_error(socket: &Path, err: &io::Error) {
     }
 }
 
-pub fn run(args: SendArgs, config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    run_inner(args, config)
+pub fn run(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
+    run_inner(args)
 }
 
 #[cfg(test)]
@@ -483,36 +430,6 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
-        }
-    }
-
-    fn test_config() -> Config {
-        let mut mailboxes = std::collections::HashMap::new();
-        mailboxes.insert(
-            "agent".to_string(),
-            crate::config::MailboxConfig {
-                address: "agent@example.com".to_string(),
-                on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-            },
-        );
-        mailboxes.insert(
-            "catchall".to_string(),
-            crate::config::MailboxConfig {
-                address: "*@example.com".to_string(),
-                on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-            },
-        );
-        Config {
-            domain: "example.com".to_string(),
-            data_dir: std::path::PathBuf::from("/tmp"),
-            dkim_selector: "dkim".to_string(),
-            mailboxes,
-            verify_host: None,
-            enable_ipv6: false,
         }
     }
 
@@ -1030,60 +947,11 @@ mod tests {
     // ------------------------------------------------------------------
     // Sprint 35: client wire-layer tests. These use a tempdir-scoped UDS
     // + an in-memory handler so we never hit the real `/run/aimx/`.
+    //
+    // Sprint 45: `aimx send` no longer resolves mailboxes on the client
+    // side — those tests now live in `send_handler::tests` where the
+    // daemon-side resolver is exercised directly.
     // ------------------------------------------------------------------
-
-    #[test]
-    fn resolve_from_mailbox_exact_match() {
-        let cfg = test_config();
-        assert_eq!(
-            resolve_from_mailbox(&cfg, "agent@example.com").unwrap(),
-            "agent"
-        );
-    }
-
-    #[test]
-    fn resolve_from_mailbox_display_name_form() {
-        let cfg = test_config();
-        assert_eq!(
-            resolve_from_mailbox(&cfg, "Agent <agent@example.com>").unwrap(),
-            "agent"
-        );
-    }
-
-    #[test]
-    fn resolve_from_mailbox_falls_through_to_catchall() {
-        let cfg = test_config();
-        // Local part doesn't match a named mailbox; should resolve to catchall.
-        assert_eq!(
-            resolve_from_mailbox(&cfg, "nobody@example.com").unwrap(),
-            "catchall"
-        );
-    }
-
-    #[test]
-    fn resolve_from_mailbox_no_match_no_catchall_errors() {
-        let mut mailboxes = std::collections::HashMap::new();
-        mailboxes.insert(
-            "agent".to_string(),
-            crate::config::MailboxConfig {
-                address: "agent@example.com".to_string(),
-                on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-            },
-        );
-        let cfg = Config {
-            domain: "example.com".to_string(),
-            data_dir: std::path::PathBuf::from("/tmp"),
-            dkim_selector: "dkim".to_string(),
-            mailboxes,
-            verify_host: None,
-            enable_ipv6: false,
-        };
-        let err = resolve_from_mailbox(&cfg, "nobody@example.com").unwrap_err();
-        assert!(err.contains("no mailbox"));
-        assert!(err.contains("nobody@example.com"));
-    }
 
     #[test]
     fn parse_response_ok() {
@@ -1222,7 +1090,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut reader, mut writer) = stream.into_split();
-            let req = send_protocol::parse_request(&mut reader).await.unwrap();
+            let req = send_protocol::parse_send_request(&mut reader)
+                .await
+                .unwrap();
             *captured_c.lock().unwrap() = Some(req);
             send_protocol::write_response(
                 &mut writer,
@@ -1237,7 +1107,6 @@ mod tests {
         });
 
         let request = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
@@ -1248,7 +1117,6 @@ mod tests {
             _ => panic!("expected Ok"),
         }
         let seen = captured.lock().unwrap().clone().unwrap();
-        assert_eq!(seen.from_mailbox, "alice");
         assert_eq!(seen.body, b"From: alice@example.com\r\n\r\nhi\r\n".to_vec());
     }
 
@@ -1257,7 +1125,6 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let missing = tmp.path().join("does-not-exist.sock");
         let request = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
         };
         let result = submit_request(&missing, &request).await;
@@ -1278,7 +1145,9 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut reader, mut writer) = stream.into_split();
-            let _ = send_protocol::parse_request(&mut reader).await.unwrap();
+            let _ = send_protocol::parse_send_request(&mut reader)
+                .await
+                .unwrap();
             send_protocol::write_response(
                 &mut writer,
                 &SendResponse::Err {
@@ -1293,7 +1162,6 @@ mod tests {
         });
 
         let request = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: b"From: alice@other.org\r\n\r\nhi\r\n".to_vec(),
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
@@ -1316,14 +1184,15 @@ mod tests {
         let server = tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (mut reader, mut writer) = stream.into_split();
-            let _ = send_protocol::parse_request(&mut reader).await.unwrap();
+            let _ = send_protocol::parse_send_request(&mut reader)
+                .await
+                .unwrap();
             use tokio::io::AsyncWriteExt;
             writer.write_all(b"garbage not a frame\n").await.unwrap();
             writer.shutdown().await.ok();
         });
 
         let request = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
