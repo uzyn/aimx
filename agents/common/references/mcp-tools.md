@@ -49,24 +49,32 @@ mailbox_list()
 
 ### `mailbox_delete`
 
-Delete a mailbox and all its mail. This removes both `inbox/<name>/` and
-`sent/<name>/` directories. Irreversible.
+Delete a mailbox. Removes the `[mailboxes.<name>]` stanza from
+`config.toml` and hot-swaps the daemon's in-memory config. The
+`inbox/<name>/` and `sent/<name>/` directories must be empty first — the
+daemon refuses the delete otherwise. Empty directories are left on disk
+for the operator to clean up (e.g. `rmdir`).
 
 **Parameters:**
 | Name   | Type   | Required | Description |
 |--------|--------|----------|-------------|
 | `name` | string | yes      | Mailbox name to delete |
 
-**Returns:** Confirmation string.
+**Returns:** Confirmation string. Mentions the empty directories that
+remain on disk so the operator isn't surprised.
 
 **Example:**
 ```
 mailbox_delete(name: "old-project")
-→ "Mailbox 'old-project' deleted."
+→ "Mailbox 'old-project' deleted. Empty `inbox/old-project/` and
+   `sent/old-project/` directories remain on disk — run `rmdir` to tidy
+   up if desired."
 ```
 
 **Errors:**
 - Mailbox does not exist.
+- Mailbox is non-empty (inbox or sent contains files).
+- Attempt to delete the `catchall` mailbox.
 
 ---
 

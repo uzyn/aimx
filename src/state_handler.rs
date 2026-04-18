@@ -17,27 +17,38 @@
 //! inbound ingest do not serialize against each other — safety relies on
 //! the fact that ingest allocates a fresh filename (timestamp + slug)
 //! while MARK rewrites an existing file, so the two paths write to
-//! disjoint paths in practice. Sprint 46 is tracked to unify both writers
-//! under a single per-mailbox lock.
+//! disjoint paths in practice. Unifying both writers under a single
+//! per-mailbox lock is tracked in the Non-blocking Review Backlog for a
+//! future sprint.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::sync::RwLock;
 
+use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mcp::resolve_email_path;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
-/// Per-connection shared state for the MARK verbs (and future state-
-/// mutation verbs added in Sprint 46+).
+/// Per-connection shared state for the MARK verbs (and the Sprint 46
+/// MAILBOX-CRUD verbs, which share the per-mailbox lock map so their
+/// config.toml rewrite does not race with an in-flight MARK).
 pub struct StateContext {
     /// Data directory root — `<data_dir>/inbox/<mailbox>/<id>.md` etc.
+    ///
+    /// Invariant: `data_dir == config_handle.load().data_dir` for the
+    /// life of the daemon. `data_dir` is captured once at startup and
+    /// never changes; the `Config` swap path (MAILBOX-CRUD in
+    /// `mailbox_handler.rs`) deliberately never rewrites `data_dir`, so
+    /// this snapshot and the live handle's `data_dir` cannot diverge in
+    /// practice.
     pub data_dir: PathBuf,
-    /// Mailboxes known at daemon startup. The MARK handlers gate on
-    /// presence here before touching the filesystem so a typo'd mailbox
-    /// name produces `ERR MAILBOX` instead of `ERR NOTFOUND` on the file.
-    pub mailboxes: std::collections::HashSet<String>,
+    /// Live handle to the daemon's `Config`. MARK-* uses it to validate
+    /// that the referenced mailbox exists at the time of the call (rather
+    /// than at startup); MAILBOX-* uses it to append / remove stanzas and
+    /// hot-swap the in-memory snapshot.
+    pub config_handle: ConfigHandle,
     /// Per-mailbox lock map. `Mutex` because the map-level mutation
     /// (lazy insert) is short; the per-mailbox `RwLock` handles the
     /// actual file write ordering.
@@ -45,17 +56,17 @@ pub struct StateContext {
 }
 
 impl StateContext {
-    pub fn new(data_dir: PathBuf, mailboxes: std::collections::HashSet<String>) -> Self {
+    pub fn new(data_dir: PathBuf, config_handle: ConfigHandle) -> Self {
         Self {
             data_dir,
-            mailboxes,
+            config_handle,
             locks: Mutex::new(HashMap::new()),
         }
     }
 
     /// Acquire (lazy-inserting if needed) the per-mailbox write lock.
     /// Returned guard is released when dropped.
-    fn lock_for(&self, mailbox: &str) -> Arc<RwLock<()>> {
+    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<RwLock<()>> {
         let mut map = self
             .locks
             .lock()
@@ -98,14 +109,22 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 /// against inbound ingest (which uses a separate process-wide
 /// `INGEST_WRITE_LOCK`); the two writers are safe today only because
 /// they target disjoint paths — ingest writes freshly-allocated
-/// filenames while MARK rewrites existing files. Sprint 46 is tracked
-/// to unify both writers under a shared per-mailbox lock.
+/// filenames while MARK rewrites existing files. Unifying both writers
+/// under a shared per-mailbox lock is in the Non-blocking Review
+/// Backlog for a future sprint.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
     }
 
-    if !ctx.mailboxes.contains(&req.mailbox) {
+    // Sprint 46: mailbox existence is resolved live through the handle so
+    // a freshly-created mailbox is immediately target-able from MARK.
+    if !ctx
+        .config_handle
+        .load()
+        .mailboxes
+        .contains_key(&req.mailbox)
+    {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
             reason: format!("mailbox '{}' does not exist", req.mailbox),
@@ -193,7 +212,6 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
 mod tests {
     use super::*;
     use crate::frontmatter::InboundFrontmatter;
-    use std::collections::HashSet;
     use tempfile::TempDir;
 
     fn sample_meta(id: &str, read: bool) -> InboundFrontmatter {
@@ -234,9 +252,25 @@ mod tests {
     }
 
     fn ctx(data_dir: &Path) -> StateContext {
-        let mut boxes = HashSet::new();
-        boxes.insert("alice".to_string());
-        StateContext::new(data_dir.to_path_buf(), boxes)
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".to_string(),
+                on_receive: vec![],
+                trust: "none".to_string(),
+                trusted_senders: vec![],
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        StateContext::new(data_dir.to_path_buf(), ConfigHandle::new(config))
     }
 
     #[tokio::test]
