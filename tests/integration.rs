@@ -65,9 +65,9 @@ fn setup_test_env(tmp: &Path) -> String {
 }
 
 /// Build an `aimx` Command pre-wired with `AIMX_CONFIG_DIR` pointed at the
-/// test's tempdir. v0.2 (Sprint 33) moved config out of the storage
-/// directory, so integration tests must override both the storage path
-/// (`--data-dir` / `AIMX_DATA_DIR`) and the config lookup via this env var.
+/// test's tempdir. Config and storage live in different roots, so
+/// integration tests must override both the storage path (`--data-dir`
+/// / `AIMX_DATA_DIR`) and the config lookup via this env var.
 fn aimx_cmd(tmp: &Path) -> Command {
     let mut cmd = Command::cargo_bin("aimx").unwrap();
     cmd.env("AIMX_CONFIG_DIR", tmp);
@@ -274,7 +274,7 @@ fn ingest_attachment_fixture_full_pipeline() {
     let att = attachments[0].as_table().unwrap();
     assert_eq!(att.get("filename").unwrap().as_str().unwrap(), "readme.txt");
     // Bundle-relative path: attachment sits beside the `.md` with no
-    // `attachments/` prefix after Sprint 36.
+    // `attachments/` prefix.
     assert_eq!(att.get("path").unwrap().as_str().unwrap(), "readme.txt");
 }
 
@@ -490,8 +490,8 @@ struct McpClient {
 
 impl McpClient {
     fn spawn(data_dir: &Path) -> Self {
-        // Sprint 46: MCP mailbox create/delete now try the daemon's UDS
-        // socket first. Tests that don't spawn their own daemon must point
+        // MCP mailbox create/delete try the daemon's UDS socket first.
+        // Tests that don't spawn their own daemon must point
         // AIMX_RUNTIME_DIR at an empty tempdir so the socket isn't found
         // (otherwise the test would speak to whatever production daemon
         // happens to be running on the CI/dev host).
@@ -780,9 +780,9 @@ fn mcp_email_list_nonexistent_mailbox_error() {
 #[cfg(unix)]
 #[test]
 fn mcp_email_mark_read_unread() {
-    // Sprint 45: MCP's email_mark_read / email_mark_unread tools route
-    // through `aimx serve` over UDS so they work without write access to
-    // the root-owned mailbox files. The test spawns the daemon first and
+    // MCP's email_mark_read / email_mark_unread tools route through
+    // `aimx serve` over UDS so they work without write access to the
+    // root-owned mailbox files. The test spawns the daemon first and
     // points both the daemon and the MCP client at the same runtime dir.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
@@ -858,8 +858,8 @@ fn mcp_email_mark_read_unread() {
     stop_serve(daemon);
 }
 
-/// Sprint 45: when the daemon is not running, email_mark_read returns a
-/// helpful error pointing the operator at `systemctl start aimx`.
+/// When the daemon is not running, email_mark_read returns a helpful
+/// error pointing the operator at `systemctl start aimx`.
 #[cfg(unix)]
 #[test]
 fn mcp_email_mark_without_daemon_reports_missing_socket() {
@@ -1062,7 +1062,7 @@ command = "false"
 
 #[test]
 fn ingest_rejects_legacy_placeholder_config_at_cli() {
-    // Sprint 44 regression guard: Config::load must refuse a config that still
+    // Regression guard: Config::load must refuse a config that still
     // references the retired `{from}` / `{subject}` / `{to}` / `{mailbox}` /
     // `{filepath}` placeholders, and that error must surface to the CLI user
     // as a non-zero exit code with a stderr message naming the placeholder and
@@ -1265,9 +1265,9 @@ command = "touch {}"
 /// that trigger failure does NOT block delivery. This is the smoke test
 /// protecting every recipe in `book/channel-recipes.md` from regressions.
 ///
-/// Sprint 44 switched user-controlled fields from `{subject}` / `{filepath}`
-/// substitution to `AIMX_*` env vars (shell-injection fix). The test uses
-/// the new pattern end-to-end.
+/// User-controlled fields ride on `AIMX_*` env vars rather than
+/// `{subject}` / `{filepath}` substitution (shell-injection fix). The
+/// test uses that pattern end-to-end.
 #[test]
 fn channel_recipe_end_to_end_with_templated_args() {
     let tmp = TempDir::new().unwrap();
@@ -2082,7 +2082,7 @@ fn serve_e2e_to_cc_bcc_combined() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 34 — UDS send listener integration tests.
+// UDS send listener integration tests.
 //
 // These tests spawn `aimx serve` as a subprocess (same pattern as the
 // `serve_e2e_*` tests above) and drive the `/run/aimx/send.sock` UDS
@@ -2153,8 +2153,8 @@ fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
     // rejected with `ERR DOMAIN` before any MX lookup happens, proving
     // both the wire parser and the handler wiring end-to-end.
     //
-    // Sprint 45: the `From-Mailbox:` header is gone — the daemon parses
-    // `From:` out of the body and resolves the mailbox itself.
+    // There is no `From-Mailbox:` header — the daemon parses `From:`
+    // out of the body and resolves the mailbox itself.
     let body = b"From: alice@not-the-domain.example\r\n\
                  To: user@gmail.com\r\n\
                  Subject: Hi\r\n\
@@ -2252,7 +2252,7 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 35 — `aimx send` thin UDS client end-to-end.
+// `aimx send` thin UDS client end-to-end.
 //
 // Spawns `aimx serve` with `AIMX_TEST_MAIL_DROP` pointing at a tempfile so
 // the daemon's outbound MX transport is replaced with a file-drop capture.
@@ -2260,8 +2260,8 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
 //   * client exited 0
 //   * daemon logs include peer_uid=/peer_pid= for the accepted send
 //   * the captured (signed) message carries a DKIM-Signature header that
-//     verifies against the test public key using the same canonicalization
-//     helper from the Sprint 25 DKIM test.
+//     verifies against the test public key using the relaxed-canonicalization
+//     helper.
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -2394,9 +2394,9 @@ fn send_uds_end_to_end_delivers_signed_message() {
         .arg("--to")
         .arg("recipient@example.com")
         .arg("--subject")
-        .arg("E2E Sprint 35")
+        .arg("End-to-end UDS send")
         .arg("--body")
-        .arg("Hello from Sprint 35")
+        .arg("Hello from the end-to-end test.")
         .output()
         .expect("aimx send failed to run");
 
@@ -2437,8 +2437,8 @@ fn send_uds_end_to_end_delivers_signed_message() {
         "captured message must echo the original From header"
     );
 
-    // Cryptographic DKIM body-hash verification — reuses the same relaxed
-    // canonicalization the Sprint 25 unit test walks through.
+    // Cryptographic DKIM body-hash verification using relaxed
+    // canonicalization.
     let signed_header = extract_dkim_bh(payload);
     let computed = compute_relaxed_body_hash(payload);
     assert_eq!(
@@ -2541,7 +2541,7 @@ fn send_without_daemon_reports_missing_socket() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 45 — MCP write ops via daemon.
+// MCP write ops via daemon.
 //
 // `email_mark_read` / `email_mark_unread` route through `aimx serve` over
 // the UDS. These tests spawn the daemon + MCP as sibling subprocesses and
@@ -2706,12 +2706,12 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 46: mailbox CRUD via UDS (daemon hot-swaps Arc<Config>). These
-// integration tests exercise the end-to-end flow:
+// Mailbox CRUD via UDS (daemon hot-swaps Arc<Config>). These integration
+// tests exercise the end-to-end flow:
 //   - `aimx mailbox create foo` against a running daemon → inbound SMTP to
 //     `foo@<domain>` routes to `inbox/foo/`, not catchall, with no restart.
 //   - `aimx mailbox create foo` against a stopped daemon → falls back to
-//     direct on-disk edit + prints the Sprint 44 restart-hint banner.
+//     direct on-disk edit + prints the restart-hint banner.
 //   - `aimx mailbox delete foo` refuses when the mailbox still has files,
 //     then succeeds after the files are removed.
 // ---------------------------------------------------------------------------
@@ -2931,10 +2931,10 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 47 (S47-1): DKIM startup check wired into `run_serve`. These tests
-// exercise the full daemon against a canned resolver override so the check
-// runs through the real code path (not just the evaluator unit tests) and
-// we can assert the startup log rendering and that the listeners still bind
+// DKIM startup check wired into `run_serve`. These tests exercise the
+// full daemon against a canned resolver override so the check runs
+// through the real code path (not just the evaluator unit tests) and we
+// can assert the startup log rendering and that the listeners still bind
 // after a non-`Match` outcome.
 // ---------------------------------------------------------------------------
 
@@ -3085,8 +3085,8 @@ fn dkim_startup_check_resolve_error_logs_warning_and_binds_listeners() {
 }
 
 // ---------------------------------------------------------------------------
-// Sprint 47 (S47-4): unified per-mailbox write lock covering inbound ingest,
-// MARK-*, and MAILBOX-*. These integration tests stress the lock boundary:
+// Unified per-mailbox write lock covering inbound ingest, MARK-*, and
+// MAILBOX-*. These integration tests stress the lock boundary:
 //   1. Concurrent ingest bursts + MARK-READ on the same mailbox — no torn
 //      writes, every `.md` file has a clean `+++ ... +++` frontmatter and
 //      parses as TOML.
@@ -3104,9 +3104,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
     // against the same mailbox. With the unified per-mailbox
     // `tokio::sync::Mutex<()>` shared between ingest and the MARK
     // handler, every `.md` file on disk must end with a clean
-    // frontmatter block. Pre-Sprint-47, ingest held a different lock
-    // (`INGEST_WRITE_LOCK`) than MARK-*'s per-mailbox RwLock, so a
-    // future writer that re-opened an existing file would race.
+    // frontmatter block.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3304,7 +3302,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     // the sum exceeds 20s — tests normally complete in <1s. The flag
     // lets us dismiss the watchdog promptly on success instead of
     // leaving a detached thread sleeping for 20s then panicking in the
-    // background (see Sprint 47 review).
+    // background.
     let watchdog_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let watchdog = {
         let cancel = std::sync::Arc::clone(&watchdog_cancel);
@@ -3320,7 +3318,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
                 return;
             }
             // If this runs, the joins below are still pending → deadlock.
-            panic!("Sprint 47 deadlock watchdog fired: MAILBOX-CREATE + ingest did not converge");
+            panic!("Deadlock watchdog fired: MAILBOX-CREATE + ingest did not converge");
         })
     };
 

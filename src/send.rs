@@ -1,15 +1,16 @@
 //! `aimx send` — thin UDS client for `AIMX/1 SEND`.
 //!
-//! As of Sprint 35, this module no longer signs, loads DKIM keys, or talks
-//! to MX servers directly. It composes an unsigned RFC 5322 message,
-//! opens `/run/aimx/send.sock`, writes a single `AIMX/1 SEND` request frame,
-//! and maps the daemon's response to a stable CLI exit code + user message.
+//! This module does not sign, load DKIM keys, or talk to MX servers
+//! directly. It composes an unsigned RFC 5322 message, opens
+//! `/run/aimx/send.sock`, writes a single `AIMX/1 SEND` request frame,
+//! and maps the daemon's response to a stable CLI exit code + user
+//! message.
 //!
-//! Sprint 45 further shrinks the client: `aimx send` no longer reads
-//! `/etc/aimx/config.toml` at all. The daemon parses `From:` out of the
-//! submitted message body and resolves the sender mailbox from its
-//! in-memory Config. This lets a non-root operator run `aimx send` on a
-//! default install where `config.toml` is `0640 root:root`.
+//! `aimx send` does not read `/etc/aimx/config.toml` at all — the daemon
+//! parses `From:` out of the submitted message body and resolves the
+//! sender mailbox from its in-memory Config. This lets a non-root
+//! operator run `aimx send` on a default install where `config.toml` is
+//! `0640 root:root`.
 //!
 //! Signing and MX delivery live in `aimx serve` (see `send_handler.rs` and
 //! `transport.rs`).
@@ -350,10 +351,10 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
     }
 }
 
-/// Build the `AIMX/1 SEND` request frame from composed CLI args. Since
-/// Sprint 45 the request carries no `From-Mailbox:` header — the daemon
-/// parses the `From:` header out of the body itself and resolves the
-/// mailbox against its in-memory Config.
+/// Build the `AIMX/1 SEND` request frame from composed CLI args. The
+/// request carries no `From-Mailbox:` header — the daemon parses the
+/// `From:` header out of the body itself and resolves the mailbox
+/// against its in-memory Config.
 pub fn build_request(args: &SendArgs) -> Result<SendRequest, String> {
     let composed = compose_message(args).map_err(|e| e.to_string())?;
     Ok(SendRequest {
@@ -947,12 +948,10 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // Sprint 35: client wire-layer tests. These use a tempdir-scoped UDS
-    // + an in-memory handler so we never hit the real `/run/aimx/`.
-    //
-    // Sprint 45: `aimx send` no longer resolves mailboxes on the client
-    // side — those tests now live in `send_handler::tests` where the
-    // daemon-side resolver is exercised directly.
+    // Client wire-layer tests. These use a tempdir-scoped UDS plus an
+    // in-memory handler so we never hit the real `/run/aimx/`. Mailbox
+    // resolution lives in `send_handler::tests` where the daemon-side
+    // resolver is exercised directly.
     // ------------------------------------------------------------------
 
     #[test]

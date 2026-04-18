@@ -3,20 +3,15 @@
 //!
 //! # Why a shared lock
 //!
-//! Sprint 36 gave the inbound ingest path a process-wide
-//! `std::sync::Mutex<()>` (`INGEST_WRITE_LOCK`) to serialize filename
-//! allocation + bundle-directory writes. Sprint 45 added MARK-READ /
-//! MARK-UNREAD with its own per-mailbox `tokio::sync::RwLock` map in
-//! [`crate::state_handler`]. Both paths do "read → modify → write" on
-//! files under the same mailbox tree — but they never acquired the *same*
-//! lock, because the writers targeted disjoint files (ingest creates a
-//! fresh `YYYY-MM-DD-HHMMSS-<slug>.md`; MARK rewrites an existing stem).
-//!
-//! That invariant was defensible but fragile: any future verb that
+//! Inbound ingest, MARK-READ/UNREAD, and MAILBOX-CREATE/DELETE all do
+//! "read → modify → write" on files under the same mailbox tree. They
+//! could in principle target disjoint files (ingest creates a fresh
+//! `YYYY-MM-DD-HHMMSS-<slug>.md`; MARK rewrites an existing stem), but
+//! relying on file-path disjointness is fragile: any future verb that
 //! re-opens an existing `.md` on the ingest side, or that creates files
-//! on the MARK side, would quietly lose correctness. Sprint 47
-//! (S47-4) unifies both writers under a single per-mailbox lock so the
-//! safety argument no longer depends on file-path disjointness.
+//! on the MARK side, would quietly lose correctness. A single
+//! per-mailbox lock unifies all three writers so the safety argument no
+//! longer depends on file-path disjointness.
 //!
 //! # Lock hierarchy
 //!

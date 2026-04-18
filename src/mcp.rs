@@ -117,10 +117,10 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<MailboxCreateParams>,
     ) -> Result<String, String> {
-        // Sprint 46: prefer the daemon UDS path — the daemon atomically
-        // rewrites config.toml and hot-swaps its in-memory Config so a
-        // following inbound mail routes correctly with no restart. Fall
-        // back to direct on-disk edit only when the socket isn't reachable
+        // Prefer the daemon UDS path — the daemon atomically rewrites
+        // config.toml and hot-swaps its in-memory Config so a following
+        // inbound mail routes correctly with no restart. Fall back to
+        // direct on-disk edit only when the socket isn't reachable
         // (daemon stopped, first-time setup, etc.).
         match submit_mailbox_crud_via_daemon(&params.name, true) {
             Ok(()) => Ok(format!("Mailbox '{}' created successfully.", params.name)),
@@ -166,11 +166,11 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<MailboxDeleteParams>,
     ) -> Result<String, String> {
-        // Sprint 46: daemon-side delete refuses when the inbox/sent
-        // directories still contain files (returns ERR NONEMPTY). The
-        // fallback direct-on-disk path below matches the CLI's current
-        // semantics (removes the directory tree) and runs only when the
-        // daemon is unreachable.
+        // Daemon-side delete refuses when the inbox/sent directories
+        // still contain files (returns ERR NONEMPTY). The fallback
+        // direct-on-disk path below matches the CLI's current semantics
+        // (removes the directory tree) and runs only when the daemon is
+        // unreachable.
         match submit_mailbox_crud_via_daemon(&params.name, false) {
             Ok(()) => Ok(format!(
                 "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
@@ -263,8 +263,8 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
         let folder = resolve_folder(params.folder.as_deref())?;
-        // Sprint 45: route through the daemon — mailbox files are
-        // root-owned and the MCP process runs as the invoking user.
+        // Route through the daemon — mailbox files are root-owned and
+        // the MCP process runs as the invoking user.
         submit_mark_via_daemon(&params.mailbox, &params.id, folder, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
@@ -383,12 +383,11 @@ impl AimxMcpServer {
 }
 
 /// Compose `args` into an `AIMX/1 SEND` request and submit it to
-/// `aimx serve` over the UDS. MCP, like `aimx send`, no longer signs or
-/// delivers mail directly — everything goes through the daemon.
-///
-/// Sprint 45: the request frame no longer carries `From-Mailbox:`; the
-/// daemon parses the `From:` header out of the composed body itself and
-/// resolves the sender mailbox against its in-memory Config.
+/// `aimx serve` over the UDS. MCP, like `aimx send`, does not sign or
+/// deliver mail directly — everything goes through the daemon. The
+/// request frame carries no `From-Mailbox:` header; the daemon parses
+/// `From:` out of the composed body itself and resolves the sender
+/// mailbox against its in-memory Config.
 fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
     let composed = send::compose_message(args).map_err(|e| e.to_string())?;
     let request = SendRequest {
@@ -434,9 +433,9 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
 }
 
 /// Submit a `MARK-READ` or `MARK-UNREAD` request to the daemon over UDS.
-/// Sprint 45: MCP's `email_mark_read` / `email_mark_unread` tools route
-/// through this path so the non-root MCP process doesn't need write access
-/// to the root-owned mailbox files.
+/// MCP's `email_mark_read` / `email_mark_unread` tools route through this
+/// path so the non-root MCP process doesn't need write access to the
+/// root-owned mailbox files.
 fn submit_mark_via_daemon(
     mailbox: &str,
     id: &str,
@@ -640,7 +639,7 @@ fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
             "PROTOCOL" => ErrCode::Protocol,
             "NOTFOUND" => ErrCode::NotFound,
             "IO" => ErrCode::Io,
-            // Sprint 46 additions: MAILBOX-CRUD verbs report these codes.
+            // MAILBOX-CRUD verbs report these codes.
             "VALIDATION" => ErrCode::Validation,
             "NONEMPTY" => ErrCode::NonEmpty,
             _ => {
@@ -838,10 +837,10 @@ pub fn filter_emails(
     Ok(result)
 }
 
-/// Direct-on-disk frontmatter rewrite. Sprint 45 removed the call from the
-/// MCP tool handlers (they now route through the daemon via UDS so the
+/// Direct-on-disk frontmatter rewrite. Not called by the MCP tool
+/// handlers themselves — they route through the daemon via UDS so the
 /// non-root MCP process doesn't need write access to root-owned mailbox
-/// files). Retained for unit-test coverage of the frontmatter
+/// files. Retained for unit-test coverage of the frontmatter
 /// read/rewrite flow; exercised at the protocol level by
 /// `state_handler::tests` and at the MCP level by integration tests.
 #[cfg(test)]

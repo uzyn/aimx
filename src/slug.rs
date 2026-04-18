@@ -1,4 +1,4 @@
-//! Slug algorithm + filename helper (Sprint 36 / FR-13b).
+//! Slug algorithm + filename helper (FR-13b).
 //!
 //! `slugify` is a pure transform: MIME-decoded subject → deterministic
 //! filesystem-safe stem. `allocate_filename` picks the final on-disk path,

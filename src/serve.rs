@@ -366,8 +366,8 @@ async fn run_serve(
         None => Arc::new(LettreTransport::new(config.enable_ipv6)),
     };
 
-    // Sprint 46: wrap the starting Config in a live, swappable handle.
-    // Every daemon-side context (send, state, mailbox, SMTP server) reads
+    // Wrap the starting Config in a live, swappable handle. Every
+    // daemon-side context (send, state, mailbox, SMTP server) reads
     // through this same handle so MAILBOX-CREATE/DELETE is reflected
     // everywhere at once on a successful atomic `config.toml` write.
     let data_dir = config.data_dir.clone();
@@ -382,23 +382,23 @@ async fn run_serve(
         data_dir: data_dir.clone(),
     });
 
-    // Sprint 47: a single `MailboxLocks` map is shared across every
-    // writer (inbound ingest, MARK-*, MAILBOX-*) so they all serialize
-    // on the same per-mailbox `tokio::sync::Mutex<()>`. See
-    // `crate::mailbox_locks` for the lock hierarchy.
+    // A single `MailboxLocks` map is shared across every writer (inbound
+    // ingest, MARK-*, MAILBOX-*) so they all serialize on the same
+    // per-mailbox `tokio::sync::Mutex<()>`. See `crate::mailbox_locks`
+    // for the lock hierarchy.
     let mailbox_locks = Arc::new(crate::mailbox_locks::MailboxLocks::new());
 
-    // Shared state context for MARK-READ / MARK-UNREAD verbs (Sprint 45)
-    // and the per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE
-    // (Sprint 46), plus inbound ingest (Sprint 47).
+    // Shared state context for MARK-READ / MARK-UNREAD verbs and the
+    // per-mailbox write lock used by MAILBOX-CREATE / MAILBOX-DELETE
+    // plus inbound ingest.
     let state_ctx = Arc::new(StateContext::with_locks(
         data_dir.clone(),
         config_handle.clone(),
         Arc::clone(&mailbox_locks),
     ));
 
-    // Sprint 46: MailboxContext owns the on-disk config.toml path + the
-    // handle it writes through.
+    // MailboxContext owns the on-disk config.toml path + the handle it
+    // writes through.
     let mb_ctx = Arc::new(MailboxContext::new(
         crate::config::config_path(),
         config_handle.clone(),
@@ -710,8 +710,8 @@ pub mod service {
     pub fn generate_systemd_unit(aimx_path: &str, data_dir: &str) -> String {
         // `RuntimeDirectory=aimx` makes systemd create `/run/aimx/` at
         // service start (default mode 0755, root:root) and tear it down on
-        // stop. The UDS send socket landing inside (Sprint 34) is
-        // world-writable — authorization is out of scope in v0.2.
+        // stop. The UDS send socket landing inside is world-writable —
+        // authorization is out of scope in v0.2.
         format!(
             "[Unit]\n\
              Description=AIMX SMTP server\n\
@@ -881,8 +881,8 @@ mod tests {
         );
         assert!(
             !unit.contains("Group=aimx"),
-            "Sprint 33.1 dropped the `aimx` group — the systemd unit must \
-             not declare Group=aimx. The UDS send socket (Sprint 34) is \
+            "v0.2 does not use an `aimx` group — the systemd unit must \
+             not declare Group=aimx. The UDS send socket is \
              world-writable; authorization is out of scope in v0.2."
         );
         assert!(
@@ -902,12 +902,11 @@ mod tests {
         assert!(
             script.contains("checkpath -d -m 0755 -o root:root /run/aimx"),
             "OpenRC script must mint /run/aimx with mode 0755 and owner \
-             root:root (Sprint 33.1 dropped the aimx group): {script}"
+             root:root (no aimx group is used): {script}"
         );
         assert!(
             !script.contains("command_user=\"root:aimx\""),
-            "OpenRC script must not declare command_user with the aimx group \
-             (Sprint 33.1)"
+            "OpenRC script must not declare command_user with an aimx group"
         );
         assert!(
             !script.contains("root:aimx"),
