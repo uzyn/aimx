@@ -248,11 +248,11 @@ trusted_senders = ["*@company.com", "boss@gmail.com"]
 # Channel rules: trigger commands on incoming email
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'echo "New email from {from}: {subject}" >> /tmp/email.log'
+command = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = 'ntfy pub my-topic "Email from {from}: {subject}"'
+command = 'ntfy pub my-topic "Email from $AIMX_FROM: $AIMX_SUBJECT"'
 
 [mailboxes.support.on_receive.match]
 from = "*@gmail.com"        # Glob pattern on sender
@@ -260,19 +260,26 @@ subject = "urgent"           # Substring match (case-insensitive)
 has_attachment = true        # Filter on attachment presence
 ```
 
-### Channel manager template variables
+### Channel manager variables
 
-Available in `on_receive` command templates:
+User-controlled fields (from the sender's headers) are exposed as **environment variables** so they're safe to quote inside the command string. Always expand them inside double quotes (`"$AIMX_SUBJECT"`) — `sh -c` preserves arbitrary bytes under env-var expansion.
 
-| Variable | Description |
-|----------|-------------|
-| `{filepath}` | Full path to the saved `.md` file (e.g., `/var/lib/aimx/inbox/support/2025-04-15-103000-hello.md`) |
-| `{from}` | Sender email address |
-| `{to}` | Recipient email address |
-| `{subject}` | Email subject |
-| `{mailbox}` | Mailbox name |
+| Environment variable | Description |
+|----------------------|-------------|
+| `AIMX_FILEPATH` | Full path to the saved `.md` file (e.g., `/var/lib/aimx/inbox/support/2025-04-15-103000-hello.md`) |
+| `AIMX_FROM` | Sender email address (may include display name) |
+| `AIMX_TO` | Recipient email address |
+| `AIMX_SUBJECT` | Email subject |
+| `AIMX_MAILBOX` | Mailbox name |
+
+Two aimx-controlled fields are also substituted as **template placeholders** directly into the command string (safe because aimx controls the content):
+
+| Placeholder | Description |
+|-------------|-------------|
 | `{id}` | Email ID / filename stem (e.g., `2025-04-15-103000-hello`) |
 | `{date}` | Email date |
+
+Configs that reference the legacy `{from}`, `{to}`, `{subject}`, `{mailbox}`, or `{filepath}` placeholders are rejected at config load with a migration hint — replace each with its `$AIMX_*` equivalent inside double quotes.
 
 ### Trust policy
 
