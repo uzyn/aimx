@@ -12,24 +12,42 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
     }
 }
 
-fn validate_mailbox_name(name: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// Canonical mailbox-name validator. Rejects anything that would be
+/// unsafe as a file-system path component *or* as the local-part of the
+/// resulting email address (`<name>@<domain>`).
+///
+/// A valid mailbox name is non-empty, matches `[a-z0-9._-]+` (case-folded —
+/// no uppercase), and contains no leading/trailing `.` or consecutive `..`.
+/// This is stricter than RFC 5322 allows but matches what modern MTAs
+/// actually accept without quoting, which is what we care about in
+/// practice.
+///
+/// Used both by the CLI path (`aimx mailbox create`) and by the UDS
+/// handler (`MAILBOX-CREATE`/`MAILBOX-DELETE`). Keeping a single source of
+/// truth prevents drift between the two.
+pub(crate) fn validate_mailbox_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
         return Err("Mailbox name cannot be empty".into());
     }
     if name.contains("..") {
         return Err("Mailbox name cannot contain '..'".into());
     }
-    if name.contains('/') || name.contains('\\') {
-        return Err("Mailbox name cannot contain path separators".into());
+    if name.starts_with('.') || name.ends_with('.') {
+        return Err("Mailbox name cannot start or end with '.'".into());
     }
-    if name.contains('\0') {
-        return Err("Mailbox name cannot contain null bytes".into());
+    for c in name.chars() {
+        let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-';
+        if !ok {
+            return Err(format!(
+                "Mailbox name contains invalid character {c:?}; allowed: [a-z0-9._-]"
+            ));
+        }
     }
     Ok(())
 }
 
 pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-    validate_mailbox_name(name)?;
+    validate_mailbox_name(name).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     if config.mailboxes.contains_key(name) {
         return Err(format!("Mailbox '{name}' already exists").into());
@@ -259,13 +277,18 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
 /// and OpenRC for the *restart* verb beyond `serve::service`'s existing
 /// dispatch tables; keeping it inline keeps the hint readable without
 /// threading the full init-system check through more modules.
+///
+/// Every `InitSystem` variant is matched explicitly so adding a new one
+/// (e.g. `Runit`, `S6`) fails to compile until the new arm is supplied —
+/// no silent fall-through via `_`.
 pub(crate) fn restart_hint_command(init: &crate::serve::service::InitSystem) -> &'static str {
+    use crate::serve::service::InitSystem;
     match init {
-        crate::serve::service::InitSystem::OpenRC => "sudo rc-service aimx restart",
-        // Systemd and Unknown both land here — systemd is far more common,
-        // and on an unknown init the systemd wording is a better fallback
-        // than saying nothing (operator can translate once).
-        _ => "sudo systemctl restart aimx",
+        InitSystem::Systemd => "sudo systemctl restart aimx",
+        InitSystem::OpenRC => "sudo rc-service aimx restart",
+        // On an unknown init the systemd wording is a better fallback than
+        // saying nothing (systemd is far more common; operator can translate).
+        InitSystem::Unknown => "sudo systemctl restart aimx",
     }
 }
 
@@ -336,6 +359,38 @@ mod tests {
         let guard = ConfigDirOverride::set(tmp);
         config.save(&crate::config::config_path()).unwrap();
         guard
+    }
+
+    #[test]
+    fn validate_mailbox_name_rejects_whitespace_and_bad_chars() {
+        // S47-3: tighter validation closes a hole where names like
+        // "hello world" made it past the old validator and produced an
+        // invalid email address when interpolated into `<name>@<domain>`.
+        assert!(validate_mailbox_name("hello world").is_err());
+        assert!(validate_mailbox_name("a b").is_err());
+        assert!(validate_mailbox_name("\ttab").is_err());
+        assert!(validate_mailbox_name("..foo").is_err());
+        assert!(validate_mailbox_name("").is_err());
+        assert!(validate_mailbox_name(".leading").is_err());
+        assert!(validate_mailbox_name("trailing.").is_err());
+        assert!(validate_mailbox_name("foo/bar").is_err());
+        assert!(validate_mailbox_name("foo\\bar").is_err());
+        assert!(validate_mailbox_name("foo\0bar").is_err());
+        // Uppercase rejected — the class is case-folded.
+        assert!(validate_mailbox_name("Alice").is_err());
+        // RFC-5322 would allow `+` in the local part (Gmail plus-addressing
+        // etc.) but we keep the class tight to prevent surprises further
+        // downstream.
+        assert!(validate_mailbox_name("alice+bob").is_err());
+    }
+
+    #[test]
+    fn validate_mailbox_name_accepts_safe_names() {
+        assert!(validate_mailbox_name("good-mailbox.1").is_ok());
+        assert!(validate_mailbox_name("catchall").is_ok());
+        assert!(validate_mailbox_name("alice").is_ok());
+        assert!(validate_mailbox_name("a").is_ok());
+        assert!(validate_mailbox_name("a.b_c-1").is_ok());
     }
 
     #[test]
@@ -542,7 +597,12 @@ mod tests {
 
         let result = create_mailbox(&config, "foo/bar");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("path separator"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid character")
+        );
     }
 
     #[test]
@@ -553,7 +613,12 @@ mod tests {
 
         let result = create_mailbox(&config, "foo\\bar");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("path separator"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("invalid character")
+        );
     }
 
     // ----- S44-4 restart hint ------------------------------------------
@@ -601,6 +666,28 @@ mod tests {
             restart_hint_command(&crate::serve::service::InitSystem::Unknown),
             "sudo systemctl restart aimx"
         );
+    }
+
+    #[test]
+    fn restart_hint_command_is_exhaustive_over_init_system() {
+        // The `match` inside `restart_hint_command` is exhaustive: every
+        // `InitSystem` variant has an explicit arm (no `_` fall-through). This
+        // test destructures every current variant so adding a new variant
+        // without touching this function would fail the exhaustive pattern
+        // check below at compile time. If you're here because this stopped
+        // compiling, you probably just added a new `InitSystem` variant — add
+        // its arm to `restart_hint_command` (and extend the assertions below).
+        use crate::serve::service::InitSystem;
+        let all = [InitSystem::Systemd, InitSystem::OpenRC, InitSystem::Unknown];
+        for variant in &all {
+            // Force an explicit destructure — the `_` catch-all is forbidden.
+            let expected: &'static str = match variant {
+                InitSystem::Systemd => "sudo systemctl restart aimx",
+                InitSystem::OpenRC => "sudo rc-service aimx restart",
+                InitSystem::Unknown => "sudo systemctl restart aimx",
+            };
+            assert_eq!(restart_hint_command(variant), expected, "{variant:?}");
+        }
     }
 
     #[test]

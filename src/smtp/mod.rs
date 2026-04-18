@@ -12,6 +12,7 @@ use tokio::sync::Semaphore;
 #[cfg(test)]
 use crate::config::Config;
 use crate::config::ConfigHandle;
+use crate::mailbox_locks::MailboxLocks;
 
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 25 * 1024 * 1024; // 25 MB
 pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
@@ -31,6 +32,13 @@ pub struct SmtpServer {
     total_timeout: Duration,
     max_connections: usize,
     max_commands_before_data: usize,
+    /// Sprint 47 (S47-4): shared with `StateContext` and `MailboxContext`
+    /// so inbound ingest, MARK-*, and MAILBOX-* all serialize on the
+    /// same per-mailbox `tokio::sync::Mutex<()>`. Defaults to a
+    /// freshly-constructed map for tests that only exercise the SMTP
+    /// path; `aimx serve` calls `with_mailbox_locks` to inject the
+    /// daemon-wide map.
+    mailbox_locks: Arc<MailboxLocks>,
 }
 
 impl SmtpServer {
@@ -53,7 +61,16 @@ impl SmtpServer {
             total_timeout: DEFAULT_TOTAL_TIMEOUT,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             max_commands_before_data: DEFAULT_MAX_COMMANDS_BEFORE_DATA,
+            mailbox_locks: Arc::new(MailboxLocks::new()),
         }
+    }
+
+    /// Share an existing `MailboxLocks` map with this SMTP server.
+    /// `aimx serve` calls this so inbound ingest, MARK-*, and MAILBOX-*
+    /// all take the same per-mailbox lock.
+    pub fn with_mailbox_locks(mut self, locks: Arc<MailboxLocks>) -> Self {
+        self.mailbox_locks = locks;
+        self
     }
 
     pub fn with_tls(
@@ -131,6 +148,7 @@ impl SmtpServer {
                     let total_timeout = self.total_timeout;
                     let max_commands = self.max_commands_before_data;
 
+                    let mailbox_locks = Arc::clone(&self.mailbox_locks);
                     tokio::spawn(async move {
                         let _permit = permit;
                         let params = session::SessionParams {
@@ -142,6 +160,7 @@ impl SmtpServer {
                             idle_timeout,
                             total_timeout,
                             max_commands_before_data: max_commands,
+                            mailbox_locks,
                         };
                         let session = session::SmtpSession::new(params);
                         if let Err(e) = session.handle(stream).await {

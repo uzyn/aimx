@@ -7,27 +7,32 @@
 //! the invoking non-root user) routes through these verbs instead of
 //! touching the files directly.
 //!
-//! Concurrency model: a per-mailbox `RwLock<()>` guards the "read →
-//! rewrite" critical section against other MARK calls on the same
-//! mailbox. The map is lazily populated so tests that never touch a
-//! mailbox never allocate a lock for it.
+//! # Concurrency model (unified in Sprint 47 / S47-4)
 //!
-//! Note: this lock is **independent** of the process-wide
-//! `ingest::INGEST_WRITE_LOCK` (a blocking `std::sync::Mutex`). MARK and
-//! inbound ingest do not serialize against each other — safety relies on
-//! the fact that ingest allocates a fresh filename (timestamp + slug)
-//! while MARK rewrites an existing file, so the two paths write to
-//! disjoint paths in practice. Unifying both writers under a single
-//! per-mailbox lock is tracked in the Non-blocking Review Backlog for a
-//! future sprint.
+//! MARK-*, inbound ingest, and MAILBOX-* all acquire the **same**
+//! per-mailbox `tokio::sync::Mutex<()>` from the shared
+//! [`crate::mailbox_locks::MailboxLocks`] map before touching any file
+//! under that mailbox's tree. The shared lock replaces the pre-Sprint-47
+//! split regime (ingest's process-wide `std::sync::Mutex` +
+//! state_handler's own per-mailbox `tokio::sync::RwLock` map) whose
+//! safety relied on the two paths writing disjoint filenames.
+//!
+//! Lock hierarchy (see [`crate::mailbox_locks`] for the full rationale):
+//!
+//! ```text
+//!   outer: per-mailbox mailbox_locks::MailboxLocks  (tokio::sync::Mutex)
+//!   inner: process-wide mailbox_handler::CONFIG_WRITE_LOCK (std::sync::Mutex)
+//! ```
+//!
+//! Always acquire outer → inner, never the reverse.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use tokio::sync::RwLock;
+use std::sync::Arc;
+use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
+use crate::mailbox_locks::MailboxLocks;
 use crate::mcp::resolve_email_path;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
@@ -49,31 +54,41 @@ pub struct StateContext {
     /// than at startup); MAILBOX-* uses it to append / remove stanzas and
     /// hot-swap the in-memory snapshot.
     pub config_handle: ConfigHandle,
-    /// Per-mailbox lock map. `Mutex` because the map-level mutation
-    /// (lazy insert) is short; the per-mailbox `RwLock` handles the
-    /// actual file write ordering.
-    locks: Mutex<HashMap<String, Arc<RwLock<()>>>>,
+    /// Shared per-mailbox write-lock map. Inbound ingest, MARK-*, and
+    /// MAILBOX-* all serialize through these locks (see
+    /// [`crate::mailbox_locks`]).
+    pub locks: Arc<MailboxLocks>,
 }
 
 impl StateContext {
+    /// Fresh lock map — convenient for tests. Production callers share
+    /// the daemon-wide map via [`StateContext::with_locks`].
+    #[cfg(test)]
     pub fn new(data_dir: PathBuf, config_handle: ConfigHandle) -> Self {
+        Self::with_locks(data_dir, config_handle, Arc::new(MailboxLocks::new()))
+    }
+
+    /// Construct a `StateContext` that shares an existing
+    /// [`MailboxLocks`] map with other daemon-side contexts. Used by
+    /// `run_serve` so the SMTP session (inbound ingest) and the UDS
+    /// handlers all take the same lock per mailbox.
+    pub fn with_locks(
+        data_dir: PathBuf,
+        config_handle: ConfigHandle,
+        locks: Arc<MailboxLocks>,
+    ) -> Self {
         Self {
             data_dir,
             config_handle,
-            locks: Mutex::new(HashMap::new()),
+            locks,
         }
     }
 
     /// Acquire (lazy-inserting if needed) the per-mailbox write lock.
-    /// Returned guard is released when dropped.
-    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<RwLock<()>> {
-        let mut map = self
-            .locks
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        map.entry(mailbox.to_string())
-            .or_insert_with(|| Arc::new(RwLock::new(())))
-            .clone()
+    /// Returned `Arc` owns the lock; callers `.lock().await` (async) or
+    /// `.blocking_lock()` (inside `spawn_blocking`) it.
+    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<AsyncMutex<()>> {
+        self.locks.lock_for(mailbox)
     }
 }
 
@@ -103,15 +118,11 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
     data_dir.join(sub).join(mailbox)
 }
 
-/// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the per-mailbox
-/// write lock so concurrent MARK calls on the same mailbox serialize
-/// around the read → rewrite critical section. Does **not** serialize
-/// against inbound ingest (which uses a separate process-wide
-/// `INGEST_WRITE_LOCK`); the two writers are safe today only because
-/// they target disjoint paths — ingest writes freshly-allocated
-/// filenames while MARK rewrites existing files. Unifying both writers
-/// under a shared per-mailbox lock is in the Non-blocking Review
-/// Backlog for a future sprint.
+/// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the shared
+/// per-mailbox write lock (see [`crate::mailbox_locks`]) for the full
+/// read → rewrite critical section. Sprint 47 unified this lock with the
+/// inbound-ingest writer so MARK and ingest now serialize against each
+/// other — not just against other MARK calls.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
@@ -132,7 +143,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     }
 
     let lock = ctx.lock_for(&req.mailbox);
-    let _guard = lock.write().await;
+    let _guard = lock.lock().await;
 
     let mailbox_dir = folder_dir(&ctx.data_dir, &req.mailbox, req.folder);
     let filepath = match resolve_email_path(&mailbox_dir, &req.id) {

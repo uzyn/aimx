@@ -24,17 +24,17 @@
 //!    first and the rename failed, we would be handing inbound mail a
 //!    routing table that doesn't match disk.
 //!
-//! Locking: a per-mailbox `RwLock<()>` (acquired via `StateContext`) is
-//! taken for the duration of the write so a MARK-* request on the same
-//! mailbox can't see the file system half-created / half-deleted. In
-//! addition, a **process-wide** [`CONFIG_WRITE_LOCK`] serializes the
-//! `load → modify → write → store` critical section across *all* mailbox
-//! names — without it, two concurrent `MAILBOX-CREATE alice` +
-//! `MAILBOX-CREATE bob` requests hold disjoint per-mailbox locks and can
-//! interleave their loads + writes, clobbering one stanza on disk and in
-//! memory. The global mutex closes that lost-update race while still
-//! letting MARK-* and inbound ingest (which don't touch `config.toml`)
-//! proceed independently.
+//! Locking: acquired in the order the
+//! [`crate::mailbox_locks`] module documents. The **outer** per-mailbox
+//! `tokio::sync::Mutex<()>` (shared with inbound ingest and MARK-* as of
+//! Sprint 47) is taken for the duration of the write so no other writer
+//! on the same mailbox can see the file system half-created /
+//! half-deleted. The **inner** process-wide [`CONFIG_WRITE_LOCK`]
+//! serializes the `load → modify → write → store` critical section
+//! across *all* mailbox names — without it, two concurrent
+//! `MAILBOX-CREATE alice` + `MAILBOX-CREATE bob` requests hold disjoint
+//! per-mailbox locks and can interleave their loads + writes, clobbering
+//! one stanza on disk and in memory. Always outer → inner.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -83,7 +83,7 @@ pub async fn handle_mailbox_crud(
     mb_ctx: &MailboxContext,
     req: &MailboxCrudRequest,
 ) -> AckResponse {
-    if let Err(e) = validate_mailbox_name(&req.name) {
+    if let Err(e) = crate::mailbox::validate_mailbox_name(&req.name) {
         return AckResponse::Err {
             code: ErrCode::Validation,
             reason: e,
@@ -91,7 +91,7 @@ pub async fn handle_mailbox_crud(
     }
 
     let lock = state_ctx.lock_for(&req.name);
-    let _guard = lock.write().await;
+    let _guard = lock.lock().await;
 
     // Serialize the load → modify → write → store critical section across
     // *all* mailbox names. The per-mailbox lock above keeps MARK-* on the
@@ -107,25 +107,6 @@ pub async fn handle_mailbox_crud(
     } else {
         handle_delete(state_ctx, mb_ctx, &req.name)
     }
-}
-
-/// Name-validation mirror of `mailbox::validate_mailbox_name`. Duplicated
-/// here (rather than re-exported) so the daemon-side enforcement is
-/// local — a caller can't silently skip it by calling into the handler.
-fn validate_mailbox_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("Mailbox name cannot be empty".into());
-    }
-    if name.contains("..") {
-        return Err("Mailbox name cannot contain '..'".into());
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err("Mailbox name cannot contain path separators".into());
-    }
-    if name.contains('\0') {
-        return Err("Mailbox name cannot contain null bytes".into());
-    }
-    Ok(())
 }
 
 fn handle_create(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) -> AckResponse {
@@ -257,6 +238,17 @@ fn count_files_if_exists(dir: &Path) -> usize {
 /// filesystem targets, so readers see either the old snapshot or the new
 /// one — never a truncated file. On failure the temp file is cleaned up
 /// best-effort so subsequent retries don't trip over stale state.
+///
+/// **Unknown-key / comment behaviour (v1):** this function re-serializes
+/// the `Config` struct through `toml::to_string_pretty`, which means any
+/// TOML fields the operator added that are **not** modeled in the `Config`
+/// struct are dropped on rewrite, and any human-authored comments are
+/// erased. This is symmetric with the pre-existing `Config::save` path
+/// and matches the v1 assumption that `config.toml` is machine-authored
+/// (the only supported edits are through `aimx setup` / `aimx mailbox
+/// create|delete`). Adopting a preserving editor (e.g. `toml_edit`) is
+/// tracked for v2; see the test `unknown_stanza_is_dropped_on_rewrite`
+/// below for the contract check.
 pub(crate) fn write_config_atomic(path: &Path, config: &Config) -> std::io::Result<()> {
     let serialized = toml::to_string_pretty(config)
         .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))?;
@@ -510,15 +502,27 @@ mod tests {
 
     #[tokio::test]
     async fn create_failure_at_disk_write_leaves_handle_and_disk_unchanged() {
+        // S47-3: this test used to force failure by pointing config_path
+        // at a non-existent parent directory — which tripped
+        // `File::create` before the temp write even started, so the
+        // rename-rollback branch was never exercised. The rewritten form
+        // below makes the temp write succeed (parent is writable) and the
+        // subsequent `rename(2)` fail because the target path is a
+        // **non-empty directory**. `rename("foo.tmp", "config.toml/")`
+        // with a non-empty directory as the target returns `EISDIR` /
+        // `ENOTEMPTY` on Linux + macOS, which is what the real failure
+        // mode looks like in production (e.g. a filesystem error mid-rename).
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        // Substitute a read-only config.toml path by replacing the parent
-        // directory with a non-writable one. We simulate atomic-rename
-        // failure by pointing `config_path` at a location whose parent
-        // doesn't exist — `File::create` will fail.
-        let bad_path = tmp.path().join("nonexistent").join("config.toml");
-        let bad_ctx = MailboxContext::new(bad_path.clone(), mb_ctx.config_handle.clone());
+        // `config.toml` as a non-empty *directory* — the temp write to
+        // `.config.toml.tmp.<pid>` succeeds, then rename-over fails.
+        let dir_path = tmp.path().join("configdir").join("config.toml");
+        std::fs::create_dir_all(&dir_path).unwrap();
+        // Put a file inside so the directory is non-empty (rename semantics
+        // over an empty directory differ on some kernels).
+        std::fs::write(dir_path.join("blocker"), "x").unwrap();
+        let bad_ctx = MailboxContext::new(dir_path.clone(), mb_ctx.config_handle.clone());
 
         let req = MailboxCrudRequest {
             name: "alice".into(),
@@ -535,6 +539,56 @@ mod tests {
         // half a mailbox behind.
         assert!(!tmp.path().join("inbox").join("alice").exists());
         assert!(!tmp.path().join("sent").join("alice").exists());
+
+        // No `.config.toml.tmp.<pid>` was left behind — the rollback path
+        // cleans up the temp file after a rename failure.
+        let parent = dir_path.parent().unwrap();
+        let strays: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| n.contains(".tmp."))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "no stray temp file should remain after rename failure: {strays:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_stanza_is_dropped_on_rewrite() {
+        // S47-3: this pins the **documented** v1 behaviour of
+        // `write_config_atomic`. The rewrite goes through
+        // `toml::to_string_pretty(&Config)`, so any stanza the operator
+        // added that isn't modeled in `Config` is not preserved. If this
+        // test starts failing because the behaviour changed (e.g. we
+        // adopted `toml_edit`), update the doc comment on
+        // `write_config_atomic` and flip this assertion accordingly.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let base = base_config(tmp.path());
+        let serialized = toml::to_string_pretty(&base).unwrap();
+        let with_unknown = format!(
+            "# operator-added comment\n\
+             {serialized}\n\
+             [experimental.extra]\n\
+             opaque_value = 42\n"
+        );
+        std::fs::write(&path, with_unknown).unwrap();
+
+        // Rewrite through the canonical path.
+        write_config_atomic(&path, &base).unwrap();
+
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !after.contains("operator-added comment"),
+            "v1 documented behaviour: rewrite erases human comments. Got: {after:?}"
+        );
+        assert!(
+            !after.contains("experimental"),
+            "v1 documented behaviour: rewrite drops unknown stanzas. Got: {after:?}"
+        );
     }
 
     #[tokio::test]
