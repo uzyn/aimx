@@ -133,11 +133,24 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
         // The shell expands `$AIMX_FROM` literally — attacker-controlled
         // payload in `From:` can no longer break out of quotes, add extra
         // commands, or exploit `$()`/backticks.
+        //
+        // Defense in depth: `.env_clear()` wipes the parent-process env
+        // before we selectively re-add `PATH`/`HOME` and the `AIMX_*`
+        // variables. A stray `LD_PRELOAD` / `SSH_AUTH_SOCK` / credential
+        // env var set on the daemon process cannot leak into a trigger
+        // subshell. `PATH` is preserved so common commands (`curl`,
+        // `python`, ...) still resolve; `HOME` is preserved so tools that
+        // read per-user config files still work for the service account.
         let filepath = ctx.filepath.to_string_lossy().into_owned();
         let mut command = Command::new("sh");
+        command.env_clear().arg("-c").arg(&expanded);
+        if let Some(path) = std::env::var_os("PATH") {
+            command.env("PATH", path);
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            command.env("HOME", home);
+        }
         command
-            .arg("-c")
-            .arg(&expanded)
             .env("AIMX_FROM", &ctx.metadata.from)
             .env("AIMX_SUBJECT", &ctx.metadata.subject)
             .env("AIMX_TO", &ctx.metadata.to)
@@ -699,6 +712,80 @@ mod tests {
         let content = std::fs::read_to_string(&output_file).unwrap();
         assert!(content.contains("alice@gmail.com"), "got: {content:?}");
         assert!(content.contains("Hello World"), "got: {content:?}");
+    }
+
+    /// RAII guard that sets an env var on construction and removes it on
+    /// drop. Used by `execute_triggers_clears_parent_env` so a panicking
+    /// assertion still cleans up the sentinel — `std::env::set_var` is
+    /// process-global, and leaking a sentinel across tests is nasty.
+    struct EnvVarGuard {
+        name: &'static str,
+    }
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            unsafe {
+                std::env::set_var(name, value);
+            }
+            Self { name }
+        }
+    }
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var(self.name);
+            }
+        }
+    }
+
+    #[test]
+    fn execute_triggers_clears_parent_env() {
+        // S47-2: `execute_triggers` calls `.env_clear()` before selectively
+        // re-adding `PATH`/`HOME`/`AIMX_*`. An unrelated env var set on the
+        // parent process must NOT be visible inside the trigger subshell.
+        //
+        // This test intentionally uses a unique variable name and is not
+        // parallelized against other env-var-touching tests because
+        // `std::env::set_var` mutates process-global state. The RAII
+        // `EnvVarGuard` ensures the sentinel is removed even if an
+        // assertion panics.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let log = tmp.path().join("env.log");
+        let meta = sample_metadata();
+        let filepath = tmp.path().join("test.md");
+        let ctx = sample_ctx(&filepath, &meta);
+
+        // Set a sentinel on the parent process. The guard removes it on
+        // drop — panic-safe.
+        let _sentinel = EnvVarGuard::set("AIMX_LEAK_TEST", "sentinel-should-not-leak");
+
+        let config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            on_receive: vec![OnReceiveRule {
+                rule_type: "cmd".to_string(),
+                command: format!(
+                    "printf 'leak=[%s] path_set=%s\\n' \"$AIMX_LEAK_TEST\" \
+                     \"${{PATH:+yes}}\" > {}",
+                    log.to_string_lossy()
+                ),
+                r#match: None,
+            }],
+        };
+
+        execute_triggers(&config, &ctx);
+
+        let content = std::fs::read_to_string(&log).unwrap();
+        assert!(
+            content.contains("leak=[]"),
+            "AIMX_LEAK_TEST must not leak into the trigger env: {content:?}"
+        );
+        // PATH was re-added selectively so everyday shell tools still work.
+        assert!(
+            content.contains("path_set=yes"),
+            "PATH must be preserved for the trigger: {content:?}"
+        );
+        // `_sentinel` dropped here → `AIMX_LEAK_TEST` removed.
     }
 
     /// Helper: fire a single-shot trigger that writes `$AIMX_*` env vars to

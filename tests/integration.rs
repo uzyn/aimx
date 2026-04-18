@@ -2929,3 +2929,467 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 
     stop_serve(daemon);
 }
+
+// ---------------------------------------------------------------------------
+// Sprint 47 (S47-1): DKIM startup check wired into `run_serve`. These tests
+// exercise the full daemon against a canned resolver override so the check
+// runs through the real code path (not just the evaluator unit tests) and
+// we can assert the startup log rendering and that the listeners still bind
+// after a non-`Match` outcome.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+fn start_serve_with_env(tmp: &Path, port: u16, extra_env: &[(&str, &str)]) -> std::process::Child {
+    let runtime = tmp.join("run");
+    std::fs::create_dir_all(&runtime).ok();
+    let mut cmd = StdCommand::new(aimx_binary_path());
+    cmd.env("AIMX_CONFIG_DIR", tmp)
+        .env("AIMX_RUNTIME_DIR", &runtime);
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
+    let mut child = cmd
+        .arg("--data-dir")
+        .arg(tmp)
+        .arg("serve")
+        .arg("--bind")
+        .arg(format!("127.0.0.1:{port}"))
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx serve");
+
+    let started = std::time::Instant::now();
+    loop {
+        if started.elapsed() > std::time::Duration::from_secs(10) {
+            child.kill().unwrap();
+            panic!("aimx serve did not start within 10s");
+        }
+        if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    child
+}
+
+/// Collect the stderr a spawned `aimx serve` has buffered so far. We send
+/// SIGTERM, wait for exit, then drain stderr — the startup-warning log
+/// lines are well before the shutdown banner, so they are always captured
+/// in full.
+#[cfg(unix)]
+fn stop_serve_capture_stderr(mut child: std::process::Child) -> String {
+    use std::io::Read as _;
+    unsafe {
+        libc::kill(child.id() as libc::pid_t, libc::SIGTERM);
+    }
+    let _ = child.wait_timeout(std::time::Duration::from_secs(10));
+    let mut buf = String::new();
+    if let Some(mut stderr) = child.stderr.take() {
+        let _ = stderr.read_to_string(&mut buf);
+    }
+    buf
+}
+
+/// Strip ANSI escape sequences so the substring assertions below don't
+/// break when `term::warn`/`term::error` decorate output for a TTY.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' && chars.peek() == Some(&'[') {
+            chars.next();
+            while let Some(&nc) = chars.peek() {
+                chars.next();
+                if nc.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(unix)]
+#[test]
+fn dkim_startup_check_mismatch_logs_warning_and_binds_listeners() {
+    // `AIMX_TEST_DKIM_RESOLVER_OVERRIDE=ok:...` short-circuits the real
+    // DNS lookup so the startup check sees a canned `p=` value that does
+    // not match the on-disk public key. The daemon must log a multi-line
+    // ERROR warning and still bind both the SMTP and UDS listeners.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let child = start_serve_with_env(
+        tmp.path(),
+        port,
+        &[(
+            "AIMX_TEST_DKIM_RESOLVER_OVERRIDE",
+            "ok:v=DKIM1; k=rsa; p=COMPLETELY-DIFFERENT-KEY",
+        )],
+    );
+
+    // The TCP listener is already accepting connections (start_serve_with_env
+    // waits for that). Confirm the UDS listener bound too.
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared despite DKIM mismatch (should be non-fatal)"
+    );
+
+    let stderr = strip_ansi(&stop_serve_capture_stderr(child));
+    assert!(
+        stderr.contains("ERROR:") && stderr.contains("DKIM key mismatch"),
+        "expected mismatch ERROR in stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("aimx setup"),
+        "mismatch warning must tell operator how to fix: {stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dkim_startup_check_resolve_error_logs_warning_and_binds_listeners() {
+    // `AIMX_TEST_DKIM_RESOLVER_OVERRIDE=err:...` forces the resolver to
+    // return an error, simulating NXDOMAIN / timeout / offline DNS. The
+    // daemon must log a `warn`-level message but never treat this as
+    // fatal — DNS may not have propagated yet after a fresh setup.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let child = start_serve_with_env(
+        tmp.path(),
+        port,
+        &[("AIMX_TEST_DKIM_RESOLVER_OVERRIDE", "err:simulated NXDOMAIN")],
+    );
+
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared after ResolveError (should be non-fatal)"
+    );
+
+    let stderr = strip_ansi(&stop_serve_capture_stderr(child));
+    assert!(
+        stderr.contains("Warning:") && stderr.contains("DKIM DNS sanity check skipped"),
+        "expected resolve-error warn in stderr, got:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("simulated NXDOMAIN"),
+        "resolve error message must surface the underlying DNS error: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Sprint 47 (S47-4): unified per-mailbox write lock covering inbound ingest,
+// MARK-*, and MAILBOX-*. These integration tests stress the lock boundary:
+//   1. Concurrent ingest bursts + MARK-READ on the same mailbox — no torn
+//      writes, every `.md` file has a clean `+++ ... +++` frontmatter and
+//      parses as TOML.
+//   2. Concurrent MAILBOX-CREATE + ingest addressed to the new mailbox —
+//      the two locks (outer per-mailbox, inner CONFIG_WRITE_LOCK) must not
+//      deadlock, the config write lands before the ingest routes, and the
+//      inbound message ends up in the new mailbox (or catchall, but never
+//      corrupt) with the daemon still healthy.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
+    // Fire N inbound messages concurrently with M MARK-READ calls
+    // against the same mailbox. With the unified per-mailbox
+    // `tokio::sync::Mutex<()>` shared between ingest and the MARK
+    // handler, every `.md` file on disk must end with a clean
+    // frontmatter block. Pre-Sprint-47, ingest held a different lock
+    // (`INGEST_WRITE_LOCK`) than MARK-*'s per-mailbox RwLock, so a
+    // future writer that re-opened an existing file would race.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let alice_dir = inbox(tmp.path(), "alice");
+    // Pre-seed two emails so MARK-READ has stable targets while new
+    // inbound ingests are landing in the same directory.
+    for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
+        create_email_file(&alice_dir, id, "sender@example.com", "Pre-seed", false);
+    }
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let runtime = tmp.path().join("run");
+    let sock = runtime.join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Fire 6 concurrent inbound SMTP transactions.
+    let mut smtp_handles = Vec::new();
+    for i in 0..6 {
+        smtp_handles.push(std::thread::spawn(move || {
+            let email = format!(
+                "From: other@example.com\r\n\
+                 To: alice@agent.example.com\r\n\
+                 Subject: Burst {i}\r\n\
+                 Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n\
+                 Message-ID: <burst-{i}@example.com>\r\n\
+                 \r\n\
+                 burst body {i}\r\n",
+            );
+            smtp_send_email(
+                port,
+                "other@example.com",
+                &["alice@agent.example.com"],
+                &email,
+            );
+        }));
+    }
+
+    // Fire concurrent MARK-READ calls on the seeded files via MCP.
+    let mut mark_handles = Vec::new();
+    for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
+        let tmp_path = tmp.path().to_path_buf();
+        let runtime = runtime.clone();
+        let id = id.to_string();
+        mark_handles.push(std::thread::spawn(move || {
+            let mut child = StdCommand::new(aimx_binary_path())
+                .env("AIMX_CONFIG_DIR", &tmp_path)
+                .env("AIMX_RUNTIME_DIR", &runtime)
+                .arg("--data-dir")
+                .arg(&tmp_path)
+                .arg("mcp")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("Failed to spawn aimx mcp");
+            let stdin = child.stdin.take().unwrap();
+            let stdout = child.stdout.take().unwrap();
+            let mut client = McpClient {
+                child,
+                stdin,
+                reader: BufReader::new(stdout),
+                id: 0,
+            };
+            client.initialize();
+            let resp = client.call_tool(
+                "email_mark_read",
+                serde_json::json!({"mailbox": "alice", "id": id}),
+            );
+            let text = get_tool_text(&resp);
+            assert!(text.contains("marked as read"), "{text}");
+            client.shutdown();
+        }));
+    }
+
+    for h in smtp_handles {
+        h.join().unwrap();
+    }
+    for h in mark_handles {
+        h.join().unwrap();
+    }
+
+    // All .md files in the mailbox must have intact frontmatter.
+    let mds = find_md_files(&alice_dir);
+    assert!(
+        mds.len() >= 8,
+        "expected >=8 .md files (2 seed + 6 burst); got {}",
+        mds.len()
+    );
+    for md in &mds {
+        let content = std::fs::read_to_string(md).unwrap();
+        assert!(
+            content.starts_with("+++"),
+            "torn write detected in {}: content did not start with '+++'",
+            md.display()
+        );
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "torn write in {}: expected 3 +++ parts, got {}",
+            md.display(),
+            parts.len()
+        );
+        // Frontmatter must parse as TOML — a half-written file would
+        // almost certainly produce a parse error.
+        let _parsed: toml::Value = toml::from_str(parts[1].trim()).unwrap_or_else(|e| {
+            panic!(
+                "frontmatter in {} failed to parse as TOML: {e}\n{}",
+                md.display(),
+                parts[1]
+            )
+        });
+    }
+
+    // Both seeded files were successfully marked read — MARK-READ did
+    // not get corrupted by a racing ingest.
+    for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
+        let content = std::fs::read_to_string(alice_dir.join(format!("{id}.md"))).unwrap();
+        assert!(
+            content.contains("read = true"),
+            "MARK-READ did not persist for {id}: {content}"
+        );
+    }
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
+    // MAILBOX-CREATE takes the outer per-mailbox lock, then the inner
+    // process-wide CONFIG_WRITE_LOCK (see `crate::mailbox_locks`).
+    // Inbound ingest to the same mailbox takes only the outer lock.
+    // This test races the two to confirm (a) no deadlock occurs and
+    // (b) the daemon is still responsive afterwards — the message
+    // lands somewhere consistent (either the new mailbox if the
+    // create completed first, or catchall if ingest ran first).
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let runtime = tmp.path().join("run");
+    let sock = runtime.join("send.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    // Kick off the two operations concurrently and cap the total wait
+    // — a deadlock would manifest as a join that never returns.
+    let create_handle = {
+        let tmp_path = tmp.path().to_path_buf();
+        let runtime = runtime.clone();
+        std::thread::spawn(move || {
+            let status = StdCommand::new(aimx_binary_path())
+                .env("AIMX_CONFIG_DIR", &tmp_path)
+                .env("AIMX_RUNTIME_DIR", &runtime)
+                .arg("--data-dir")
+                .arg(&tmp_path)
+                .arg("mailbox")
+                .arg("create")
+                .arg("newton")
+                .status()
+                .expect("mailbox create did not complete");
+            assert!(status.success(), "mailbox create failed: {status:?}");
+        })
+    };
+
+    let ingest_handle = std::thread::spawn(move || {
+        let email = concat!(
+            "From: sender@example.com\r\n",
+            "To: newton@agent.example.com\r\n",
+            "Subject: Newton race\r\n",
+            "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+            "Message-ID: <newton-race@example.com>\r\n",
+            "\r\n",
+            "race body\r\n",
+        );
+        smtp_send_email(
+            port,
+            "sender@example.com",
+            &["newton@agent.example.com"],
+            email,
+        );
+    });
+
+    // Guard against deadlock: require both threads to finish within a
+    // bounded wall-clock budget. We use a watchdog thread to panic if
+    // the sum exceeds 20s — tests normally complete in <1s. The flag
+    // lets us dismiss the watchdog promptly on success instead of
+    // leaving a detached thread sleeping for 20s then panicking in the
+    // background (see Sprint 47 review).
+    let watchdog_cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let watchdog = {
+        let cancel = std::sync::Arc::clone(&watchdog_cancel);
+        std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while std::time::Instant::now() < deadline {
+                if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                return;
+            }
+            // If this runs, the joins below are still pending → deadlock.
+            panic!("Sprint 47 deadlock watchdog fired: MAILBOX-CREATE + ingest did not converge");
+        })
+    };
+
+    create_handle.join().unwrap();
+    ingest_handle.join().unwrap();
+    // Successful joins reached here — dismiss the watchdog promptly so
+    // it exits rather than lingering in the background.
+    watchdog_cancel.store(true, std::sync::atomic::Ordering::Release);
+    watchdog.join().unwrap();
+
+    // config.toml reflects the create.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        config_text.contains("[mailboxes.newton]"),
+        "mailbox create must land on disk: {config_text}"
+    );
+
+    // The message went to either newton (if create won) or catchall
+    // (if ingest won) — but never disappeared and never produced a
+    // torn file.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let newton = find_md_files(&inbox(tmp.path(), "newton"));
+    let catchall = find_md_files(&inbox(tmp.path(), "catchall"));
+    assert!(
+        newton.len() + catchall.len() >= 1,
+        "ingest lost the message: newton={} catchall={}",
+        newton.len(),
+        catchall.len()
+    );
+    for md in newton.iter().chain(catchall.iter()) {
+        let content = std::fs::read_to_string(md).unwrap();
+        assert!(
+            content.starts_with("+++"),
+            "torn write in {}: does not start with '+++'",
+            md.display()
+        );
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        assert_eq!(parts.len(), 3, "{}", md.display());
+        let _: toml::Value = toml::from_str(parts[1].trim())
+            .unwrap_or_else(|e| panic!("{} failed to parse: {e}", md.display()));
+    }
+
+    // Daemon still responsive after the race — send a follow-up
+    // message and confirm it lands (the deadlock canary).
+    let followup = concat!(
+        "From: sender@example.com\r\n",
+        "To: alice@agent.example.com\r\n",
+        "Subject: Post-race\r\n",
+        "Date: Mon, 01 Jan 2024 00:00:00 +0000\r\n",
+        "Message-ID: <post-race@example.com>\r\n",
+        "\r\n",
+        "still alive\r\n",
+    );
+    smtp_send_email(
+        port,
+        "sender@example.com",
+        &["alice@agent.example.com"],
+        followup,
+    );
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let alice = find_md_files(&inbox(tmp.path(), "alice"));
+    assert!(
+        alice.iter().any(|p| {
+            std::fs::read_to_string(p)
+                .map(|c| c.contains("Post-race"))
+                .unwrap_or(false)
+        }),
+        "daemon unresponsive after the race — follow-up message never landed"
+    );
+
+    stop_serve(daemon);
+}

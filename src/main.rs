@@ -8,6 +8,7 @@ mod frontmatter;
 mod ingest;
 mod mailbox;
 mod mailbox_handler;
+mod mailbox_locks;
 mod mcp;
 mod mx;
 mod platform;
