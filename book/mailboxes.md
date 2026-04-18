@@ -195,9 +195,9 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 ### How sending works
 
-1. `aimx send` composes an RFC 5322 compliant message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS.
-2. `aimx serve` validates the sender mailbox + domain, DKIM-signs the message (RSA-SHA256) with the domain's private key it loaded at startup, and delivers the signed message directly to the recipient's MX server via SMTP.
-3. `aimx send` exits as soon as the daemon returns a status — signing and delivery never run inside the client, so it does not need to read the DKIM key and does not need to run as root.
+1. `aimx send` composes an RFC 5322 compliant message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. The client does not read `config.toml` — it just composes bytes and writes them to the socket.
+2. `aimx serve` parses the `From:` header from the submitted body, verifies the domain matches the configured primary domain and the local part resolves to an explicitly configured non-wildcard mailbox, DKIM-signs the message (RSA-SHA256) with the domain's private key it loaded at startup, and delivers the signed message directly to the recipient's MX server via SMTP. The catchall (`*@domain`) is inbound-routing only and is never accepted as an outbound sender.
+3. `aimx send` exits as soon as the daemon returns a status — signing, mailbox resolution, and delivery never run inside the client, so it does not need to read `config.toml`, does not need to read the DKIM key, and does not need to run as root.
 
 ### Reply threading
 

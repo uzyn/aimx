@@ -3,7 +3,7 @@ use crate::config::Config;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
-use crate::send_protocol::SendRequest;
+use crate::send_protocol::{self, ErrCode, MarkFolder, MarkRequest, SendRequest};
 
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
@@ -228,9 +228,10 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
-        let config = self.load_config()?;
         let folder = resolve_folder(params.folder.as_deref())?;
-        set_read_status(&config, &params.mailbox, folder, &params.id, true)?;
+        // Sprint 45: route through the daemon — mailbox files are
+        // root-owned and the MCP process runs as the invoking user.
+        submit_mark_via_daemon(&params.mailbox, &params.id, folder, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
 
@@ -240,9 +241,8 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
-        let config = self.load_config()?;
         let folder = resolve_folder(params.folder.as_deref())?;
-        set_read_status(&config, &params.mailbox, folder, &params.id, false)?;
+        submit_mark_via_daemon(&params.mailbox, &params.id, folder, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
     }
 
@@ -278,7 +278,7 @@ impl AimxMcpServer {
             attachments: params.attachments.unwrap_or_default(),
         };
 
-        submit_via_daemon(&args, &params.from_mailbox)
+        submit_via_daemon(&args)
     }
 
     #[tool(
@@ -344,17 +344,20 @@ impl AimxMcpServer {
             attachments: vec![],
         };
 
-        submit_via_daemon(&args, &params.mailbox)
+        submit_via_daemon(&args)
     }
 }
 
 /// Compose `args` into an `AIMX/1 SEND` request and submit it to
 /// `aimx serve` over the UDS. MCP, like `aimx send`, no longer signs or
 /// delivers mail directly — everything goes through the daemon.
-fn submit_via_daemon(args: &SendArgs, from_mailbox: &str) -> Result<String, String> {
+///
+/// Sprint 45: the request frame no longer carries `From-Mailbox:`; the
+/// daemon parses the `From:` header out of the composed body itself and
+/// resolves the sender mailbox against its in-memory Config.
+fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
     let composed = send::compose_message(args).map_err(|e| e.to_string())?;
     let request = SendRequest {
-        from_mailbox: from_mailbox.to_string(),
         body: composed.message,
     };
     let socket = crate::serve::send_socket_path();
@@ -375,7 +378,7 @@ fn submit_via_daemon(args: &SendArgs, from_mailbox: &str) -> Result<String, Stri
 
     let outcome = outcome.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            "aimx daemon not running — check 'systemctl status aimx'".to_string()
+            "aimx daemon not running — start with 'sudo systemctl start aimx'".to_string()
         } else {
             format!(
                 "Failed to connect to aimx daemon at {}: {e}",
@@ -394,6 +397,135 @@ fn submit_via_daemon(args: &SendArgs, from_mailbox: &str) -> Result<String, Stri
             Err(format!("Malformed response from aimx daemon: {reason}"))
         }
     }
+}
+
+/// Submit a `MARK-READ` or `MARK-UNREAD` request to the daemon over UDS.
+/// Sprint 45: MCP's `email_mark_read` / `email_mark_unread` tools route
+/// through this path so the non-root MCP process doesn't need write access
+/// to the root-owned mailbox files.
+fn submit_mark_via_daemon(
+    mailbox: &str,
+    id: &str,
+    folder: Folder,
+    read: bool,
+) -> Result<(), String> {
+    let folder = match folder {
+        Folder::Inbox => MarkFolder::Inbox,
+        Folder::Sent => MarkFolder::Sent,
+    };
+    let request = MarkRequest {
+        mailbox: mailbox.to_string(),
+        id: id.to_string(),
+        folder,
+        read,
+    };
+    let socket = crate::serve::send_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let outcome = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(submit_mark_request(&socket, &request)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+            rt.block_on(submit_mark_request(&socket, &request))
+        }
+    };
+
+    let outcome = outcome.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "aimx daemon not running — start with 'sudo systemctl start aimx'".to_string()
+        } else {
+            format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            )
+        }
+    })?;
+
+    match outcome {
+        MarkOutcome::Ok => Ok(()),
+        MarkOutcome::Err { code, reason } => Err(format!("[{}] {reason}", code.as_str())),
+        MarkOutcome::Malformed(reason) => {
+            Err(format!("Malformed response from aimx daemon: {reason}"))
+        }
+    }
+}
+
+#[derive(Debug)]
+enum MarkOutcome {
+    Ok,
+    Err { code: ErrCode, reason: String },
+    Malformed(String),
+}
+
+async fn submit_mark_request(
+    socket_path: &std::path::Path,
+    request: &MarkRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_mark_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
+    let text = match std::str::from_utf8(buf) {
+        Ok(s) => s,
+        Err(_) => return MarkOutcome::Malformed("response is not UTF-8".to_string()),
+    };
+    let line = text.lines().next().unwrap_or("").trim_end_matches('\r');
+    if line.is_empty() {
+        return MarkOutcome::Malformed("empty response from daemon".to_string());
+    }
+    let rest = match line.strip_prefix("AIMX/1 ") {
+        Some(r) => r,
+        None => return MarkOutcome::Malformed(format!("unexpected response: {line:?}")),
+    };
+    // MARK verbs use a bare `AIMX/1 OK` ack — any trailing payload is a
+    // protocol violation. Reject it as Malformed rather than silently
+    // succeeding so the client notices if the daemon ever drifts.
+    if rest == "OK" {
+        return MarkOutcome::Ok;
+    }
+    if rest.starts_with("OK ") {
+        return MarkOutcome::Malformed(format!("unexpected payload after OK: {line:?}"));
+    }
+    if let Some(err_body) = rest.strip_prefix("ERR ") {
+        let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
+        let code = match code_str {
+            "MAILBOX" => ErrCode::Mailbox,
+            "DOMAIN" => ErrCode::Domain,
+            "SIGN" => ErrCode::Sign,
+            "DELIVERY" => ErrCode::Delivery,
+            "TEMP" => ErrCode::Temp,
+            "MALFORMED" => ErrCode::Malformed,
+            "PROTOCOL" => ErrCode::Protocol,
+            "NOTFOUND" => ErrCode::NotFound,
+            "IO" => ErrCode::Io,
+            _ => {
+                return MarkOutcome::Malformed(format!(
+                    "unknown ERR code {code_str:?} in response"
+                ));
+            }
+        };
+        return MarkOutcome::Err {
+            code,
+            reason: reason.trim().to_string(),
+        };
+    }
+    MarkOutcome::Malformed(format!("unexpected response: {line:?}"))
 }
 
 #[tool_handler]
@@ -577,7 +709,14 @@ pub fn filter_emails(
     Ok(result)
 }
 
-pub fn set_read_status(
+/// Direct-on-disk frontmatter rewrite. Sprint 45 removed the call from the
+/// MCP tool handlers (they now route through the daemon via UDS so the
+/// non-root MCP process doesn't need write access to root-owned mailbox
+/// files). Retained for unit-test coverage of the frontmatter
+/// read/rewrite flow; exercised at the protocol level by
+/// `state_handler::tests` and at the MCP level by integration tests.
+#[cfg(test)]
+fn set_read_status(
     config: &Config,
     mailbox: &str,
     folder: Folder,
@@ -1106,6 +1245,45 @@ mod tests {
     fn validate_email_id_accepts_valid() {
         assert!(validate_email_id("2025-06-01-001").is_ok());
         assert!(validate_email_id("2025-01-01-999").is_ok());
+    }
+
+    #[test]
+    fn parse_ack_response_accepts_bare_ok() {
+        assert!(matches!(
+            parse_ack_response(b"AIMX/1 OK\n"),
+            MarkOutcome::Ok
+        ));
+        // Trailing CR is tolerated (line-end normalisation).
+        assert!(matches!(
+            parse_ack_response(b"AIMX/1 OK\r\n"),
+            MarkOutcome::Ok
+        ));
+    }
+
+    #[test]
+    fn parse_ack_response_rejects_trailing_payload_on_ok() {
+        // MARK verbs use a bare `AIMX/1 OK` ack; any trailing payload is
+        // a protocol violation and must surface as Malformed, not Ok.
+        match parse_ack_response(b"AIMX/1 OK extra junk\n") {
+            MarkOutcome::Malformed(reason) => {
+                assert!(
+                    reason.contains("unexpected payload after OK"),
+                    "reason was {reason:?}"
+                );
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_ack_response_parses_err_code() {
+        match parse_ack_response(b"AIMX/1 ERR NOTFOUND email missing\n") {
+            MarkOutcome::Err { code, reason } => {
+                assert_eq!(code, ErrCode::NotFound);
+                assert_eq!(reason, "email missing");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 
     #[test]

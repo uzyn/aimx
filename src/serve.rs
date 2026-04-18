@@ -6,6 +6,7 @@ use crate::dkim;
 use crate::send_handler::SendContext;
 use crate::send_protocol;
 use crate::smtp::SmtpServer;
+use crate::state_handler::StateContext;
 use crate::term;
 use crate::transport::{FileDropTransport, LettreTransport, MailTransport};
 
@@ -326,10 +327,27 @@ async fn run_serve(
         dkim_key,
         primary_domain: config.domain.clone(),
         dkim_selector: config.dkim_selector.clone(),
-        registered_mailboxes: config.mailboxes.keys().cloned().collect(),
+        mailboxes: config
+            .mailboxes
+            .iter()
+            .map(|(name, mb)| {
+                (
+                    name.clone(),
+                    crate::send_handler::RegisteredMailbox {
+                        address: mb.address.clone(),
+                    },
+                )
+            })
+            .collect(),
         transport,
         data_dir: config.data_dir.clone(),
     });
+
+    // Shared state context for MARK-READ / MARK-UNREAD verbs (Sprint 45).
+    let state_ctx = Arc::new(StateContext::new(
+        config.data_dir.clone(),
+        config.mailboxes.keys().cloned().collect(),
+    ));
 
     let server = SmtpServer::new(config);
     let server = if tls_available {
@@ -389,7 +407,7 @@ async fn run_serve(
     let uds_shutdown = shutdown_rx.clone();
     let uds_socket_path = socket_path.clone();
     let uds_handle = tokio::spawn(async move {
-        run_send_listener(uds_listener, send_ctx, uds_shutdown).await;
+        run_send_listener(uds_listener, send_ctx, state_ctx, uds_shutdown).await;
         // Clean up the socket file on clean shutdown so the next start does
         // not trip the "stale socket" fallback path.
         let _ = std::fs::remove_file(&uds_socket_path);
@@ -439,7 +457,8 @@ fn set_socket_mode(_path: &Path, _mode: u32) -> std::io::Result<()> {
 
 async fn run_send_listener(
     listener: tokio::net::UnixListener,
-    ctx: Arc<SendContext>,
+    send_ctx: Arc<SendContext>,
+    state_ctx: Arc<StateContext>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     loop {
@@ -453,9 +472,10 @@ async fn run_send_listener(
                             peer.uid_str(),
                             peer.pid_str()
                         );
-                        let ctx = Arc::clone(&ctx);
+                        let send_ctx = Arc::clone(&send_ctx);
+                        let state_ctx = Arc::clone(&state_ctx);
                         tokio::spawn(async move {
-                            handle_send_connection(stream, ctx).await;
+                            handle_uds_connection(stream, send_ctx, state_ctx).await;
                         });
                     }
                     Err(e) => {
@@ -474,33 +494,62 @@ async fn run_send_listener(
 }
 
 /// Per-connection UDS request timeout. A connected client must deliver its
-/// entire `AIMX/1 SEND` request frame within this window or the connection
-/// is dropped. Prevents slow-loris abuse on the world-writable socket.
+/// entire `AIMX/1` request frame within this window or the connection is
+/// dropped. Prevents slow-loris abuse on the world-writable socket.
 const UDS_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-async fn handle_send_connection(stream: tokio::net::UnixStream, ctx: Arc<SendContext>) {
-    handle_send_connection_with_timeout(stream, ctx, UDS_REQUEST_TIMEOUT).await;
+async fn handle_uds_connection(
+    stream: tokio::net::UnixStream,
+    send_ctx: Arc<SendContext>,
+    state_ctx: Arc<StateContext>,
+) {
+    handle_uds_connection_with_timeout(stream, send_ctx, state_ctx, UDS_REQUEST_TIMEOUT).await;
 }
 
-async fn handle_send_connection_with_timeout(
+/// One-frame-per-connection dispatcher. Reads a single `AIMX/1` request
+/// (SEND, MARK-READ, MARK-UNREAD) within `timeout`, runs the matching
+/// handler, and writes the framed response. The same slow-loris defence
+/// and parse-failure drain logic applies to every verb.
+async fn handle_uds_connection_with_timeout(
     stream: tokio::net::UnixStream,
-    ctx: Arc<SendContext>,
+    send_ctx: Arc<SendContext>,
+    state_ctx: Arc<StateContext>,
     timeout: std::time::Duration,
 ) {
+    use send_protocol::{AckResponse, ErrCode, ParseError, Request, SendResponse};
+
+    #[allow(clippy::large_enum_variant)]
+    enum Reply {
+        Send(SendResponse),
+        Ack(AckResponse),
+    }
+
     let (mut reader, mut writer) = stream.into_split();
-    let (response, parse_failed) =
+    let (reply, parse_failed) =
         match tokio::time::timeout(timeout, send_protocol::parse_request(&mut reader)).await {
-            Ok(Ok(req)) => (crate::send_handler::handle_send(req, &ctx).await, false),
-            Ok(Err(send_protocol::ParseError::ClosedBeforeRequest)) => {
-                // Client connected and closed without sending anything. No
-                // response to write — just drop the connection.
+            Ok(Ok(Request::Send(req))) => (
+                Reply::Send(crate::send_handler::handle_send(req, &send_ctx).await),
+                false,
+            ),
+            Ok(Ok(Request::Mark(req))) => (
+                Reply::Ack(crate::state_handler::handle_mark(&state_ctx, &req).await),
+                false,
+            ),
+            Ok(Err(ParseError::ClosedBeforeRequest)) => {
                 return;
             }
+            Ok(Err(ParseError::UnknownVerb(v))) => (
+                Reply::Ack(AckResponse::Err {
+                    code: ErrCode::Protocol,
+                    reason: format!("unknown verb '{v}'"),
+                }),
+                true,
+            ),
             Ok(Err(e)) => (
-                send_protocol::SendResponse::Err {
-                    code: send_protocol::ErrCode::Malformed,
+                Reply::Ack(AckResponse::Err {
+                    code: ErrCode::Malformed,
                     reason: e.to_string(),
-                },
+                }),
                 true,
             ),
             Err(_elapsed) => {
@@ -536,7 +585,11 @@ async fn handle_send_connection_with_timeout(
         }
     }
 
-    if let Err(e) = send_protocol::write_response(&mut writer, &response).await {
+    let write_result = match reply {
+        Reply::Send(r) => send_protocol::write_response(&mut writer, &r).await,
+        Reply::Ack(r) => send_protocol::write_ack_response(&mut writer, &r).await,
+    };
+    if let Err(e) = write_result {
         eprintln!("[send] failed to write response: {e}");
     }
     let _ = writer.shutdown().await;
@@ -1171,10 +1224,47 @@ mod tests {
     }
 
     #[cfg(unix)]
+    fn build_test_send_ctx(data_dir: &Path) -> Arc<crate::send_handler::SendContext> {
+        use std::collections::HashMap;
+        let dkim_tmp = tempfile::TempDir::new().unwrap();
+        crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
+        let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+        let mut mboxes = HashMap::new();
+        mboxes.insert(
+            "catchall".to_string(),
+            crate::send_handler::RegisteredMailbox {
+                address: "*@example.com".to_string(),
+            },
+        );
+        mboxes.insert(
+            "alice".to_string(),
+            crate::send_handler::RegisteredMailbox {
+                address: "alice@example.com".to_string(),
+            },
+        );
+        let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
+        Arc::new(crate::send_handler::SendContext {
+            dkim_key: Arc::new(key),
+            primary_domain: "example.com".to_string(),
+            dkim_selector: "dkim".to_string(),
+            mailboxes: mboxes,
+            transport,
+            data_dir: data_dir.to_path_buf(),
+        })
+    }
+
+    #[cfg(unix)]
+    fn build_test_state_ctx(data_dir: &Path) -> Arc<StateContext> {
+        use std::collections::HashSet;
+        let mut mboxes = HashSet::new();
+        mboxes.insert("alice".to_string());
+        mboxes.insert("catchall".to_string());
+        Arc::new(StateContext::new(data_dir.to_path_buf(), mboxes))
+    }
+
+    #[cfg(unix)]
     #[test]
     fn uds_accept_reads_peer_credentials() {
-        use std::collections::HashSet;
-
         let tmp = tempfile::TempDir::new().unwrap();
         let sock = tmp.path().join("send.sock");
 
@@ -1182,32 +1272,16 @@ mod tests {
         rt.block_on(async {
             let listener = bind_send_socket(&sock).unwrap();
 
-            // Build a throwaway SendContext. Key generation is the slow
-            // step so we use a tempdir-backed one.
-            let dkim_tmp = tempfile::TempDir::new().unwrap();
-            crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
-            let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
-            let mut mboxes = HashSet::new();
-            mboxes.insert("catchall".to_string());
-            let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
-            let ctx = Arc::new(crate::send_handler::SendContext {
-                dkim_key: Arc::new(key),
-                primary_domain: "example.com".to_string(),
-                dkim_selector: "dkim".to_string(),
-                registered_mailboxes: mboxes,
-                transport,
-                data_dir: tmp.path().to_path_buf(),
-            });
+            let send_ctx = build_test_send_ctx(tmp.path());
+            let state_ctx = build_test_state_ctx(tmp.path());
 
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let handle = tokio::spawn(async move {
-                run_send_listener(listener, ctx, shutdown_rx).await;
+                run_send_listener(listener, send_ctx, state_ctx, shutdown_rx).await;
             });
 
             // Connect from the same process.
             let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
-            // Assert the client stream has peer credentials for the server
-            // side too (mirrors the server-side read).
             let cred = client
                 .peer_cred()
                 .expect("peer_cred should succeed on local UDS");
@@ -1219,7 +1293,6 @@ mod tests {
             let _ = client.shutdown().await;
             drop(client);
 
-            // Shut down the listener.
             shutdown_tx.send(true).unwrap();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;
         });
@@ -1240,6 +1313,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uds_end_to_end_signed_delivery() {
+        use std::collections::HashMap;
         use std::collections::HashSet;
         use std::sync::Mutex;
 
@@ -1276,20 +1350,29 @@ mod tests {
             });
             let transport: Arc<dyn MailTransport + Send + Sync> = captor.clone();
 
-            let mut mboxes = HashSet::new();
-            mboxes.insert("alice".to_string());
-            let ctx = Arc::new(crate::send_handler::SendContext {
+            let mut mboxes = HashMap::new();
+            mboxes.insert(
+                "alice".to_string(),
+                crate::send_handler::RegisteredMailbox {
+                    address: "alice@example.com".to_string(),
+                },
+            );
+            let send_ctx = Arc::new(crate::send_handler::SendContext {
                 dkim_key: Arc::new(key),
                 primary_domain: "example.com".to_string(),
                 dkim_selector: "dkim".to_string(),
-                registered_mailboxes: mboxes,
+                mailboxes: mboxes,
                 transport,
                 data_dir: tmp.path().to_path_buf(),
             });
 
+            let mut state_mboxes = HashSet::new();
+            state_mboxes.insert("alice".to_string());
+            let state_ctx = Arc::new(StateContext::new(tmp.path().to_path_buf(), state_mboxes));
+
             let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
             let handle = tokio::spawn(async move {
-                run_send_listener(listener, ctx, shutdown_rx).await;
+                run_send_listener(listener, send_ctx, state_ctx, shutdown_rx).await;
             });
 
             // Build a minimal RFC 5322 body.
@@ -1301,7 +1384,6 @@ mod tests {
                          \r\n\
                          hello\r\n";
             let req = crate::send_protocol::SendRequest {
-                from_mailbox: "alice".to_string(),
                 body: body.to_vec(),
             };
 
@@ -1344,8 +1426,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn uds_slow_loris_times_out() {
-        use std::collections::HashSet;
-
         let tmp = tempfile::TempDir::new().unwrap();
         let sock = tmp.path().join("send.sock");
 
@@ -1353,29 +1433,19 @@ mod tests {
         rt.block_on(async {
             let listener = bind_send_socket(&sock).unwrap();
 
-            let dkim_tmp = tempfile::TempDir::new().unwrap();
-            crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
-            let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
-            let mut mboxes = HashSet::new();
-            mboxes.insert("catchall".to_string());
-            let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
-            let ctx = Arc::new(crate::send_handler::SendContext {
-                dkim_key: Arc::new(key),
-                primary_domain: "example.com".to_string(),
-                dkim_selector: "dkim".to_string(),
-                registered_mailboxes: mboxes,
-                transport,
-                data_dir: tmp.path().to_path_buf(),
-            });
+            let send_ctx = build_test_send_ctx(tmp.path());
+            let state_ctx = build_test_state_ctx(tmp.path());
 
             // Accept one connection and handle it with a 1-second timeout.
             let accept_handle = {
-                let ctx = Arc::clone(&ctx);
+                let send_ctx = Arc::clone(&send_ctx);
+                let state_ctx = Arc::clone(&state_ctx);
                 tokio::spawn(async move {
                     let (stream, _) = listener.accept().await.unwrap();
-                    handle_send_connection_with_timeout(
+                    handle_uds_connection_with_timeout(
                         stream,
-                        ctx,
+                        send_ctx,
+                        state_ctx,
                         std::time::Duration::from_secs(1),
                     )
                     .await;
@@ -1385,10 +1455,7 @@ mod tests {
             // Connect and send only the request line but then stall.
             let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
             use tokio::io::AsyncWriteExt;
-            client
-                .write_all(b"AIMX/1 SEND\nFrom-Mailbox: catchall\n")
-                .await
-                .unwrap();
+            client.write_all(b"AIMX/1 SEND\n").await.unwrap();
             // Don't send Content-Length or body — stall.
 
             // The handler should drop the connection within ~1s.

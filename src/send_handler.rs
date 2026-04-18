@@ -10,7 +10,7 @@
 //! behind the [`MailTransport`](crate::transport::MailTransport) trait so
 //! tests can inject a mock.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -33,6 +33,14 @@ use crate::transport::MailTransport;
 /// in `ingest.rs`.
 static SENT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
+/// A single mailbox entry as seen by the send handler. The daemon only
+/// needs the configured address (to check for concrete-mailbox match) — it
+/// never executes triggers or reads `trusted_senders` on the outbound path.
+#[derive(Debug, Clone)]
+pub struct RegisteredMailbox {
+    pub address: String,
+}
+
 /// Context shared across every per-connection send.
 ///
 /// Heap-allocated once at daemon startup and cloned (cheap — `Arc` clones)
@@ -46,9 +54,11 @@ pub struct SendContext {
     pub primary_domain: String,
     /// DKIM selector (`dkim._domainkey.<domain>`).
     pub dkim_selector: String,
-    /// Set of mailbox names registered in config. `From-Mailbox` must be
-    /// one of these.
-    pub registered_mailboxes: HashSet<String>,
+    /// Mailboxes registered in config, keyed by mailbox name. The From:
+    /// header on the submitted message must resolve to a concrete (non-
+    /// wildcard) entry — catchall is inbound-routing only per FR-18d
+    /// (tightened in Sprint 45).
+    pub mailboxes: HashMap<String, RegisteredMailbox>,
     /// Transport used for final MX delivery. In production this is a
     /// `LettreTransport`; tests inject a mock.
     pub transport: Arc<dyn MailTransport + Send + Sync>,
@@ -78,13 +88,6 @@ pub(crate) async fn handle_send_with_signer<F>(
 where
     F: FnOnce(&[u8], &RsaPrivateKey, &str, &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>,
 {
-    if !ctx.registered_mailboxes.contains(&req.from_mailbox) {
-        return SendResponse::Err {
-            code: ErrCode::Mailbox,
-            reason: format!("mailbox `{}` not registered", req.from_mailbox),
-        };
-    }
-
     let headers = scan_headers(
         &req.body,
         &[
@@ -108,8 +111,27 @@ where
         }
     };
 
-    let sender_domain = match extract_domain(&from_header) {
-        Some(d) => d,
+    // Sprint 45: daemon resolves the sender mailbox from the submitted
+    // `From:` itself — the client no longer sends `From-Mailbox:` and no
+    // longer reads `/etc/aimx/config.toml`.
+    //
+    // FR-18d (tightened): the sender domain must equal the configured
+    // primary domain (case-insensitive) AND the local part must resolve to
+    // an explicitly configured non-wildcard mailbox. Catchall (`*@domain`)
+    // is inbound-routing only and never accepted as an outbound sender.
+
+    let bare_from = match extract_bare_address(&from_header) {
+        Some(addr) => addr,
+        None => {
+            return SendResponse::Err {
+                code: ErrCode::Malformed,
+                reason: format!("could not extract sender address from From: {from_header}"),
+            };
+        }
+    };
+
+    let sender_domain = match bare_from.rfind('@') {
+        Some(at) => bare_from[at + 1..].to_string(),
         None => {
             return SendResponse::Err {
                 code: ErrCode::Malformed,
@@ -122,12 +144,25 @@ where
         return SendResponse::Err {
             code: ErrCode::Domain,
             reason: format!(
-                "sender domain does not match aimx domain (got {sender_domain}, \
-                 expected {})",
+                "sender domain '{sender_domain}' does not match aimx domain '{}'",
                 ctx.primary_domain
             ),
         };
     }
+
+    let from_mailbox = match resolve_concrete_mailbox(&ctx.mailboxes, &bare_from) {
+        Some(name) => name,
+        None => {
+            return SendResponse::Err {
+                code: ErrCode::Mailbox,
+                reason: format!(
+                    "no mailbox matches From: {bare_from} \
+                     (run `aimx mailbox create <name>` to register one; \
+                     catchall is inbound-only)"
+                ),
+            };
+        }
+    };
 
     let to_header = match headers.get("To") {
         Some(v) => v.clone(),
@@ -194,7 +229,7 @@ where
             let delivered_at = chrono::Utc::now().to_rfc3339();
             persist_sent_file(
                 ctx,
-                &req.from_mailbox,
+                &from_mailbox,
                 &message_id,
                 &from_header,
                 &to_header,
@@ -222,7 +257,7 @@ where
             if code == ErrCode::Delivery {
                 persist_sent_file(
                     ctx,
-                    &req.from_mailbox,
+                    &from_mailbox,
                     &message_id,
                     &from_header,
                     &to_header,
@@ -239,6 +274,38 @@ where
             SendResponse::Err { code, reason: msg }
         }
     }
+}
+
+/// Resolve the sender local part to a concrete registered mailbox name.
+/// Tries (in order): exact `address` match → mailbox name equal to the
+/// local part (for the common case where name == local). Returns `None`
+/// when nothing concrete matches. The catchall fallback (`*@domain`) from
+/// the pre-Sprint-45 handler was removed — catchall is inbound-only per
+/// FR-18d (tightened).
+fn resolve_concrete_mailbox(
+    mailboxes: &HashMap<String, RegisteredMailbox>,
+    bare_from: &str,
+) -> Option<String> {
+    for (name, mb) in mailboxes {
+        if mb.address.starts_with('*') {
+            continue;
+        }
+        if mb.address.eq_ignore_ascii_case(bare_from) {
+            return Some(name.clone());
+        }
+    }
+
+    let local = bare_from
+        .rfind('@')
+        .map(|i| &bare_from[..i])
+        .unwrap_or(bare_from);
+    if let Some(mb) = mailboxes.get(local)
+        && !mb.address.starts_with('*')
+    {
+        return Some(local.to_string());
+    }
+
+    None
 }
 
 /// Insert a `Message-ID:` header at the top of an RFC 5322 message body. The
@@ -311,7 +378,9 @@ fn scan_headers(body: &[u8], names: &[&str]) -> std::collections::HashMap<String
 
 /// Extract the bare-addr domain from an RFC 5322 `From:` header, handling
 /// both `"Name <user@host>"` and `"user@host"` forms. Returns `None` if no
-/// `@` is present.
+/// `@` is present. Retained for test coverage; the main path inlines the
+/// rfind('@') lookup on the already-extracted bare address.
+#[cfg(test)]
 fn extract_domain(from: &str) -> Option<String> {
     let addr = extract_bare_address(from)?;
     let at = addr.rfind('@')?;
@@ -508,15 +577,25 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         dkim::generate_keypair(tmp.path(), false).unwrap();
         let key = dkim::load_private_key(tmp.path()).unwrap();
-        let mut boxes = HashSet::new();
-        boxes.insert("catchall".to_string());
-        boxes.insert("alice".to_string());
+        let mut boxes = HashMap::new();
+        boxes.insert(
+            "catchall".to_string(),
+            RegisteredMailbox {
+                address: "*@example.com".to_string(),
+            },
+        );
+        boxes.insert(
+            "alice".to_string(),
+            RegisteredMailbox {
+                address: "alice@example.com".to_string(),
+            },
+        );
         let dir = data_dir.unwrap_or_else(|| tmp.path().to_path_buf());
         SendContext {
             dkim_key: Arc::new(key),
             primary_domain: "example.com".to_string(),
             dkim_selector: "dkim".to_string(),
-            registered_mailboxes: boxes,
+            mailboxes: boxes,
             transport,
             data_dir: dir,
         }
@@ -543,7 +622,6 @@ mod tests {
         });
         let ctx = test_ctx(mock.clone());
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -564,23 +642,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_mailbox_returns_mailbox_error() {
+    async fn bogus_local_part_under_config_domain_returns_mailbox_error() {
+        // S45-2: wildcard fallback is gone — sending as a local part that
+        // doesn't match a concrete registered mailbox must be rejected
+        // with ERR MAILBOX even when the domain matches the configured one.
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
             behavior: Behavior::Ok,
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "ghost".to_string(),
-            body: body("alice@example.com"),
+            body: body("bogus@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
         match resp {
             SendResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
-                assert!(reason.contains("ghost"), "{reason}");
+                assert!(reason.contains("bogus@example.com"), "{reason}");
+                assert!(
+                    reason.contains("aimx mailbox create"),
+                    "error should point operator at aimx mailbox create: {reason}"
+                );
             }
             other => panic!("expected Err, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wildcard_catchall_is_never_accepted_as_outbound_sender() {
+        // Even if `catchall` has address `*@example.com`, sending
+        // `catchall@example.com` must not succeed: catchall is inbound-only.
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock);
+        let req = SendRequest {
+            body: body("catchall@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        match resp {
+            SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Mailbox),
+            other => panic!("expected Err(MAILBOX), got {other:?}"),
         }
     }
 
@@ -592,7 +695,6 @@ mod tests {
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@other.org"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -613,7 +715,6 @@ mod tests {
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@EXAMPLE.COM"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -621,15 +722,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn any_local_part_accepted() {
+    async fn concrete_mailbox_under_config_domain_is_accepted() {
+        // S45-2: sending as a registered concrete mailbox (not the
+        // wildcard catchall) under the configured domain succeeds end-to-end.
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
             behavior: Behavior::Ok,
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
-            body: body("anything@example.com"),
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+    }
+
+    #[tokio::test]
+    async fn display_name_from_header_resolves_to_concrete_mailbox() {
+        // Display-name forms like `Alice <alice@example.com>` must still
+        // resolve to the registered mailbox named `alice`.
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock);
+        let req = SendRequest {
+            body: body("Alice <alice@example.com>"),
         };
         let resp = handle_send(req, &ctx).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -648,10 +766,7 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest {
-            from_mailbox: "alice".to_string(),
-            body,
-        };
+        let req = SendRequest { body };
         let resp = handle_send(req, &ctx).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Malformed),
@@ -669,7 +784,6 @@ mod tests {
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -692,7 +806,6 @@ mod tests {
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -810,10 +923,7 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest {
-            from_mailbox: "alice".to_string(),
-            body,
-        };
+        let req = SendRequest { body };
         let resp = handle_send(req, &ctx).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
@@ -832,10 +942,7 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest {
-            from_mailbox: "alice".to_string(),
-            body,
-        };
+        let req = SendRequest { body };
         let resp = handle_send(req, &ctx).await;
         match resp {
             SendResponse::Ok { message_id } => {
@@ -867,7 +974,6 @@ mod tests {
         });
         let ctx = test_ctx(mock);
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         // Inject a signer that always fails, to exercise the `ERR SIGN`
@@ -901,7 +1007,6 @@ mod tests {
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -935,7 +1040,6 @@ mod tests {
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -965,7 +1069,6 @@ mod tests {
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
@@ -990,7 +1093,6 @@ mod tests {
         });
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
-            from_mailbox: "alice".to_string(),
             body: body("alice@example.com"),
         };
         let resp = handle_send(req, &ctx).await;
