@@ -104,11 +104,6 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
         None
     };
 
-    let dkim_dns_value = match local_dkim_pubkey.as_deref() {
-        Some(p) => format!("v=DKIM1; k=rsa; p={p}"),
-        None => "v=DKIM1; k=rsa; p=".to_string(),
-    };
-
     let results = setup::verify_all_dns(
         net,
         &config.domain,
@@ -119,13 +114,26 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
     );
 
     let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
-    let records = setup::generate_dns_records(
+    let mut records = setup::generate_dns_records(
         &config.domain,
         &server_ip.to_string(),
         server_ipv6_str.as_deref(),
-        &dkim_dns_value,
+        local_dkim_pubkey
+            .as_deref()
+            .map(|p| format!("v=DKIM1; k=rsa; p={p}"))
+            .unwrap_or_default()
+            .as_str(),
         &config.dkim_selector,
     );
+
+    // Without a local DKIM public key on disk we have no authoritative value
+    // to suggest in the "→ Add:" hint — drop the DKIM record so the hint is
+    // suppressed. The DKIM DNS check itself still runs (it just verifies the
+    // record exists) and its FAIL/MISSING badge is still rendered.
+    if local_dkim_pubkey.is_none() {
+        let dkim_name = format!("{}._domainkey.{}", config.dkim_selector, config.domain);
+        records.retain(|r| !(r.record_type == "TXT" && r.name == dkim_name));
+    }
 
     Some(DnsSection { results, records })
 }
@@ -324,11 +332,8 @@ pub fn format_status(info: &StatusInfo) -> String {
     out.push_str(&format!("\n{}\n", term::header("DNS")));
     match &info.dns {
         Some(dns) => {
-            let (lines, _) = setup::dns_verification_lines(&dns.results, &dns.records);
-            // `dns_verification_lines` prefixes its output with a blank line,
-            // a "DNS Verification:" heading, and another blank line — redundant
-            // once we have our own [DNS] header, so skip the first three lines.
-            for line in lines.iter().skip(3) {
+            let (lines, _) = setup::dns_verification_record_lines(&dns.results, &dns.records);
+            for line in lines {
                 out.push_str(&format!("{line}\n"));
             }
         }
@@ -906,6 +911,20 @@ mod tests {
             net.resolve_calls.get() > 0,
             "gather_status must perform DNS lookups when building the DNS section"
         );
+
+        // The A-record verification was primed with a matching IP; it must
+        // produce Pass. This proves the IP→verify_all_dns→DnsSection wiring
+        // end-to-end, not just struct shape.
+        let a_result = dns
+            .results
+            .iter()
+            .find(|(n, _)| n == "A")
+            .map(|(_, r)| r)
+            .expect("A check must be present");
+        assert!(
+            matches!(a_result, DnsVerifyResult::Pass),
+            "A check must Pass when the mock A record matches the server IP, got {a_result:?}"
+        );
     }
 
     #[test]
@@ -941,6 +960,44 @@ mod tests {
         assert!(
             info.dns.is_none(),
             "DNS section must be None when get_server_ips errors out"
+        );
+    }
+
+    #[test]
+    fn gather_dns_drops_dkim_record_when_local_pubkey_missing() {
+        // When no DKIM public key is on disk (e.g. setup not yet run, or key
+        // removed), `aimx status` must NOT emit a "→ Add:" DNS hint with an
+        // empty `p=` value. Guarding this at the `records` level is the
+        // cheapest way: dns_record_for_check falls back to None for DKIM,
+        // and dns_verification_lines omits the hint line.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        // Do NOT write a DKIM public.key — this is the scenario under test.
+        assert!(
+            !crate::config::dkim_dir().join("public.key").exists(),
+            "precondition: no DKIM public key on disk"
+        );
+
+        let config = empty_config(tmp.path());
+        let net = MockNetworkOps::default();
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        let dns = info.dns.expect("DNS section must be present");
+
+        let dkim_name = format!("dkim._domainkey.{}", config.domain);
+        let has_dkim_record = dns
+            .records
+            .iter()
+            .any(|r| r.record_type == "TXT" && r.name == dkim_name);
+        assert!(
+            !has_dkim_record,
+            "DnsSection.records must NOT contain a DKIM TXT record with an empty p= \
+             value when the local public key is absent (got: {:?})",
+            dns.records
+                .iter()
+                .find(|r| r.name == dkim_name)
+                .map(|r| r.value.as_str())
         );
     }
 
