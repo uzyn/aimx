@@ -1257,6 +1257,26 @@ pub fn run_setup(
         return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
     }
 
+    // Step 2: Port 25 preflight — runs BEFORE the domain prompt and any
+    // filesystem writes. If the VPS blocks SMTP there is no point asking for
+    // a domain, generating TLS certs, or writing config.
+    let port25_status = sys.check_port25_occupancy()?;
+    if let Port25Status::OtherProcess(name) = &port25_status {
+        return Err(format!(
+            "Port 25 is occupied by {name}. \
+             Stop the process and run `aimx setup` again."
+        )
+        .into());
+    }
+
+    println!("{}\n", term::header("Port 25 preflight"));
+    if matches!(port25_status, Port25Status::Aimx) {
+        run_port25_preflight(net)?;
+    } else {
+        sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
+    }
+    println!();
+
     // Resolve domain: use argument if provided, otherwise prompt interactively
     let domain = match domain {
         Some(d) => {
@@ -1289,25 +1309,6 @@ pub fn run_setup(
     // Re-entrant detection: if already configured, skip install/configure steps
     let already_configured = is_already_configured(sys, data_dir);
 
-    // Step 2: Port 25 conflict check. Always run — even on re-entrant invocations,
-    // this surfaces an unexpected foreign process bound to :25.
-    let port25_status = sys.check_port25_occupancy()?;
-    match &port25_status {
-        Port25Status::Free => {}
-        Port25Status::Aimx => {
-            if !already_configured {
-                println!("`aimx serve` is already running on port 25. Proceeding with setup.");
-            }
-        }
-        Port25Status::OtherProcess(name) => {
-            return Err(format!(
-                "Port 25 is occupied by {name}. \
-                 Stop the process and run `aimx setup` again."
-            )
-            .into());
-        }
-    }
-
     if already_configured {
         println!(
             "{}",
@@ -1331,17 +1332,6 @@ pub fn run_setup(
     // domain changes). Must happen before the aimx.service install at the end,
     // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector)?;
-
-    // Step 5: Port 25 preflight — confirm the VPS allows SMTP traffic before
-    // the user spends time setting up DNS. On a fresh install aimx.service is
-    // not yet bound to :25, so we stand up a minimal SMTP responder for the
-    // duration of the probe and tear it down afterwards. On re-entry (Aimx)
-    // the real daemon is already bound and answers the probe directly.
-    if matches!(port25_status, Port25Status::Aimx) {
-        run_port25_preflight(net)?;
-    } else {
-        sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
-    }
 
     // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
@@ -2272,19 +2262,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_setup_writes_config_and_dkim_before_preflight() {
-        // finalize_setup (config.toml + DKIM private key) must run before the
-        // port-25 preflight, so that by the time install_and_verify_service
-        // runs at the end of setup, aimx.service has a loadable config and a
-        // DKIM key on disk. This is what the original bug violated — aimx
-        // serve was being started before finalize_setup, exiting with
-        // "Config file not found" and restart-looping into permanent failure.
-        //
-        // We can't reach install_and_verify_service here without mocking
-        // stdin (DNS retry loop reads it), so we force a preflight failure
-        // and assert both artefacts are already on disk by that point.
-        // Combined with the run_setup source ordering (preflight → DNS →
-        // install), this proves the invariant end-to-end.
+    fn fresh_setup_does_not_write_config_when_preflight_fails() {
+        // The port-25 preflight runs BEFORE finalize_setup, so a VPS that
+        // blocks outbound port 25 leaves no artefacts on disk. This is the
+        // fail-fast invariant: no TLS cert, no config.toml, no DKIM key
+        // until the network has been proven OK.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
@@ -2294,15 +2276,29 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let err = result.expect_err("preflight failure must bubble up");
+        assert!(
+            err.to_string().contains("Port 25 checks failed"),
+            "expected port-25 error, got: {err}"
+        );
 
         assert!(
-            crate::config::config_path().exists(),
-            "config.toml must exist on disk after finalize_setup"
+            !crate::config::config_path().exists(),
+            "config.toml must NOT be written when the early preflight fails"
         );
         assert!(
-            crate::config::dkim_dir().join("private.key").exists(),
-            "DKIM private key must exist on disk after finalize_setup"
+            !crate::config::dkim_dir().join("private.key").exists(),
+            "DKIM private key must NOT be generated when the early preflight fails"
+        );
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "install_service_file must NOT run when the preflight fails"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            0,
+            "wait_for_service_ready must NOT run when the preflight fails"
         );
     }
 
