@@ -167,10 +167,13 @@ impl AimxMcpServer {
         Parameters(params): Parameters<MailboxDeleteParams>,
     ) -> Result<String, String> {
         // Daemon-side delete refuses when the inbox/sent directories
-        // still contain files (returns ERR NONEMPTY). The fallback
-        // direct-on-disk path below matches the CLI's current semantics
-        // (removes the directory tree) and runs only when the daemon is
-        // unreachable.
+        // still contain files (returns ERR NONEMPTY). MCP deliberately
+        // does NOT gain a force variant — destructive wipes stay on the
+        // CLI where operators see prompts and can't be triggered
+        // remotely by an agent. On NONEMPTY we rewrite the daemon's
+        // error into a structured hint that names the exact CLI command
+        // (S48-6). The fallback direct-on-disk path runs only when the
+        // daemon is unreachable.
         match submit_mailbox_crud_via_daemon(&params.name, false) {
             Ok(()) => Ok(format!(
                 "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
@@ -185,7 +188,9 @@ impl AimxMcpServer {
                     params.name
                 ))
             }
-            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+            Err(MailboxCrudFallback::Daemon(msg)) => {
+                Err(rewrite_nonempty_error_for_mcp(&params.name, &msg))
+            }
         }
     }
 
@@ -909,6 +914,46 @@ fn extract_email_address(addr: &str) -> &str {
     addr
 }
 
+/// Rewrite the daemon's `[NONEMPTY]` error into an MCP-friendly hint
+/// that names the exact CLI command. The MCP `mailbox_delete` tool
+/// deliberately does not gain a force variant — destructive wipes stay
+/// on the CLI where the operator sees prompts and the request can't be
+/// triggered remotely. Non-NONEMPTY daemon errors pass through verbatim.
+pub(crate) fn rewrite_nonempty_error_for_mcp(name: &str, msg: &str) -> String {
+    if !msg.contains("[NONEMPTY]") {
+        return msg.to_string();
+    }
+    let (inbox_files, sent_files) = parse_nonempty_counts(msg);
+    format!(
+        "Cannot delete mailbox '{name}' — inbox: {inbox_files} files, sent: {sent_files} files. \
+         MCP `mailbox_delete` does not wipe mail; run `sudo aimx mailboxes delete --force {name}` \
+         on the host to wipe and remove."
+    )
+}
+
+/// Parse `(N in inbox, M in sent)` out of the daemon's NONEMPTY reason
+/// string. Returns `(0, 0)` when the format doesn't match — the caller
+/// still gets the hint with zeroed counts, which is better than 500ing.
+fn parse_nonempty_counts(msg: &str) -> (usize, usize) {
+    let mut inbox = 0usize;
+    let mut sent = 0usize;
+    if let Some(idx) = msg.find(" in inbox") {
+        inbox = msg[..idx]
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+    }
+    if let Some(idx) = msg.find(" in sent") {
+        sent = msg[..idx]
+            .rsplit(|c: char| !c.is_ascii_digit())
+            .find(|s| !s.is_empty())
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+    }
+    (inbox, sent)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1434,5 +1479,44 @@ mod tests {
         let result = set_read_status(&config, "alice", Folder::Inbox, "../../etc/passwd", true);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("invalid characters"));
+    }
+
+    // ----- S48-6 NONEMPTY → CLI hint rewrite ---------------------------
+
+    #[test]
+    fn rewrite_nonempty_error_carries_counts_and_cli_command() {
+        // Mirrors the daemon's actual reason format from
+        // mailbox_handler.rs:handle_delete.
+        let daemon = "[NONEMPTY] mailbox 'orders' has 7 files (5 in inbox, 2 in sent); \
+                      archive or remove them first";
+        let hint = rewrite_nonempty_error_for_mcp("orders", daemon);
+        assert!(hint.contains("Cannot delete mailbox 'orders'"), "{hint}");
+        assert!(hint.contains("inbox: 5 files"), "{hint}");
+        assert!(hint.contains("sent: 2 files"), "{hint}");
+        assert!(
+            hint.contains("sudo aimx mailboxes delete --force orders"),
+            "MCP hint must spell out the exact CLI command operators should run: {hint}"
+        );
+    }
+
+    #[test]
+    fn rewrite_nonempty_error_passes_non_nonempty_through() {
+        // VALIDATION / IO / etc. errors should reach the agent verbatim.
+        let other = "[VALIDATION] mailbox name contains invalid character '/'";
+        assert_eq!(rewrite_nonempty_error_for_mcp("orders", other), other);
+    }
+
+    #[test]
+    fn rewrite_nonempty_error_falls_back_to_zero_counts_when_format_unexpected() {
+        // If the daemon ever changes its phrasing, the MCP hint must
+        // still render rather than 500 — counts default to 0.
+        let weird = "[NONEMPTY] mailbox has files";
+        let hint = rewrite_nonempty_error_for_mcp("orders", weird);
+        assert!(hint.contains("inbox: 0 files"), "{hint}");
+        assert!(hint.contains("sent: 0 files"), "{hint}");
+        assert!(
+            hint.contains("aimx mailboxes delete --force orders"),
+            "{hint}"
+        );
     }
 }

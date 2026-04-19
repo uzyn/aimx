@@ -2,12 +2,15 @@
 
 Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email address to a directory on disk.
 
+> **CLI alias:** Examples below use `aimx mailboxes`. The singular `aimx mailbox` is retained as a clap alias for muscle-memory and works identically.
+
 ## Concepts
 
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
 - **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only — no `sent/catchall/` directory is created.
-- **No restart needed — the daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailbox create` / `delete` route through the daemon's UDS socket (`/run/aimx/send.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
-- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files — it returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailbox delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
+- **No restart needed — the daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/send.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
+- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files — it returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
+- **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files — continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**; the MCP `mailbox_delete` tool deliberately does not gain a force variant — destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
 
 ### On-disk layout
 
@@ -39,7 +42,7 @@ For example, with mailboxes `support` and `catchall` configured:
 ### Create a mailbox
 
 ```bash
-aimx mailbox create support
+aimx mailboxes create support
 ```
 
 This creates `support@agent.yourdomain.com` and both directories:
@@ -50,7 +53,7 @@ both; `catchall` cannot be deleted.
 ### List mailboxes
 
 ```bash
-aimx mailbox list
+aimx mailboxes list
 ```
 
 Shows all mailboxes with their addresses and message counts (total and unread).
@@ -58,7 +61,7 @@ Shows all mailboxes with their addresses and message counts (total and unread).
 ### Delete a mailbox
 
 ```bash
-aimx mailbox delete support
+aimx mailboxes delete support
 ```
 
 Prompts for confirmation; use `--yes` to skip the prompt. When the daemon is
@@ -67,6 +70,26 @@ to delete a mailbox that still contains files (error `NONEMPTY`) — archive
 or remove them first, then retry. When the daemon is stopped, delete goes
 through the direct-edit fallback which removes the directory tree and
 prints a restart-hint banner.
+
+### Force-delete a non-empty mailbox
+
+> **Destructive.** `--force` permanently removes every email under `inbox/<name>/`
+> and `sent/<name>/` before unregistering the mailbox. There is no undo.
+
+```bash
+# Interactive: shows file counts and prompts before wiping
+aimx mailboxes delete --force support
+
+# Scripted: skip the confirmation prompt
+aimx mailboxes delete --force --yes support
+```
+
+Without `--force`, a non-empty mailbox cannot be deleted — the command
+fails with the daemon's `ERR NONEMPTY` error and reports per-directory
+file counts. Use `--force` only when you are sure you want to lose those
+emails. `catchall` is still refused even with `--force`. Force is CLI-only;
+the MCP `mailbox_delete` tool returns a hint pointing at this command on
+NONEMPTY rather than gaining its own force variant.
 
 Mailboxes can also be managed via [MCP tools](mcp.md#mailbox-tools) (`mailbox_list`, `mailbox_create`, `mailbox_delete`).
 

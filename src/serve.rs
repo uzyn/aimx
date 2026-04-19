@@ -827,12 +827,196 @@ pub mod service {
             InitSystem::Unknown => None,
         }
     }
+
+    /// Pure dispatch table for the log-tail command. systemd uses
+    /// `journalctl -u <unit> -n <n> --no-pager`; OpenRC has no native
+    /// per-unit log store so this returns `None` and the default
+    /// implementation falls back to reading log files directly.
+    pub fn tail_service_logs_command(
+        init: &InitSystem,
+        unit: &str,
+        n: usize,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "journalctl",
+                vec![
+                    "-u".to_string(),
+                    unit.to_string(),
+                    "-n".to_string(),
+                    n.to_string(),
+                    "--no-pager".to_string(),
+                ],
+            )),
+            InitSystem::OpenRC | InitSystem::Unknown => None,
+        }
+    }
+
+    /// Pure dispatch table for the log-follow command. systemd uses
+    /// `journalctl -f -u <unit>`. OpenRC: nothing native — we'd `tail -F`
+    /// `/var/log/messages`, but that requires root + isn't unit-scoped, so
+    /// the default impl prints a clear "not supported" error rather than
+    /// streaming the wrong file.
+    pub fn follow_service_logs_command(
+        init: &InitSystem,
+        unit: &str,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "journalctl",
+                vec!["-f".to_string(), "-u".to_string(), unit.to_string()],
+            )),
+            InitSystem::OpenRC | InitSystem::Unknown => None,
+        }
+    }
+
+    /// Default `tail_service_logs` implementation used by `RealSystemOps`.
+    /// systemd: spawn `journalctl` and capture stdout. OpenRC: best-effort
+    /// read of `/var/log/aimx/*.log` (concatenated, last `n` lines), with
+    /// `/var/log/messages` as a final fallback. Returns an error when no
+    /// source is reachable so callers can render a friendly message.
+    pub fn tail_service_logs_default(
+        unit: &str,
+        n: usize,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let init = detect_init_system();
+        if let Some((program, args)) = tail_service_logs_command(&init, unit, n) {
+            let output = std::process::Command::new(program).args(&args).output()?;
+            if output.status.success() {
+                return Ok(String::from_utf8_lossy(&output.stdout).into_owned());
+            }
+            return Err(format!(
+                "{program} exited non-zero: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+            .into());
+        }
+
+        match init {
+            InitSystem::OpenRC => openrc_tail_log_files(unit, n),
+            InitSystem::Unknown => Err(
+                "could not detect init system (systemd or OpenRC); no log source available".into(),
+            ),
+            InitSystem::Systemd => unreachable!("systemd handled above"),
+        }
+    }
+
+    /// Default `follow_service_logs` implementation used by `RealSystemOps`.
+    /// On systemd this spawns `journalctl -f -u <unit>` as a child process
+    /// and waits on it; Ctrl-C in a TTY reaches both the parent and child
+    /// via the process group so the tail terminates naturally. On OpenRC
+    /// and unknown init systems we return a clear error rather than guess
+    /// at a log file.
+    pub fn follow_service_logs_default(unit: &str) -> Result<(), Box<dyn std::error::Error>> {
+        let init = detect_init_system();
+        if let Some((program, args)) = follow_service_logs_command(&init, unit) {
+            let status = std::process::Command::new(program).args(&args).status()?;
+            return if status.success() {
+                Ok(())
+            } else {
+                Err(format!("{program} exited non-zero").into())
+            };
+        }
+
+        Err(
+            "log follow is only supported on systemd; on OpenRC tail your syslog file directly \
+             (e.g. `tail -F /var/log/messages`)"
+                .into(),
+        )
+    }
+
+    /// OpenRC log-file fallback: try `/var/log/<unit>/*.log` first, then
+    /// `/var/log/messages`. Returns an error when neither is readable.
+    fn openrc_tail_log_files(unit: &str, n: usize) -> Result<String, Box<dyn std::error::Error>> {
+        use std::path::PathBuf;
+
+        let unit_dir = PathBuf::from(format!("/var/log/{unit}"));
+        if let Ok(entries) = std::fs::read_dir(&unit_dir) {
+            let mut all = String::new();
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().is_some_and(|e| e == "log")
+                    && let Ok(content) = std::fs::read_to_string(&path)
+                {
+                    all.push_str(&content);
+                }
+            }
+            if !all.is_empty() {
+                return Ok(tail_lines(&all, n));
+            }
+        }
+
+        let messages = PathBuf::from("/var/log/messages");
+        if messages.exists()
+            && let Ok(content) = std::fs::read_to_string(&messages)
+        {
+            return Ok(tail_lines(&content, n));
+        }
+
+        Err(format!(
+            "no log source found for unit '{unit}': checked {unit_dir:?} and /var/log/messages"
+        )
+        .into())
+    }
+
+    /// Return the last `n` lines of `s`, preserving terminating newlines.
+    fn tail_lines(s: &str, n: usize) -> String {
+        if n == 0 {
+            return String::new();
+        }
+        let lines: Vec<&str> = s.lines().collect();
+        let start = lines.len().saturating_sub(n);
+        let mut out = lines[start..].join("\n");
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::service::*;
     use super::*;
+
+    #[test]
+    fn tail_service_logs_command_systemd_uses_journalctl() {
+        let (program, args) = tail_service_logs_command(&InitSystem::Systemd, "aimx", 50)
+            .expect("systemd must dispatch");
+        assert_eq!(program, "journalctl");
+        assert!(args.contains(&"-u".to_string()));
+        assert!(args.contains(&"aimx".to_string()));
+        assert!(args.contains(&"-n".to_string()));
+        assert!(args.contains(&"50".to_string()));
+        assert!(
+            args.contains(&"--no-pager".to_string()),
+            "must request --no-pager so the output is not paginated when a TTY is attached"
+        );
+    }
+
+    #[test]
+    fn tail_service_logs_command_openrc_returns_none() {
+        // OpenRC has no native unit-scoped log store; the default impl
+        // falls back to reading log files directly.
+        assert!(tail_service_logs_command(&InitSystem::OpenRC, "aimx", 10).is_none());
+        assert!(tail_service_logs_command(&InitSystem::Unknown, "aimx", 10).is_none());
+    }
+
+    #[test]
+    fn follow_service_logs_command_systemd_uses_journalctl_dash_f() {
+        let (program, args) =
+            follow_service_logs_command(&InitSystem::Systemd, "aimx").expect("systemd dispatches");
+        assert_eq!(program, "journalctl");
+        assert!(args.contains(&"-f".to_string()));
+        assert!(args.contains(&"-u".to_string()));
+        assert!(args.contains(&"aimx".to_string()));
+    }
+
+    #[test]
+    fn follow_service_logs_command_openrc_returns_none() {
+        assert!(follow_service_logs_command(&InitSystem::OpenRC, "aimx").is_none());
+        assert!(follow_service_logs_command(&InitSystem::Unknown, "aimx").is_none());
+    }
 
     #[test]
     fn systemd_unit_contains_required_fields() {

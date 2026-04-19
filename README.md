@@ -40,8 +40,8 @@ sudo cp target/release/aimx /usr/local/bin/
 # 2. Run setup and follow the guided instructions
 sudo aimx setup
 
-# 3. Check status
-aimx status
+# 3. Check health
+aimx doctor
 ```
 
 ### CLI Commands
@@ -55,15 +55,17 @@ Usage: aimx [OPTIONS] <COMMAND>
 Commands:
   ingest       Ingest an email from stdin (called by aimx serve or via stdin)
   send         Compose and send an email
-  mailbox      Manage mailboxes
+  mailboxes    Manage mailboxes
   mcp          Start MCP server in stdio mode
   setup        Run interactive setup wizard
   uninstall    Uninstall the aimx daemon service (config and data are retained)
-  status       Show server status, mailbox counts, configuration, and DNS record verification
+  doctor       Show server health, mailbox counts, configuration, DNS verification, and recent logs
+  logs         Tail or follow the aimx service log
   serve        Start the embedded SMTP listener daemon
   portcheck    Check port 25 connectivity (outbound, inbound)
   agent-setup  Install AIMX plugin/skill for an AI agent into the current user's config
   dkim-keygen  Generate DKIM keypair for email signing
+  completion   Print a shell-completion script for the requested shell
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -347,11 +349,11 @@ AIMX splits its filesystem footprint across two roots, each with its own overrid
 
 ```bash
 # Storage override (CLI flag — wins over env var)
-aimx --data-dir /custom/storage status
+aimx --data-dir /custom/storage doctor
 
 # Storage override (env var)
 export AIMX_DATA_DIR=/custom/storage
-aimx status
+aimx doctor
 
 # Config + DKIM override (tests and dev loops that can't run as root)
 export AIMX_CONFIG_DIR=/tmp/aimx-dev

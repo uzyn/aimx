@@ -9,8 +9,13 @@ Diagnostic commands and solutions for common issues.
 # Requires root
 sudo aimx portcheck
 
-# Show server status, configuration, and mailbox counts
-aimx status
+# Show server health, configuration, mailbox counts, and a tail of the service log
+aimx doctor
+
+# Stream the service log on its own (last 50 lines by default)
+aimx logs
+aimx logs --lines 200
+aimx logs --follow
 
 # Test against a self-hosted verify service instead of the default
 sudo aimx portcheck --verify-host https://verify.yourdomain.com
@@ -66,11 +71,24 @@ rc-service aimx restart
 
 ## Where are the logs?
 
-AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system:
+AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
+
+```bash
+# Tail the last 50 lines (default)
+aimx logs
+
+# Tail a custom number of lines
+aimx logs --lines 200
+
+# Follow new lines as they arrive (Ctrl-C to stop)
+aimx logs --follow
+```
+
+`aimx doctor` also prints the last 10 lines under a "Recent logs" section, so you usually do not need a separate `aimx logs` invocation when running a quick health check.
 
 **systemd (Ubuntu, Fedora, Debian, etc.)**
 
-The systemd unit declares `StandardOutput=journal` and `StandardError=journal`, so all daemon output is routed to journald:
+The systemd unit declares `StandardOutput=journal` and `StandardError=journal`, so all daemon output is routed to journald. `aimx logs` shells out to `journalctl -u aimx -n <N>` (and `journalctl -f -u aimx` with `--follow`). You can also call journalctl directly:
 
 ```bash
 # Follow logs in real time
@@ -85,7 +103,7 @@ journalctl -u aimx -n 200
 
 **OpenRC (Alpine)**
 
-The generated OpenRC init script uses `supervise-daemon`, which routes daemon output to the system logger (typically `/var/log/messages` or syslog). Check your OpenRC logging configuration for the exact destination.
+The generated OpenRC init script uses `supervise-daemon`, which routes daemon output to the system logger (typically `/var/log/messages` or syslog). Check your OpenRC logging configuration for the exact destination. `aimx logs` makes a best-effort read of `/var/log/aimx/*.log` and falls back to `/var/log/messages`; `aimx logs --follow` is unsupported on OpenRC and will direct you to tail your syslog file directly.
 
 ## DKIM/SPF debugging
 
@@ -170,13 +188,14 @@ If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx
 | Command | Purpose |
 |---------|---------|
 | `sudo aimx portcheck` | Check port 25 connectivity (requires root) |
-| `aimx status` | Show config, mailboxes, message counts, and DNS record verification |
-| `aimx mailbox list` | List all mailboxes |
+| `aimx doctor` | Show config, mailboxes, message counts, DNS record verification, and recent log lines |
+| `aimx logs [--lines N] [--follow]` | Tail or follow the aimx service log |
+| `aimx mailboxes list` | List all mailboxes |
 | `aimx dkim-keygen` | Generate DKIM keypair |
 | `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |
-| `aimx --data-dir /path status` | Use a custom data directory |
+| `aimx --data-dir /path doctor` | Use a custom data directory |
 | `sudo systemctl status aimx` | Check aimx serve service |
-| `journalctl -u aimx -e` | View aimx serve logs |
+| `journalctl -u aimx -e` | View aimx serve logs (or use `aimx logs`) |
 | `dig +short TXT agent.yourdomain.com` | Check DNS records |
 | `cat /etc/aimx/dkim/public.key` | View DKIM public key |
 

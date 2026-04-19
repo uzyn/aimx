@@ -171,7 +171,7 @@ where
                 code: ErrCode::Mailbox,
                 reason: format!(
                     "no mailbox matches From: {bare_from} \
-                     (run `aimx mailbox create <name>` to register one; \
+                     (run `aimx mailboxes create <name>` to register one; \
                      catchall is inbound-only)"
                 ),
             };
@@ -689,8 +689,8 @@ mod tests {
                 assert_eq!(code, ErrCode::Mailbox);
                 assert!(reason.contains("bogus@example.com"), "{reason}");
                 assert!(
-                    reason.contains("aimx mailbox create"),
-                    "error should point operator at aimx mailbox create: {reason}"
+                    reason.contains("aimx mailboxes create"),
+                    "error should point operator at aimx mailboxes create: {reason}"
                 );
             }
             other => panic!("expected Err, got {other:?}"),

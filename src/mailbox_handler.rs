@@ -1,7 +1,7 @@
 //! Daemon-side handlers for the `MAILBOX-CREATE` and `MAILBOX-DELETE`
 //! verbs of the `AIMX/1` UDS protocol.
 //!
-//! `aimx mailbox create` / `delete` route through the daemon over UDS so
+//! `aimx mailboxes create` / `delete` route through the daemon over UDS so
 //! the in-memory `Config` is hot-swapped under a `RwLock<Arc<Config>>`
 //! whenever `config.toml` on disk changes. Inbound mail to a just-created
 //! mailbox routes correctly on the very next SMTP session — no restart,
@@ -244,7 +244,7 @@ fn count_files_if_exists(dir: &Path) -> usize {
 /// struct are dropped on rewrite, and any human-authored comments are
 /// erased. This is symmetric with the pre-existing `Config::save` path
 /// and matches the v1 assumption that `config.toml` is machine-authored
-/// (the only supported edits are through `aimx setup` / `aimx mailbox
+/// (the only supported edits are through `aimx setup` / `aimx mailboxes
 /// create|delete`). Adopting a preserving editor (e.g. `toml_edit`) is
 /// tracked for v2; see the test `unknown_stanza_is_dropped_on_rewrite`
 /// below for the contract check.
