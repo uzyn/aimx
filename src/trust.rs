@@ -73,10 +73,9 @@ impl<'de> Deserialize<'de> for TrustedValue {
 ///   `trusted_senders` AND DKIM pass -> `TrustedValue::True`
 /// - effective `trust == "verified"`, any other outcome -> `TrustedValue::False`
 ///
-/// Note: this is stricter than the channel-trigger gate in `channel.rs`,
-/// which fires when the sender is allowlisted OR DKIM passes. The
-/// `trusted` field requires BOTH. See `channel::should_execute_triggers`
-/// for the v1 gate semantics and the rationale comment there.
+/// Note: Sprint 50 moves hook gating off this value — an `on_receive`
+/// hook fires iff `trusted == "true"` OR the hook opts in via
+/// `dangerously_support_untrusted`. See `hook::should_fire_on_receive`.
 pub fn evaluate_trust(
     config: &Config,
     mailbox: &MailboxConfig,
@@ -99,15 +98,20 @@ pub fn evaluate_trust(
         return TrustedValue::False;
     }
 
-    // Unknown trust value: fail closed (same as channel.rs).
+    // Unknown trust value: fail closed.
     TrustedValue::False
 }
 
 fn extract_email_for_match(from: &str) -> String {
-    if let Some(start) = from.find('<')
-        && let Some(end) = from.find('>')
-    {
-        return from[start + 1..end].to_lowercase();
+    // Match RFC 5322 display-name form `"Name" <addr>` by taking the LAST
+    // `<` and the first `>` after it. Mirrors `send_handler::extract_bare_address`
+    // and avoids slice-panics on pathological input like `"foo>bar<baz>"`
+    // where a stray `>` precedes the opening `<`.
+    if let Some(start) = from.rfind('<') {
+        let tail = &from[start + 1..];
+        if let Some(end) = tail.find('>') {
+            return tail[..end].to_lowercase();
+        }
     }
     from.to_lowercase()
 }
@@ -148,7 +152,7 @@ mod tests {
             address: "*@test.com".to_string(),
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
-            on_receive: vec![],
+            hooks: vec![],
         }
     }
 
@@ -157,7 +161,7 @@ mod tests {
             address: "secure@test.com".to_string(),
             trust: Some("verified".to_string()),
             trusted_senders: Some(trusted_senders),
-            on_receive: vec![],
+            hooks: vec![],
         }
     }
 
@@ -259,7 +263,7 @@ mod tests {
             address: "test@test.com".to_string(),
             trust: Some("typo".to_string()),
             trusted_senders: Some(vec![]),
-            on_receive: vec![],
+            hooks: vec![],
         };
         let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
@@ -275,7 +279,7 @@ mod tests {
             address: "any@test.com".to_string(),
             trust: None,
             trusted_senders: None,
-            on_receive: vec![],
+            hooks: vec![],
         };
 
         let t = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
@@ -295,7 +299,7 @@ mod tests {
             address: "public@test.com".to_string(),
             trust: Some("none".to_string()),
             trusted_senders: None,
-            on_receive: vec![],
+            hooks: vec![],
         };
 
         let t = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
@@ -312,7 +316,7 @@ mod tests {
             address: "strict@test.com".to_string(),
             trust: None,
             trusted_senders: Some(vec!["boss@company.com".to_string()]),
-            on_receive: vec![],
+            hooks: vec![],
         };
 
         // Global says gmail is trusted; mailbox replaces that list — so an
@@ -333,96 +337,69 @@ mod tests {
         }
     }
 
-    /// Parity test: for a `trust: verified` mailbox, `trusted == "true"`
-    /// implies the channel-trigger gate fires, but NOT the reverse.
-    ///
-    /// The channel gate (v1 semantics) fires when:
-    /// - sender is allowlisted, OR
-    /// - DKIM passes
-    ///
-    /// The `trusted` field (FR-37b) is `"true"` when:
-    /// - sender is allowlisted AND DKIM passes
-    ///
-    /// So `trusted == "true"` is strictly stronger than the trigger gate.
-    /// When `trusted == "true"`, the trigger gate also fires (both conditions
-    /// met). The reverse does NOT hold: the trigger fires for allowlisted
-    /// senders even when DKIM fails, but `trusted` is `"false"` in that case.
+    /// Parity test (Sprint 50 rewrite): for `trust: verified`, an
+    /// `on_receive` hook fires iff `trusted == TrustedValue::True`
+    /// OR `dangerously_support_untrusted = true`. `evaluate_trust` is
+    /// the sole source of truth for the `trusted` value.
     #[test]
-    fn parity_trusted_true_implies_trigger_fires() {
-        use crate::channel;
-        use crate::frontmatter::InboundFrontmatter;
+    fn parity_hook_gate_follows_trusted_true() {
+        use crate::hook::{Hook, HookEvent, should_fire_on_receive};
 
         let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
 
-        let test_cases = vec![
+        let default_hook = Hook {
+            id: "aaaabbbbcccc".to_string(),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".to_string(),
+            cmd: "true".to_string(),
+            from: None,
+            to: None,
+            subject: None,
+            has_attachment: None,
+            dangerously_support_untrusted: false,
+        };
+
+        for (from, dkim_result) in [
             ("alice@gmail.com", "pass"),
             ("alice@gmail.com", "fail"),
-            ("alice@gmail.com", "none"),
             ("alice@yahoo.com", "pass"),
             ("alice@yahoo.com", "fail"),
-            ("alice@yahoo.com", "none"),
-        ];
-
-        for (from, dkim_result) in test_cases {
+        ] {
             let auth_results = auth(dkim_result);
             let trusted = evaluate_trust(&cfg, &mb, &auth_results, from);
-
-            let meta = InboundFrontmatter {
-                id: "test".to_string(),
-                message_id: "<test@test.com>".to_string(),
-                thread_id: "0123456789abcdef".to_string(),
-                from: from.to_string(),
-                to: "agent@test.com".to_string(),
-                cc: None,
-                reply_to: None,
-                delivered_to: "agent@test.com".to_string(),
-                subject: "Test".to_string(),
-                date: "2025-01-01T00:00:00Z".to_string(),
-                received_at: "2025-01-01T00:00:01Z".to_string(),
-                received_from_ip: None,
-                size_bytes: 100,
-                in_reply_to: None,
-                references: None,
-                attachments: vec![],
-                list_id: None,
-                auto_submitted: None,
-                dkim: dkim_result.to_string(),
-                spf: "none".to_string(),
-                dmarc: "none".to_string(),
-                trusted: trusted.as_str().to_string(),
-                mailbox: "secure".to_string(),
-                read: false,
-                read_at: None,
-                labels: vec![],
-            };
-
-            let trigger_would_fire = channel::should_execute_triggers(&cfg, &mb, &meta);
-
-            // Forward direction: trusted=true => trigger fires
-            if trusted == TrustedValue::True {
-                assert!(
-                    trigger_would_fire,
-                    "trusted=true but trigger would NOT fire for from={from}, dkim={dkim_result}"
-                );
-            }
-
-            // Reverse direction: trigger fires does NOT imply trusted=true.
-            // Specifically, allowlisted senders with DKIM fail fire the
-            // trigger (v1 semantics: allowlisted OR DKIM pass), but
-            // trusted is "false" because FR-37b requires BOTH.
-            if trigger_would_fire && trusted != TrustedValue::True {
-                // This is expected for:
-                //   - allowlisted + dkim fail  (trigger fires via allowlist, trusted="false")
-                //   - allowlisted + dkim none  (trigger fires via allowlist, trusted="false")
-                //   - not-allowlisted + dkim pass (trigger fires via DKIM, trusted="false")
-                assert_eq!(
-                    trusted,
-                    TrustedValue::False,
-                    "trigger fires but trusted is not 'true' — must be 'false' \
-                     (the asymmetry) for from={from}, dkim={dkim_result}"
-                );
-            }
+            let fires = should_fire_on_receive(&default_hook, trusted);
+            assert_eq!(
+                fires,
+                trusted == TrustedValue::True,
+                "default hook gate must track trusted==true; from={from} dkim={dkim_result} \
+                 trusted={trusted:?} fires={fires}"
+            );
         }
+
+        // dangerously_support_untrusted fires unconditionally.
+        let mut yolo = default_hook.clone();
+        yolo.dangerously_support_untrusted = true;
+        for trusted in [TrustedValue::None, TrustedValue::False, TrustedValue::True] {
+            assert!(should_fire_on_receive(&yolo, trusted));
+        }
+    }
+
+    #[test]
+    fn extract_email_for_match_no_panic_on_inverted_brackets() {
+        // Regression: the pre-hardening `find('<') + find('>')` slice
+        // panicked when `>` preceded `<`. After the rfind/tail-find
+        // hardening, this must return a well-formed lowercased address
+        // and never panic — even on adversarial sender headers.
+        let out = extract_email_for_match("foo>bar<baz@example.com>");
+        assert_eq!(out, "baz@example.com");
+
+        // No `<` at all — fall through cleanly.
+        let out = extract_email_for_match("weird> input");
+        assert_eq!(out, "weird> input");
+
+        // Multiple `<` — pick the last one (matches send_handler semantics).
+        let out = extract_email_for_match("<spoof@bad> real <user@example.com>");
+        assert_eq!(out, "user@example.com");
     }
 }

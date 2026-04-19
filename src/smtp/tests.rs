@@ -60,7 +60,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         "catchall".to_string(),
         MailboxConfig {
             address: "*@test.local".to_string(),
-            on_receive: vec![],
+            hooks: vec![],
             trust: None,
             trusted_senders: None,
         },
@@ -69,7 +69,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         "alice".to_string(),
         MailboxConfig {
             address: "alice@test.local".to_string(),
-            on_receive: vec![],
+            hooks: vec![],
             trust: None,
             trusted_senders: None,
         },

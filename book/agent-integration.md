@@ -9,7 +9,7 @@ knows when and how to use those tools).
 This page covers what the installer does, the list of supported agents, and
 how to wire AIMX in manually if your agent is not yet in the registry.
 
-Once your agent is installed, see [Channel Recipes](channel-recipes.md)
+Once your agent is installed, see [Hook Recipes](hook-recipes.md)
 for email-triggered workflows — side-by-side non-interactive CLI
 invocations for every supported agent.
 
@@ -87,8 +87,8 @@ layout guide).
 
 Claude Code discovers plugins by scanning `~/.claude/plugins/`, but the MCP
 server bundled inside a plugin is **not** auto-activated for every
-invocation — in particular `claude -p` (headless mode, used by channel
-triggers) needs an explicit `claude mcp add` so the server is registered in
+invocation — in particular `claude -p` (headless mode, used by hook
+recipes) needs an explicit `claude mcp add` so the server is registered in
 its MCP registry. The AIMX plugin ships two pieces:
 
 - `.claude-plugin/plugin.json` — manifest declaring the plugin and the

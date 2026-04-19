@@ -64,7 +64,7 @@ before `mcp`.
 ## Channel-trigger recipes
 
 To have AIMX invoke `goose run` automatically when an email arrives,
-see the [Channel Recipes](../../book/channel-recipes.md#goose) chapter.
+see the [Hook Recipes](../../book/hook-recipes.md#goose) chapter.
 
 ## Schema reference
 

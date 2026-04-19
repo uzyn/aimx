@@ -137,7 +137,7 @@ Open a new shell and `aimx <Tab>` will expand subcommands and flags
 ## Next steps
 
 - **[Setup](setup.md)** -- detailed walkthrough of every setup step, DNS records, DKIM management, and production hardening
-- **[Configuration](configuration.md)** -- full `config.toml` reference for mailboxes, channel rules, and trust policies
-- **[Channel Rules](channels.md)** -- trigger agent actions automatically when email arrives
+- **[Configuration](configuration.md)** -- full `config.toml` reference for mailboxes, hooks, and trust policies
+- **[Hooks & Trust](hooks.md)** -- fire agent actions automatically on inbound/outbound events
 - **[MCP Server](mcp.md)** -- integrate with Claude Code, OpenClaw, or any MCP client
 - **[Troubleshooting](troubleshooting.md)** -- common issues and diagnostic commands

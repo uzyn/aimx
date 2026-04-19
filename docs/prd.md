@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-AIMX is a self-hosted email system for AI agents. It gives agents their own email addresses on a domain the user controls, with mail stored as Markdown files, MCP integration for agent access, and channel rules to trigger actions on incoming mail. One binary, one setup command, no third parties.
+AIMX is a self-hosted email system for AI agents. It gives agents their own email addresses on a domain the user controls, with mail stored as Markdown files, MCP integration for agent access, and hooks that trigger actions on inbound and outbound email events. One binary, one setup command, no third parties.
 
 **Tagline:** SMTP for agents. No middleman.
 
@@ -148,7 +148,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
     - `"none"` — mailbox `trust` is `none` (default). No trust evaluation performed.
     - `"true"` — mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed.
     - `"false"` — mailbox `trust` is `verified`, any other outcome (sender not in `trusted_senders`, OR DKIM failed/absent, OR both).
-  The frontmatter field is `trusted` (distinct from the mailbox config field `trust`) to reflect that the value is the result of the evaluation, not the policy itself. `trusted == "true"` is equivalent to "this email passed the trigger gate for this mailbox," so the channel manager's gating logic (FR-35/36/37) can be expressed as `if mailbox.trust == "verified" then require trusted == "true"`.
+  The frontmatter field is `trusted` (distinct from the mailbox config field `trust`) to reflect that the value is the result of the evaluation, not the policy itself. `trusted == "true"` is the canonical Sprint 50 hook gate: `on_receive` hooks fire iff `trusted == "true"` OR the hook opts in via `dangerously_support_untrusted = true`.
 
 ### 6.8 Verifier Service
 - FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx portcheck` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.

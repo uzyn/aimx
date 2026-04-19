@@ -1,8 +1,8 @@
-use crate::channel::{self, TriggerContext};
 use crate::config::Config;
 use crate::frontmatter::{
     AttachmentMeta, AuthResults, InboundFrontmatter, compute_thread_id, format_frontmatter,
 };
+use crate::hook::{self, OnReceiveContext};
 use crate::mailbox_locks::MailboxLocks;
 use crate::slug::{allocate_filename, slugify};
 use crate::trust;
@@ -255,11 +255,11 @@ pub fn ingest_email(
     drop(_guard);
 
     if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
-        let ctx = TriggerContext {
+        let ctx = OnReceiveContext {
             filepath: &md_path,
             metadata: &meta,
         };
-        channel::execute_triggers(config, mailbox_config, &ctx);
+        hook::execute_on_receive(mailbox_config, &ctx);
     }
 
     Ok(())
@@ -800,7 +800,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -809,7 +809,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

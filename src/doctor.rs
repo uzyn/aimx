@@ -50,9 +50,8 @@ pub struct MailboxStatus {
     /// Number of entries in the effective `trusted_senders` list (per-mailbox
     /// override if present, otherwise the top-level default).
     pub trusted_senders_count: usize,
-    /// Number of `on_receive` triggers (post-S50 these are renamed to "hooks";
-    /// pre-S50 the per-event count is collapsed under the same label below).
-    pub on_receive_count: usize,
+    /// Number of hooks on this mailbox (aggregated across all events).
+    pub hook_count: usize,
 }
 
 pub struct RecentEmail {
@@ -93,7 +92,7 @@ pub fn gather_status_with_ops<S: SystemOps>(
                 unread,
                 trust: mb_config.effective_trust(config).to_string(),
                 trusted_senders_count: mb_config.effective_trusted_senders(config).len(),
-                on_receive_count: mb_config.on_receive.len(),
+                hook_count: mb_config.hooks.len(),
             }
         })
         .collect();
@@ -357,16 +356,14 @@ pub fn format_status(info: &StatusInfo) -> String {
                 mb.unread,
                 pad = name_pad,
             ));
-            // S48-2: per-mailbox trust + triggers/hooks summary line.
+            // S48-2 / S50-1: per-mailbox trust + hooks summary line.
             // Indented under the row so the table itself stays narrow.
-            // The "triggers" wording is preserved pre-S50; once S50
-            // lands the same field can be re-labelled to "hooks".
             out.push_str(&format!(
-                "    {} trust = {:?}, trusted_senders: {} entries, triggers: {} on_receive\n",
+                "    {} trust = {:?}, trusted_senders: {} entries, hooks: {}\n",
                 term::dim("→"),
                 mb.trust,
                 mb.trusted_senders_count,
-                mb.on_receive_count,
+                mb.hook_count,
             ));
         }
     }
@@ -665,7 +662,7 @@ mod tests {
                     unread: 3,
                     trust: "none".to_string(),
                     trusted_senders_count: 0,
-                    on_receive_count: 0,
+                    hook_count: 0,
                 },
                 MailboxStatus {
                     name: "support".to_string(),
@@ -674,7 +671,7 @@ mod tests {
                     unread: 1,
                     trust: "none".to_string(),
                     trusted_senders_count: 0,
-                    on_receive_count: 0,
+                    hook_count: 0,
                 },
             ],
             recent_activity: vec![],
@@ -711,7 +708,7 @@ mod tests {
                     unread: 0,
                     trust: "none".to_string(),
                     trusted_senders_count: 0,
-                    on_receive_count: 0,
+                    hook_count: 0,
                 },
                 MailboxStatus {
                     name: "catchall".to_string(),
@@ -720,7 +717,7 @@ mod tests {
                     unread: 1,
                     trust: "none".to_string(),
                     trusted_senders_count: 0,
-                    on_receive_count: 0,
+                    hook_count: 0,
                 },
             ],
             recent_activity: vec![],
@@ -889,7 +886,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -992,7 +989,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -1425,7 +1422,7 @@ mod tests {
                 unread: 1,
                 trust: "verified".to_string(),
                 trusted_senders_count: 3,
-                on_receive_count: 2,
+                hook_count: 2,
             }],
             recent_activity: vec![],
             dns: None,
@@ -1441,9 +1438,8 @@ mod tests {
             "per-mailbox trusted_senders count must render: {output}"
         );
         assert!(
-            output.contains("triggers: 2 on_receive"),
-            "per-mailbox trigger count must render under the 'triggers' label \
-             (re-labelled to 'hooks' once S50 lands): {output}"
+            output.contains("hooks: 2"),
+            "per-mailbox hook count must render: {output}"
         );
     }
 
@@ -1457,7 +1453,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -1466,10 +1462,16 @@ mod tests {
             "ops".to_string(),
             crate::config::MailboxConfig {
                 address: "ops@test.com".to_string(),
-                on_receive: vec![crate::config::OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "true".to_string(),
-                    r#match: None,
+                hooks: vec![crate::hook::Hook {
+                    id: "docthook0001".to_string(),
+                    event: crate::hook::HookEvent::OnReceive,
+                    r#type: "cmd".to_string(),
+                    cmd: "true".to_string(),
+                    from: None,
+                    to: None,
+                    subject: None,
+                    has_attachment: None,
+                    dangerously_support_untrusted: false,
                 }],
                 trust: Some("verified".to_string()),
                 trusted_senders: Some(vec!["alice@example.com".to_string()]),
@@ -1502,7 +1504,7 @@ mod tests {
             .expect("ops mailbox must be in the snapshot");
         assert_eq!(ops.trust, "verified");
         assert_eq!(ops.trusted_senders_count, 1);
-        assert_eq!(ops.on_receive_count, 1);
+        assert_eq!(ops.hook_count, 1);
 
         // Catchall inherits the top-level default → "none" with zero senders.
         let catchall = info
@@ -1512,7 +1514,7 @@ mod tests {
             .expect("catchall mailbox must be in the snapshot");
         assert_eq!(catchall.trust, "none");
         assert_eq!(catchall.trusted_senders_count, 0);
-        assert_eq!(catchall.on_receive_count, 0);
+        assert_eq!(catchall.hook_count, 0);
 
         // Top-level snapshot fields surface too.
         assert_eq!(info.default_trust, "none");
