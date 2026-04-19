@@ -35,7 +35,7 @@ pub struct AgentSpec {
 /// Static registry of supported agents.
 ///
 /// v1 roster: `claude-code`, `codex`, `opencode`, `gemini`, `goose`,
-/// `openclaw` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
+/// `openclaw`, `hermes` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
 /// design; `assemble_plugin_files` walks each source tree relative to its
 /// root and handles all three shapes. Do not "normalize" the layout —
 /// the destination template determines the depth.
@@ -103,6 +103,18 @@ pub fn registry() -> &'static [AgentSpec] {
             // skill-directory package (no flat SKILL.md at the root).
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
+            progressive_disclosure: true,
+        },
+        AgentSpec {
+            name: "hermes",
+            source_subdir: "hermes",
+            // Hermes Agent (Nous Research) loads skills from
+            // ~/.hermes/skills/<name>/SKILL.md with optional `references/`
+            // siblings. MCP servers live in ~/.hermes/config.yaml under
+            // `mcp_servers:`; there is no shell-side `mcp add` CLI today, so
+            // the activation hint prints a YAML snippet to paste in.
+            dest_template: "$HOME/.hermes/skills/aimx",
+            activation_hint: hermes_hint,
             progressive_disclosure: true,
         },
     ]
@@ -236,6 +248,40 @@ fn goose_hint(_data_dir: Option<&Path>) -> String {
      $GOOSE_RECIPE_GITHUB_REPO; Goose loads recipes from that repo when \
      the variable is set.\n"
         .to_string()
+}
+
+fn hermes_hint(data_dir: Option<&Path>) -> String {
+    // Hermes Agent does NOT expose a shell-side CLI for registering external
+    // MCP servers. `hermes mcp serve` runs Hermes itself as an MCP server
+    // (the opposite direction); the canonical registration path per the
+    // official docs is editing ~/.hermes/config.yaml directly. We print a
+    // YAML snippet to paste under the top-level `mcp_servers:` key, then
+    // the user runs `/reload-mcp` inside Hermes to pick up the new server
+    // without restarting.
+    //
+    // The snippet is hand-rendered as YAML rather than serialized via a YAML
+    // library so we avoid a serde_yaml dependency (FR-49 principle: never
+    // mutate agent config files; print snippets instead). The args list uses
+    // YAML inline-flow syntax so the rendered block stays compact.
+    let args_inline = match data_dir {
+        Some(dd) => format!("[--data-dir, {}, mcp]", dd.to_string_lossy()),
+        None => "[mcp]".to_string(),
+    };
+    format!(
+        "Skill installed at ~/.hermes/skills/aimx/. Add the following block \
+         to the top-level `mcp_servers:` key in ~/.hermes/config.yaml \
+         (create the key if it does not yet exist):\n\
+         \n\
+         \x20\x20mcp_servers:\n\
+         \x20\x20\x20\x20aimx:\n\
+         \x20\x20\x20\x20\x20\x20command: /usr/local/bin/aimx\n\
+         \x20\x20\x20\x20\x20\x20args: {args_inline}\n\
+         \x20\x20\x20\x20\x20\x20enabled: true\n\
+         \n\
+         Then run `/reload-mcp` inside Hermes to pick up the new server \
+         without restarting. (Hermes loads MCP servers from \
+         ~/.hermes/config.yaml; `/reload-mcp` re-reads that file at runtime.)"
+    )
 }
 
 fn openclaw_hint(data_dir: Option<&Path>) -> String {
@@ -1505,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_six_agents_in_canonical_order() {
+    fn registry_lists_seven_agents_in_canonical_order() {
         let names: Vec<&str> = registry().iter().map(|s| s.name).collect();
         assert_eq!(
             names,
@@ -1515,7 +1561,8 @@ mod tests {
                 "opencode",
                 "gemini",
                 "goose",
-                "openclaw"
+                "openclaw",
+                "hermes",
             ]
         );
     }
@@ -2087,6 +2134,7 @@ mod tests {
         assert!(by_name("claude-code").progressive_disclosure);
         assert!(by_name("codex").progressive_disclosure);
         assert!(by_name("openclaw").progressive_disclosure);
+        assert!(by_name("hermes").progressive_disclosure);
 
         assert!(!by_name("opencode").progressive_disclosure);
         assert!(!by_name("gemini").progressive_disclosure);
@@ -2112,7 +2160,14 @@ mod tests {
 
     #[test]
     fn author_metadata_in_all_skill_headers() {
-        for agent in ["claude-code", "codex", "opencode", "gemini", "openclaw"] {
+        for agent in [
+            "claude-code",
+            "codex",
+            "opencode",
+            "gemini",
+            "openclaw",
+            "hermes",
+        ] {
             let header_path = match agent {
                 "claude-code" => "claude-code/skills/aimx/SKILL.md.header",
                 _ => &format!("{agent}/SKILL.md.header"),
@@ -2226,5 +2281,104 @@ mod tests {
         assert!(ref_text.contains("\"true\""));
         assert!(ref_text.contains("\"false\""));
         assert!(ref_text.contains("trusted_senders"));
+    }
+
+    #[test]
+    fn registry_contains_hermes() {
+        let spec = find_agent("hermes").expect("registry must include hermes");
+        assert_eq!(spec.dest_template, "$HOME/.hermes/skills/aimx");
+        assert!(spec.progressive_disclosure);
+    }
+
+    #[test]
+    fn install_hermes_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("hermes".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".hermes/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+        assert!(!dest.join("README.md").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(
+            skill.starts_with("---\n"),
+            "missing YAML frontmatter: {skill:.200}"
+        );
+        assert!(skill.contains("name: aimx"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("license: MIT"));
+        assert!(skill.contains("metadata:"));
+        assert!(skill.contains("hermes:"));
+        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("Trust model"));
+    }
+
+    #[test]
+    fn hermes_progressive_disclosure_installs_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("hermes".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".hermes/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("references/mcp-tools.md").exists());
+        assert!(dest.join("references/frontmatter.md").exists());
+        assert!(dest.join("references/workflows.md").exists());
+        assert!(dest.join("references/troubleshooting.md").exists());
+    }
+
+    #[test]
+    fn hermes_activation_hint_mentions_config_and_reload() {
+        let spec = find_agent("hermes").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("~/.hermes/config.yaml"));
+        assert!(hint.contains("/reload-mcp"));
+        assert!(hint.contains("mcp_servers:"));
+        assert!(hint.contains("aimx:"));
+        assert!(hint.contains("command: /usr/local/bin/aimx"));
+        assert!(hint.contains("args: [mcp]"));
+        assert!(hint.contains("enabled: true"));
+        // Default install must not leak --data-dir into the snippet.
+        assert!(!hint.contains("--data-dir"));
+    }
+
+    #[test]
+    fn hermes_activation_hint_with_custom_data_dir_rewrites_args() {
+        let spec = find_agent("hermes").unwrap();
+        let hint = (spec.activation_hint)(Some(Path::new("/custom/aimx-data")));
+        assert!(hint.contains("args: [--data-dir, /custom/aimx-data, mcp]"));
+        // The other lines remain identical to the default form.
+        assert!(hint.contains("command: /usr/local/bin/aimx"));
+        assert!(hint.contains("enabled: true"));
+    }
+
+    #[test]
+    fn assembled_hermes_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("hermes").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("hermes/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
     }
 }

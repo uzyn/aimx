@@ -102,7 +102,7 @@ aimx send --from catchall@agent.yourdomain.com \
 Install AIMX into your agent with one command:
 
 ```bash
-aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw
+aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw / hermes
 ```
 
 Run `aimx agent-setup --list` to see every supported agent and its
