@@ -58,7 +58,7 @@ The printed `openclaw mcp set` command's JSON will include
 
 OpenClaw does not currently ship a non-interactive `run` / `exec` CLI
 suitable for channel triggers. See the
-[Channel Recipes](../../book/channel-recipes.md#openclaw) chapter for
+[Hook Recipes](../../book/hook-recipes.md#openclaw) chapter for
 the current recommendation (wire a different agent as the trigger and
 let OpenClaw consume the result via its own pipeline).
 

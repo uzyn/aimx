@@ -4,14 +4,14 @@
 
 **SMTP for agents. No middleman.**
 
-AIMX is a self-hosted email system for AI agents. One command gives your agents their own email addresses on a domain you control -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs an email channel.
+AIMX is a self-hosted email system for AI agents. One command gives your agents their own email addresses on a domain you control -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs email as a communication surface.
 
 ## How it works
 
 ```
 Inbound:
   Sender -> port 25 -> aimx serve -> ingest -> .md file
-                                             -> channel manager (triggers agent)
+                                             -> hook manager (fires `on_receive` commands)
 
 Outbound:
   MCP tool call -> aimx send -> UDS (/run/aimx/send.sock) -> aimx serve
@@ -30,9 +30,9 @@ Outbound:
 - **[Markdown email](mailboxes.md)** -- incoming email parsed to Markdown with TOML frontmatter, attachment extraction, per-mailbox routing
 - **[MCP Server](mcp.md)** -- stdio transport for Claude Code, OpenClaw, Codex, OpenCode, and any MCP-compatible agent: list, read, send, reply, manage mailboxes
 - **[Agent Integration](agent-integration.md)** -- one-command `aimx agent-setup <agent>` installer for per-agent plugin/skill packages
-- **[Channel rules](channels.md)** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
+- **[Hooks](hooks.md)** -- trigger shell commands on `on_receive` and `after_send` events with match filters (from, to, subject, attachments)
 - **[DKIM signing](setup.md#dkim-key-management)** -- native RSA-SHA256 signing for outbound mail
-- **[Inbound trust](channels.md#trust-policies)** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
+- **[Inbound trust](hooks.md#trust-gate-on_receive-only)** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
 
 ## Quick start
 
@@ -59,7 +59,7 @@ See the full [Getting Started](getting-started.md) guide for details.
 | [Setup](setup.md) | Detailed server setup, DNS, verification, DKIM keys, production hardening |
 | [Configuration](configuration.md) | `config.toml` reference, data directory, environment variables |
 | [Mailboxes & Email](mailboxes.md) | Mailbox management, email format, sending, attachments, threading |
-| [Channel Rules & Trust](channels.md) | Trigger commands on incoming mail, match filters, trust policies |
+| [Hooks & Trust](hooks.md) | Fire commands on inbound/outbound events, match filters, trust policies |
 | [MCP Server](mcp.md) | Agent integration via Model Context Protocol, all 9 MCP tools |
 | [Agent Integration](agent-integration.md) | `aimx agent-setup <agent>` installer and per-agent plugin packages |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |

@@ -2,7 +2,7 @@
 
 ## Context
 
-aimx is a self-hosted email server for AI agents. This plan manually verifies an end-to-end install on a fresh VPS: setup, inbound/outbound mail, agent integrations (Claude Code + Codex CLI), channel triggers, and the trust model. Every test below is copy-pasteable — run top-to-bottom on the VPS as root unless noted. Tests that need external help (sending from Gmail, receiving at `chua@uzyn.com`) call that out explicitly and include a prompt to hand off to a human collaborator.
+aimx is a self-hosted email server for AI agents. This plan manually verifies an end-to-end install on a fresh VPS: setup, inbound/outbound mail, agent integrations (Claude Code + Codex CLI), hooks, and the trust model. Every test below is copy-pasteable — run top-to-bottom on the VPS as root unless noted. Tests that need external help (sending from Gmail, receiving at `chua@uzyn.com`) call that out explicitly and include a prompt to hand off to a human collaborator.
 
 **Test domain assumption.** Replace `mail.example.com` with your real test domain everywhere below. The plan uses `inbox`, `agent`, and `test` as mailbox names.
 
@@ -282,11 +282,11 @@ codex exec "List unread mail in mailbox 'inbox'. Read the most recent one, summa
 
 ---
 
-## T8 — Channel trigger fires on TRUSTED sender
+## T8 — Hook fires on TRUSTED sender
 
-**Goal.** A configured `on_receive` shell command runs when a trusted sender emails, and receives the expanded template variables.
+**Goal.** A configured `on_receive` hook runs when a trusted sender emails, and receives the expanded template variables.
 
-Edit `/etc/aimx/config.toml` to **update the existing `[mailboxes.test]` section** (created by `aimx mailboxes create test` in T2). Set `trust` and `trusted_senders` on the existing table, and append the `on_receive` sub-table under it:
+Edit `/etc/aimx/config.toml` to **update the existing `[mailboxes.test]` section** (created by `aimx mailboxes create test` in T2). Set `trust` and `trusted_senders` on the existing table, and append a `hooks` sub-table under it:
 
 ```toml
 [mailboxes.test]
@@ -294,9 +294,10 @@ address = "test@mail.example.com"
 trust = "verified"
 trusted_senders = ["chua@uzyn.com"]
 
-[[mailboxes.test.on_receive]]
-type = "cmd"
-command = '''
+[[mailboxes.test.hooks]]
+id = "manualt8hook"
+event = "on_receive"
+cmd = '''
 touch /tmp/aimx-trigger-{id}.flag
 printf 'from=%s\nsubject=%s\nfilepath=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "$AIMX_FILEPATH" >> /tmp/aimx-trigger.log
 '''
@@ -326,7 +327,7 @@ sudo grep '^trusted' /var/lib/aimx/inbox/test/*trigger-trusted*.md
 
 ---
 
-## T9 — Off-allowlist sender: trigger gate vs. `trusted` field
+## T9 — Off-allowlist sender: hook does NOT fire
 
 Keep the T8 config. Clear state:
 
@@ -344,16 +345,16 @@ sudo ls /var/lib/aimx/inbox/test/ | grep trigger-untrusted
 sudo grep '^trusted' /var/lib/aimx/inbox/test/*trigger-untrusted*.md
 ```
 
-**Acceptance (v1 semantics — trigger gate is wider than the `trusted` field).**
-- A `/tmp/aimx-trigger-<id>.flag` file **is** created, because Gmail's DKIM passes and the v1 trigger gate fires on "allowlisted OR DKIM-pass" (see `src/channel.rs::should_execute_triggers` and the parity test in `src/trust.rs`).
-- The email is stored in the mailbox with frontmatter `trusted = "false"` — the `trusted` field is strictly stronger (requires allowlisted AND DKIM-pass), so an off-allowlist Gmail sender yields `trusted = "false"` even though the trigger fired.
+**Acceptance (Sprint 50 semantics — hook gate = `trusted == "true"` OR opt-in).**
+- NO `/tmp/aimx-trigger-<id>.flag` file is created — the off-allowlist sender yields `trusted = "false"`, and the hook does not opt in via `dangerously_support_untrusted`.
+- The email is still stored in the mailbox with frontmatter `trusted = "false"` (email delivery is never gated by trust).
 - The `.md` contains `dkim = "pass"` but `trusted = "false"`.
 
-> **Subtlety confirmed.** This test demonstrates the documented asymmetry: the channel-trigger gate is deliberately wider than the `trusted` frontmatter field. To observe "untrusted → no trigger fires", you would need a sender whose DKIM fails, which is rare from real providers. If you want that stricter behavior, that is a future tightening (tracked as a v1.x follow-up). Today, this output is **expected**, not a regression.
+> Sprint 50 tightened this gate: the hook fires iff `trusted == "true"` OR `dangerously_support_untrusted = true`. Pre-Sprint-50 configs saw the hook fire here because the v1 gate was "allowlisted OR DKIM-pass"; v2 requires both (through the `trusted` field) or an explicit opt-in.
 
 ---
 
-## T10 — Outbound mail does NOT fire triggers
+## T10 — Outbound mail does NOT fire `on_receive` hooks
 
 ```bash
 # [VPS]
@@ -366,7 +367,7 @@ aimx send --from test@mail.example.com --to chua@uzyn.com \
 ls /tmp/aimx-trigger-*.flag 2>/dev/null || echo "no flag — PASS"
 ```
 
-**Acceptance.** No flag file. Triggers fire only on **inbound** (port 25), never on `aimx send`.
+**Acceptance.** No flag file. `on_receive` hooks fire only on **inbound** (port 25). To observe a send event use an `after_send` hook on the sending mailbox.
 
 ---
 

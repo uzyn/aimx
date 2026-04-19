@@ -55,7 +55,7 @@ The printed JSONC snippet will include `--data-dir /custom/path` in the
 ## Channel-trigger recipes
 
 To have AIMX invoke `opencode run` automatically when an email arrives,
-see the [Channel Recipes](../../book/channel-recipes.md#opencode)
+see the [Hook Recipes](../../book/hook-recipes.md#opencode)
 chapter.
 
 ## Schema reference

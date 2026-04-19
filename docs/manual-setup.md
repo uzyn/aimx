@@ -373,7 +373,7 @@ aimx send \
 
 Check your inbox (and spam folder). If the email lands in spam, see the Production Hardening section.
 
-### B9: Create Mailboxes & Channel Rules
+### B9: Create Mailboxes & Hooks
 
 Create additional mailboxes beyond the default catchall:
 
@@ -383,7 +383,7 @@ aimx mailboxes create notifications
 aimx mailboxes list
 ```
 
-Edit `/etc/aimx/config.toml` to configure channel rules (triggers on incoming mail):
+Edit `/etc/aimx/config.toml` to configure hooks (fire on `on_receive` inbound events and `after_send` outbound events):
 
 ```toml
 [mailboxes.support]
@@ -391,20 +391,19 @@ address = "support@agent.yourdomain.com"
 trust = "verified"
 trusted_senders = ["*@yourcompany.com"]
 
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
-
-[mailboxes.support.on_receive.match]
+[[mailboxes.support.hooks]]
+id = "supporturg01"
+event = "on_receive"
+cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 from = "*@gmail.com"
 subject = "urgent"
 ```
 
-Available template placeholders in commands: `{id}` and `{date}` (aimx-controlled, substituted literally). User-controlled fields are passed as environment variables: `$AIMX_FROM`, `$AIMX_TO`, `$AIMX_SUBJECT`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`. Quote env-var expansions (`"$AIMX_SUBJECT"`) to stay safe against shell metacharacters in sender-supplied values.
+Available template placeholders in commands: `{id}` and `{date}` (aimx-controlled, substituted literally). User-controlled fields are passed as environment variables: `$AIMX_HOOK_ID`, `$AIMX_FROM`, `$AIMX_TO`, `$AIMX_SUBJECT`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`. `after_send` hooks additionally receive `$AIMX_SEND_STATUS` (`delivered`/`failed`/`deferred`). Quote env-var expansions (`"$AIMX_SUBJECT"`) to stay safe against shell metacharacters in sender-supplied values.
 
-Trust policies:
-- `trust = "none"` (default) — triggers fire for all emails
-- `trust = "verified"` — triggers only fire when DKIM passes
+Trust policies (Sprint 50):
+- `trust = "none"` (default) — no trust evaluation performed. Default hooks do NOT fire. Set `dangerously_support_untrusted = true` on a hook to opt in.
+- `trust = "verified"` — emails with an allowlisted sender AND a DKIM pass get `trusted = "true"`, which fires default hooks. Everything else gets `trusted = "false"` and fires no default hooks.
 - `trusted_senders` — glob patterns that bypass DKIM verification
 
 ### B10: MCP Integration

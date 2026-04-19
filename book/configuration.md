@@ -59,9 +59,9 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 | `address` | string | *(required)* | Email address pattern (e.g. `support@domain.com` or `*@domain.com` for catchall) |
 | `trust` | string | *(inherited)* | Override the global default. Allowed values: `none` or `verified`. Omit to inherit. |
 | `trusted_senders` | array | *(inherited)* | Override the global allowlist. Setting this **replaces** the global list (no merging). Omit to inherit. |
-| `on_receive` | array | `[]` | Channel rules triggered on incoming email |
+| `hooks` | array | `[]` | Hooks fired on `on_receive` (inbound) and `after_send` (outbound) events |
 
-See [Mailboxes](mailboxes.md) for mailbox management and [Channel Rules](channels.md) for trigger configuration.
+See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.md) for hook configuration.
 
 #### Upgrading an older config to use the global defaults
 
@@ -89,19 +89,25 @@ The `trusted` frontmatter field summarizes the effective trust evaluation for th
 | `"true"` | Effective `trust` is `verified`, sender matches the effective `trusted_senders`, AND DKIM passed. |
 | `"false"` | Effective `trust` is `verified`, any other outcome. |
 
-Trust only gates channel trigger execution -- all email is stored regardless of the `trusted` result.
+Trust only gates hook execution (`on_receive`) -- all email is stored regardless of the `trusted` result.
 
-### Channel rule settings
+### Hook settings
 
-Channel rules are defined as `[[mailboxes.<name>.on_receive]]` arrays:
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays:
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `type` | string | Trigger type (currently only `cmd`) |
-| `command` | string | Shell command to execute with [template variables](channels.md#template-variables) |
-| `match` | table | Optional filters: `from` (glob), `subject` (substring), `has_attachment` (bool) |
+| `id` | string | Required globally-unique 12-char `[a-z0-9]` identifier |
+| `event` | string | `"on_receive"` or `"after_send"` |
+| `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
+| `cmd` | string | Shell command to execute |
+| `from` | glob | `on_receive` only: sender filter |
+| `to` | glob | `after_send` only: recipient filter |
+| `subject` | string | Case-insensitive substring filter |
+| `has_attachment` | bool | Attachment-presence filter |
+| `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"` |
 
-See [Channel Rules](channels.md) for full details on triggers, match filters, and trust policies.
+See [Hooks & Trust](hooks.md) for full details on events, match filters, and trust policies.
 
 ## Storage layout
 
@@ -204,10 +210,12 @@ dkim_selector = "aimx"
 [mailboxes.catchall]
 address = "*@agent.yourdomain.com"
 
-# Notify on any incoming email
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
+# Notify on any incoming email (opts in to fire on untrusted mail)
+[[mailboxes.catchall.hooks]]
+id = "notifyall001"
+event = "on_receive"
+cmd = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
+dangerously_support_untrusted = true
 
 # ----------------------------
 # Named mailbox with a per-mailbox trust override
@@ -220,17 +228,17 @@ address = "support@agent.yourdomain.com"
 trust = "verified"
 trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 
-# Log all incoming emails
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log'
+# Log all incoming emails (default gate: only fires when trusted == "true")
+[[mailboxes.support.hooks]]
+id = "supportlog01"
+event = "on_receive"
+cmd = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log'
 
 # Trigger agent on emails from Gmail with attachments
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'claude -p "Process this email: $(cat "$AIMX_FILEPATH")"'
-
-[mailboxes.support.on_receive.match]
+[[mailboxes.support.hooks]]
+id = "supportgmai"
+event = "on_receive"
+cmd = 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"'
 from = "*@gmail.com"
 has_attachment = true
 
@@ -243,4 +251,4 @@ address = "notifications@agent.yourdomain.com"
 
 ---
 
-Next: [Mailboxes & Email](mailboxes.md) | [Channel Rules](channels.md)
+Next: [Mailboxes & Email](mailboxes.md) | [Hooks & Trust](hooks.md)

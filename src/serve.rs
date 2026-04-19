@@ -1188,7 +1188,7 @@ mod tests {
                 "catchall".to_string(),
                 crate::config::MailboxConfig {
                     address: "*@test.local".to_string(),
-                    on_receive: vec![],
+                    hooks: vec![],
                     trust: None,
                     trusted_senders: None,
                 },
@@ -1484,7 +1484,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -1493,7 +1493,7 @@ mod tests {
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -1638,7 +1638,7 @@ mod tests {
                 "alice".to_string(),
                 crate::config::MailboxConfig {
                     address: "alice@example.com".to_string(),
-                    on_receive: vec![],
+                    hooks: vec![],
                     trust: None,
                     trusted_senders: None,
                 },

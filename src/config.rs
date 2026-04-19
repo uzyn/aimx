@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
+use crate::hook::{Hook, HookEvent, is_valid_hook_id};
+
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
 const CONFIG_DIR_ENV: &str = "AIMX_CONFIG_DIR";
@@ -70,8 +72,11 @@ pub struct Config {
 pub struct MailboxConfig {
     pub address: String,
 
-    #[serde(default)]
-    pub on_receive: Vec<OnReceiveRule>,
+    /// v2 schema: hooks grouped by event (`on_receive`, `after_send`).
+    /// Replaces the v1 `on_receive` array-of-tables. Legacy schema is
+    /// rejected at `Config::load` with a migration error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hooks: Vec<Hook>,
 
     /// Per-mailbox override for the global [`Config::trust`] default.
     /// `None` means "inherit the global default"; `Some("none" | "verified")`
@@ -88,6 +93,20 @@ pub struct MailboxConfig {
 }
 
 impl MailboxConfig {
+    /// Iterate only this mailbox's `on_receive` hooks.
+    pub fn on_receive_hooks(&self) -> impl Iterator<Item = &Hook> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == HookEvent::OnReceive)
+    }
+
+    /// Iterate only this mailbox's `after_send` hooks.
+    pub fn after_send_hooks(&self) -> impl Iterator<Item = &Hook> {
+        self.hooks
+            .iter()
+            .filter(|h| h.event == HookEvent::AfterSend)
+    }
+
     /// Resolve the effective trust policy for this mailbox, falling back
     /// to `config.trust` when the mailbox's own `trust` is `None`.
     pub fn effective_trust<'a>(&'a self, config: &'a Config) -> &'a str {
@@ -113,24 +132,6 @@ fn is_default_trust(s: &str) -> bool {
     s == "none"
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct OnReceiveRule {
-    #[serde(rename = "type")]
-    pub rule_type: String,
-
-    pub command: String,
-
-    #[serde(default)]
-    pub r#match: Option<MatchFilter>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct MatchFilter {
-    pub from: Option<String>,
-    pub subject: Option<String>,
-    pub has_attachment: Option<bool>,
-}
-
 fn default_data_dir() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR)
 }
@@ -142,8 +143,111 @@ fn default_dkim_selector() -> String {
 /// Allowed values for `Config::trust` and per-mailbox `MailboxConfig::trust`.
 /// Validated at config load time (`Config::load`) so typos fail fast with a
 /// clear error rather than silently fail-closed at runtime via
-/// [`crate::trust::evaluate_trust`] / [`crate::channel::should_execute_triggers`].
+/// [`crate::trust::evaluate_trust`] / [`crate::hook::should_fire_on_receive`].
 pub const VALID_TRUST_VALUES: &[&str] = &["none", "verified"];
+
+/// Pre-parse check: reject the legacy `[[mailboxes.<name>.on_receive]]`
+/// schema with a clear migration error before the TOML parser sees it.
+///
+/// Sprint 50 is pre-launch, so there is no compat shim — users hand-editing
+/// old configs see a single actionable error naming the offending mailbox.
+fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error>> {
+    for line in toml_text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("[[mailboxes.")
+            && let Some(inner) = rest.strip_suffix("]]")
+            && let Some(name) = inner.strip_suffix(".on_receive")
+        {
+            return Err(format!(
+                "mailbox '{name}' uses the legacy `on_receive` schema; \
+                 migrate to `[[mailboxes.{name}.hooks]]` with \
+                 `event = \"on_receive\"` and auto-generated 12-char `id =`"
+            )
+            .into());
+        }
+        if let Some(rest) = trimmed.strip_prefix("[mailboxes.")
+            && let Some(inner) = rest.strip_suffix("]")
+            && let Some(name_dot_on_receive) = inner.strip_suffix(".match")
+            && let Some(name) = name_dot_on_receive.strip_suffix(".on_receive")
+        {
+            return Err(format!(
+                "mailbox '{name}' uses the legacy `on_receive.match` schema; \
+                 migrate to `[[mailboxes.{name}.hooks]]` with \
+                 `event = \"on_receive\"` and auto-generated 12-char `id =` \
+                 (filter fields are now flat on the hook table)"
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_hooks(config: &Config) -> Result<(), String> {
+    // Globally-unique ID map: id -> owning mailbox.
+    let mut seen: HashMap<String, String> = HashMap::new();
+
+    for (mailbox_name, mb) in &config.mailboxes {
+        for hook in &mb.hooks {
+            if !is_valid_hook_id(&hook.id) {
+                return Err(format!(
+                    "invalid hook id '{id}' on mailbox '{mailbox_name}': \
+                     must be 12 chars, [a-z0-9] only",
+                    id = hook.id,
+                ));
+            }
+            if hook.cmd.trim().is_empty() {
+                return Err(format!(
+                    "hook '{}' on mailbox '{mailbox_name}' has empty `cmd`",
+                    hook.id
+                ));
+            }
+            if hook.r#type != "cmd" {
+                return Err(format!(
+                    "hook '{}' on mailbox '{mailbox_name}' has unsupported type '{}': \
+                     only `cmd` is supported",
+                    hook.id, hook.r#type
+                ));
+            }
+            if hook.dangerously_support_untrusted && hook.event != HookEvent::OnReceive {
+                return Err(format!(
+                    "hook '{}' on mailbox '{mailbox_name}' sets \
+                     `dangerously_support_untrusted = true` on event \
+                     '{:?}': this flag only applies to `on_receive` hooks",
+                    hook.id, hook.event
+                ));
+            }
+            // Event-specific filter validation (FR-31).
+            match hook.event {
+                HookEvent::OnReceive => {
+                    if hook.to.is_some() {
+                        return Err(format!(
+                            "hook '{}' on mailbox '{mailbox_name}': `to` filter \
+                             is only valid on `after_send` hooks",
+                            hook.id
+                        ));
+                    }
+                }
+                HookEvent::AfterSend => {
+                    if hook.from.is_some() {
+                        return Err(format!(
+                            "hook '{}' on mailbox '{mailbox_name}': `from` filter \
+                             is only valid on `on_receive` hooks",
+                            hook.id
+                        ));
+                    }
+                }
+            }
+            if let Some(prior) = seen.insert(hook.id.clone(), mailbox_name.clone()) {
+                return Err(format!(
+                    "duplicate hook id '{}' used by both mailbox '{prior}' \
+                     and mailbox '{mailbox_name}': hook ids must be globally unique",
+                    hook.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn validate_trust_values(config: &Config) -> Result<(), String> {
     if !VALID_TRUST_VALUES.contains(&config.trust.as_str()) {
@@ -177,8 +281,10 @@ impl Config {
                 Box::new(e) as Box<dyn std::error::Error>
             }
         })?;
+        reject_legacy_on_receive_schema(&content)?;
         let config: Config = toml::from_str(&content)?;
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        validate_hooks(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         Ok(config)
     }
 
@@ -370,11 +476,11 @@ address = "*@agent.example.com"
 [mailboxes.support]
 address = "support@agent.example.com"
 
-[[mailboxes.support.on_receive]]
+[[mailboxes.support.hooks]]
+id = "abc123def456"
+event = "on_receive"
 type = "cmd"
-command = 'echo "$AIMX_FROM" >> /tmp/log'
-
-[mailboxes.support.on_receive.match]
+cmd = 'echo "$AIMX_FROM" >> /tmp/log'
 from = "*@gmail.com"
 subject = "urgent"
 has_attachment = true
@@ -469,21 +575,47 @@ trust = "none"
     }
 
     #[test]
-    fn parse_on_receive_rules() {
+    fn parse_hooks() {
         let config: Config = toml::from_str(sample_toml()).unwrap();
         let support = &config.mailboxes["support"];
-        assert_eq!(support.on_receive.len(), 1);
-        let rule = &support.on_receive[0];
-        assert_eq!(rule.rule_type, "cmd");
-        assert_eq!(rule.command, "echo \"$AIMX_FROM\" >> /tmp/log");
-        let m = rule.r#match.as_ref().unwrap();
-        assert_eq!(m.from.as_deref(), Some("*@gmail.com"));
-        assert_eq!(m.subject.as_deref(), Some("urgent"));
-        assert_eq!(m.has_attachment, Some(true));
+        assert_eq!(support.hooks.len(), 1);
+        let hook = &support.hooks[0];
+        assert_eq!(hook.id, "abc123def456");
+        assert_eq!(hook.event, HookEvent::OnReceive);
+        assert_eq!(hook.r#type, "cmd");
+        assert_eq!(hook.cmd, "echo \"$AIMX_FROM\" >> /tmp/log");
+        assert_eq!(hook.from.as_deref(), Some("*@gmail.com"));
+        assert_eq!(hook.subject.as_deref(), Some("urgent"));
+        assert_eq!(hook.has_attachment, Some(true));
     }
 
     #[test]
-    fn load_accepts_env_var_trigger_recipe() {
+    fn load_accepts_env_var_hook_recipe() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+event = "on_receive"
+cmd = '''
+printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
+'''
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes["support"].hooks.len(), 1);
+    }
+
+    #[test]
+    fn load_rejects_legacy_on_receive_schema() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -496,14 +628,295 @@ address = "support@test.com"
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
-command = '''
-printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
-'''
+command = "echo hi"
 "#,
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
-        assert_eq!(cfg.mailboxes["support"].on_receive.len(), 1);
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("legacy `on_receive` schema"),
+            "error should name the schema: {err}"
+        );
+        assert!(
+            err.contains("support"),
+            "error should name the mailbox: {err}"
+        );
+        assert!(
+            err.contains("[[mailboxes.support.hooks]]"),
+            "error should point at the new schema: {err}"
+        );
+        assert!(
+            err.contains("event = \"on_receive\""),
+            "error should show the migration: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_legacy_on_receive_match_block() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+event = "on_receive"
+cmd = "echo hi"
+
+[mailboxes.support.on_receive.match]
+from = "*@gmail.com"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("legacy"),
+            "error should flag legacy match block: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_missing_hook_event() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("event"),
+            "error should complain about missing event: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_unknown_hook_event() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+event = "before_send"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("event")
+                || err.to_ascii_lowercase().contains("before_send"),
+            "error should name the offending event: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_missing_hook_id() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("id"),
+            "error should complain about missing id: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_malformed_hook_id() {
+        // Too short
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "short"
+event = "on_receive"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("invalid hook id"),
+            "error should flag malformed id: {err}"
+        );
+
+        // Uppercase
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "ABC123DEF456"
+event = "on_receive"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("invalid hook id"),
+            "error should reject uppercase: {err}"
+        );
+
+        // Too long
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "abc123def456789"
+event = "on_receive"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("invalid hook id"),
+            "error should reject over-length id: {err}"
+        );
+
+        // Non-alphanumeric
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "abc-123-def!"
+event = "on_receive"
+cmd = "echo hi"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.to_ascii_lowercase().contains("invalid hook id"),
+            "error should reject non-alphanumeric: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_duplicate_hook_ids_across_mailboxes() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.one]
+address = "one@test.com"
+
+[[mailboxes.one.hooks]]
+id = "dupedupedupe"
+event = "on_receive"
+cmd = "echo one"
+
+[mailboxes.two]
+address = "two@test.com"
+
+[[mailboxes.two.hooks]]
+id = "dupedupedupe"
+event = "on_receive"
+cmd = "echo two"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate hook id"),
+            "error should flag duplicate: {err}"
+        );
+        assert!(
+            err.contains("one") && err.contains("two"),
+            "error should name both mailboxes: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_dangerously_flag_on_after_send() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+event = "after_send"
+cmd = "echo hi"
+dangerously_support_untrusted = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("dangerously_support_untrusted"),
+            "error should name the flag: {err}"
+        );
+        assert!(
+            err.contains("on_receive"),
+            "error should mention on_receive: {err}"
+        );
     }
 
     #[test]
@@ -531,7 +944,7 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -720,7 +1133,7 @@ trusted_senders = []
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

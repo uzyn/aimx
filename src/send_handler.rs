@@ -17,14 +17,15 @@ use std::sync::{Arc, Mutex};
 use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
-use crate::config::ConfigHandle;
+use crate::config::{ConfigHandle, MailboxConfig};
 use crate::dkim;
 use crate::frontmatter::{
     DeliveryStatus, OutboundFrontmatter, compute_thread_id, format_outbound_frontmatter,
 };
+use crate::hook::{self, AfterSendContext, SendStatus};
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
 use crate::slug::{allocate_filename, slugify};
-use crate::transport::MailTransport;
+use crate::transport::{MailTransport, TransportError};
 
 /// Process-scoped lock guarding the outbound critical section: filename
 /// allocation + file/directory creation. The daemon is the single writer
@@ -238,10 +239,12 @@ where
     let references_val = headers.get("References").cloned();
     let date_header = headers.get("Date").cloned();
 
-    match ctx.transport.send(&from_header, &recipient_bare, &signed) {
+    let send_result = ctx.transport.send(&from_header, &recipient_bare, &signed);
+
+    let (send_status, persisted_path, response) = match send_result {
         Ok(_server) => {
             let delivered_at = chrono::Utc::now().to_rfc3339();
-            persist_sent_file(
+            let path = persist_sent_file(
                 ctx,
                 &from_mailbox,
                 &message_id,
@@ -256,19 +259,25 @@ where
                 Some(&delivered_at),
                 None,
             );
-            SendResponse::Ok { message_id }
+            (
+                SendStatus::Delivered,
+                path,
+                SendResponse::Ok {
+                    message_id: message_id.clone(),
+                },
+            )
         }
         Err(e) => {
             let msg = e.to_string();
-            let code = match &e {
-                crate::transport::TransportError::Temp(_) => ErrCode::Temp,
-                crate::transport::TransportError::Permanent(_) => ErrCode::Delivery,
+            let (code, status) = match &e {
+                TransportError::Temp(_) => (ErrCode::Temp, SendStatus::Deferred),
+                TransportError::Permanent(_) => (ErrCode::Delivery, SendStatus::Failed),
             };
             // TEMP errors: do NOT persist. The client sees the transient
             // error and may retry, so writing a "failed" record would be
             // premature. Only permanent delivery failures (DELIVERY) get
             // persisted.
-            if code == ErrCode::Delivery {
+            let path = if code == ErrCode::Delivery {
                 persist_sent_file(
                     ctx,
                     &from_mailbox,
@@ -283,11 +292,63 @@ where
                     DeliveryStatus::Failed,
                     None,
                     Some(&msg),
-                );
-            }
-            SendResponse::Err { code, reason: msg }
+                )
+            } else {
+                None
+            };
+            (status, path, SendResponse::Err { code, reason: msg })
         }
+    };
+
+    // Sprint 50 / S50-4: fire `after_send` hooks for the from-mailbox.
+    // Synchronous — daemon awaits subprocess completion for predictable
+    // timing — but exit code is discarded. Failures cannot affect the
+    // outbound result the client already expects.
+    fire_after_send_hooks(
+        &config,
+        &from_mailbox,
+        &from_header,
+        &to_header,
+        &subject,
+        persisted_path.as_deref(),
+        send_status,
+    );
+
+    response
+}
+
+fn fire_after_send_hooks(
+    config: &crate::config::Config,
+    from_mailbox: &str,
+    from_header: &str,
+    to_header: &str,
+    subject: &str,
+    persisted_path: Option<&std::path::Path>,
+    send_status: SendStatus,
+) {
+    let Some(mailbox_config) = config.mailboxes.get(from_mailbox) else {
+        return;
+    };
+    if !has_any_after_send(mailbox_config) {
+        return;
     }
+    let filepath = persisted_path
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let ctx = AfterSendContext {
+        mailbox: from_mailbox,
+        from: from_header,
+        to: to_header,
+        subject,
+        has_attachment: false, // outbound via UDS is text-only in v0.2
+        filepath: &filepath,
+        send_status,
+    };
+    hook::execute_after_send(mailbox_config, &ctx);
+}
+
+fn has_any_after_send(mailbox: &MailboxConfig) -> bool {
+    mailbox.after_send_hooks().next().is_some()
 }
 
 /// Resolve the sender local part to a concrete registered mailbox name.
@@ -439,14 +500,14 @@ fn persist_sent_file(
     delivery_status: DeliveryStatus,
     delivered_at: Option<&str>,
     delivery_details: Option<&str>,
-) {
+) -> Option<PathBuf> {
     let sent_dir = ctx.data_dir.join("sent").join(from_mailbox);
     if let Err(e) = std::fs::create_dir_all(&sent_dir) {
         eprintln!(
             "[send] failed to create sent dir {}: {e}",
             sent_dir.display()
         );
-        return;
+        return None;
     }
 
     let slug = slugify(subject);
@@ -506,7 +567,7 @@ fn persist_sent_file(
                 "[send] failed to create parent dir {}: {e}",
                 parent_dir.display()
             );
-            return;
+            return None;
         }
 
         let id = md_path
@@ -521,7 +582,7 @@ fn persist_sent_file(
                 "[send] failed to create sent file {}: {e}",
                 md_path.display()
             );
-            return;
+            return None;
         }
 
         (md_path, id)
@@ -539,7 +600,10 @@ fn persist_sent_file(
             "[send] failed to write sent file {}: {e}",
             md_path.display()
         );
+        return None;
     }
+
+    Some(md_path)
 }
 
 #[cfg(test)]
@@ -596,7 +660,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -605,7 +669,7 @@ mod tests {
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

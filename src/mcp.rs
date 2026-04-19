@@ -967,7 +967,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -976,7 +976,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
