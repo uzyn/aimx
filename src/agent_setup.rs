@@ -263,8 +263,19 @@ fn hermes_hint(data_dir: Option<&Path>) -> String {
     // library so we avoid a serde_yaml dependency (FR-49 principle: never
     // mutate agent config files; print snippets instead). The args list uses
     // YAML inline-flow syntax so the rendered block stays compact.
+    //
+    // YAML flow sequences treat `,`, `[`, `]`, and `#` as structural, so any
+    // `--data-dir` path containing those characters must be quoted. We route
+    // the path through `serde_json::to_string` to produce a valid YAML
+    // double-quoted scalar (matches how `rewrite_recipe_data_dir` handles the
+    // same problem for Goose recipes).
     let args_inline = match data_dir {
-        Some(dd) => format!("[--data-dir, {}, mcp]", dd.to_string_lossy()),
+        Some(dd) => {
+            let dd_str = dd.to_string_lossy();
+            let quoted =
+                serde_json::to_string(dd_str.as_ref()).unwrap_or_else(|_| format!("\"{dd_str}\""));
+            format!("[--data-dir, {quoted}, mcp]")
+        }
         None => "[mcp]".to_string(),
     };
     format!(
@@ -2350,10 +2361,119 @@ mod tests {
     fn hermes_activation_hint_with_custom_data_dir_rewrites_args() {
         let spec = find_agent("hermes").unwrap();
         let hint = (spec.activation_hint)(Some(Path::new("/custom/aimx-data")));
-        assert!(hint.contains("args: [--data-dir, /custom/aimx-data, mcp]"));
+        // The path is routed through a JSON-string serializer so it is always
+        // emitted as a YAML double-quoted scalar, even for "safe" inputs.
+        assert!(hint.contains("args: [--data-dir, \"/custom/aimx-data\", mcp]"));
         // The other lines remain identical to the default form.
         assert!(hint.contains("command: /usr/local/bin/aimx"));
         assert!(hint.contains("enabled: true"));
+    }
+
+    #[test]
+    fn hermes_activation_hint_escapes_yaml_flow_sensitive_chars_in_data_dir() {
+        // YAML flow sequences treat `,`, `[`, `]`, and `#` as structural.
+        // A `--data-dir` containing any of these MUST be quoted, or the
+        // rendered snippet either fails to parse or silently produces the
+        // wrong argv for Hermes. Regression coverage for the blocker raised
+        // on PR #91.
+        let spec = find_agent("hermes").unwrap();
+
+        // Case 1: path with `[` and `]` (previously produced a YAML parse error).
+        let hint = (spec.activation_hint)(Some(Path::new("/opt/aimx [staging]")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/opt/aimx [staging]\", mcp]"),
+            "bracketed path must be quoted: {hint}"
+        );
+        // Three argv entries separated by commas — not nine.
+        let args_line = hint
+            .lines()
+            .find(|l| l.trim_start().starts_with("args:"))
+            .expect("snippet must contain an args: line");
+        assert_eq!(
+            args_count_in_flow_sequence(args_line),
+            3,
+            "args list must contain exactly 3 entries: {args_line}"
+        );
+
+        // Case 2: path containing `,` (previously split into extra argv entries).
+        let hint = (spec.activation_hint)(Some(Path::new("/path,with,commas")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/path,with,commas\", mcp]"),
+            "comma path must be quoted: {hint}"
+        );
+        let args_line = hint
+            .lines()
+            .find(|l| l.trim_start().starts_with("args:"))
+            .unwrap();
+        assert_eq!(
+            args_count_in_flow_sequence(args_line),
+            3,
+            "args list must contain exactly 3 entries: {args_line}"
+        );
+
+        // Case 3: path containing `#` (previously triggered YAML comment handling).
+        let hint = (spec.activation_hint)(Some(Path::new("/opt/aimx #archive")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/opt/aimx #archive\", mcp]"),
+            "hash path must be quoted: {hint}"
+        );
+
+        // Case 4: path containing `"` and `\` — must be JSON-escaped inside
+        // the double-quoted scalar so the resulting YAML is still valid.
+        let hint = (spec.activation_hint)(Some(Path::new(r#"/opt/a"b\c"#)));
+        assert!(
+            hint.contains(r#"args: [--data-dir, "/opt/a\"b\\c", mcp]"#),
+            "quote/backslash path must be JSON-escaped: {hint}"
+        );
+    }
+
+    // Count items in a YAML flow sequence like `args: [a, b, c]` by splitting
+    // on the commas that live OUTSIDE any double-quoted scalar. This mirrors
+    // what a real YAML parser does on the `args:` line and lets us verify
+    // the argv survives round-trip without pulling in a YAML crate.
+    fn args_count_in_flow_sequence(line: &str) -> usize {
+        let lb = line.find('[').expect("expected `[` in flow sequence");
+        let rb = line.rfind(']').expect("expected `]` in flow sequence");
+        let inner = &line[lb + 1..rb];
+
+        let mut count = 0usize;
+        let mut has_content = false;
+        let mut in_quotes = false;
+        let mut escaped = false;
+        for ch in inner.chars() {
+            if escaped {
+                escaped = false;
+                has_content = true;
+                continue;
+            }
+            if in_quotes {
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_quotes = false,
+                    _ => {}
+                }
+                has_content = true;
+                continue;
+            }
+            match ch {
+                '"' => {
+                    in_quotes = true;
+                    has_content = true;
+                }
+                ',' => {
+                    if has_content {
+                        count += 1;
+                    }
+                    has_content = false;
+                }
+                c if c.is_whitespace() => {}
+                _ => has_content = true,
+            }
+        }
+        if has_content {
+            count += 1;
+        }
+        count
     }
 
     #[test]
