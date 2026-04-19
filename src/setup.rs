@@ -1202,7 +1202,7 @@ pub fn finalize_setup(
                 "catchall".to_string(),
                 MailboxConfig {
                     address: format!("*@{domain}"),
-                    on_receive: vec![],
+                    hooks: vec![],
                     trust: None,
                     trusted_senders: None,
                 },
@@ -1218,7 +1218,7 @@ pub fn finalize_setup(
             "catchall".to_string(),
             MailboxConfig {
                 address: format!("*@{domain}"),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

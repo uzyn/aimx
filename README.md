@@ -11,7 +11,7 @@ Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capa
 
 - **Single binary.** One binary, no other dependencies. 
 - **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery -- closer to an API call.
-- **Push, not poll.** Inbound mail fires channel triggers the moment SMTP `DATA` completes. No cron, no heartbeat.
+- **Push, not poll.** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
 - **Trust modeling.** Signatures verified on ingest, stamped into the frontmatter. Configurable globally or per mailbox.
 - **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
 - **Markdown-first storage.** No `.eml`, no database. Just Markdown with TOML frontmatter -- LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
@@ -95,8 +95,8 @@ Install AIMX into your agent with one command:
 Run `aimx agent-setup --list` to see every supported agent and its
 destination path. See [`book/agent-integration.md`](book/agent-integration.md)
 for per-agent activation steps and manual MCP wiring, and
-[`book/channel-recipes.md`](book/channel-recipes.md) for copy-paste
-channel-trigger recipes (email-driven agent invocation) covering every
+[`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste
+hook recipes (email-driven agent invocation) covering every
 supported agent plus Aider.
 
 Available MCP tools:
@@ -172,39 +172,43 @@ address = "*@agent.yourdomain.com"
 address = "support@agent.yourdomain.com"
 
 # Trust policy (default: none)
-# none: all triggers fire regardless of DKIM/SPF
-# verified: triggers only fire on DKIM-pass emails
+# none: no trust evaluation performed; default hooks do not fire
+# verified: `trusted` evaluates to "true" iff sender in allowlist AND DKIM pass
 trust = "verified"
 
-# Trusted senders bypass DKIM verification (glob patterns)
+# Trusted senders (glob patterns). Combined with `trust = "verified"` these
+# drive the `trusted` frontmatter value; see the Trust policy section.
 trusted_senders = ["*@company.com", "boss@gmail.com"]
 
-# Channel rules: trigger commands on incoming email
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
+# Hooks: fire shell commands on inbound (`on_receive`) and outbound
+# (`after_send`) events. Each hook has a globally-unique 12-char `id`.
+[[mailboxes.support.hooks]]
+id = "suplog000001"
+event = "on_receive"
+cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'ntfy pub my-topic "Email from $AIMX_FROM: $AIMX_SUBJECT"'
-
-[mailboxes.support.on_receive.match]
-from = "*@gmail.com"        # Glob pattern on sender
-subject = "urgent"           # Substring match (case-insensitive)
-has_attachment = true        # Filter on attachment presence
+[[mailboxes.support.hooks]]
+id = "supntfy00001"
+event = "on_receive"
+cmd = 'ntfy pub my-topic "Email from $AIMX_FROM: $AIMX_SUBJECT"'
+from = "*@gmail.com"
+subject = "urgent"
+has_attachment = true
 ```
 
-### Channel manager variables
+### Hook env vars and placeholders
 
 User-controlled fields (from the sender's headers) are exposed as **environment variables** so they're safe to quote inside the command string. Always expand them inside double quotes (`"$AIMX_SUBJECT"`) — `sh -c` preserves arbitrary bytes under env-var expansion.
 
 | Environment variable | Description |
 |----------------------|-------------|
-| `AIMX_FILEPATH` | Full path to the saved `.md` file (e.g., `/var/lib/aimx/inbox/support/2025-04-15-103000-hello.md`) |
-| `AIMX_FROM` | Sender email address (may include display name) |
+| `AIMX_HOOK_ID` | Hook id that fired this invocation |
+| `AIMX_FILEPATH` | Full path to the saved `.md` file (inbound) or sent-copy `.md` (outbound) |
+| `AIMX_FROM` | Sender email address |
 | `AIMX_TO` | Recipient email address |
 | `AIMX_SUBJECT` | Email subject |
 | `AIMX_MAILBOX` | Mailbox name |
+| `AIMX_SEND_STATUS` | (`after_send` only) `"delivered"`, `"failed"`, or `"deferred"` |
 
 Two aimx-controlled fields are also substituted as **template placeholders** directly into the command string (safe because aimx controls the content):
 
@@ -215,22 +219,22 @@ Two aimx-controlled fields are also substituted as **template placeholders** dir
 
 ### Trust policy
 
-Trust policies control whether channel triggers fire based on sender authentication:
+Trust policies drive the `trusted` frontmatter field, which in turn drives the `on_receive` hook gate:
 
-- **`trust: none`** (default) -- triggers fire for all incoming emails
-- **`trust: verified`** -- triggers only fire when the sender's DKIM signature passes verification
+- **`trust: none`** (default) — no evaluation; `trusted` is always `"none"` for this mailbox, and default hooks do NOT fire.
+- **`trust: verified`** — `trusted` becomes `"true"` iff the sender is in the effective allowlist AND DKIM passes; otherwise `"false"`.
 
-The `trusted_senders` list allows specific senders to bypass DKIM verification. Supports glob patterns.
+An `on_receive` hook fires iff `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`. Set the opt-in only on hooks you accept firing for unsigned / off-allowlist mail.
 
 Every inbound email records the evaluated result in a `trusted` frontmatter field so agents can act on it without re-reading config:
 
 | Value | Meaning |
 |-------|---------|
-| `"none"` | Mailbox `trust` is `none` (default) -- no evaluation performed. |
+| `"none"` | Mailbox `trust` is `none` -- no evaluation performed. |
 | `"true"` | Mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed. |
 | `"false"` | Mailbox `trust` is `verified`, any other outcome. |
 
-Email is always stored regardless of trust result. Trust only gates trigger execution.
+Email is always stored regardless of trust result. Trust only gates hook execution.
 
 ## Storage layout
 

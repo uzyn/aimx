@@ -246,4 +246,4 @@ to disambiguate.
 
 ---
 
-Next: [Channel Rules](channels.md) | [MCP Server](mcp.md) | [Configuration](configuration.md)
+Next: [Hooks & Trust](hooks.md) | [MCP Server](mcp.md) | [Configuration](configuration.md)

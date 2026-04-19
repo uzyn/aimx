@@ -70,7 +70,7 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         name.to_string(),
         MailboxConfig {
             address: format!("{name}@{}", config.domain),
-            on_receive: vec![],
+            hooks: vec![],
             trust: None,
             trusted_senders: None,
         },
@@ -418,7 +418,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

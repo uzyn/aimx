@@ -985,9 +985,11 @@ data_dir = "{}"
 [mailboxes.catchall]
 address = "*@agent.example.com"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "catchalltrig"
+event = "on_receive"
+cmd = "touch {}"
+dangerously_support_untrusted = true
 "#,
         tmp.display(),
         trigger_marker.display()
@@ -1032,9 +1034,11 @@ data_dir = "{}"
 [mailboxes.catchall]
 address = "*@agent.example.com"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "false"
+[[mailboxes.catchall.hooks]]
+id = "failtrigger1"
+event = "on_receive"
+cmd = "false"
+dangerously_support_untrusted = true
 "#,
         tmp.path().display()
     );
@@ -1072,9 +1076,10 @@ data_dir = "{}"
 address = "*@agent.example.com"
 trust = "verified"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "verifiedhook"
+event = "on_receive"
+cmd = "touch {}"
 "#,
         tmp.path().display(),
         marker.display()
@@ -1103,6 +1108,9 @@ command = "touch {}"
 
 #[test]
 fn ingest_trust_none_allows_unsigned_trigger() {
+    // S50-3: mailbox trust=none no longer fires hooks by default. The hook
+    // must explicitly opt in via `dangerously_support_untrusted` to keep
+    // the pre-Sprint-50 "fire on unsigned" behavior.
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
     let config_content = format!(
@@ -1113,9 +1121,11 @@ data_dir = "{}"
 address = "*@agent.example.com"
 trust = "none"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "trustnonefir"
+event = "on_receive"
+cmd = "touch {}"
+dangerously_support_untrusted = true
 "#,
         tmp.path().display(),
         marker.display()
@@ -1145,13 +1155,17 @@ command = "touch {}"
 /// Verifies the end-to-end global-trust inherit path: the top-level
 /// `trust` + `trusted_senders` on `Config` apply to a mailbox that has
 /// neither field set. On ingest the frontmatter's `trusted` value and the
-/// channel-trigger gate must both reflect the inherited policy.
+/// hook gate (Sprint 50) must both reflect the inherited policy.
 #[test]
 fn ingest_inherits_global_trust_when_mailbox_has_no_override() {
+    // S50-3: Sprint 50 inverts the hook gate — it now fires iff the
+    // evaluated `trusted == "true"` OR the hook opts in explicitly.
+    // Unsigned fixture means `trusted == "false"` even with allowlist, so
+    // the hook must opt in or it won't fire. We keep the original intent
+    // of this test (inheriting global trust into the mailbox row) by
+    // asserting the frontmatter value and NOT asserting the marker exists.
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
-    // Global `trust = "verified"` + allowlist covering alice@example.com.
-    // The catchall mailbox has no per-mailbox trust or trusted_senders.
     let config_content = format!(
         r#"domain = "agent.example.com"
 data_dir = "{}"
@@ -1161,9 +1175,10 @@ trusted_senders = ["*@example.com"]
 [mailboxes.catchall]
 address = "*@agent.example.com"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "inheritglobs"
+event = "on_receive"
+cmd = "touch {}"
 "#,
         tmp.path().display(),
         marker.display()
@@ -1185,12 +1200,12 @@ command = "touch {}"
     let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
-    // Channel-trigger gate fires via the inherited allowlist — even though
-    // the unsigned fixture's DKIM is `"none"`, the global `trusted_senders`
-    // covers alice@example.com.
+    // S50-3: the hook gate now reads `trusted` from frontmatter. The
+    // unsigned fixture produces `trusted = "false"` even with the global
+    // allowlist covering the sender, so a default hook does NOT fire.
     assert!(
-        marker.exists(),
-        "Trigger should fire via inherited global trusted_senders allowlist"
+        !marker.exists(),
+        "Default hook must not fire for trusted=false under Sprint 50 semantics"
     );
 
     // The strict `trusted` field evaluation requires BOTH allowlist AND
@@ -1205,9 +1220,10 @@ command = "touch {}"
     );
 }
 
-/// A per-mailbox `trust = "none"` override must beat a global `"verified"`:
-/// triggers fire for any inbound, and the frontmatter `trusted` field is
-/// `"none"` (no evaluation performed).
+/// S50-3: per-mailbox `trust = "none"` override yields
+/// `trusted = "none"` on the email, which Sprint 50 no longer treats as
+/// "fire hooks by default." To preserve the original intent (mailbox
+/// override beats global), the hook opts in explicitly.
 #[test]
 fn ingest_mailbox_trust_none_override_beats_global_verified() {
     let tmp = TempDir::new().unwrap();
@@ -1221,9 +1237,11 @@ trust = "verified"
 address = "*@agent.example.com"
 trust = "none"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "mbtrustover1"
+event = "on_receive"
+cmd = "touch {}"
+dangerously_support_untrusted = true
 "#,
         tmp.path().display(),
         marker.display()
@@ -1294,6 +1312,10 @@ fn ingest_frontmatter_contains_dkim_spf() {
 
 #[test]
 fn ingest_trusted_sender_bypasses_dkim() {
+    // S50-3: trusted_senders alone no longer yields `trusted = "true"`;
+    // Sprint 50 requires allowlist AND DKIM pass for `trusted = "true"`.
+    // To mirror the "bypass DKIM for trusted senders" affordance, the hook
+    // opts in explicitly.
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
     let config_content = format!(
@@ -1305,9 +1327,11 @@ address = "*@agent.example.com"
 trust = "verified"
 trusted_senders = ["*@example.com"]
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "touch {}"
+[[mailboxes.catchall.hooks]]
+id = "trustedsend1"
+event = "on_receive"
+cmd = "touch {}"
+dangerously_support_untrusted = true
 "#,
         tmp.path().display(),
         marker.display()
@@ -1334,19 +1358,15 @@ command = "touch {}"
     );
 }
 
-/// S31-2 / S44-1: end-to-end channel-recipe test.
+/// S31-2 / S44-1 / S50-*: end-to-end hook-recipe test.
 ///
-/// Drives the full ingest -> channel-rule-match -> templated shell command
-/// path with an assert-able one-liner that writes `$AIMX_FILEPATH` and
-/// `$AIMX_SUBJECT` into a marker file. A second rule exits non-zero to prove
-/// that trigger failure does NOT block delivery. This is the smoke test
-/// protecting every recipe in `book/channel-recipes.md` from regressions.
-///
-/// User-controlled fields ride on `AIMX_*` env vars rather than
-/// `{subject}` / `{filepath}` substitution (shell-injection fix). The
-/// test uses that pattern end-to-end.
+/// Drives the full ingest -> hook-match -> templated shell command path with
+/// an assert-able one-liner that writes `$AIMX_FILEPATH` and `$AIMX_SUBJECT`
+/// into a marker file. A second hook exits non-zero to prove that hook
+/// failure does NOT block delivery. Both hooks opt in via
+/// `dangerously_support_untrusted` so they fire on the unsigned fixture.
 #[test]
-fn channel_recipe_end_to_end_with_templated_args() {
+fn hook_recipe_end_to_end_with_templated_args() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("recipe.marker");
     let config_content = format!(
@@ -1356,13 +1376,17 @@ data_dir = "{data_dir}"
 [mailboxes.catchall]
 address = "*@agent.example.com"
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
+[[mailboxes.catchall.hooks]]
+id = "recipehook01"
+event = "on_receive"
+cmd = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
+dangerously_support_untrusted = true
 
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = "false"
+[[mailboxes.catchall.hooks]]
+id = "recipehook02"
+event = "on_receive"
+cmd = "false"
+dangerously_support_untrusted = true
 "#,
         data_dir = tmp.path().display(),
         marker = marker.display()
@@ -2683,6 +2707,82 @@ fn send_uds_end_to_end_delivers_signed_message() {
     );
 }
 
+/// S50-4: end-to-end `after_send` hook test. Replaces the default
+/// `setup_test_env` config with a mailbox that carries an `after_send` hook
+/// writing a sentinel file containing `$AIMX_SEND_STATUS`. After a send
+/// round-trip the sentinel must exist and carry `delivered`.
+#[cfg(unix)]
+#[test]
+fn after_send_hook_fires_with_delivered_status() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Overwrite config.toml with an after_send hook on `alice`.
+    let sentinel = tmp.path().join("after_send.sentinel");
+    let config = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{data_dir}"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[mailboxes.alice]
+address = "alice@agent.example.com"
+
+[[mailboxes.alice.hooks]]
+id = "aftersendhk1"
+event = "after_send"
+cmd = 'printf "status=%s to=%s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" > {sentinel}'
+"#,
+        data_dir = tmp.path().display(),
+        sentinel = sentinel.display(),
+    );
+    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
+
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("hook test")
+        .arg("--body")
+        .arg("body")
+        .output()
+        .expect("aimx send failed to run");
+    assert!(output.status.success(), "aimx send should succeed");
+
+    stop_serve(child);
+
+    // Daemon awaits the subprocess before replying, so the sentinel is
+    // already written by the time `aimx send` returns. Read directly.
+    assert!(
+        sentinel.exists(),
+        "after_send sentinel should exist at {}",
+        sentinel.display()
+    );
+    let content = std::fs::read_to_string(&sentinel).unwrap();
+    assert!(
+        content.contains("status=delivered"),
+        "AIMX_SEND_STATUS should be 'delivered'; got: {content}"
+    );
+    assert!(
+        content.contains("to=recipient@example.com"),
+        "AIMX_TO should be the recipient; got: {content}"
+    );
+}
+
 #[test]
 fn serve_e2e_stale_readme_refreshed_at_startup() {
     let tmp = TempDir::new().unwrap();
@@ -2706,7 +2806,7 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 3 -->"),
+        after.starts_with("<!-- aimx-readme-version: 4 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );

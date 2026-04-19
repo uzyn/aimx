@@ -1,11 +1,11 @@
 mod agent_setup;
-mod channel;
 mod cli;
 mod config;
 mod datadir_readme;
 mod dkim;
 mod doctor;
 mod frontmatter;
+mod hook;
 mod ingest;
 mod logs;
 mod mailbox;

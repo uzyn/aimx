@@ -58,7 +58,7 @@ The printed JSON block's `args` will include `--data-dir /custom/path`.
 
 To have AIMX invoke `gemini -p` automatically when an email arrives,
 see the
-[Channel Recipes](../../book/channel-recipes.md#gemini-cli) chapter.
+[Hook Recipes](../../book/hook-recipes.md#gemini-cli) chapter.
 
 ## Schema reference
 

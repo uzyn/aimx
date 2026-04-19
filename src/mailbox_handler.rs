@@ -144,7 +144,7 @@ fn handle_create(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
         name.to_string(),
         MailboxConfig {
             address,
-            on_receive: vec![],
+            hooks: vec![],
             trust: None,
             trusted_senders: None,
         },
@@ -288,7 +288,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
@@ -606,7 +606,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".into(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

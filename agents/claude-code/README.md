@@ -50,7 +50,7 @@ MCP registry.
 Installing the plugin gives Claude Code MCP access to AIMX. To wire it
 the other way — have AIMX invoke `claude -p` automatically on inbound
 email — see the
-[Channel Recipes](../../book/channel-recipes.md#claude-code) chapter,
+[Hook Recipes](../../book/hook-recipes.md#claude-code) chapter,
 which has a copy-paste `config.toml` snippet and flag references.
 
 ## Schema reference

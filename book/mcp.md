@@ -194,9 +194,9 @@ Two reference documents help agents understand AIMX:
 | Framework | Integration method |
 |-----------|-------------------|
 | Claude Code | MCP stdio mode via `~/.claude/settings.json` |
-| OpenClaw | MCP stdio mode or [channel rules](channels.md) via shell |
+| OpenClaw | MCP stdio mode or [hooks](hooks.md) via shell |
 | OpenCode | MCP stdio mode |
-| Codex | [Channel rules](channels.md) via shell command |
+| Codex | [Hooks](hooks.md) via shell command |
 | Any MCP client | Standard MCP stdio transport |
 
 ## Example workflow
@@ -209,8 +209,8 @@ A typical agent email workflow:
 4. **Reply** -- call `email_reply` with the response body
 5. **Mark as read** -- call `email_mark_read`
 
-For automated processing without MCP, use [channel rules](channels.md) to trigger commands on incoming email.
+For automated processing without MCP, use [hooks](hooks.md) to trigger commands on incoming email.
 
 ---
 
-Next: [Channel Rules](channels.md) | [Mailboxes & Email](mailboxes.md) | [Setup](setup.md)
+Next: [Hooks & Trust](hooks.md) | [Mailboxes & Email](mailboxes.md) | [Setup](setup.md)

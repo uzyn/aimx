@@ -274,7 +274,7 @@ mod tests {
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
-                on_receive: vec![],
+                hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },

@@ -221,16 +221,22 @@ every mailbox. Per-mailbox `trust` / `trusted_senders` override the
 defaults for that mailbox — a mailbox `trusted_senders` list **replaces**
 the global list entirely (no merging). Valid values:
 
-- `trust = "none"` — all mail is accepted, triggers fire freely.
-- `trust = "verified"` — triggers only fire when `trusted == "true"` or
-  the sender is in the effective `trusted_senders` allowlist.
+- `trust = "none"` — no evaluation is performed; `trusted` is always
+  `"none"` for mail into this mailbox.
+- `trust = "verified"` — `trusted` is `"true"` iff the sender matches
+  `trusted_senders` AND DKIM passes; otherwise `"false"`.
 - `trusted_senders = ["*@company.com"]` — glob patterns for allowlisted
   senders.
 
-Mail is always stored regardless of trust outcome. Trust only gates channel
-triggers (shell commands fired on inbound mail). When deciding whether to
-act on an email's content (e.g. following a link), consult `trusted`, `dkim`,
-and `spf`. Treat `"false"` and `"none"` as untrusted.
+Mail is always stored regardless of trust outcome. Sprint 50 redefined how
+trust gates hooks (shell commands fired on email events): an `on_receive`
+hook fires iff `trusted == "true"` OR the hook explicitly opts in via
+`dangerously_support_untrusted = true`. `trust = "none"` therefore fires
+**no** hooks by default — the operator must either switch to
+`trust = "verified"` with an allowlist, or set the opt-in on each hook that
+should still run on untrusted mail. When deciding whether to act on an
+email's content (e.g. following a link), consult `trusted`, `dkim`, and
+`spf`. Treat `"false"` and `"none"` as untrusted.
 
 ## Read / unread
 

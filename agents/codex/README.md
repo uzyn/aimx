@@ -39,7 +39,7 @@ in the server command.
 ## Channel-trigger recipes
 
 To have AIMX invoke `codex exec` automatically when an email arrives, see
-the [Channel Recipes](../../book/channel-recipes.md#codex-cli) chapter.
+the [Hook Recipes](../../book/hook-recipes.md#codex-cli) chapter.
 
 ## Why a skill, not a plugin directory
 
