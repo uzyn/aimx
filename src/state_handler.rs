@@ -273,7 +273,7 @@ mod tests {
         let config = crate::config::Config {
             domain: "example.com".to_string(),
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,

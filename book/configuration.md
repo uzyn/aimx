@@ -181,8 +181,8 @@ domain = "agent.yourdomain.com"
 # Data directory (default: /var/lib/aimx)
 data_dir = "/var/lib/aimx"
 
-# DKIM selector name (default: dkim)
-dkim_selector = "dkim"
+# DKIM selector name (default: aimx)
+dkim_selector = "aimx"
 
 # Custom verifier service host (optional)
 # verify_host = "https://verify.yourdomain.com"

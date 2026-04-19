@@ -119,7 +119,7 @@ pub enum DkimStartupCheck {
     Match,
     /// DNS `p=` differs from the on-disk key — receivers will see DKIM fail.
     Mismatch { dns: String, local: String },
-    /// No `dkim._domainkey.<domain>` TXT record present.
+    /// No `<selector>._domainkey.<domain>` TXT record present.
     NoRecord,
     /// TXT record exists but has no `p=` tag.
     NoPTag,
@@ -1012,7 +1012,7 @@ mod tests {
             let config = crate::config::Config {
                 domain: "test.local".to_string(),
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "dkim".to_string(),
+                dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
@@ -1202,7 +1202,7 @@ mod tests {
         let resolver = FakeDkimResolver {
             result: Err("simulated NXDOMAIN".into()),
         };
-        match run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()) {
+        match run_dkim_startup_check(&resolver, "example.com", "aimx", tmp.path()) {
             DkimStartupCheck::ResolveError(msg) => {
                 assert!(msg.contains("NXDOMAIN"), "got: {msg}");
             }
@@ -1221,7 +1221,7 @@ mod tests {
             result: Ok(vec![record]),
         };
         assert_eq!(
-            run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()),
+            run_dkim_startup_check(&resolver, "example.com", "aimx", tmp.path()),
             DkimStartupCheck::Match
         );
     }
@@ -1233,10 +1233,10 @@ mod tests {
         let resolver = FakeDkimResolver {
             result: Ok(vec!["v=DKIM1; k=rsa; p=SOMEOTHERKEY".to_string()]),
         };
-        let outcome = run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path());
+        let outcome = run_dkim_startup_check(&resolver, "example.com", "aimx", tmp.path());
         assert!(matches!(outcome, DkimStartupCheck::Mismatch { .. }));
         // Smoke: the logging path does not panic on a long base64 payload.
-        log_dkim_startup_check(&outcome, "example.com", "dkim");
+        log_dkim_startup_check(&outcome, "example.com", "aimx");
     }
 
     #[test]
@@ -1247,7 +1247,7 @@ mod tests {
             result: Ok(vec!["v=spf1 -all".to_string()]),
         };
         assert_eq!(
-            run_dkim_startup_check(&resolver, "example.com", "dkim", tmp.path()),
+            run_dkim_startup_check(&resolver, "example.com", "aimx", tmp.path()),
             DkimStartupCheck::NoRecord
         );
     }
@@ -1317,7 +1317,7 @@ mod tests {
         crate::config::Config {
             domain: "example.com".to_string(),
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
@@ -1337,7 +1337,7 @@ mod tests {
         let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
         Arc::new(crate::send_handler::SendContext {
             dkim_key: Arc::new(key),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             config_handle: handle,
             transport,
             data_dir: data_dir.to_path_buf(),
@@ -1462,7 +1462,7 @@ mod tests {
             let config = crate::config::Config {
                 domain: "example.com".to_string(),
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "dkim".to_string(),
+                dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
@@ -1473,7 +1473,7 @@ mod tests {
 
             let send_ctx = Arc::new(crate::send_handler::SendContext {
                 dkim_key: Arc::new(key),
-                dkim_selector: "dkim".to_string(),
+                dkim_selector: "aimx".to_string(),
                 config_handle: handle_cfg.clone(),
                 transport,
                 data_dir: tmp.path().to_path_buf(),
@@ -1529,12 +1529,12 @@ mod tests {
             let signed = String::from_utf8_lossy(&signed_bytes);
             assert!(signed.starts_with("DKIM-Signature:"));
             assert!(signed.contains("d=example.com"));
-            assert!(signed.contains("s=dkim"));
+            assert!(signed.contains("s=aimx"));
 
             // Cryptographically verify the DKIM signature using our test
             // public key. We feed the key to `mail-auth` through an
             // in-memory TXT cache so no DNS lookup is performed.
-            verify_dkim_with_pubkey(&signed_bytes, &pub_pem, "example.com", "dkim").await;
+            verify_dkim_with_pubkey(&signed_bytes, &pub_pem, "example.com", "aimx").await;
 
             shutdown_tx.send(true).unwrap();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await;

@@ -177,7 +177,7 @@ mod tests {
         Config {
             domain: "test.com".to_string(),
             data_dir: PathBuf::from("/tmp/aimx-test"),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes: HashMap::new(),

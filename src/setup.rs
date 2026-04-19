@@ -1407,10 +1407,10 @@ pub fn run_setup(
     let (dkim_selector, enable_ipv6) = if config_path.exists() {
         match Config::load(&config_path) {
             Ok(c) => (c.dkim_selector, c.enable_ipv6),
-            Err(_) => ("dkim".to_string(), false),
+            Err(_) => ("aimx".to_string(), false),
         }
     } else {
-        ("dkim".to_string(), false)
+        ("aimx".to_string(), false)
     };
 
     // Re-entrant detection: if already configured, skip install/configure steps
@@ -1861,7 +1861,7 @@ mod tests {
             "1.2.3.4",
             None,
             "v=DKIM1; k=rsa; p=ABC123",
-            "dkim",
+            "aimx",
         );
         assert_eq!(records.len(), 5);
 
@@ -1878,7 +1878,7 @@ mod tests {
         assert!(!records[2].value.contains("ip6:"));
 
         assert_eq!(records[3].record_type, "TXT");
-        assert_eq!(records[3].name, "dkim._domainkey.agent.example.com");
+        assert_eq!(records[3].name, "aimx._domainkey.agent.example.com");
         assert!(records[3].value.contains("DKIM1"));
 
         assert_eq!(records[4].record_type, "TXT");
@@ -1895,7 +1895,7 @@ mod tests {
     #[test]
     fn dns_record_formatting() {
         let records =
-            generate_dns_records("test.com", "5.6.7.8", None, "v=DKIM1; k=rsa; p=XYZ", "dkim");
+            generate_dns_records("test.com", "5.6.7.8", None, "v=DKIM1; k=rsa; p=XYZ", "aimx");
         let formatted = format_dns_records(&records);
         assert!(formatted.contains("A"));
         assert!(formatted.contains("MX"));
@@ -1998,11 +1998,11 @@ mod tests {
     fn verify_dkim_pass_no_local_key() {
         let mut net = MockNetworkOps::default();
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC123".into()],
         );
         assert_eq!(
-            verify_dkim(&net, "example.com", "dkim", None),
+            verify_dkim(&net, "example.com", "aimx", None),
             DnsVerifyResult::Pass
         );
     }
@@ -2011,11 +2011,11 @@ mod tests {
     fn verify_dkim_pass_with_matching_key() {
         let mut net = MockNetworkOps::default();
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC123".into()],
         );
         assert_eq!(
-            verify_dkim(&net, "example.com", "dkim", Some("ABC123")),
+            verify_dkim(&net, "example.com", "aimx", Some("ABC123")),
             DnsVerifyResult::Pass
         );
     }
@@ -2024,10 +2024,10 @@ mod tests {
     fn verify_dkim_fail_mismatched_key() {
         let mut net = MockNetworkOps::default();
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC123".into()],
         );
-        match verify_dkim(&net, "example.com", "dkim", Some("WRONG_KEY")) {
+        match verify_dkim(&net, "example.com", "aimx", Some("WRONG_KEY")) {
             DnsVerifyResult::Fail(msg) => {
                 assert!(msg.contains("does not match"), "Got: {msg}")
             }
@@ -2043,11 +2043,11 @@ mod tests {
         let long_key = "MIIBCgKCAQEA011La5tkO7DUxlLEduWsIbrPcK0NAS9SpcW9rftGU2Kx6F0YSPy/54QjZ13AZk6eGM0zJgF3JF9ibX/GiRDVefqCJPhi7lj1kq6xErWxO0ZR7/YslRcoSoAHR/PnO8chRr1DVHEY+5e0cY54z5SLR+lq/xn69zuiHq5AZBpevcfn/ESA3KujF3rXjDT4DM+ydqu92bdLB4MpLMezVoOjNq75RsSQW/ItokH37V4g6OtrV41yYEGvhAawG24j2Kj6RT96cXdOrvRqUb1/IH/a81Is0WH/PoXSLpwarF0Ie1u/+RfUWLj57osAuIsScbzVmzo5Pil+GgAU45UXj91pDwIDAQAB";
         let mut net = MockNetworkOps::default();
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec![format!("v=DKIM1; k=rsa; p={long_key}")],
         );
         assert_eq!(
-            verify_dkim(&net, "example.com", "dkim", Some(long_key)),
+            verify_dkim(&net, "example.com", "aimx", Some(long_key)),
             DnsVerifyResult::Pass,
         );
     }
@@ -2055,7 +2055,7 @@ mod tests {
     #[test]
     fn verify_dkim_missing() {
         let net = MockNetworkOps::default();
-        match verify_dkim(&net, "example.com", "dkim", None) {
+        match verify_dkim(&net, "example.com", "aimx", None) {
             DnsVerifyResult::Missing(msg) => assert!(msg.contains("No DKIM")),
             other => panic!("Expected Missing, got {:?}", other),
         }
@@ -2144,7 +2144,7 @@ mod tests {
         net.txt_records
             .insert("example.com".into(), vec!["v=spf1 ip4:1.2.3.4 -all".into()]);
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC".into()],
         );
         net.txt_records.insert(
@@ -2152,7 +2152,7 @@ mod tests {
             vec!["v=DMARC1; p=reject".into()],
         );
 
-        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, None, "aimx", None);
         assert!(results.iter().all(|(_, r)| *r == DnsVerifyResult::Pass));
     }
 
@@ -2164,7 +2164,7 @@ mod tests {
             .insert("example.com".into(), vec!["10 example.com.".into()]);
         // A record missing, SPF missing, etc.
 
-        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, None, "aimx", None);
         let pass_count = results
             .iter()
             .filter(|(_, r)| *r == DnsVerifyResult::Pass)
@@ -2525,7 +2525,7 @@ mod tests {
     fn config_dir_exists_after_finalize() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "mode.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "mode.example.com", "aimx", None).unwrap();
 
         // Config file resolved via AIMX_CONFIG_DIR lives inside tmp.
         let cfg_path = crate::config::config_path();
@@ -2536,7 +2536,7 @@ mod tests {
     fn finalize_creates_data_dir_and_config() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         assert!(crate::config::config_path().exists());
         assert!(tmp.path().join("catchall").exists());
@@ -2553,11 +2553,11 @@ mod tests {
     fn finalize_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let key1 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
@@ -2571,12 +2571,12 @@ mod tests {
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
@@ -2587,9 +2587,9 @@ mod tests {
     fn finalize_updates_domain_if_changed() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "old.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "old.example.com", "aimx", None).unwrap();
 
-        finalize_setup(tmp.path(), "new.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "new.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "new.example.com");
@@ -2914,7 +2914,7 @@ mod tests {
         finalize_setup(
             tmp.path(),
             "trust.example.com",
-            "dkim",
+            "aimx",
             Some(("verified".to_string(), vec!["*@company.com".to_string()])),
         )
         .unwrap();
@@ -2937,12 +2937,12 @@ mod tests {
         finalize_setup(
             tmp.path(),
             "trust.example.com",
-            "dkim",
+            "aimx",
             Some(("verified".to_string(), vec!["*@company.com".to_string()])),
         )
         .unwrap();
         // Re-entry passes None — the on-disk value must survive regardless.
-        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "trust.example.com", "aimx", None).unwrap();
 
         let on_disk = Config::load(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "verified");
@@ -2955,7 +2955,7 @@ mod tests {
         // tests), `None` should behave identically to `Some((\"none\", []))`.
         let tmp = tempfile::TempDir::new().unwrap();
         let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
+        finalize_setup(tmp.path(), "trust.example.com", "aimx", None).unwrap();
 
         let on_disk = Config::load(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "none");
@@ -3155,7 +3155,7 @@ mod tests {
             "1.2.3.4",
             Some("2001:db8::1"),
             "v=DKIM1; k=rsa; p=ABC123",
-            "dkim",
+            "aimx",
         );
         assert_eq!(records.len(), 6);
 
@@ -3184,7 +3184,7 @@ mod tests {
             "1.2.3.4",
             None,
             "v=DKIM1; k=rsa; p=ABC",
-            "dkim",
+            "aimx",
         );
         assert!(!records.iter().any(|r| r.record_type == "AAAA"));
         let spf = records
@@ -3202,7 +3202,7 @@ mod tests {
             "1.2.3.4",
             Some("2001:db8::1"),
             "v=DKIM1; k=rsa; p=ABC",
-            "dkim",
+            "aimx",
         );
         assert_eq!(records.len(), 6);
         assert!(records.iter().any(|r| r.record_type == "AAAA"));
@@ -3338,7 +3338,7 @@ mod tests {
             vec!["v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all".into()],
         );
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC".into()],
         );
         net.txt_records.insert(
@@ -3346,7 +3346,7 @@ mod tests {
             vec!["v=DMARC1; p=reject".into()],
         );
 
-        let results = verify_all_dns(&net, "example.com", &ip, Some(&ipv6), "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, Some(&ipv6), "aimx", None);
         assert!(results.iter().all(|(_, r)| *r == DnsVerifyResult::Pass));
         assert!(results.iter().any(|(name, _)| name == "AAAA"));
         assert!(results.iter().any(|(name, _)| name == "SPF (IPv6)"));
@@ -3362,7 +3362,7 @@ mod tests {
         net.txt_records
             .insert("example.com".into(), vec!["v=spf1 ip4:1.2.3.4 -all".into()]);
         net.txt_records.insert(
-            "dkim._domainkey.example.com".into(),
+            "aimx._domainkey.example.com".into(),
             vec!["v=DKIM1; k=rsa; p=ABC".into()],
         );
         net.txt_records.insert(
@@ -3370,7 +3370,7 @@ mod tests {
             vec!["v=DMARC1; p=reject".into()],
         );
 
-        let results = verify_all_dns(&net, "example.com", &ip, None, "dkim", None);
+        let results = verify_all_dns(&net, "example.com", &ip, None, "aimx", None);
         assert!(!results.iter().any(|(name, _)| name == "AAAA"));
         assert!(!results.iter().any(|(name, _)| name == "SPF (IPv6)"));
     }

@@ -126,7 +126,7 @@ After the setup wizard displays the required DNS records, add them at your domai
 | AAAA | `agent.yourdomain.com` | Your server IPv6 (if available) | Domain registrar |
 | MX | `agent.yourdomain.com` | `10 agent.yourdomain.com.` | Domain registrar |
 | TXT | `agent.yourdomain.com` | `v=spf1 ip4:YOUR_IP -all` (or `v=spf1 ip4:YOUR_IP ip6:YOUR_IPV6 -all` with IPv6) | Domain registrar |
-| TXT | `dkim._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
+| TXT | `aimx._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 
 Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx as of v0.2. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
@@ -163,7 +163,7 @@ dig +short TXT agent.yourdomain.com
 # Should include: v=spf1 ip4:YOUR_IP -all (or v=spf1 ip4:YOUR_IP ip6:YOUR_IPV6 -all)
 
 # DKIM record
-dig +short TXT dkim._domainkey.agent.yourdomain.com
+dig +short TXT aimx._domainkey.agent.yourdomain.com
 # Should include: v=DKIM1; k=rsa; p=...
 
 # DMARC record
@@ -211,7 +211,7 @@ aimx send \
 DKIM keys are generated automatically during setup. To manage them independently:
 
 ```bash
-# Generate DKIM keypair (default selector: "dkim")
+# Generate DKIM keypair (default selector: "aimx")
 aimx dkim-keygen
 
 # Force regenerate (overwrites existing keys)

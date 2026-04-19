@@ -136,7 +136,7 @@ fn default_data_dir() -> PathBuf {
 }
 
 fn default_dkim_selector() -> String {
-    "dkim".to_string()
+    "aimx".to_string()
 }
 
 /// Allowed values for `Config::trust` and per-mailbox `MailboxConfig::trust`.
@@ -514,6 +514,14 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
     }
 
     #[test]
+    fn default_dkim_selector_is_aimx() {
+        assert_eq!(super::default_dkim_selector(), "aimx");
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.dkim_selector, "aimx");
+    }
+
+    #[test]
     fn save_and_load_roundtrip() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
@@ -532,7 +540,7 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
@@ -683,7 +691,7 @@ trusted_senders = []
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: PathBuf::from("/tmp/x"),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes: HashMap::new(),
@@ -720,7 +728,7 @@ trusted_senders = []
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: PathBuf::from("/tmp/x"),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "verified".to_string(),
             trusted_senders: vec!["*@company.com".to_string()],
             mailboxes,

@@ -77,7 +77,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
     Config {
         domain: "test.local".to_string(),
         data_dir: data_dir.to_path_buf(),
-        dkim_selector: "dkim".to_string(),
+        dkim_selector: "aimx".to_string(),
         trust: "none".to_string(),
         trusted_senders: vec![],
         mailboxes,
@@ -674,7 +674,7 @@ async fn test_ingest_failure_returns_451() {
     let config = Config {
         domain: "test.local".to_string(),
         data_dir: bad_data_dir,
-        dkim_selector: "dkim".to_string(),
+        dkim_selector: "aimx".to_string(),
         trust: "none".to_string(),
         trusted_senders: vec![],
         mailboxes: HashMap::new(),
