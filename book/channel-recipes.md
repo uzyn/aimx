@@ -15,7 +15,7 @@ A channel-trigger recipe is a `[[mailboxes.<name>.on_receive]]` block whose `com
 3. The agent reads the email body (typically by `cat`-ing `"$AIMX_FILEPATH"`) and takes action — replying, filing a ticket, updating a calendar, whatever.
 4. Exit code is logged; a non-zero exit does not block delivery.
 
-> **Why env vars, not `{from}`/`{subject}` substitution?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into the command string — even with shell-escape quoting — is fragile. Delivering them as env vars and expanding with `"$AIMX_FROM"` inside double quotes is safe no matter what the sender puts in the header. The legacy `{from}`, `{subject}`, `{to}`, `{mailbox}`, `{filepath}` placeholders are rejected at config-load time with a migration hint.
+> **Why env vars, not `{from}`/`{subject}` substitution?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into the command string — even with shell-escape quoting — is fragile. Delivering them as env vars and expanding with `"$AIMX_FROM"` inside double quotes is safe no matter what the sender puts in the header.
 
 Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `aider`) is on the `PATH` of the user running `aimx serve`. Since `aimx serve` runs as a system user under systemd/OpenRC, you will typically either install the agent CLI system-wide or set an explicit absolute path in the command.
 

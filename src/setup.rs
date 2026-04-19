@@ -46,14 +46,14 @@ pub trait SystemOps {
         &self,
         f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        crate::verify::with_temp_smtp_listener(f)
+        crate::portcheck::with_temp_smtp_listener(f)
     }
 }
 
 pub trait NetworkOps {
     fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     /// Full SMTP EHLO handshake via `{verify_host}/probe`.
-    /// Used by `aimx setup` (post-install) and `aimx verify`.
+    /// Used by `aimx setup` (post-install) and `aimx portcheck`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     /// Return the server's IPv4 and IPv6 addresses in a single call.
     ///
@@ -486,7 +486,7 @@ impl NetworkOps for RealNetworkOps {
 
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
-            .args(["+short", "MX", domain])
+            .args(dig_short_args("MX", domain))
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let records: Vec<String> = stdout
@@ -499,7 +499,7 @@ impl NetworkOps for RealNetworkOps {
 
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
-            .args(["+short", "A", domain])
+            .args(dig_short_args("A", domain))
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let addrs: Vec<IpAddr> = stdout
@@ -511,7 +511,7 @@ impl NetworkOps for RealNetworkOps {
 
     fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
-            .args(["+short", "AAAA", domain])
+            .args(dig_short_args("AAAA", domain))
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let addrs: Vec<IpAddr> = stdout
@@ -523,7 +523,7 @@ impl NetworkOps for RealNetworkOps {
 
     fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
         let output = std::process::Command::new("dig")
-            .args(["+short", "TXT", domain])
+            .args(dig_short_args("TXT", domain))
             .output()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         let records: Vec<String> = stdout
@@ -542,6 +542,38 @@ pub const COMPATIBLE_PROVIDERS: &[&str] = &[
     "Vultr (on request)",
     "Linode/Akamai (on request)",
 ];
+
+/// Per-query timeout for the dig-based DNS helpers, in seconds. dig's own
+/// default (5s × 3 tries = 15s per query) stacks to ~90s across the six
+/// queries `verify_all_dns` issues — far too long for `aimx status` on a
+/// host with flaky recursive DNS. Combined with `DIG_TRIES` this caps each
+/// query at ~DIG_TIMEOUT_SECS seconds.
+pub const DIG_TIMEOUT_SECS: u32 = 2;
+
+/// Number of dig attempts per query. Set to 1 so the per-query worst case
+/// is bounded by `DIG_TIMEOUT_SECS`, not `DIG_TIMEOUT_SECS × DIG_TRIES`.
+pub const DIG_TRIES: u32 = 1;
+
+// Compile-time check: keep the per-query dig budget tight so a pathological
+// resolver can't stall `aimx status` for minutes. If someone bumps these
+// constants past ~5s per query, the build fails here rather than at runtime.
+const _: () = assert!(
+    DIG_TIMEOUT_SECS * DIG_TRIES <= 5,
+    "per-query dig budget must stay tight — see DIG_TIMEOUT_SECS × DIG_TRIES"
+);
+
+/// Build the argv vec for a `dig +short <TYPE> <domain>` invocation with
+/// the tight timeout/try bounds declared above. Extracted so the bounds
+/// are applied uniformly and are unit-testable without shelling out.
+pub fn dig_short_args(record_type: &str, domain: &str) -> Vec<String> {
+    vec![
+        format!("+time={DIG_TIMEOUT_SECS}"),
+        format!("+tries={DIG_TRIES}"),
+        "+short".to_string(),
+        record_type.to_string(),
+        domain.to_string(),
+    ]
+}
 
 #[derive(Debug, PartialEq)]
 pub enum PreflightResult {
@@ -871,18 +903,14 @@ fn dns_record_for_check<'a>(check: &str, records: &'a [DnsRecord]) -> Option<&'a
     }
 }
 
-/// Produce the DNS verification output lines without printing anything.
-/// Returned as `(lines, all_pass)` so tests can assert on specific text —
-/// in particular the louder DKIM-mismatch line added in S44-2 — without
-/// capturing stdout.
-pub fn dns_verification_lines(
+/// Produce just the per-record DNS verification lines — no preamble, no
+/// trailing blank. Used by callers (like `aimx status`) that render their
+/// own section header and don't want the `DNS Verification:` heading.
+pub fn dns_verification_record_lines(
     results: &[(String, DnsVerifyResult)],
     dns_records: &[DnsRecord],
 ) -> (Vec<String>, bool) {
     let mut lines = Vec::new();
-    lines.push(String::new());
-    lines.push("DNS Verification:".to_string());
-    lines.push(String::new());
     let mut all_pass = true;
     for (name, result) in results {
         match result {
@@ -936,6 +964,23 @@ pub fn dns_verification_lines(
             }
         }
     }
+    (lines, all_pass)
+}
+
+/// Produce the full DNS verification output — preamble (`""`, `"DNS
+/// Verification:"`, `""`), per-record lines, trailing blank — as used by
+/// the setup wizard. Callers that render their own section header should
+/// use `dns_verification_record_lines` instead to avoid double-headers.
+pub fn dns_verification_lines(
+    results: &[(String, DnsVerifyResult)],
+    dns_records: &[DnsRecord],
+) -> (Vec<String>, bool) {
+    let (body, all_pass) = dns_verification_record_lines(results, dns_records);
+    let mut lines = Vec::with_capacity(body.len() + 4);
+    lines.push(String::new());
+    lines.push("DNS Verification:".to_string());
+    lines.push(String::new());
+    lines.extend(body);
     lines.push(String::new());
     (lines, all_pass)
 }
@@ -1015,10 +1060,17 @@ Alternatively, just reply to an email from {domain} — Gmail will learn it's no
     )
 }
 
+/// Finalize the on-disk install: ensure `data_dir` exists, create or
+/// update `config.toml`, and generate the DKIM keypair if missing.
+///
+/// `trust_defaults` is honoured only on **fresh installs**. When `config.toml`
+/// already exists the existing top-level `trust` / `trusted_senders` are
+/// preserved, and `trust_defaults` is ignored — pass `None` in that case.
 pub fn finalize_setup(
     data_dir: &Path,
     domain: &str,
     dkim_selector: &str,
+    trust_defaults: Option<(String, Vec<String>)>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(data_dir)?;
     install_config_dir()?;
@@ -1046,28 +1098,32 @@ pub fn finalize_setup(
                 MailboxConfig {
                     address: format!("*@{domain}"),
                     on_receive: vec![],
-                    trust: "none".to_string(),
-                    trusted_senders: vec![],
+                    trust: None,
+                    trusted_senders: None,
                 },
             );
             install_config_file(&cfg, &config_path)?;
         }
         cfg
     } else {
+        let (default_trust, default_trusted_senders) =
+            trust_defaults.unwrap_or_else(|| ("none".to_string(), vec![]));
         let mut mailboxes = HashMap::new();
         mailboxes.insert(
             "catchall".to_string(),
             MailboxConfig {
                 address: format!("*@{domain}"),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         let cfg = Config {
             domain: domain.to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: dkim_selector.to_string(),
+            trust: default_trust,
+            trusted_senders: default_trusted_senders,
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1197,6 +1253,56 @@ fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// Interactively prompt for the global default trust policy and — if the
+/// operator picks `verified` — an optional `trusted_senders` allowlist.
+///
+/// Returns `(policy, senders)`:
+/// - policy: `"none"` (default) or `"verified"`.
+/// - senders: empty for `none`; for `verified`, parsed from a single line
+///   split on commas and whitespace.
+pub fn prompt_default_trust(
+    reader: &mut dyn BufRead,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    println!();
+    println!("Default trust policy for inbound email:");
+    println!("  none     - accept all inbound, channel triggers always fire (default)");
+    println!("  verified - channel triggers only fire when DKIM passes OR sender is allowlisted");
+    println!("Each mailbox can override this default later by setting `trust` in config.toml.");
+    print!("Trust policy [none]: ");
+    io::stdout().flush()?;
+
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mode = line.trim().to_ascii_lowercase();
+    let mode = if mode.is_empty() {
+        "none".to_string()
+    } else {
+        mode
+    };
+    if mode != "none" && mode != "verified" {
+        return Err(format!("invalid trust policy '{mode}', expected 'none' or 'verified'").into());
+    }
+
+    if mode == "none" {
+        return Ok((mode, vec![]));
+    }
+
+    print!(
+        "Trusted senders (comma- or space-separated globs, e.g. '*@company.com, boss@gmail.com'), \
+         leave blank for none: "
+    );
+    io::stdout().flush()?;
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let senders: Vec<String> = line
+        .trim()
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Ok((mode, senders))
+}
+
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
     print!("Enter the domain you want to use for email (e.g. agent.example.com): ");
     io::stdout().flush()?;
@@ -1257,6 +1363,27 @@ pub fn run_setup(
         return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
     }
 
+    // Step 2: Port 25 preflight — runs BEFORE the domain prompt and any
+    // filesystem writes. If the VPS blocks SMTP there is no point asking for
+    // a domain, generating TLS certs, or writing config.
+    let port25_status = sys.check_port25_occupancy()?;
+    if let Port25Status::OtherProcess(name) = &port25_status {
+        return Err(format!(
+            "Port 25 is occupied by {name}. \
+             Stop the process and run `aimx setup` again."
+        )
+        .into());
+    }
+
+    println!("{}\n", term::header("Port 25 preflight"));
+    if matches!(port25_status, Port25Status::Aimx) {
+        println!("  `aimx serve` is already running on port 25 — probing the live daemon.");
+        run_port25_preflight(net)?;
+    } else {
+        sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
+    }
+    println!();
+
     // Resolve domain: use argument if provided, otherwise prompt interactively
     let domain = match domain {
         Some(d) => {
@@ -1289,25 +1416,6 @@ pub fn run_setup(
     // Re-entrant detection: if already configured, skip install/configure steps
     let already_configured = is_already_configured(sys, data_dir);
 
-    // Step 2: Port 25 conflict check. Always run — even on re-entrant invocations,
-    // this surfaces an unexpected foreign process bound to :25.
-    let port25_status = sys.check_port25_occupancy()?;
-    match &port25_status {
-        Port25Status::Free => {}
-        Port25Status::Aimx => {
-            if !already_configured {
-                println!("`aimx serve` is already running on port 25. Proceeding with setup.");
-            }
-        }
-        Port25Status::OtherProcess(name) => {
-            return Err(format!(
-                "Port 25 is occupied by {name}. \
-                 Stop the process and run `aimx setup` again."
-            )
-            .into());
-        }
-    }
-
     if already_configured {
         println!(
             "{}",
@@ -1327,21 +1435,21 @@ pub fn run_setup(
         }
     }
 
+    // Prompt for the default trust policy only on fresh installs. On
+    // re-entry, pass `None` so `finalize_setup` preserves the existing
+    // top-level values in config.toml.
+    let trust_defaults = if config_path.exists() {
+        None
+    } else {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        Some(prompt_default_trust(&mut reader)?)
+    };
+
     // Step 4: Write config.toml + DKIM keys. Idempotent on re-entry (handles
     // domain changes). Must happen before the aimx.service install at the end,
     // because the daemon refuses to start without a loadable config and DKIM key.
-    finalize_setup(data_dir, &domain, &dkim_selector)?;
-
-    // Step 5: Port 25 preflight — confirm the VPS allows SMTP traffic before
-    // the user spends time setting up DNS. On a fresh install aimx.service is
-    // not yet bound to :25, so we stand up a minimal SMTP responder for the
-    // duration of the probe and tear it down afterwards. On re-entry (Aimx)
-    // the real daemon is already bound and answers the probe directly.
-    if matches!(port25_status, Port25Status::Aimx) {
-        run_port25_preflight(net)?;
-    } else {
-        sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
-    }
+    finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
     // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
@@ -2272,19 +2380,11 @@ mod tests {
     }
 
     #[test]
-    fn fresh_setup_writes_config_and_dkim_before_preflight() {
-        // finalize_setup (config.toml + DKIM private key) must run before the
-        // port-25 preflight, so that by the time install_and_verify_service
-        // runs at the end of setup, aimx.service has a loadable config and a
-        // DKIM key on disk. This is what the original bug violated — aimx
-        // serve was being started before finalize_setup, exiting with
-        // "Config file not found" and restart-looping into permanent failure.
-        //
-        // We can't reach install_and_verify_service here without mocking
-        // stdin (DNS retry loop reads it), so we force a preflight failure
-        // and assert both artefacts are already on disk by that point.
-        // Combined with the run_setup source ordering (preflight → DNS →
-        // install), this proves the invariant end-to-end.
+    fn fresh_setup_does_not_write_config_when_preflight_fails() {
+        // The port-25 preflight runs BEFORE finalize_setup, so a VPS that
+        // blocks outbound port 25 leaves no artefacts on disk. This is the
+        // fail-fast invariant: no TLS cert, no config.toml, no DKIM key
+        // until the network has been proven OK.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
@@ -2294,15 +2394,29 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let err = result.expect_err("preflight failure must bubble up");
+        assert!(
+            err.to_string().contains("Port 25 checks failed"),
+            "expected port-25 error, got: {err}"
+        );
 
         assert!(
-            crate::config::config_path().exists(),
-            "config.toml must exist on disk after finalize_setup"
+            !crate::config::config_path().exists(),
+            "config.toml must NOT be written when the early preflight fails"
         );
         assert!(
-            crate::config::dkim_dir().join("private.key").exists(),
-            "DKIM private key must exist on disk after finalize_setup"
+            !crate::config::dkim_dir().join("private.key").exists(),
+            "DKIM private key must NOT be generated when the early preflight fails"
+        );
+        assert!(
+            !*sys.service_file_installed.borrow(),
+            "install_service_file must NOT run when the preflight fails"
+        );
+        assert_eq!(
+            *sys.wait_for_ready_calls.borrow(),
+            0,
+            "wait_for_service_ready must NOT run when the preflight fails"
         );
     }
 
@@ -2411,7 +2525,7 @@ mod tests {
     fn config_dir_exists_after_finalize() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "mode.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "mode.example.com", "dkim", None).unwrap();
 
         // Config file resolved via AIMX_CONFIG_DIR lives inside tmp.
         let cfg_path = crate::config::config_path();
@@ -2422,7 +2536,7 @@ mod tests {
     fn finalize_creates_data_dir_and_config() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         assert!(crate::config::config_path().exists());
         assert!(tmp.path().join("catchall").exists());
@@ -2439,11 +2553,11 @@ mod tests {
     fn finalize_is_idempotent() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let key1 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
@@ -2457,12 +2571,12 @@ mod tests {
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
-        finalize_setup(tmp.path(), "test.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "test.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
@@ -2473,9 +2587,9 @@ mod tests {
     fn finalize_updates_domain_if_changed() {
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        finalize_setup(tmp.path(), "old.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "old.example.com", "dkim", None).unwrap();
 
-        finalize_setup(tmp.path(), "new.example.com", "dkim").unwrap();
+        finalize_setup(tmp.path(), "new.example.com", "dkim", None).unwrap();
 
         let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "new.example.com");
@@ -2487,6 +2601,40 @@ mod tests {
     fn compatible_providers_not_empty() {
         assert!(!COMPATIBLE_PROVIDERS.is_empty());
         assert!(COMPATIBLE_PROVIDERS.iter().any(|p| p.contains("Hetzner")));
+    }
+
+    #[test]
+    fn dig_short_args_bounds_per_query_timeout() {
+        // `aimx status` runs these resolvers synchronously; without tight
+        // `+time` / `+tries` bounds, dig's defaults (5s × 3) let a single
+        // broken recursive resolver stall the command for ~90s across the
+        // six queries `verify_all_dns` issues. This test locks the bounds
+        // in so a future "drop the args" refactor trips a red test.
+        let args = dig_short_args("MX", "example.com");
+        assert!(
+            args.iter().any(|a| a.starts_with("+time=")),
+            "dig args must carry a +time= bound, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a.starts_with("+tries=")),
+            "dig args must carry a +tries= bound, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "+short"),
+            "dig args must include +short, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "MX"),
+            "dig args must include the record type, got {args:?}"
+        );
+        assert!(
+            args.iter().any(|a| a == "example.com"),
+            "dig args must include the domain, got {args:?}"
+        );
+        // The constant-only `DIG_TIMEOUT_SECS * DIG_TRIES <= 5` invariant is
+        // enforced as a compile-time `const _: () = assert!(..)` near the
+        // constants themselves, not as a runtime assertion here — clippy's
+        // `assertions_on_constants` lint complains about the runtime form.
     }
 
     #[test]
@@ -2694,6 +2842,125 @@ mod tests {
     }
 
     // S18.1 — Interactive domain prompt tests
+
+    #[test]
+    fn prompt_default_trust_defaults_to_none_on_enter() {
+        let input = b"\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_none_explicit() {
+        let input = b"none\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_no_senders() {
+        let input = b"verified\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_with_senders() {
+        let input = b"verified\n*@company.com, boss@gmail.com\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(
+            senders,
+            vec!["*@company.com".to_string(), "boss@gmail.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_senders_whitespace_only() {
+        let input = b"verified\n  \t \n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_default_trust_verified_is_case_insensitive() {
+        let input = b"VERIFIED\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, _) = prompt_default_trust(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+    }
+
+    #[test]
+    fn prompt_default_trust_rejects_unknown_policy() {
+        let input = b"strict\n";
+        let mut reader = io::Cursor::new(input);
+        let err = prompt_default_trust(&mut reader).unwrap_err().to_string();
+        assert!(err.contains("strict"), "error should name input: {err}");
+    }
+
+    #[test]
+    fn finalize_setup_writes_default_trust_on_fresh_install() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(
+            tmp.path(),
+            "trust.example.com",
+            "dkim",
+            Some(("verified".to_string(), vec!["*@company.com".to_string()])),
+        )
+        .unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "verified");
+        assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
+        // Catchall mailbox inherits; its own fields remain unset.
+        let catchall = on_disk.mailboxes.get("catchall").unwrap();
+        assert!(catchall.trust.is_none());
+        assert!(catchall.trusted_senders.is_none());
+        assert_eq!(catchall.effective_trust(&on_disk), "verified");
+    }
+
+    #[test]
+    fn finalize_setup_preserves_existing_trust_on_reentry() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        // Fresh install picks `verified`.
+        finalize_setup(
+            tmp.path(),
+            "trust.example.com",
+            "dkim",
+            Some(("verified".to_string(), vec!["*@company.com".to_string()])),
+        )
+        .unwrap();
+        // Re-entry passes None — the on-disk value must survive regardless.
+        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "verified");
+        assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
+    }
+
+    #[test]
+    fn finalize_setup_none_defaults_produce_trust_none() {
+        // When the operator omits the prompt (e.g. non-interactive path or
+        // tests), `None` should behave identically to `Some((\"none\", []))`.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(tmp.path(), "trust.example.com", "dkim", None).unwrap();
+
+        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        assert_eq!(on_disk.trust, "none");
+        assert!(on_disk.trusted_senders.is_empty());
+    }
 
     #[test]
     fn prompt_domain_accepts_valid_domain_with_confirmation() {

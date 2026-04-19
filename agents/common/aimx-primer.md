@@ -13,7 +13,8 @@ For full reference material, see the files in `references/`:
 - `references/troubleshooting.md` — error codes and recovery steps
 
 At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
-directory layout, regenerated on each AIMX upgrade.
+directory layout, written by `aimx setup` and refreshed on `aimx serve`
+startup.
 
 ## Two access surfaces
 
@@ -199,18 +200,26 @@ triage, filtering by list, handling attachments, reply-all, and mark-all-read.
 AIMX verifies DKIM, SPF, and DMARC on every inbound email. Results are
 stored in the `dkim`, `spf`, and `dmarc` frontmatter fields.
 
-The `trusted` field reflects the per-mailbox trust evaluation:
+The `trusted` field reflects the effective trust evaluation for the
+email's mailbox. The effective policy is the mailbox's own `trust` /
+`trusted_senders` if set, otherwise the top-level defaults in
+`config.toml`:
 
-- **`"none"`** — the mailbox has no trust policy (`trust = "none"` in
-  config, the default). No evaluation performed.
-- **`"true"`** — the mailbox has `trust = "verified"`, the sender matches
-  `trusted_senders`, AND DKIM passed.
-- **`"false"`** — the mailbox has `trust = "verified"`, but one or both
+- **`"none"`** — effective `trust = "none"` (the default). No evaluation
+  performed.
+- **`"true"`** — effective `trust = "verified"`, the sender matches the
+  effective `trusted_senders`, AND DKIM passed.
+- **`"false"`** — effective `trust = "verified"`, but one or both
   conditions failed (sender not in allowlist, or DKIM did not pass).
 
-Trust evaluation is per-mailbox. Each mailbox in `config.toml` may define:
-- `trust = "none"` (default) — all mail is accepted, triggers fire freely.
-- `trust = "verified"` — triggers only fire when `trusted == "true"`.
+Trust is configured globally at the top of `config.toml` and applies to
+every mailbox. Per-mailbox `trust` / `trusted_senders` override the
+defaults for that mailbox — a mailbox `trusted_senders` list **replaces**
+the global list entirely (no merging). Valid values:
+
+- `trust = "none"` — all mail is accepted, triggers fire freely.
+- `trust = "verified"` — triggers only fire when `trusted == "true"` or
+  the sender is in the effective `trusted_senders` allowlist.
 - `trusted_senders = ["*@company.com"]` — glob patterns for allowlisted
   senders.
 
@@ -303,4 +312,4 @@ and `spf`. Treat `"false"` and `"none"` as untrusted.
 - `references/troubleshooting.md` — UDS protocol error codes, common
   misconfigurations, and recovery steps.
 - `/var/lib/aimx/README.md` — runtime guide to the data directory layout,
-  regenerated on each AIMX upgrade.
+  written by `aimx setup` and refreshed on `aimx serve` startup.

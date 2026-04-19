@@ -145,8 +145,8 @@ fn handle_create(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
         MailboxConfig {
             address,
             on_receive: vec![],
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: None,
+            trusted_senders: None,
         },
     );
 
@@ -289,14 +289,16 @@ mod tests {
             MailboxConfig {
                 address: "*@example.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         Config {
             domain: "example.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -605,8 +607,8 @@ mod tests {
             MailboxConfig {
                 address: "alice@example.com".into(),
                 on_receive: vec![],
-                trust: "none".into(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
         write_config_atomic(&path, &c2).unwrap();

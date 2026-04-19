@@ -7,13 +7,13 @@ Diagnostic commands and solutions for common issues.
 ```bash
 # Check port 25 connectivity (outbound + inbound EHLO handshake)
 # Requires root
-sudo aimx verify
+sudo aimx portcheck
 
 # Show server status, configuration, and mailbox counts
 aimx status
 
 # Test against a self-hosted verify service instead of the default
-sudo aimx verify --verify-host https://verify.yourdomain.com
+sudo aimx portcheck --verify-host https://verify.yourdomain.com
 ```
 
 The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `verify_host` value from `config.toml` for the current invocation.
@@ -25,7 +25,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see [compatible providers](getting-started.md#compatible-vps-providers)) |
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` (see [verifying DNS](setup.md#verifying-dns-records)) |
-| `sudo aimx verify` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |
+| `sudo aimx portcheck` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |
 | Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all [DNS records](setup.md#dns-configuration), configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or not started | Check status and logs (see below) |
 | Emails not delivered to mailbox | `aimx serve` not running or misconfigured | Check service status with `systemctl status aimx` |
@@ -153,9 +153,9 @@ If permissions are wrong:
 sudo chmod 600 /etc/aimx/dkim/private.key
 ```
 
-## How verify works
+## How portcheck works
 
-`aimx verify` requires root and auto-detects what is listening on port 25:
+`aimx portcheck` requires root and auto-detects what is listening on port 25:
 
 | Scenario | What happens |
 |----------|-------------|
@@ -163,14 +163,14 @@ sudo chmod 600 /etc/aimx/dkim/private.key
 | **Other process on port 25** (Postfix, Exim, etc.) | Fails -- advises to stop the conflicting process |
 | **Nothing on port 25** (fresh VPS) | Spawns temporary SMTP listener, then runs outbound + inbound EHLO checks |
 
-If verify fails with EHLO probe after setup, the issue is likely in the `aimx serve` configuration rather than firewall/port access. Run `sudo systemctl status aimx` to check.
+If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx serve` configuration rather than firewall/port access. Run `sudo systemctl status aimx` to check.
 
 ## Useful commands reference
 
 | Command | Purpose |
 |---------|---------|
-| `sudo aimx verify` | Check port 25 connectivity (requires root) |
-| `aimx status` | Show config, mailboxes, and message counts |
+| `sudo aimx portcheck` | Check port 25 connectivity (requires root) |
+| `aimx status` | Show config, mailboxes, message counts, and DNS record verification |
 | `aimx mailbox list` | List all mailboxes |
 | `aimx dkim-keygen` | Generate DKIM keypair |
 | `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |

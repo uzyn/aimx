@@ -63,27 +63,34 @@ All auth fields are always written. They are never omitted or null so
 | `dkim`   | string | always   | `"pass"`, `"fail"`, `"none"` | DKIM signature verification result |
 | `spf`    | string | always   | `"pass"`, `"fail"`, `"softfail"`, `"neutral"`, `"none"` | SPF record verification result |
 | `dmarc`  | string | always   | `"pass"`, `"fail"`, `"none"` | DMARC alignment check result |
-| `trusted`| string | always   | `"none"`, `"true"`, `"false"` | Per-mailbox trust evaluation outcome |
+| `trusted`| string | always   | `"none"`, `"true"`, `"false"` | Effective trust evaluation outcome (per-mailbox override if set, else top-level default) |
 
 #### `trusted` field details
 
-The `trusted` field surfaces the per-mailbox trust evaluation as a single
-value so agents can read the outcome directly without re-deriving it:
+The `trusted` field surfaces the effective trust evaluation for the email's
+mailbox. The effective policy is the mailbox's own `trust` /
+`trusted_senders` if set, otherwise the top-level defaults in
+`config.toml`:
 
-- **`"none"`** — the mailbox has `trust = "none"` in its config (the
-  default). No trust evaluation was performed.
-- **`"true"`** — the mailbox has `trust = "verified"`, the sender matches
-  one of the `trusted_senders` glob patterns, AND DKIM passed. This is
-  equivalent to "the email passed the trigger gate."
-- **`"false"`** — the mailbox has `trust = "verified"`, but one or both
+- **`"none"`** — effective `trust` is `"none"` (the default). No trust
+  evaluation was performed.
+- **`"true"`** — effective `trust` is `"verified"`, the sender matches
+  one of the effective `trusted_senders` glob patterns, AND DKIM passed.
+  This is equivalent to "the email passed the trigger gate."
+- **`"false"`** — effective `trust` is `"verified"`, but one or both
   conditions were not met: the sender was not in the allowlist, or DKIM did
   not pass (or both).
 
-Per-mailbox trust config in `config.toml`:
+Trust config in `config.toml` — global defaults at the top, optional
+per-mailbox overrides:
 ```toml
-[[mailboxes]]
-address = "agent@domain.com"
+# Global defaults applied to every mailbox unless overridden
 trust = "verified"
+trusted_senders = ["*@company.com"]
+
+[mailboxes.support]
+address = "support@domain.com"
+# Per-mailbox override fully replaces the global list (no merging)
 trusted_senders = ["*@company.com", "alice@gmail.com"]
 ```
 

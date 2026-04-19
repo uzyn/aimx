@@ -1,4 +1,4 @@
-use crate::config::{MailboxConfig, MatchFilter, OnReceiveRule};
+use crate::config::{Config, MailboxConfig, MatchFilter, OnReceiveRule};
 use crate::frontmatter::InboundFrontmatter;
 use std::path::Path;
 use std::process::Command;
@@ -8,21 +8,12 @@ pub struct TriggerContext<'a> {
     pub metadata: &'a InboundFrontmatter,
 }
 
-/// Placeholders rejected in `on_receive.cmd` at config-load time. Pre-launch,
-/// the shell-injection fix in S44-1 drops string substitution for
-/// user-controlled fields (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
-/// `{filepath}`) and surfaces them as `AIMX_*` env vars instead. Keeping
-/// legacy placeholders working would reintroduce the injection; refusing to
-/// load is the safer break.
-pub const LEGACY_PLACEHOLDERS: &[&str] =
-    &["{from}", "{subject}", "{to}", "{mailbox}", "{filepath}"];
-
-/// Expand the aimx-controlled `{id}` and `{date}` placeholders. Every
-/// user-controlled field (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
-/// `{filepath}`) is deliberately **not** substituted — those are passed to
-/// the trigger shell via `AIMX_*` env vars by [`execute_triggers`], which
-/// the shell expands safely even for hostile payloads. `{id}` and `{date}`
-/// are opaque aimx-generated strings (hex and ISO-8601), safe to splice.
+/// Expand the aimx-controlled `{id}` and `{date}` placeholders. User-controlled
+/// fields (`from`, `subject`, `to`, `mailbox`, `filepath`) are deliberately
+/// **not** substituted — those are passed to the trigger shell via `AIMX_*`
+/// env vars by [`execute_triggers`], which the shell expands safely even for
+/// hostile payloads. `{id}` and `{date}` are opaque aimx-generated strings
+/// (hex and ISO-8601), safe to splice.
 pub fn substitute_template(command: &str, ctx: &TriggerContext) -> String {
     command
         .replace("{id}", &ctx.metadata.id)
@@ -75,9 +66,9 @@ pub fn should_fire(rule: &OnReceiveRule, metadata: &InboundFrontmatter) -> bool 
     }
 }
 
-pub fn is_sender_trusted(mailbox_config: &MailboxConfig, from: &str) -> bool {
+pub fn is_sender_trusted(config: &Config, mailbox_config: &MailboxConfig, from: &str) -> bool {
     let from_lower = extract_email_for_match(from);
-    for pattern in &mailbox_config.trusted_senders {
+    for pattern in mailbox_config.effective_trusted_senders(config) {
         if glob_match::glob_match(pattern, &from_lower) {
             return true;
         }
@@ -87,38 +78,38 @@ pub fn is_sender_trusted(mailbox_config: &MailboxConfig, from: &str) -> bool {
 
 /// Determine whether channel triggers should fire for this email.
 ///
-/// v1 semantics (preserved intentionally): for `trust: verified`,
-/// triggers fire when the sender is allowlisted OR DKIM passes. This
-/// is deliberately looser than `trust::evaluate_trust()`, which
-/// requires BOTH allowlisted AND DKIM pass for `trusted = "true"`.
-/// The trigger gate keeps the "allowlisted senders skip verification"
-/// affordance intact; the `trusted` frontmatter field is the strict
-/// evaluation surfaced to agents and operators. See S38-1 rationale.
+/// v1 semantics (preserved intentionally): for effective
+/// `trust == "verified"`, triggers fire when the sender is allowlisted
+/// OR DKIM passes. This is deliberately looser than
+/// `trust::evaluate_trust()`, which requires BOTH allowlisted AND DKIM
+/// pass for `trusted = "true"`. The trigger gate keeps the
+/// "allowlisted senders skip verification" affordance intact; the
+/// `trusted` frontmatter field is the strict evaluation surfaced to
+/// agents and operators. See S38-1 rationale.
 pub fn should_execute_triggers(
+    config: &Config,
     mailbox_config: &MailboxConfig,
     metadata: &InboundFrontmatter,
 ) -> bool {
-    if mailbox_config.trust == "none" {
+    let trust = mailbox_config.effective_trust(config);
+    if trust == "none" {
         return true;
     }
 
-    if is_sender_trusted(mailbox_config, &metadata.from) {
+    if is_sender_trusted(config, mailbox_config, &metadata.from) {
         return true;
     }
 
-    if mailbox_config.trust == "verified" {
+    if trust == "verified" {
         return metadata.dkim == "pass";
     }
 
-    eprintln!(
-        "aimx: unknown trust value '{}', denying triggers (fail-closed)",
-        mailbox_config.trust
-    );
+    eprintln!("aimx: unknown trust value '{trust}', denying triggers (fail-closed)");
     false
 }
 
-pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
-    if !should_execute_triggers(mailbox_config, ctx.metadata) {
+pub fn execute_triggers(config: &Config, mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
+    if !should_execute_triggers(config, mailbox_config, ctx.metadata) {
         return;
     }
 
@@ -174,63 +165,26 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
     }
 }
 
-/// Error type returned by [`validate_on_receive_commands`] when a config
-/// contains a legacy placeholder that was dropped by S44-1.
-#[derive(Debug)]
-pub struct LegacyPlaceholderError {
-    pub mailbox: String,
-    pub placeholder: String,
-}
-
-impl std::fmt::Display for LegacyPlaceholderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "mailbox '{}': legacy placeholder '{}' in on_receive.command is no longer supported. \
-             Migrate to AIMX_* env vars: replace '{{from}}' with \"$AIMX_FROM\", \
-             '{{subject}}' with \"$AIMX_SUBJECT\", '{{to}}' with \"$AIMX_TO\", \
-             '{{mailbox}}' with \"$AIMX_MAILBOX\", '{{filepath}}' with \"$AIMX_FILEPATH\". \
-             The aimx-controlled placeholders {{id}} and {{date}} still work. \
-             See book/channel-recipes.md for updated examples.",
-            self.mailbox, self.placeholder
-        )
-    }
-}
-
-impl std::error::Error for LegacyPlaceholderError {}
-
-/// Scan every `on_receive.command` in the config for legacy user-controlled
-/// placeholders. Returns the first offender so the operator can fix
-/// mailboxes one at a time.
-pub fn validate_on_receive_commands(
-    mailboxes: &std::collections::HashMap<String, MailboxConfig>,
-) -> Result<(), LegacyPlaceholderError> {
-    // Sort keys so the error is deterministic when multiple mailboxes are
-    // broken — stable ordering keeps CI logs and test expectations sane.
-    let mut names: Vec<&String> = mailboxes.keys().collect();
-    names.sort();
-    for name in names {
-        let mailbox = &mailboxes[name];
-        for rule in &mailbox.on_receive {
-            for placeholder in LEGACY_PLACEHOLDERS {
-                if rule.command.contains(placeholder) {
-                    return Err(LegacyPlaceholderError {
-                        mailbox: name.clone(),
-                        placeholder: (*placeholder).to_string(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{MatchFilter, OnReceiveRule};
+    use crate::config::{Config, MatchFilter, OnReceiveRule};
     use crate::frontmatter::{AttachmentMeta, InboundFrontmatter};
+    use std::collections::HashMap;
     use std::path::PathBuf;
+
+    fn sample_config() -> Config {
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: PathBuf::from("/tmp/aimx-test"),
+            dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes: HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
 
     fn sample_metadata() -> InboundFrontmatter {
         InboundFrontmatter {
@@ -268,9 +222,9 @@ mod tests {
 
     #[test]
     fn substitute_only_id_and_date() {
-        // S44-1: string substitution is restricted to aimx-controlled fields.
-        // Every user-controlled placeholder must pass through untouched so
-        // the shell never sees attacker-controlled bytes as code.
+        // String substitution is restricted to aimx-controlled fields. Every
+        // user-controlled placeholder passes through untouched so the shell
+        // never sees attacker-controlled bytes as code.
         let meta = sample_metadata();
         let filepath = PathBuf::from("/var/lib/aimx/catchall/2025-06-01-001.md");
         let ctx = sample_ctx(&filepath, &meta);
@@ -287,9 +241,6 @@ mod tests {
             result.contains("2025-06-01T12:00:00Z"),
             "{{date}} must expand: {result}"
         );
-        // Legacy placeholders MUST remain literal in the expanded script —
-        // the config loader refuses configs that carry them, but the
-        // substitute_template function itself simply leaves them alone.
         assert!(
             result.contains("{filepath}"),
             "{{filepath}} must NOT be substituted: {result}"
@@ -310,23 +261,6 @@ mod tests {
             result.contains("{mailbox}"),
             "{{mailbox}} must NOT be substituted: {result}"
         );
-    }
-
-    #[test]
-    fn substitute_leaves_legacy_placeholders_literal() {
-        // Paranoid repro of the T8 bug from the 2026-04-17 manual test run:
-        // a `From:` with a display name + angle brackets would previously
-        // leak unescaped into the shell.
-        let mut meta = sample_metadata();
-        meta.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
-        meta.subject = "Re: \"urgent\" & important".to_string();
-        let filepath = PathBuf::from("/tmp/test.md");
-        let ctx = sample_ctx(&filepath, &meta);
-
-        let result = substitute_template("echo {from} {subject}", &ctx);
-        // The substitute step does not touch these — the env-var path is
-        // what safely delivers them to the shell.
-        assert_eq!(result, "echo {from} {subject}");
     }
 
     #[test]
@@ -572,10 +506,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!("touch {}", marker.to_string_lossy()),
@@ -583,7 +517,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(marker.exists());
     }
 
@@ -595,10 +529,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![
                 OnReceiveRule {
                     rule_type: "cmd".to_string(),
@@ -613,7 +547,7 @@ mod tests {
             ],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         let content = std::fs::read_to_string(&log_file).unwrap();
         let lines: Vec<&str> = content.trim().lines().collect();
         assert_eq!(lines, vec!["first", "second"]);
@@ -625,10 +559,10 @@ mod tests {
         let filepath = PathBuf::from("/tmp/test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: "false".to_string(),
@@ -636,7 +570,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
     }
 
     #[test]
@@ -645,14 +579,14 @@ mod tests {
         let filepath = PathBuf::from("/tmp/test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
     }
 
     #[test]
@@ -663,10 +597,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!("touch {}", marker.to_string_lossy()),
@@ -678,26 +612,26 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(!marker.exists());
     }
 
     #[test]
     fn execute_triggers_with_env_vars() {
-        // S44-1: the env-var path is now how user-controlled values reach
-        // the trigger shell. `$AIMX_FROM` / `$AIMX_SUBJECT` expand inside
-        // double quotes, so whitespace and metacharacters are preserved but
-        // never interpreted as shell code.
+        // User-controlled values reach the trigger shell through env vars:
+        // `$AIMX_FROM` / `$AIMX_SUBJECT` expand inside double quotes, so
+        // whitespace and metacharacters are preserved but never interpreted
+        // as shell code.
         let tmp = tempfile::TempDir::new().unwrap();
         let output_file = tmp.path().join("output.txt");
         let meta = sample_metadata();
         let filepath = tmp.path().join("catchall/2025-06-01-001.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!(
@@ -708,7 +642,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         let content = std::fs::read_to_string(&output_file).unwrap();
         assert!(content.contains("alice@gmail.com"), "got: {content:?}");
         assert!(content.contains("Hello World"), "got: {content:?}");
@@ -739,9 +673,9 @@ mod tests {
 
     #[test]
     fn execute_triggers_clears_parent_env() {
-        // S47-2: `execute_triggers` calls `.env_clear()` before selectively
-        // re-adding `PATH`/`HOME`/`AIMX_*`. An unrelated env var set on the
-        // parent process must NOT be visible inside the trigger subshell.
+        // `execute_triggers` calls `.env_clear()` before selectively re-adding
+        // `PATH`/`HOME`/`AIMX_*`. An unrelated env var set on the parent
+        // process must NOT be visible inside the trigger subshell.
         //
         // This test intentionally uses a unique variable name and is not
         // parallelized against other env-var-touching tests because
@@ -758,10 +692,10 @@ mod tests {
         // drop — panic-safe.
         let _sentinel = EnvVarGuard::set("AIMX_LEAK_TEST", "sentinel-should-not-leak");
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!(
@@ -773,7 +707,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
 
         let content = std::fs::read_to_string(&log).unwrap();
         assert!(
@@ -802,10 +736,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!(
@@ -816,16 +750,15 @@ mod tests {
                 r#match: None,
             }],
         };
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         let content = std::fs::read_to_string(&log).unwrap();
         (tmp, content)
     }
 
     #[test]
     fn env_var_preserves_angle_bracket_from() {
-        // T8 repro: `U-Zyn Chua <chua@uzyn.com>`. Previously this broke
-        // shell-escape quoting on the substitution path. With env-vars, the
-        // payload lands verbatim — no redirection, no execution.
+        // `U-Zyn Chua <chua@uzyn.com>` lands in the env var verbatim — no
+        // redirection, no execution.
         let (_tmp, content) = run_env_capture_trigger(|m| {
             m.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
         });
@@ -903,10 +836,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 // Deliberately echo the env var so the payload reaches the
@@ -917,7 +850,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(
             !marker.exists(),
             "env-var payload MUST NOT be interpreted as shell code"
@@ -925,180 +858,121 @@ mod tests {
     }
 
     #[test]
-    fn validate_on_receive_rejects_legacy_from() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "support".to_string(),
-            MailboxConfig {
-                address: "support@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo {from}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
-        assert_eq!(err.mailbox, "support");
-        assert_eq!(err.placeholder, "{from}");
-        let msg = err.to_string();
-        assert!(msg.contains("support"), "mailbox named: {msg}");
-        assert!(msg.contains("{from}"), "placeholder named: {msg}");
-        assert!(msg.contains("AIMX_FROM"), "migration hinted: {msg}");
-    }
-
-    #[test]
-    fn validate_on_receive_rejects_legacy_filepath() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "ops".to_string(),
-            MailboxConfig {
-                address: "ops@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "cat {filepath}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
-        assert_eq!(err.placeholder, "{filepath}");
-    }
-
-    #[test]
-    fn validate_on_receive_accepts_id_and_date() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "log".to_string(),
-            MailboxConfig {
-                address: "log@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo id={id} date={date}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        assert!(validate_on_receive_commands(&mailboxes).is_ok());
-    }
-
-    #[test]
-    fn validate_on_receive_accepts_env_var_recipe() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "inbox".to_string(),
-            MailboxConfig {
-                address: "inbox@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo \"$AIMX_FROM\" \"$AIMX_SUBJECT\"".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        assert!(validate_on_receive_commands(&mailboxes).is_ok());
-    }
-
-    #[test]
     fn trust_none_fires_always() {
         let mut meta = sample_metadata();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        assert!(should_execute_triggers(&config, &meta));
+        assert!(should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trust_verified_blocks_on_dkim_fail() {
         let mut meta = sample_metadata();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        assert!(!should_execute_triggers(&config, &meta));
+        assert!(!should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trust_verified_blocks_on_dkim_none() {
         let meta = sample_metadata();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        assert!(!should_execute_triggers(&config, &meta));
+        assert!(!should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trust_verified_allows_on_dkim_pass() {
         let mut meta = sample_metadata();
         meta.dkim = "pass".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        assert!(should_execute_triggers(&config, &meta));
+        assert!(should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trusted_senders_bypasses_dkim_check() {
         let mut meta = sample_metadata();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec!["*@gmail.com".to_string()],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec!["*@gmail.com".to_string()]),
             on_receive: vec![],
         };
-        assert!(should_execute_triggers(&config, &meta));
+        assert!(should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trusted_senders_exact_match() {
         let mut meta = sample_metadata();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec!["alice@gmail.com".to_string()],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec!["alice@gmail.com".to_string()]),
             on_receive: vec![],
         };
-        assert!(should_execute_triggers(&config, &meta));
+        assert!(should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
     fn trusted_senders_no_match_falls_through() {
         let mut meta = sample_metadata();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec!["*@yahoo.com".to_string()],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec!["*@yahoo.com".to_string()]),
             on_receive: vec![],
         };
-        assert!(!should_execute_triggers(&config, &meta));
+        assert!(!should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
@@ -1106,13 +980,17 @@ mod tests {
         let mut meta = sample_metadata();
         meta.from = "Alice Smith <alice@gmail.com>".to_string();
         meta.dkim = "fail".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec!["*@gmail.com".to_string()],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec!["*@gmail.com".to_string()]),
             on_receive: vec![],
         };
-        assert!(should_execute_triggers(&config, &meta));
+        assert!(should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
@@ -1124,10 +1002,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!("touch {}", marker.to_string_lossy()),
@@ -1135,7 +1013,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(
             !marker.exists(),
             "Trigger should not have fired for DKIM fail with trust=verified"
@@ -1151,10 +1029,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!("touch {}", marker.to_string_lossy()),
@@ -1162,7 +1040,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(
             marker.exists(),
             "Trigger should fire for DKIM pass with trust=verified"
@@ -1170,16 +1048,80 @@ mod tests {
     }
 
     #[test]
+    fn unset_mailbox_inherits_global_verified_trust() {
+        // Global trust = verified, mailbox does not override → behaves as
+        // if the mailbox itself had trust = verified.
+        let mut cfg = sample_config();
+        cfg.trust = "verified".to_string();
+
+        let mailbox_config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: None,
+            trusted_senders: None,
+            on_receive: vec![],
+        };
+
+        let mut meta = sample_metadata();
+        meta.dkim = "fail".to_string();
+        assert!(!should_execute_triggers(&cfg, &mailbox_config, &meta));
+
+        meta.dkim = "pass".to_string();
+        assert!(should_execute_triggers(&cfg, &mailbox_config, &meta));
+    }
+
+    #[test]
+    fn unset_mailbox_inherits_global_trusted_senders() {
+        let mut cfg = sample_config();
+        cfg.trust = "verified".to_string();
+        cfg.trusted_senders = vec!["*@gmail.com".to_string()];
+
+        let mailbox_config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: None,
+            trusted_senders: None,
+            on_receive: vec![],
+        };
+
+        let mut meta = sample_metadata();
+        meta.from = "alice@gmail.com".to_string();
+        meta.dkim = "fail".to_string();
+        // DKIM fail, but global allowlist covers the sender → trigger fires.
+        assert!(should_execute_triggers(&cfg, &mailbox_config, &meta));
+    }
+
+    #[test]
+    fn mailbox_trust_none_override_beats_global_verified() {
+        let mut cfg = sample_config();
+        cfg.trust = "verified".to_string();
+
+        let mailbox_config = MailboxConfig {
+            address: "*@test.com".to_string(),
+            trust: Some("none".to_string()),
+            trusted_senders: None,
+            on_receive: vec![],
+        };
+
+        let mut meta = sample_metadata();
+        meta.dkim = "fail".to_string();
+        // Mailbox explicitly disables trust → triggers always fire.
+        assert!(should_execute_triggers(&cfg, &mailbox_config, &meta));
+    }
+
+    #[test]
     fn invalid_trust_value_denies_triggers() {
         let mut meta = sample_metadata();
         meta.dkim = "pass".to_string();
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "verfied".to_string(),
-            trusted_senders: vec![],
+            trust: Some("verfied".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        assert!(!should_execute_triggers(&config, &meta));
+        assert!(!should_execute_triggers(
+            &sample_config(),
+            &mailbox_config,
+            &meta
+        ));
     }
 
     #[test]
@@ -1190,10 +1132,10 @@ mod tests {
         let filepath = tmp.path().join("test.md");
         let ctx = sample_ctx(&filepath, &meta);
 
-        let config = MailboxConfig {
+        let mailbox_config = MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "typo".to_string(),
-            trusted_senders: vec![],
+            trust: Some("typo".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![OnReceiveRule {
                 rule_type: "cmd".to_string(),
                 command: format!("touch {}", marker.to_string_lossy()),
@@ -1201,7 +1143,7 @@ mod tests {
             }],
         };
 
-        execute_triggers(&config, &ctx);
+        execute_triggers(&sample_config(), &mailbox_config, &ctx);
         assert!(
             !marker.exists(),
             "Trigger should not fire for unknown trust value"

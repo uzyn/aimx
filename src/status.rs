@@ -1,7 +1,10 @@
 use crate::config::Config;
 use crate::frontmatter::InboundFrontmatter;
-use crate::setup::{RealSystemOps, SystemOps};
+use crate::setup::{
+    self, DnsRecord, DnsVerifyResult, NetworkOps, RealNetworkOps, RealSystemOps, SystemOps,
+};
 use crate::term;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 pub struct StatusInfo {
@@ -12,6 +15,12 @@ pub struct StatusInfo {
     pub smtp_running: bool,
     pub mailboxes: Vec<MailboxStatus>,
     pub recent_activity: Vec<RecentEmail>,
+    pub dns: Option<DnsSection>,
+}
+
+pub struct DnsSection {
+    pub results: Vec<(String, DnsVerifyResult)>,
+    pub records: Vec<DnsRecord>,
 }
 
 pub struct MailboxStatus {
@@ -30,12 +39,17 @@ pub struct RecentEmail {
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
-    gather_status_with_ops(config, &RealSystemOps)
+    gather_status_with_ops(config, &RealSystemOps, &RealNetworkOps::default())
 }
 
-/// Injectable seam for testing: takes a `SystemOps` implementation so tests
-/// can mock `is_service_running` without shelling out to `systemctl`/`rc-service`.
-pub fn gather_status_with_ops<S: SystemOps>(config: &Config, sys: &S) -> StatusInfo {
+/// Injectable seam for testing: takes `SystemOps` + `NetworkOps` implementations
+/// so tests can mock service-state probes and DNS resolution without touching
+/// the real system or network.
+pub fn gather_status_with_ops<S: SystemOps>(
+    config: &Config,
+    sys: &S,
+    net: &dyn NetworkOps,
+) -> StatusInfo {
     let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
     let smtp_running = sys.is_service_running("aimx");
 
@@ -57,6 +71,7 @@ pub fn gather_status_with_ops<S: SystemOps>(config: &Config, sys: &S) -> StatusI
     mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
 
     let recent_activity = gather_recent_activity(config);
+    let dns = gather_dns_section(config, net);
 
     StatusInfo {
         domain: config.domain.clone(),
@@ -66,7 +81,61 @@ pub fn gather_status_with_ops<S: SystemOps>(config: &Config, sys: &S) -> StatusI
         smtp_running,
         mailboxes,
         recent_activity,
+        dns,
     }
+}
+
+fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSection> {
+    let (ipv4, ipv6) = net.get_server_ips().ok()?;
+    let server_ipv4 = ipv4?;
+    let server_ip: IpAddr = IpAddr::V4(server_ipv4);
+    let server_ipv6: Option<IpAddr> = if config.enable_ipv6 {
+        ipv6.map(IpAddr::V6)
+    } else {
+        None
+    };
+
+    let dkim_dir = crate::config::dkim_dir();
+    let local_dkim_pubkey = if dkim_dir.join("public.key").exists() {
+        crate::dkim::dns_record_value(&dkim_dir)
+            .ok()
+            .and_then(|v| v.strip_prefix("v=DKIM1; k=rsa; p=").map(|s| s.to_string()))
+    } else {
+        None
+    };
+
+    let results = setup::verify_all_dns(
+        net,
+        &config.domain,
+        &server_ip,
+        server_ipv6.as_ref(),
+        &config.dkim_selector,
+        local_dkim_pubkey.as_deref(),
+    );
+
+    let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
+    let mut records = setup::generate_dns_records(
+        &config.domain,
+        &server_ip.to_string(),
+        server_ipv6_str.as_deref(),
+        local_dkim_pubkey
+            .as_deref()
+            .map(|p| format!("v=DKIM1; k=rsa; p={p}"))
+            .unwrap_or_default()
+            .as_str(),
+        &config.dkim_selector,
+    );
+
+    // Without a local DKIM public key on disk we have no authoritative value
+    // to suggest in the "→ Add:" hint — drop the DKIM record so the hint is
+    // suppressed. The DKIM DNS check itself still runs (it just verifies the
+    // record exists) and its FAIL/MISSING badge is still rendered.
+    if local_dkim_pubkey.is_none() {
+        let dkim_name = format!("{}._domainkey.{}", config.dkim_selector, config.domain);
+        records.retain(|r| !(r.record_type == "TXT" && r.name == dkim_name));
+    }
+
+    Some(DnsSection { results, records })
 }
 
 fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
@@ -260,6 +329,22 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     }
 
+    out.push_str(&format!("\n{}\n", term::header("DNS")));
+    match &info.dns {
+        Some(dns) => {
+            let (lines, _) = setup::dns_verification_record_lines(&dns.results, &dns.records);
+            for line in lines {
+                out.push_str(&format!("{line}\n"));
+            }
+        }
+        None => {
+            out.push_str(&format!(
+                "  {} - could not determine server IP\n",
+                term::warn("skipped"),
+            ));
+        }
+    }
+
     out
 }
 
@@ -273,6 +358,71 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use crate::setup::Port25Status;
+    use std::cell::Cell;
+    use std::collections::HashMap;
+    use std::net::{Ipv4Addr, Ipv6Addr};
+
+    /// Test double for DNS resolution + server-IP discovery. Defaults to a
+    /// server with IPv4 `1.2.3.4`, no IPv6, and empty DNS tables. Tests
+    /// override fields to simulate matching or drifted DNS records.
+    struct MockNetworkOps {
+        server_ipv4: Option<Ipv4Addr>,
+        server_ipv6: Option<Ipv6Addr>,
+        get_server_ips_fails: bool,
+        mx_records: HashMap<String, Vec<String>>,
+        a_records: HashMap<String, Vec<IpAddr>>,
+        aaaa_records: HashMap<String, Vec<IpAddr>>,
+        txt_records: HashMap<String, Vec<String>>,
+        resolve_calls: Cell<u32>,
+    }
+
+    impl Default for MockNetworkOps {
+        fn default() -> Self {
+            Self {
+                server_ipv4: Some("1.2.3.4".parse().unwrap()),
+                server_ipv6: None,
+                get_server_ips_fails: false,
+                mx_records: HashMap::new(),
+                a_records: HashMap::new(),
+                aaaa_records: HashMap::new(),
+                txt_records: HashMap::new(),
+                resolve_calls: Cell::new(0),
+            }
+        }
+    }
+
+    impl NetworkOps for MockNetworkOps {
+        fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch check_outbound_port25")
+        }
+        fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch check_inbound_port25")
+        }
+        fn get_server_ips(
+            &self,
+        ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>> {
+            if self.get_server_ips_fails {
+                return Err("mock get_server_ips failure".into());
+            }
+            Ok((self.server_ipv4, self.server_ipv6))
+        }
+        fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            self.resolve_calls.set(self.resolve_calls.get() + 1);
+            Ok(self.mx_records.get(domain).cloned().unwrap_or_default())
+        }
+        fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+            self.resolve_calls.set(self.resolve_calls.get() + 1);
+            Ok(self.a_records.get(domain).cloned().unwrap_or_default())
+        }
+        fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+            self.resolve_calls.set(self.resolve_calls.get() + 1);
+            Ok(self.aaaa_records.get(domain).cloned().unwrap_or_default())
+        }
+        fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            self.resolve_calls.set(self.resolve_calls.get() + 1);
+            Ok(self.txt_records.get(domain).cloned().unwrap_or_default())
+        }
+    }
 
     /// Minimal mock that only exercises `is_service_running`. All other
     /// `SystemOps` methods panic — they must not be reached by `gather_status`.
@@ -330,6 +480,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -342,7 +494,8 @@ mod tests {
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
         let config = empty_config(tmp.path());
-        let info = gather_status_with_ops(&config, &FakeServiceOps { running: true });
+        let net = MockNetworkOps::default();
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: true }, &net);
         assert!(info.smtp_running);
     }
 
@@ -352,7 +505,8 @@ mod tests {
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
         let config = empty_config(tmp.path());
-        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false });
+        let net = MockNetworkOps::default();
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
         assert!(!info.smtp_running);
     }
 
@@ -373,6 +527,7 @@ mod tests {
             smtp_running: true,
             mailboxes: vec![],
             recent_activity: vec![],
+            dns: None,
         };
         let output = format_status(&info);
         assert!(output.contains("test.example.com"));
@@ -404,6 +559,7 @@ mod tests {
                 },
             ],
             recent_activity: vec![],
+            dns: None,
         };
         let output = format_status(&info);
         assert!(output.contains("agent.example.com"));
@@ -439,6 +595,7 @@ mod tests {
                 },
             ],
             recent_activity: vec![],
+            dns: None,
         };
 
         // Returns the visible column where the ADDRESS field starts on each
@@ -505,6 +662,7 @@ mod tests {
             smtp_running: false,
             mailboxes: vec![],
             recent_activity: vec![],
+            dns: None,
         };
         let output = format_status(&info);
         assert!(output.contains("MISSING"));
@@ -598,8 +756,8 @@ mod tests {
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
 
@@ -607,6 +765,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -644,6 +804,7 @@ mod tests {
                     date: "2025-01-14T08:00:00Z".to_string(),
                 },
             ],
+            dns: None,
         };
         let output = format_status(&info);
         assert!(
@@ -668,6 +829,7 @@ mod tests {
             smtp_running: true,
             mailboxes: vec![],
             recent_activity: vec![],
+            dns: None,
         };
         let output = format_status(&info);
         assert!(!output.contains("Recent activity:"));
@@ -689,8 +851,8 @@ mod tests {
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
 
@@ -698,6 +860,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -708,5 +872,227 @@ mod tests {
         assert_eq!(activity[0].from, "alice@example.com");
         assert_eq!(activity[0].subject, "Test email");
         assert_eq!(activity[0].mailbox, "catchall");
+    }
+
+    #[test]
+    fn gather_status_includes_dns_when_server_ip_available() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let config = empty_config(tmp.path());
+        let mut net = MockNetworkOps::default();
+        // Make the live DNS records line up with the server so we get PASS badges.
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        net.a_records.insert(config.domain.clone(), vec![ip]);
+        net.mx_records
+            .insert(config.domain.clone(), vec!["10 test.com.".into()]);
+        net.txt_records.insert(
+            config.domain.clone(),
+            vec!["v=spf1 ip4:1.2.3.4 -all".into()],
+        );
+        net.txt_records.insert(
+            format!("_dmarc.{}", config.domain),
+            vec!["v=DMARC1; p=reject".into()],
+        );
+        net.txt_records.insert(
+            format!("dkim._domainkey.{}", config.domain),
+            vec!["v=DKIM1; k=rsa; p=AAAA".into()],
+        );
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        let dns = info
+            .dns
+            .expect("DNS section must be present when server IP is known");
+        let names: Vec<&str> = dns.results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"MX"));
+        assert!(names.contains(&"A"));
+        assert!(names.contains(&"SPF"));
+        assert!(names.contains(&"DKIM"));
+        assert!(names.contains(&"DMARC"));
+        assert!(
+            !names.contains(&"AAAA"),
+            "AAAA must NOT appear when enable_ipv6 = false"
+        );
+        assert!(
+            net.resolve_calls.get() > 0,
+            "gather_status must perform DNS lookups when building the DNS section"
+        );
+
+        // The A-record verification was primed with a matching IP; it must
+        // produce Pass. This proves the IP→verify_all_dns→DnsSection wiring
+        // end-to-end, not just struct shape.
+        let a_result = dns
+            .results
+            .iter()
+            .find(|(n, _)| n == "A")
+            .map(|(_, r)| r)
+            .expect("A check must be present");
+        assert!(
+            matches!(a_result, DnsVerifyResult::Pass),
+            "A check must Pass when the mock A record matches the server IP, got {a_result:?}"
+        );
+    }
+
+    #[test]
+    fn gather_status_dns_none_when_server_ip_unavailable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let config = empty_config(tmp.path());
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        assert!(
+            info.dns.is_none(),
+            "DNS section must be None when the server IPv4 cannot be determined"
+        );
+    }
+
+    #[test]
+    fn gather_status_dns_none_when_get_server_ips_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let config = empty_config(tmp.path());
+        let net = MockNetworkOps {
+            get_server_ips_fails: true,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        assert!(
+            info.dns.is_none(),
+            "DNS section must be None when get_server_ips errors out"
+        );
+    }
+
+    #[test]
+    fn gather_dns_drops_dkim_record_when_local_pubkey_missing() {
+        // When no DKIM public key is on disk (e.g. setup not yet run, or key
+        // removed), `aimx status` must NOT emit a "→ Add:" DNS hint with an
+        // empty `p=` value. Guarding this at the `records` level is the
+        // cheapest way: dns_record_for_check falls back to None for DKIM,
+        // and dns_verification_lines omits the hint line.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        // Do NOT write a DKIM public.key — this is the scenario under test.
+        assert!(
+            !crate::config::dkim_dir().join("public.key").exists(),
+            "precondition: no DKIM public key on disk"
+        );
+
+        let config = empty_config(tmp.path());
+        let net = MockNetworkOps::default();
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        let dns = info.dns.expect("DNS section must be present");
+
+        let dkim_name = format!("dkim._domainkey.{}", config.domain);
+        let has_dkim_record = dns
+            .records
+            .iter()
+            .any(|r| r.record_type == "TXT" && r.name == dkim_name);
+        assert!(
+            !has_dkim_record,
+            "DnsSection.records must NOT contain a DKIM TXT record with an empty p= \
+             value when the local public key is absent (got: {:?})",
+            dns.records
+                .iter()
+                .find(|r| r.name == dkim_name)
+                .map(|r| r.value.as_str())
+        );
+    }
+
+    #[test]
+    fn gather_dns_includes_aaaa_when_ipv6_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let mut config = empty_config(tmp.path());
+        config.enable_ipv6 = true;
+
+        let net = MockNetworkOps {
+            server_ipv6: Some("2001:db8::1".parse().unwrap()),
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
+        let dns = info.dns.expect("DNS section must be present");
+        let names: Vec<&str> = dns.results.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(
+            names.contains(&"AAAA"),
+            "AAAA must appear when enable_ipv6 = true and server has an IPv6 address"
+        );
+        assert!(
+            names.contains(&"SPF (IPv6)"),
+            "SPF (IPv6) must appear when enable_ipv6 = true"
+        );
+    }
+
+    #[test]
+    fn format_status_renders_dns_section() {
+        let results = vec![
+            ("MX".into(), DnsVerifyResult::Pass),
+            ("A".into(), DnsVerifyResult::Pass),
+        ];
+        let records = setup::generate_dns_records(
+            "test.com",
+            "1.2.3.4",
+            None,
+            "v=DKIM1; k=rsa; p=AAAA",
+            "dkim",
+        );
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            mailboxes: vec![],
+            recent_activity: vec![],
+            dns: Some(DnsSection { results, records }),
+        };
+
+        let output = format_status(&info);
+        // Header for the new section. `term::header` wraps with "===" in color
+        // mode and plain text otherwise; "DNS" is the load-bearing substring.
+        assert!(
+            output.contains("DNS"),
+            "format_status must render a DNS section header, got:\n{output}"
+        );
+        // Per-record lines come from `dns_verification_lines`.
+        assert!(
+            output.contains("MX:"),
+            "format_status must render per-record DNS lines, got:\n{output}"
+        );
+        assert!(output.contains("A:"));
+    }
+
+    #[test]
+    fn format_status_renders_dns_skipped_when_none() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "dkim".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            mailboxes: vec![],
+            recent_activity: vec![],
+            dns: None,
+        };
+
+        let output = format_status(&info);
+        assert!(
+            output.contains("DNS"),
+            "DNS header must still render when dns is None"
+        );
+        assert!(
+            output.contains("skipped"),
+            "format_status must mark DNS as skipped when dns is None, got:\n{output}"
+        );
     }
 }

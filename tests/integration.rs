@@ -148,7 +148,7 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("status"))
         .stdout(predicate::str::contains("serve"))
-        .stdout(predicate::str::contains("verify"))
+        .stdout(predicate::str::contains("portcheck"))
         .stdout(predicate::str::contains("dkim-keygen"));
 }
 
@@ -1061,45 +1061,6 @@ command = "false"
 }
 
 #[test]
-fn ingest_rejects_legacy_placeholder_config_at_cli() {
-    // Regression guard: Config::load must refuse a config that still
-    // references the retired `{from}` / `{subject}` / `{to}` / `{mailbox}` /
-    // `{filepath}` placeholders, and that error must surface to the CLI user
-    // as a non-zero exit code with a stderr message naming the placeholder and
-    // pointing at the migration (AIMX_* env vars).
-    let tmp = TempDir::new().unwrap();
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = 'echo "from={{from}} subject={{subject}}" >> /tmp/legacy.log'
-"#,
-        tmp.path().display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("catchall"))
-        .stderr(predicate::str::contains("{from}"))
-        .stderr(predicate::str::contains("AIMX_FROM"));
-}
-
-#[test]
 fn ingest_trust_verified_blocks_unsigned_trigger() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("should_not_exist");
@@ -1178,6 +1139,122 @@ command = "touch {}"
     assert!(
         marker.exists(),
         "Trigger should fire with trust=none even for unsigned email"
+    );
+}
+
+/// Verifies the end-to-end global-trust inherit path: the top-level
+/// `trust` + `trusted_senders` on `Config` apply to a mailbox that has
+/// neither field set. On ingest the frontmatter's `trusted` value and the
+/// channel-trigger gate must both reflect the inherited policy.
+#[test]
+fn ingest_inherits_global_trust_when_mailbox_has_no_override() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("triggered");
+    // Global `trust = "verified"` + allowlist covering alice@example.com.
+    // The catchall mailbox has no per-mailbox trust or trusted_senders.
+    let config_content = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+trust = "verified"
+trusted_senders = ["*@example.com"]
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
+"#,
+        tmp.path().display(),
+        marker.display()
+    );
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
+    assert_eq!(md_files.len(), 1);
+
+    // Channel-trigger gate fires via the inherited allowlist — even though
+    // the unsigned fixture's DKIM is `"none"`, the global `trusted_senders`
+    // covers alice@example.com.
+    assert!(
+        marker.exists(),
+        "Trigger should fire via inherited global trusted_senders allowlist"
+    );
+
+    // The strict `trusted` field evaluation requires BOTH allowlist AND
+    // DKIM pass. Unsigned fixture → DKIM is not "pass" → trusted = "false".
+    // This proves the inherit path wired through `trust::evaluate_trust`.
+    let parsed = read_frontmatter(&md_files[0]);
+    let table = parsed.as_table().unwrap();
+    assert_eq!(
+        get_toml_str(table, "trusted"),
+        "false",
+        "global verified + allowlisted sender + DKIM != pass → trusted=false"
+    );
+}
+
+/// A per-mailbox `trust = "none"` override must beat a global `"verified"`:
+/// triggers fire for any inbound, and the frontmatter `trusted` field is
+/// `"none"` (no evaluation performed).
+#[test]
+fn ingest_mailbox_trust_none_override_beats_global_verified() {
+    let tmp = TempDir::new().unwrap();
+    let marker = tmp.path().join("triggered");
+    let config_content = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+trust = "verified"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+trust = "none"
+
+[[mailboxes.catchall.on_receive]]
+type = "cmd"
+command = "touch {}"
+"#,
+        tmp.path().display(),
+        marker.display()
+    );
+    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
+
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success();
+
+    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
+    assert_eq!(md_files.len(), 1);
+    assert!(
+        marker.exists(),
+        "Trigger should fire because mailbox trust=none overrides global verified"
+    );
+
+    let parsed = read_frontmatter(&md_files[0]);
+    let table = parsed.as_table().unwrap();
+    assert_eq!(
+        get_toml_str(table, "trusted"),
+        "none",
+        "mailbox trust=none override → no evaluation → trusted=none"
     );
 }
 
@@ -1392,13 +1469,13 @@ fn status_help_works() {
 }
 
 #[test]
-fn verify_help_works() {
+fn portcheck_help_works() {
     Command::cargo_bin("aimx")
         .unwrap()
-        .args(["verify", "--help"])
+        .args(["portcheck", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("verify"));
+        .stdout(predicate::str::contains("port 25"));
 }
 
 #[test]
@@ -2484,7 +2561,7 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 1 -->"),
+        after.starts_with("<!-- aimx-readme-version: 2 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );

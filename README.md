@@ -39,7 +39,7 @@ sudo aimx setup agent.yourdomain.com
 
 # 3. Follow the interactive prompts to add DNS records
 # 4. Verify inbound + outbound port 25 reachability
-sudo aimx verify
+sudo aimx portcheck
 
 # 5. Check status
 aimx status
@@ -68,7 +68,7 @@ sudo aimx setup agent.yourdomain.com
 aimx status
 
 # Check port 25 connectivity (requires root)
-sudo aimx verify
+sudo aimx portcheck
 ```
 
 ### Mailbox management
@@ -187,7 +187,7 @@ data_dir = "/var/lib/aimx"
 dkim_selector = "dkim"
 
 # Verifier service base URL (default: https://check.aimx.email)
-# Used by `aimx verify` and `aimx setup`. Set this only if
+# Used by `aimx portcheck` and `aimx setup`. Set this only if
 # you are self-hosting the verifier service (see `services/verifier/`). aimx appends
 # `/probe` to this base URL internally.
 # verify_host = "https://verify.yourdomain.com"
@@ -246,8 +246,6 @@ Two aimx-controlled fields are also substituted as **template placeholders** dir
 |-------------|-------------|
 | `{id}` | Email ID / filename stem (e.g., `2025-04-15-103000-hello`) |
 | `{date}` | Email date |
-
-Configs that reference the legacy `{from}`, `{to}`, `{subject}`, `{mailbox}`, or `{filepath}` placeholders are rejected at config load with a migration hint — replace each with its `$AIMX_*` equivalent inside double quotes.
 
 ### Trust policy
 
@@ -345,10 +343,10 @@ To point AIMX at a self-hosted instance, set `verify_host` in `config.toml`:
 verify_host = "https://verify.yourdomain.com"
 ```
 
-Or override it per-invocation with the `--verify-host` flag, which is accepted by `aimx verify` and `aimx setup`:
+Or override it per-invocation with the `--verify-host` flag, which is accepted by `aimx portcheck` and `aimx setup`:
 
 ```bash
-sudo aimx verify --verify-host https://verify.yourdomain.com
+sudo aimx portcheck --verify-host https://verify.yourdomain.com
 ```
 
 Precedence is **CLI flag > config > default** (`https://check.aimx.email`).
