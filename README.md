@@ -399,8 +399,6 @@ Under a normal install you won't need either — `aimx setup` writes to the cano
 
 ## License
 
-MIT
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## Author
-
-[U-Zyn Chua](https://uzyn.com) <chua@uzyn.com>
+Copyright (c) [U-Zyn Chua](https://uzyn.com).
