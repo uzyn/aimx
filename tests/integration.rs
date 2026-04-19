@@ -1459,6 +1459,27 @@ fn doctor_shows_domain_and_mailboxes() {
 }
 
 #[test]
+fn logs_help_advertises_lines_and_follow_flags() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["logs", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--lines"))
+        .stdout(predicate::str::contains("--follow"));
+}
+
+#[test]
+fn logs_subcommand_is_advertised_in_top_level_help() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("logs"));
+}
+
+#[test]
 fn doctor_help_works() {
     Command::cargo_bin("aimx")
         .unwrap()

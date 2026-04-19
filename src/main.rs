@@ -7,6 +7,7 @@ mod dkim;
 mod doctor;
 mod frontmatter;
 mod ingest;
+mod logs;
 mod mailbox;
 mod mailbox_handler;
 mod mailbox_locks;
@@ -74,6 +75,9 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.
         Command::Send(args) => send::run(args),
+        // `aimx logs` is a thin wrapper around journalctl; it does not
+        // read config.toml.
+        Command::Logs { lines, follow } => logs::run(lines, follow),
         // Everything else loads Config once here and takes it by value.
         other => {
             let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
@@ -108,6 +112,7 @@ fn dispatch_with_config(
         | Command::Portcheck { .. }
         | Command::Mcp
         | Command::Send(_)
+        | Command::Logs { .. }
         | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
     }
 }

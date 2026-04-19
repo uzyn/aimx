@@ -473,6 +473,16 @@ mod tests {
         fn wait_for_service_ready(&self) -> bool {
             unreachable!("gather_status must not touch wait_for_service_ready")
         }
+        fn tail_service_logs(
+            &self,
+            _unit: &str,
+            _n: usize,
+        ) -> Result<String, Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch tail_service_logs")
+        }
+        fn follow_service_logs(&self, _unit: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch follow_service_logs")
+        }
     }
 
     fn empty_config(data_dir: &Path) -> Config {

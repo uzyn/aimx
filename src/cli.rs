@@ -70,6 +70,17 @@ pub enum Command {
     /// Show server health, mailbox counts, configuration, DNS verification, and recent logs
     Doctor,
 
+    /// Tail or follow the aimx service log
+    Logs {
+        /// Number of lines to show (default: 50)
+        #[arg(long)]
+        lines: Option<usize>,
+
+        /// Stream the log live (like `journalctl -f`)
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
+
     /// Start the embedded SMTP listener daemon
     Serve {
         /// Bind address (default: 0.0.0.0:25)
