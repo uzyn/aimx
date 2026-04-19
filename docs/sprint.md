@@ -570,7 +570,7 @@ or
 
 ---
 
-## Sprint 49 — Frontmatter `read_at` Timestamp (Days 135.5–138) [IN PROGRESS]
+## Sprint 49 — Frontmatter `read_at` Timestamp (Days 135.5–138) [DONE]
 
 **Goal:** Add optional `read_at` RFC 3339 UTC timestamp to inbound email frontmatter. Written by the MARK-READ handler; removed on MARK-UNREAD. Lets agents and operators see *when* an email was first marked read without a separate audit log.
 
@@ -592,7 +592,7 @@ or
 
 ---
 
-## Sprint 50 — Hooks Foundation: Rename + Schema + Trust Gate + `after_send` + Logs (Days 138–140.5) [NOT STARTED]
+## Sprint 50 — Hooks Foundation: Rename + Schema + Trust Gate + `after_send` + Logs (Days 138–140.5) [IN PROGRESS]
 
 **Goal:** Rename the "channels" concept to "hooks" across code/config/docs. Extend the hook model with a new `after_send` event for post-delivery observability. Every hook gets a unique 12-char alphanumeric ID. Per-hook `dangerously_support_untrusted` opt-in replaces the current implicit trust gate (mailbox `trust: none` now fires no hooks by default). Every hook fire emits a structured journald log line for traceability — the agreed substitute for the rejected frontmatter `hooks` field. `before_send` was considered and dropped; only `after_send` is in scope for send-side hooks.
 
@@ -795,8 +795,8 @@ or
 | 46 | 128–130.5 | Mailbox CRUD via UDS (Daemon Picks Up Changes Live) | UDS `MAILBOX-CREATE`/`MAILBOX-DELETE` verbs + daemon hot-swaps `Arc<Config>`, `aimx mailbox create/delete` route through daemon first and suppress restart hint on success, directory lifecycle + NONEMPTY safety on delete | Done |
 | 47 | 130.5–133 | Post-v1 Non-blocking Cleanup | DKIM startup integration test + runtime-flavor contract, exhaustive `InitSystem` match + `.env_clear()` defense-in-depth, `validate_mailbox_name` tightening + `write_config_atomic` preservation + stronger rename-failure test, unify ingest + MARK writers under one per-mailbox lock | Done |
 | 48 | 133–135.5 | Doctor + Logs + Delete --force + Completion | `aimx status` → `aimx doctor` (clean rename), extended output with config path + trust + hooks summary + last 10 log lines, new `aimx logs` subcommand, `aimx mailbox delete --force` with interactive confirmation, MCP NONEMPTY hint, `aimx mailbox` → `aimx mailboxes` (singular alias retained), `aimx completion <shell>` for tab-completion | Done |
-| 49 | 135.5–138 | Frontmatter `read_at` | MARK-READ writes `read_at` timestamp; MARK-UNREAD removes the field | In Progress |
-| 50 | 138–140.5 | Hooks Foundation | Rename `channels` → `hooks` across code/config/docs, 12-char alphanumeric hook IDs, trust gate rewrite (`on_receive` trusted-only + per-hook `dangerously_support_untrusted` opt-in), `after_send` event, structured journald hook-fire logs | Not Started |
+| 49 | 135.5–138 | Frontmatter `read_at` | MARK-READ writes `read_at` timestamp; MARK-UNREAD removes the field | Done |
+| 50 | 138–140.5 | Hooks Foundation | Rename `channels` → `hooks` across code/config/docs, 12-char alphanumeric hook IDs, trust gate rewrite (`on_receive` trusted-only + per-hook `dangerously_support_untrusted` opt-in), `after_send` event, structured journald hook-fire logs | In Progress |
 | 51 | 140.5–143 | Hooks CLI + UDS Hot-Swap | `aimx mailboxes show <name>`, `aimx hooks list \| create \| delete` (flag-based, `hook` alias), UDS `HOOK-CREATE` / `HOOK-DELETE` verbs with live `Arc<Config>` swap | Not Started |
 
 ## Deferred to v2
