@@ -1,23 +1,24 @@
-# AIMX
+# AIMX – AI Mail Exchange
 
 > You give your agents an entire server. Why borrow someone else's inbox?
 
 **SMTP for agents. No middleman.**
 
-Self-hosted SMTP for AI agents. It's the only mail server built from scratch for AI — stores every message as Markdown with TOML frontmatter, perfect for LLMs and RAG. AIMX signs outbound with DKIM, verifies inbound DKIM/SPF/DMARC on arrival, so your email channel is secure. AIMX triggers your AI agents the moment mail lands, and exposes the whole inbox over MCP to Claude Code, OpenClaw and your other favorite AI agents with a one-line install. Run it on VPS with open port 25. One binary, one daemon — no Postfix, no Dovecot, no SaaS in the loop. Your emails stay truly private. Your agents send and receive from their own domain, and the mail lives on your disk.
+One command gives your AI agents their own email addresses. No Gmail, no OAuth, no SaaS. Fully self-hosted means full sovereignty.
 
-AIMX takes a 40-year-old open protocol and rebuilds it into a fast, private, signed channel for the agentic era.                                                                                                      
+Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent -- Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw.
 
-- **Single binary, lightweight daemon.** One binary is all your need. No other dependencies.
-- **Email as a secure & fast channel.** Email has become a send-and-pray best-effort. AIMX turns email back again into direct MTA-to-MTA communication, bringing it closer to API-like experience.
+
+- **Single binary.** One binary, no other dependencies. 
+- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery -- closer to an API call.
 - **Push, not poll.** Inbound mail fires channel triggers the moment SMTP `DATA` completes. No cron, no heartbeat.
-- **Trust modeling.** DKIM/SPF/DMARC verified on ingest, result stamped into the frontmatter. Configure trust globally or per mailbox.
-- **IPv6-ready.** Opt into IPv6 with one config flag. IPv4 by default, so your SPF record stays simple.
-- **Markdown-first storage.** No `.eml`, no database. Emails are simply Markdown with TOML frontmatter — easy for LLMs and RAG to parse. Skip the search API; your agent can just `cat` the mailbox. Your inbox becomes your knowledge base.
-- **You own the inbox.** Mail lives entirely on your disk, under your domain. Nothing phones home. 
-- **Hot-swappable mailboxes.** Let your agents create and manage your mailboxes, or manage them manually. Changes take effect live. 
-- **Built-in MCP server.** MCP tools over efficient stdio — list, read, send, reply, mark read/unread, and mailbox CRUD.
-- **One-line agent integration.** `aimx agent-setup` wires AIMX into Claude Code, OpenClaw, Codex CLI, Gemini CLI, OpenCode, and Goose in one command.
+- **Trust modeling.** Signatures verified on ingest, stamped into the frontmatter. Configurable globally or per mailbox.
+- **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
+- **Markdown-first storage.** No `.eml`, no database. Just Markdown with TOML frontmatter -- LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
+- **You own the inbox.** Mail lives on your disk, under your domain. Nothing phones home.
+- **Hot-swappable mailboxes.** Agents (or you) create and manage mailboxes. Changes take effect live.
+- **Built-in MCP server.** Stdio tools: list, read, send, reply, mark read/unread, mailbox CRUD.
+- **One-line agent integration.** `aimx agent-setup` wires AIMX into any supported agent above.
 - **MIT licensed.** No license server, no telemetry, no account.
 
 ## Requirements
