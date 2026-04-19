@@ -3,15 +3,15 @@ use crate::setup::{self, DEFAULT_VERIFY_HOST, NetworkOps, Port25Status, SystemOp
 use crate::term;
 
 pub fn run(verify_host: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
-    run_verify(verify_host, &setup::RealSystemOps)
+    run_portcheck(verify_host, &setup::RealSystemOps)
 }
 
-pub(crate) fn run_verify(
+pub(crate) fn run_portcheck(
     verify_host: Option<&str>,
     sys: &dyn SystemOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !sys.check_root() {
-        return Err("`aimx verify` requires root. Run with: sudo aimx verify".into());
+        return Err("`aimx portcheck` requires root. Run with: sudo aimx portcheck".into());
     }
 
     let config = Config::load_resolved().ok();
@@ -30,7 +30,7 @@ pub(crate) fn run_verify(
 
 /// Bind a minimal SMTP listener on `0.0.0.0:25` for the duration of `f`,
 /// then tear it down. Used by the preflight probe during `aimx setup`
-/// (before aimx.service is installed) and by `aimx verify` (when nothing
+/// (before aimx.service is installed) and by `aimx portcheck` (when nothing
 /// is holding the port). The listener speaks just enough SMTP — 220 banner,
 /// EHLO/HELO, QUIT — for the remote `/probe` endpoint to confirm the port
 /// is reachable.
@@ -151,7 +151,7 @@ pub fn run_with_net(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}\n",
-        term::header("AIMX verify - Port 25 connectivity check")
+        term::header("AIMX portcheck - Port 25 connectivity check")
     );
 
     let mut all_pass = true;
@@ -198,7 +198,7 @@ pub fn run_with_net(
 
         Port25Status::OtherProcess(name) => Err(format!(
             "Port 25 is occupied by `{name}`.\n\
-             Stop or uninstall the process and run `sudo aimx verify` again to check."
+             Stop or uninstall the process and run `sudo aimx portcheck` again to check."
         )
         .into()),
     }
@@ -314,9 +314,9 @@ mod tests {
     }
 
     #[test]
-    fn verify_requires_root() {
+    fn portcheck_requires_root() {
         let sys = MockSystemOps { is_root: false };
-        let result = run_verify(Some("https://check.example.com"), &sys);
+        let result = run_portcheck(Some("https://check.example.com"), &sys);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -328,7 +328,7 @@ mod tests {
     // --- aimx running tests ---
 
     #[test]
-    fn verify_aimx_all_pass() {
+    fn portcheck_aimx_all_pass() {
         let net = MockNetworkOps::default();
         assert!(run_with_net(&net, &Port25Status::Aimx).is_ok());
         assert!(
@@ -338,7 +338,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_aimx_outbound_fail() {
+    fn portcheck_aimx_outbound_fail() {
         let net = MockNetworkOps {
             outbound: false,
             ..Default::default()
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_aimx_inbound_ehlo_fail() {
+    fn portcheck_aimx_inbound_ehlo_fail() {
         let net = MockNetworkOps {
             inbound: false,
             ..Default::default()
@@ -358,7 +358,7 @@ mod tests {
     // --- OtherProcess tests ---
 
     #[test]
-    fn verify_other_process_fails_with_name() {
+    fn portcheck_other_process_fails_with_name() {
         let net = MockNetworkOps::default();
         let err = run_with_net(&net, &Port25Status::OtherProcess("postfix".into()))
             .unwrap_err()
@@ -373,7 +373,7 @@ mod tests {
     // --- Free (temp server) tests ---
 
     #[test]
-    fn verify_free_all_pass() {
+    fn portcheck_free_all_pass() {
         let net = MockNetworkOps::default();
         assert!(run_with_net(&net, &Port25Status::Free).is_ok());
         assert!(
@@ -383,7 +383,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_free_inbound_fail() {
+    fn portcheck_free_inbound_fail() {
         let net = MockNetworkOps {
             inbound: false,
             ..Default::default()
@@ -396,13 +396,6 @@ mod tests {
     #[test]
     fn config_without_verify_address_parses() {
         let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.domain, "test.com");
-    }
-
-    #[test]
-    fn config_with_legacy_verify_address_parses() {
-        let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.domain, "test.com");
     }

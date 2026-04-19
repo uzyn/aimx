@@ -2,7 +2,7 @@
 
 Verification service for [AIMX](https://github.com/uzyn/aimx). Provides an HTTP endpoint plus a built-in port 25 listener:
 
-1. **`/probe`** — full SMTP EHLO handshake back to the caller's IP on port 25. Used by `aimx setup` and `aimx verify` to confirm a real SMTP server is responding.
+1. **`/probe`** — full SMTP EHLO handshake back to the caller's IP on port 25. Used by `aimx setup` and `aimx portcheck` to confirm a real SMTP server is responding.
 2. **Port 25 listener** — built-in TCP listener on port 25 that implements a minimal but correct SMTP exchange (banner → EHLO/HELO → 250 → QUIT → 221 Bye), allowing `aimx` clients to test outbound port 25 reachability via EHLO handshake.
 
 No MTA is required on the verifier server.
@@ -34,7 +34,7 @@ BIND_ADDR=0.0.0.0:8080 SMTP_BIND_ADDR=0.0.0.0:2525 ./target/release/aimx-verifie
 Health check. Returns `{"status": "ok", "service": "aimx-verifier"}`.
 
 #### `GET /probe`
-Connects back to the caller's IP on port 25 and performs a full SMTP EHLO handshake. Returns `reachable: true` only if a real SMTP server responds with a valid `220` banner, accepts `EHLO`, and replies `250`. Used by `aimx setup` and `aimx verify`, both of which run after OpenSMTPD is installed and should validate that a real SMTP responder is live.
+Connects back to the caller's IP on port 25 and performs a full SMTP EHLO handshake. Returns `reachable: true` only if a real SMTP server responds with a valid `220` banner, accepts `EHLO`, and replies `250`. Used by `aimx setup` and `aimx portcheck`, both of which run after OpenSMTPD is installed and should validate that a real SMTP responder is live.
 
 Response: `{"reachable": true, "ip": "1.2.3.4"}`
 
@@ -88,7 +88,7 @@ To self-host (replacing `check.aimx.email`):
 
    You can also override it per-invocation:
    ```
-   aimx verify --verify-host https://check.yourdomain.com
+   aimx portcheck --verify-host https://check.yourdomain.com
    ```
 
 No MTA, no email sending, no DNS records beyond the A record are needed on the verifier server — it only needs:

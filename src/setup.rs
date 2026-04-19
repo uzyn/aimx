@@ -46,14 +46,14 @@ pub trait SystemOps {
         &self,
         f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        crate::verify::with_temp_smtp_listener(f)
+        crate::portcheck::with_temp_smtp_listener(f)
     }
 }
 
 pub trait NetworkOps {
     fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     /// Full SMTP EHLO handshake via `{verify_host}/probe`.
-    /// Used by `aimx setup` (post-install) and `aimx verify`.
+    /// Used by `aimx setup` (post-install) and `aimx portcheck`.
     fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>>;
     /// Return the server's IPv4 and IPv6 addresses in a single call.
     ///

@@ -13,7 +13,8 @@ For full reference material, see the files in `references/`:
 - `references/troubleshooting.md` — error codes and recovery steps
 
 At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
-directory layout, regenerated on each AIMX upgrade.
+directory layout, written by `aimx setup` and refreshed on `aimx serve`
+startup.
 
 ## Two access surfaces
 
@@ -303,4 +304,4 @@ and `spf`. Treat `"false"` and `"none"` as untrusted.
 - `references/troubleshooting.md` — UDS protocol error codes, common
   misconfigurations, and recovery steps.
 - `/var/lib/aimx/README.md` — runtime guide to the data directory layout,
-  regenerated on each AIMX upgrade.
+  written by `aimx setup` and refreshed on `aimx serve` startup.
