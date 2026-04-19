@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
@@ -55,6 +56,12 @@ pub struct InboundFrontmatter {
     // -- Storage --
     pub mailbox: String,
     pub read: bool,
+    /// RFC 3339 UTC timestamp written by the `MARK-READ` handler when
+    /// the email is marked read. Removed entirely on `MARK-UNREAD`.
+    /// Re-marking read overwrites with a new timestamp — "most recent
+    /// read", not "first read" (FR-13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
 }
@@ -351,6 +358,7 @@ mod tests {
             trusted: "none".to_string(),
             mailbox: "alice".to_string(),
             read: false,
+            read_at: None,
             labels: vec![],
         }
     }
@@ -708,6 +716,57 @@ mod tests {
         fm.received_from_ip = None;
         let toml_str = toml::to_string(&fm).unwrap();
         assert!(!toml_str.contains("received_from_ip"));
+    }
+
+    #[test]
+    fn read_at_omitted_when_none() {
+        let fm = sample_frontmatter();
+        assert!(fm.read_at.is_none());
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(
+            !toml_str.contains("read_at"),
+            "read_at must be omitted when None (FR-19d); got:\n{toml_str}"
+        );
+    }
+
+    #[test]
+    fn read_at_present_when_set() {
+        use chrono::TimeZone;
+        let mut fm = sample_frontmatter();
+        fm.read = true;
+        fm.read_at = Some(Utc.with_ymd_and_hms(2025, 6, 15, 12, 30, 45).unwrap());
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(toml_str.contains("read_at ="), "got:\n{toml_str}");
+    }
+
+    #[test]
+    fn read_at_appears_after_read_in_storage_section() {
+        use chrono::TimeZone;
+        let mut fm = sample_frontmatter();
+        fm.read = true;
+        fm.read_at = Some(Utc.with_ymd_and_hms(2025, 6, 15, 12, 30, 45).unwrap());
+        let toml_str = toml::to_string(&fm).unwrap();
+        let read_pos = toml_str.find("\nread = ").expect("read field present");
+        let read_at_pos = toml_str
+            .find("\nread_at = ")
+            .expect("read_at field present");
+        assert!(
+            read_pos < read_at_pos,
+            "read_at must follow read; got:\n{toml_str}"
+        );
+    }
+
+    #[test]
+    fn read_at_roundtrip_preserves_value() {
+        use chrono::TimeZone;
+        let mut fm = sample_frontmatter();
+        fm.read = true;
+        let ts = Utc.with_ymd_and_hms(2025, 6, 15, 12, 30, 45).unwrap();
+        fm.read_at = Some(ts);
+
+        let toml_str = toml::to_string(&fm).unwrap();
+        let parsed: InboundFrontmatter = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.read_at, Some(ts));
     }
 
     fn sample_outbound_frontmatter() -> OutboundFrontmatter {

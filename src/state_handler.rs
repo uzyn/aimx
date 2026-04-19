@@ -188,6 +188,14 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     };
 
     meta.read = req.read;
+    // FR-13: `read_at` is set when marking read (reflects the most
+    // recent read, overwriting any prior timestamp on re-read) and
+    // removed entirely when marking unread — never serialized as null.
+    meta.read_at = if req.read {
+        Some(chrono::Utc::now())
+    } else {
+        None
+    };
 
     let new_toml = match toml::to_string(&meta) {
         Ok(t) => t,
@@ -248,6 +256,7 @@ mod tests {
             trusted: "none".to_string(),
             mailbox: "alice".to_string(),
             read,
+            read_at: None,
             labels: vec![],
         }
     }
@@ -474,6 +483,125 @@ mod tests {
             }
             other => panic!("expected Err(Io), got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn mark_read_sets_read_at_timestamp() {
+        let tmp = TempDir::new().unwrap();
+        let meta = sample_meta("2025-06-01-001", false);
+        let inbox = tmp.path().join("inbox").join("alice");
+        write_email(&inbox, "2025-06-01-001", &meta);
+
+        let sctx = ctx(tmp.path());
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-001".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        let before = chrono::Utc::now();
+        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        let after = chrono::Utc::now();
+
+        let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
+        let fm: InboundFrontmatter =
+            toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
+        assert!(fm.read);
+        let ts = fm.read_at.expect("read_at must be set on MARK-READ");
+        assert!(
+            ts >= before && ts <= after,
+            "read_at {ts} not between {before} and {after}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_unread_removes_read_at_field() {
+        let tmp = TempDir::new().unwrap();
+        let mut meta = sample_meta("2025-06-01-001", true);
+        meta.read_at = Some(chrono::Utc::now());
+        let inbox = tmp.path().join("inbox").join("alice");
+        write_email(&inbox, "2025-06-01-001", &meta);
+
+        let sctx = ctx(tmp.path());
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-001".to_string(),
+            folder: MarkFolder::Inbox,
+            read: false,
+        };
+        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+
+        let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
+        // Field must be removed entirely, not serialized as `null`
+        // (FR-19d).
+        assert!(
+            !content.contains("read_at"),
+            "read_at must be removed on MARK-UNREAD; got:\n{content}"
+        );
+        let fm: InboundFrontmatter =
+            toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
+        assert!(!fm.read);
+        assert!(fm.read_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn mark_read_twice_updates_timestamp_to_most_recent() {
+        // FR-13: re-MARK-READ overwrites the prior timestamp. The
+        // field reflects "most recent read", not "first read".
+        let tmp = TempDir::new().unwrap();
+        let meta = sample_meta("2025-06-01-001", false);
+        let inbox = tmp.path().join("inbox").join("alice");
+        write_email(&inbox, "2025-06-01-001", &meta);
+
+        let sctx = ctx(tmp.path());
+        let req_read = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-001".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        let req_unread = MarkRequest {
+            read: false,
+            ..req_read.clone()
+        };
+
+        // First MARK-READ.
+        assert!(matches!(
+            handle_mark(&sctx, &req_read).await,
+            AckResponse::Ok
+        ));
+        let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
+        let fm: InboundFrontmatter =
+            toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
+        let first = fm.read_at.expect("read_at set on first MARK-READ");
+
+        // MARK-UNREAD clears it.
+        assert!(matches!(
+            handle_mark(&sctx, &req_unread).await,
+            AckResponse::Ok
+        ));
+        let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
+        let fm: InboundFrontmatter =
+            toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
+        assert!(fm.read_at.is_none());
+
+        // Give the monotonic wall clock room to advance between reads.
+        // Millisecond resolution is plenty — chrono stores nanoseconds.
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+
+        // Second MARK-READ writes a fresh, later timestamp.
+        assert!(matches!(
+            handle_mark(&sctx, &req_read).await,
+            AckResponse::Ok
+        ));
+        let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
+        let fm: InboundFrontmatter =
+            toml::from_str(content.split("+++").nth(1).unwrap().trim()).unwrap();
+        let second = fm.read_at.expect("read_at set on second MARK-READ");
+        assert!(
+            second > first,
+            "second read_at ({second}) must be later than first ({first})"
+        );
     }
 
     #[tokio::test]
