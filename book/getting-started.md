@@ -84,7 +84,7 @@ After DNS records propagate, verify the setup:
 # Check port 25 connectivity (requires root)
 sudo aimx portcheck
 
-# Check server status and mailbox counts
+# Check server status, mailbox counts, and DNS verification
 aimx status
 ```
 

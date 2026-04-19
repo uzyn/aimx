@@ -67,7 +67,7 @@ pub enum Command {
         yes: bool,
     },
 
-    /// Show server status, mailbox counts, and configuration
+    /// Show server status, mailbox counts, configuration, and DNS record verification
     Status,
 
     /// Start the embedded SMTP listener daemon

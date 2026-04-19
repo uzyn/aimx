@@ -75,13 +75,13 @@ When run without a domain argument, setup will prompt you to enter the domain an
 ### First-time setup flow
 
 1. **Root check** -- exits if not running as root
-2. **Domain prompt** -- asks for domain if not provided as argument
-3. **Port 25 conflict detection** -- checks for another process on port 25
+2. **Port 25 preflight** -- checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
+3. **Domain prompt** -- asks for domain if not provided as argument
 4. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
 5. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
 6. **Config creation** -- writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
-7. **Service installation** -- generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
-8. **Port 25 checks** -- verifies outbound and inbound port 25 connectivity
+7. **DNS guidance + verification loop** -- shows the records to add and re-verifies on Enter
+8. **Service installation** -- generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
 
 After initial setup, the wizard displays three clearly labeled sections:
 
@@ -97,7 +97,7 @@ If you've already completed setup and want to re-verify, simply run `aimx setup`
 sudo aimx setup agent.yourdomain.com
 ```
 
-When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly to port 25 checks, DNS verification, and the output sections. This makes re-runs a quick verification pass.
+When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly through the port 25 preflight (run up front), DNS verification, and the output sections. This makes re-runs a quick verification pass.
 
 ### DNS retry loop
 
