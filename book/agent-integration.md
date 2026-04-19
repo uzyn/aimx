@@ -13,6 +13,17 @@ Once your agent is installed, see [Channel Recipes](channel-recipes.md)
 for email-triggered workflows — side-by-side non-interactive CLI
 invocations for every supported agent.
 
+## Guided setup
+
+Running `aimx agent-setup` with no argument on an interactive terminal
+prints a numbered menu listing every supported agent plus an **MCP
+(General)** option. Pick an agent to install it; pick **MCP (General)** to
+print a generic MCP stdio JSON snippet you can paste into any MCP-capable
+client that is not yet in the registry. The menu respects `--data-dir`, so
+the printed snippet includes the override when one is set. Non-interactive
+callers (scripts, CI) must still pass the positional `<agent>` argument or
+`--list`.
+
 ## What `aimx agent-setup` does
 
 `aimx agent-setup <agent>`:
