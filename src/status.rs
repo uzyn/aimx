@@ -479,7 +479,7 @@ mod tests {
         Config {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes: std::collections::HashMap::new(),
@@ -522,7 +522,7 @@ mod tests {
         let info = StatusInfo {
             domain: "test.example.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![],
@@ -541,7 +541,7 @@ mod tests {
         let info = StatusInfo {
             domain: "agent.example.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: false,
             mailboxes: vec![
@@ -577,7 +577,7 @@ mod tests {
         let info = StatusInfo {
             domain: "ex.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![
@@ -657,7 +657,7 @@ mod tests {
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: false,
             smtp_running: false,
             mailboxes: vec![],
@@ -764,7 +764,7 @@ mod tests {
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
@@ -784,7 +784,7 @@ mod tests {
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![],
@@ -824,7 +824,7 @@ mod tests {
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![],
@@ -859,7 +859,7 @@ mod tests {
         let config = Config {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
@@ -895,7 +895,7 @@ mod tests {
             vec!["v=DMARC1; p=reject".into()],
         );
         net.txt_records.insert(
-            format!("dkim._domainkey.{}", config.domain),
+            format!("aimx._domainkey.{}", config.domain),
             vec!["v=DKIM1; k=rsa; p=AAAA".into()],
         );
 
@@ -991,7 +991,7 @@ mod tests {
         let info = gather_status_with_ops(&config, &FakeServiceOps { running: false }, &net);
         let dns = info.dns.expect("DNS section must be present");
 
-        let dkim_name = format!("dkim._domainkey.{}", config.domain);
+        let dkim_name = format!("aimx._domainkey.{}", config.domain);
         let has_dkim_record = dns
             .records
             .iter()
@@ -1044,12 +1044,12 @@ mod tests {
             "1.2.3.4",
             None,
             "v=DKIM1; k=rsa; p=AAAA",
-            "dkim",
+            "aimx",
         );
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![],
@@ -1077,7 +1077,7 @@ mod tests {
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
             mailboxes: vec![],

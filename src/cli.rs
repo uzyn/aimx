@@ -113,7 +113,7 @@ pub enum Command {
     /// Generate DKIM keypair for email signing
     DkimKeygen {
         /// DKIM selector name
-        #[arg(long, default_value = "dkim")]
+        #[arg(long, default_value = "aimx")]
         selector: String,
 
         /// Overwrite existing keys
