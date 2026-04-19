@@ -50,7 +50,7 @@ use crate::state_handler::StateContext;
 /// `MAILBOX-CREATE`/`DELETE` requests on different mailbox names cannot
 /// clobber each other. Held only for the duration of the critical
 /// section (not across the full request lifetime).
-static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) static CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Shared context for MAILBOX-CREATE / MAILBOX-DELETE. Kept separate from
 /// `StateContext` so the state-lock map is not accidentally bypassed (the

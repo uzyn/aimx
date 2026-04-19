@@ -6,6 +6,9 @@ mod dkim;
 mod doctor;
 mod frontmatter;
 mod hook;
+mod hook_client;
+mod hook_handler;
+mod hooks;
 mod ingest;
 mod logs;
 mod mailbox;
@@ -101,6 +104,7 @@ fn dispatch_with_config(
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
         Command::Mailboxes(cmd) => mailbox::run(cmd, config),
+        Command::Hooks(cmd) => hooks::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }

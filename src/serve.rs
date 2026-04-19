@@ -603,6 +603,18 @@ async fn handle_uds_connection_with_timeout(
                 ),
                 false,
             ),
+            Ok(Ok(Request::HookCreate(req))) => (
+                Reply::Ack(
+                    crate::hook_handler::handle_hook_create(&state_ctx, &mb_ctx, &req).await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::HookDelete(req))) => (
+                Reply::Ack(
+                    crate::hook_handler::handle_hook_delete(&state_ctx, &mb_ctx, &req).await,
+                ),
+                false,
+            ),
             Ok(Err(ParseError::ClosedBeforeRequest)) => {
                 return;
             }

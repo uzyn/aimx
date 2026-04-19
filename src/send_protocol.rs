@@ -30,6 +30,19 @@
 //!   Content-Length: 0\n
 //!   \n
 //!
+//! Client → Server (HOOK-CREATE):
+//!   AIMX/1 HOOK-CREATE\n
+//!   Mailbox: <mailbox-name>\n
+//!   Content-Length: <n>\n
+//!   \n
+//!   <n bytes of TOML encoding one Hook stanza>
+//!
+//! Client → Server (HOOK-DELETE):
+//!   AIMX/1 HOOK-DELETE\n
+//!   Hook-Id: <id>\n
+//!   Content-Length: 0\n
+//!   \n
+//!
 //! Server → Client:
 //!   AIMX/1 OK [<message-id>]\n
 //! or
@@ -57,6 +70,12 @@
 //!   restart for inbound routing to pick up the change. Error codes
 //!   reuse the existing set plus `VALIDATION` (name validation failures)
 //!   and `NONEMPTY` (delete refused because the mailbox still holds files).
+//! - `HOOK-CREATE` / `HOOK-DELETE` follow the same hot-swap pattern for
+//!   hook CRUD. `HOOK-CREATE` carries a TOML-encoded `Hook` stanza plus a
+//!   `Mailbox:` header picking the owning mailbox; `HOOK-DELETE` carries
+//!   a `Hook-Id:` header and empty body (the daemon locates the hook by
+//!   id across all mailboxes). Error codes reuse `VALIDATION`,
+//!   `MAILBOX`, `NOTFOUND`, and `IO`.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -122,12 +141,35 @@ pub struct MailboxCrudRequest {
     pub create: bool,
 }
 
+/// Decoded `AIMX/1 HOOK-CREATE` request. Carries the owning mailbox name
+/// as a header and a TOML-encoded `Hook` stanza as the body. The daemon
+/// decodes the body into a `crate::hook::Hook` and appends it to the
+/// addressed mailbox's `hooks` array.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookCreateRequest {
+    pub mailbox: String,
+    /// TOML body encoding one [`crate::hook::Hook`] stanza. Kept as raw
+    /// bytes at the codec layer so the codec can stay free of the hook
+    /// struct itself — the daemon handler decodes.
+    pub hook_toml: Vec<u8>,
+}
+
+/// Decoded `AIMX/1 HOOK-DELETE` request. Locates the hook by globally-
+/// unique 12-char id across every configured mailbox; there is no
+/// `Mailbox:` header on delete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookDeleteRequest {
+    pub id: String,
+}
+
 /// One decoded `AIMX/1` request, tagged by verb.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Send(SendRequest),
     Mark(MarkRequest),
     MailboxCrud(MailboxCrudRequest),
+    HookCreate(HookCreateRequest),
+    HookDelete(HookDeleteRequest),
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -277,6 +319,12 @@ where
         "MAILBOX-DELETE" => parse_mailbox_crud_headers(reader, false)
             .await
             .map(Request::MailboxCrud),
+        "HOOK-CREATE" => parse_hook_create_headers_and_body(reader, max_body)
+            .await
+            .map(Request::HookCreate),
+        "HOOK-DELETE" => parse_hook_delete_headers(reader)
+            .await
+            .map(Request::HookDelete),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -299,6 +347,9 @@ where
         )),
         Request::MailboxCrud(_) => Err(ParseError::Malformed(
             "expected SEND verb, got MAILBOX-*".to_string(),
+        )),
+        Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
+            "expected SEND verb, got HOOK-*".to_string(),
         )),
     }
 }
@@ -543,6 +594,152 @@ where
     Ok(MailboxCrudRequest { name, create })
 }
 
+async fn parse_hook_create_headers_and_body<R>(
+    reader: &mut R,
+    max_body: usize,
+) -> Result<HookCreateRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut mailbox: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let name_norm = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match name_norm.as_str() {
+            "mailbox" => {
+                if mailbox.is_some() {
+                    return Err(ParseError::Malformed("duplicate Mailbox header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Mailbox value".into()));
+                }
+                mailbox = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n > max_body {
+                    return Err(ParseError::Malformed(format!(
+                        "Content-Length {n} exceeds cap {max_body}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers are ignored.
+            }
+        }
+    }
+
+    let mailbox =
+        mailbox.ok_or_else(|| ParseError::Malformed("missing required header: Mailbox".into()))?;
+    let content_length = content_length
+        .ok_or_else(|| ParseError::Malformed("missing required header: Content-Length".into()))?;
+
+    let mut hook_toml = vec![0u8; content_length];
+    reader.read_exact(&mut hook_toml).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            ParseError::Malformed(format!("body truncated: expected {content_length} bytes"))
+        } else {
+            ParseError::Io(e.to_string())
+        }
+    })?;
+
+    Ok(HookCreateRequest { mailbox, hook_toml })
+}
+
+async fn parse_hook_delete_headers<R>(reader: &mut R) -> Result<HookDeleteRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut id: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let name_norm = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match name_norm.as_str() {
+            "hook-id" => {
+                if id.is_some() {
+                    return Err(ParseError::Malformed("duplicate Hook-Id header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Hook-Id value".into()));
+                }
+                id = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n != 0 {
+                    return Err(ParseError::Malformed(format!(
+                        "HOOK-DELETE must have Content-Length: 0, got {n}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers are ignored.
+            }
+        }
+    }
+
+    let id = id.ok_or_else(|| ParseError::Malformed("missing required header: Hook-Id".into()))?;
+    let _ = content_length;
+
+    Ok(HookDeleteRequest { id })
+}
+
 /// Read a single `\n`-terminated line from `reader`, returning it without the
 /// trailing `\n`. Returns `Ok(None)` when the stream ends cleanly before any
 /// byte arrives. Enforces [`MAX_HEADER_LINE`] to bound memory on garbage
@@ -686,6 +883,43 @@ where
     let header = format!(
         "AIMX/1 {verb}\nName: {}\nContent-Length: 0\n\n",
         sanitize_inline(&request.name),
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 HOOK-CREATE` request frame. The body is an opaque
+/// blob of TOML bytes — the codec does not parse it.
+pub async fn write_hook_create_request<W>(
+    writer: &mut W,
+    request: &HookCreateRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "AIMX/1 HOOK-CREATE\nMailbox: {}\nContent-Length: {}\n\n",
+        sanitize_inline(&request.mailbox),
+        request.hook_toml.len(),
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(&request.hook_toml).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 HOOK-DELETE` request frame. Empty body.
+pub async fn write_hook_delete_request<W>(
+    writer: &mut W,
+    request: &HookDeleteRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "AIMX/1 HOOK-DELETE\nHook-Id: {}\nContent-Length: 0\n\n",
+        sanitize_inline(&request.id),
     );
     writer.write_all(header.as_bytes()).await?;
     writer.flush().await?;
@@ -1262,6 +1496,215 @@ mod tests {
                 String::from_utf8_lossy(verb),
                 String::from_utf8_lossy(&buf)
             );
+        }
+    }
+
+    // ----- HOOK-CREATE / HOOK-DELETE verbs ---------------------------
+
+    #[tokio::test]
+    async fn parses_hook_create_request() {
+        let body = b"id = \"abc123def456\"\nevent = \"on_receive\"\ncmd = \"echo hi\"\n";
+        let header = format!(
+            "AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: {}\n\n",
+            body.len()
+        );
+        let mut input = header.into_bytes();
+        input.extend_from_slice(body);
+        match parse_any_from_bytes(&input).await.unwrap() {
+            Request::HookCreate(r) => {
+                assert_eq!(r.mailbox, "alice");
+                assert_eq!(r.hook_toml, body.to_vec());
+            }
+            other => panic!("expected HookCreate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_missing_mailbox_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Mailbox"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_empty_mailbox_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: \nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("empty Mailbox"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_missing_content_length_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Content-Length"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_truncated_body_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: 10\n\nabc";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("truncated"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_oversized_body_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: 999999999999\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("exceeds cap"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_hook_delete_request() {
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\nContent-Length: 0\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::HookDelete(r) => assert_eq!(r.id, "abc123def456"),
+            other => panic!("expected HookDelete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_missing_id_is_malformed() {
+        let input = b"AIMX/1 HOOK-DELETE\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Hook-Id"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_empty_id_is_malformed() {
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: \nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("empty Hook-Id"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_without_content_length_accepted() {
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\n\n";
+        match parse_any_from_bytes(input).await.unwrap() {
+            Request::HookDelete(r) => assert_eq!(r.id, "abc123def456"),
+            other => panic!("expected HookDelete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_nonzero_content_length_is_malformed() {
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\nContent-Length: 5\n\nhello";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Content-Length: 0"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_header_names_case_insensitive() {
+        let body = b"id = \"abc123def456\"\n";
+        let header = format!(
+            "AIMX/1 HOOK-CREATE\nmailbox: alice\ncontent-length: {}\n\n",
+            body.len()
+        );
+        let mut input = header.into_bytes();
+        input.extend_from_slice(body);
+        match parse_any_from_bytes(&input).await.unwrap() {
+            Request::HookCreate(r) => assert_eq!(r.mailbox, "alice"),
+            other => panic!("expected HookCreate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_duplicate_mailbox_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nMailbox: bob\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("duplicate Mailbox"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_roundtrip() {
+        let req = HookCreateRequest {
+            mailbox: "alice".to_string(),
+            hook_toml: b"id = \"abc123def456\"\n".to_vec(),
+        };
+        let (mut client, mut server) = duplex(1024);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_hook_create_request(&mut client, &req).await.unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::HookCreate(r) => {
+                assert_eq!(r.mailbox, "alice");
+                assert_eq!(r.hook_toml, req.hook_toml);
+            }
+            other => panic!("expected HookCreate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_delete_roundtrip() {
+        let req = HookDeleteRequest {
+            id: "abc123def456".to_string(),
+        };
+        let (mut client, mut server) = duplex(1024);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_hook_delete_request(&mut client, &req).await.unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::HookDelete(r) => assert_eq!(r.id, req.id),
+            other => panic!("expected HookDelete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_binary_safe_body_roundtrip() {
+        let body: Vec<u8> = (0u8..=255).collect();
+        let req = HookCreateRequest {
+            mailbox: "alice".to_string(),
+            hook_toml: body.clone(),
+        };
+        let (mut client, mut server) = duplex(4096);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_hook_create_request(&mut client, &req).await.unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::HookCreate(r) => assert_eq!(r.hook_toml, body),
+            other => panic!("expected HookCreate, got {other:?}"),
         }
     }
 }

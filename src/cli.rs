@@ -47,6 +47,10 @@ pub enum Command {
     #[command(subcommand, alias = "mailbox")]
     Mailboxes(MailboxCommand),
 
+    /// Manage hooks
+    #[command(subcommand, alias = "hook")]
+    Hooks(HookCommand),
+
     /// Start MCP server in stdio mode
     Mcp,
 
@@ -181,6 +185,12 @@ pub enum MailboxCommand {
     /// List all mailboxes
     List,
 
+    /// Show trust, hooks, and message counts for a single mailbox
+    Show {
+        /// Mailbox name to inspect
+        name: String,
+    },
+
     /// Delete a mailbox
     Delete {
         /// Mailbox name to delete
@@ -198,4 +208,64 @@ pub enum MailboxCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum HookCommand {
+    /// List hooks (optionally filtered by mailbox)
+    List {
+        /// Filter hooks by owning mailbox
+        #[arg(long)]
+        mailbox: Option<String>,
+    },
+
+    /// Create a new hook on a mailbox (auto-generates the hook id)
+    Create(HookCreateArgs),
+
+    /// Delete a hook by id
+    Delete {
+        /// 12-char alphanumeric hook id
+        id: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+}
+
+#[derive(clap::Args, Clone)]
+pub struct HookCreateArgs {
+    /// Owning mailbox (local part) — must already exist in config
+    #[arg(long)]
+    pub mailbox: String,
+
+    /// Event that triggers the hook
+    #[arg(long, value_parser = ["on_receive", "after_send"])]
+    pub event: String,
+
+    /// Shell command executed via `sh -c` when the hook fires
+    #[arg(long)]
+    pub cmd: String,
+
+    /// Sender-address glob filter (only valid on `on_receive`)
+    #[arg(long)]
+    pub from: Option<String>,
+
+    /// Recipient-address glob filter (only valid on `after_send`)
+    #[arg(long)]
+    pub to: Option<String>,
+
+    /// Subject substring filter (case-insensitive, both events)
+    #[arg(long)]
+    pub subject: Option<String>,
+
+    /// Require the email to have at least one attachment (only valid on
+    /// `on_receive`). Outbound submissions via UDS are text-only in v0.2.
+    #[arg(long)]
+    pub has_attachment: bool,
+
+    /// Opt into firing this hook on non-trusted inbound email. Deliberately
+    /// verbose so operators think twice. Only valid on `on_receive`.
+    #[arg(long)]
+    pub dangerously_support_untrusted: bool,
 }
