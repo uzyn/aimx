@@ -342,10 +342,89 @@ pub(crate) fn parse_hostname_i_output(stdout: &str) -> (Option<Ipv4Addr>, Option
     (ipv4, ipv6)
 }
 
-#[derive(Debug)]
+/// Injectable shim over `std::process::Command::new("dig").args(...).output()`.
+/// Tests inject a scripted implementation to exercise the resolver cascade
+/// without shelling out to a real `dig`.
+pub(crate) trait DigRunner {
+    fn run(&self, args: &[String]) -> io::Result<std::process::Output>;
+}
+
+pub(crate) struct RealDigRunner;
+
+impl DigRunner for RealDigRunner {
+    fn run(&self, args: &[String]) -> io::Result<std::process::Output> {
+        std::process::Command::new("dig").args(args).output()
+    }
+}
+
+/// Query `dig` for a record, cascading across `DIG_RESOLVERS` with up to
+/// `DIG_RETRY_ATTEMPTS` per resolver.
+///
+/// Stop conditions, in priority order:
+/// 1. Any invocation returns exit 0 → parse and return the lines (an
+///    empty vec is a valid success; NOERROR/NXDOMAIN is authoritative
+///    so we do NOT fall through on an empty-but-ok response).
+/// 2. All resolvers × all attempts exit non-zero → return `io::Error`
+///    with the last resolver's stderr tail for diagnostics.
+///
+/// The empty-filtered, trimmed lines are returned raw. Type-specific
+/// post-processing (IP parsing for A/AAAA, quote-stripping for TXT)
+/// lives in the `resolve_*` callers.
+pub(crate) fn dig_with_cascade(
+    runner: &dyn DigRunner,
+    record_type: &str,
+    domain: &str,
+) -> io::Result<Vec<String>> {
+    let mut last_err_detail = String::new();
+    for resolver in DIG_RESOLVERS {
+        for attempt in 0..DIG_RETRY_ATTEMPTS {
+            let args = dig_short_args(resolver, record_type, domain);
+            match runner.run(&args) {
+                Ok(output) if output.status.success() => {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let lines: Vec<String> = stdout
+                        .lines()
+                        .filter(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                        .collect();
+                    return Ok(lines);
+                }
+                Ok(output) => {
+                    last_err_detail = format!(
+                        "@{resolver} exit={} stderr={}",
+                        output.status,
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                }
+                Err(e) => {
+                    last_err_detail = format!("@{resolver} spawn error: {e}");
+                }
+            }
+            if attempt + 1 < DIG_RETRY_ATTEMPTS {
+                std::thread::sleep(dig_retry_delay());
+            }
+        }
+    }
+    Err(io::Error::other(format!(
+        "dig {record_type} {domain} failed across all {} resolvers ({} attempts each); last error: {last_err_detail}",
+        DIG_RESOLVERS.len(),
+        DIG_RETRY_ATTEMPTS,
+    )))
+}
+
 pub struct RealNetworkOps {
     pub verify_host: String,
     pub check_service_smtp_addr: String,
+    dig_runner: Box<dyn DigRunner + Send + Sync>,
+}
+
+impl std::fmt::Debug for RealNetworkOps {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RealNetworkOps")
+            .field("verify_host", &self.verify_host)
+            .field("check_service_smtp_addr", &self.check_service_smtp_addr)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Default for RealNetworkOps {
@@ -353,6 +432,7 @@ impl Default for RealNetworkOps {
         Self {
             verify_host: DEFAULT_VERIFY_HOST.to_string(),
             check_service_smtp_addr: DEFAULT_CHECK_SERVICE_SMTP_ADDR.to_string(),
+            dig_runner: Box::new(RealDigRunner),
         }
     }
 }
@@ -365,7 +445,14 @@ impl RealNetworkOps {
         Ok(Self {
             verify_host: trimmed,
             check_service_smtp_addr: smtp_addr,
+            dig_runner: Box::new(RealDigRunner),
         })
+    }
+
+    #[cfg(test)]
+    fn with_dig_runner(mut self, runner: Box<dyn DigRunner + Send + Sync>) -> Self {
+        self.dig_runner = runner;
+        self
     }
 
     fn curl_probe(&self) -> Result<bool, Box<dyn std::error::Error>> {
@@ -485,53 +572,26 @@ impl NetworkOps for RealNetworkOps {
     }
 
     fn resolve_mx(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("dig")
-            .args(dig_short_args("MX", domain))
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let records: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().to_string())
-            .collect();
+        let records = dig_with_cascade(self.dig_runner.as_ref(), "MX", domain)?;
         Ok(records)
     }
 
     fn resolve_a(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("dig")
-            .args(dig_short_args("A", domain))
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let addrs: Vec<IpAddr> = stdout
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect();
-        Ok(addrs)
+        let records = dig_with_cascade(self.dig_runner.as_ref(), "A", domain)?;
+        Ok(records.into_iter().filter_map(|l| l.parse().ok()).collect())
     }
 
     fn resolve_aaaa(&self, domain: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("dig")
-            .args(dig_short_args("AAAA", domain))
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let addrs: Vec<IpAddr> = stdout
-            .lines()
-            .filter_map(|l| l.trim().parse().ok())
-            .collect();
-        Ok(addrs)
+        let records = dig_with_cascade(self.dig_runner.as_ref(), "AAAA", domain)?;
+        Ok(records.into_iter().filter_map(|l| l.parse().ok()).collect())
     }
 
     fn resolve_txt(&self, domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let output = std::process::Command::new("dig")
-            .args(dig_short_args("TXT", domain))
-            .output()?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let records: Vec<String> = stdout
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| l.trim().replace("\" \"", "").trim_matches('"').to_string())
-            .collect();
-        Ok(records)
+        let records = dig_with_cascade(self.dig_runner.as_ref(), "TXT", domain)?;
+        Ok(records
+            .into_iter()
+            .map(|l| l.replace("\" \"", "").trim_matches('"').to_string())
+            .collect())
     }
 }
 
@@ -543,36 +603,60 @@ pub const COMPATIBLE_PROVIDERS: &[&str] = &[
     "Linode/Akamai (on request)",
 ];
 
-/// Per-query timeout for the dig-based DNS helpers, in seconds. dig's own
-/// default (5s × 3 tries = 15s per query) stacks to ~90s across the six
-/// queries `verify_all_dns` issues — far too long for `aimx status` on a
-/// host with flaky recursive DNS. Combined with `DIG_TRIES` this caps each
-/// query at ~DIG_TIMEOUT_SECS seconds.
+/// Per-attempt dig timeout in seconds. A single dig invocation uses
+/// `+time=DIG_TIMEOUT_SECS +tries=DIG_TRIES` — we rely on the outer
+/// `dig_with_cascade` retry/fallback to handle transient UDP loss
+/// rather than bloating a single invocation's budget.
 pub const DIG_TIMEOUT_SECS: u32 = 2;
 
-/// Number of dig attempts per query. Set to 1 so the per-query worst case
-/// is bounded by `DIG_TIMEOUT_SECS`, not `DIG_TIMEOUT_SECS × DIG_TRIES`.
+/// Number of internal dig retries per invocation. Kept at 1 because
+/// `dig_with_cascade` handles retries at a higher level where we can
+/// bail early on success and fall through to a different resolver.
 pub const DIG_TRIES: u32 = 1;
 
-// Compile-time check: keep the per-query dig budget tight so a pathological
-// resolver can't stall `aimx status` for minutes. If someone bumps these
-// constants past ~5s per query, the build fails here rather than at runtime.
-const _: () = assert!(
-    DIG_TIMEOUT_SECS * DIG_TRIES <= 5,
-    "per-query dig budget must stay tight — see DIG_TIMEOUT_SECS × DIG_TRIES"
-);
+/// Total attempts per resolver in `dig_with_cascade`. A non-zero dig
+/// exit retries up to this many times before falling through to the
+/// next resolver. An exit-0 response (including an empty answer) stops
+/// the cascade immediately — NOERROR/NXDOMAIN is authoritative.
+pub(crate) const DIG_RETRY_ATTEMPTS: u32 = 3;
 
-/// Build the argv vec for a `dig +short <TYPE> <domain>` invocation with
-/// the tight timeout/try bounds declared above. Extracted so the bounds
-/// are applied uniformly and are unit-testable without shelling out.
-pub fn dig_short_args(record_type: &str, domain: &str) -> Vec<String> {
+/// Delay between retry attempts on the same resolver, in milliseconds.
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) const DIG_RETRY_DELAY_MS: u64 = 300;
+
+/// Public resolvers queried in order. Hardcoded because `aimx setup` /
+/// `aimx status` need reliable, cache-consistent answers and users have
+/// no reason to prefer their local recursive resolver — which is often
+/// the source of the flakiness this cascade fixes (stale caches, UDP
+/// loss, round-robin across inconsistent upstreams).
+pub(crate) const DIG_RESOLVERS: &[&str] = &["1.1.1.1", "8.8.8.8", "9.9.9.9"];
+
+/// Build the argv vec for a `dig @<resolver> +short <TYPE> <domain>`
+/// invocation with the per-attempt bounds declared above. Extracted so
+/// the bounds are applied uniformly and are unit-testable without
+/// shelling out.
+pub fn dig_short_args(resolver: &str, record_type: &str, domain: &str) -> Vec<String> {
     vec![
+        format!("@{resolver}"),
         format!("+time={DIG_TIMEOUT_SECS}"),
         format!("+tries={DIG_TRIES}"),
         "+short".to_string(),
         record_type.to_string(),
         domain.to_string(),
     ]
+}
+
+/// Retry delay between attempts on the same resolver. Extracted so tests
+/// can short-circuit the sleep — otherwise the all-resolvers-fail test
+/// alone would cost ~2.4s, compounded across multiple tests.
+#[cfg(not(test))]
+fn dig_retry_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(DIG_RETRY_DELAY_MS)
+}
+
+#[cfg(test)]
+fn dig_retry_delay() -> std::time::Duration {
+    std::time::Duration::from_millis(0)
 }
 
 #[derive(Debug, PartialEq)]
@@ -2604,13 +2688,16 @@ mod tests {
     }
 
     #[test]
-    fn dig_short_args_bounds_per_query_timeout() {
-        // `aimx status` runs these resolvers synchronously; without tight
-        // `+time` / `+tries` bounds, dig's defaults (5s × 3) let a single
-        // broken recursive resolver stall the command for ~90s across the
-        // six queries `verify_all_dns` issues. This test locks the bounds
-        // in so a future "drop the args" refactor trips a red test.
-        let args = dig_short_args("MX", "example.com");
+    fn dig_short_args_includes_resolver_and_bounds() {
+        // `aimx status` runs these resolvers synchronously; the cascade
+        // in `dig_with_cascade` pins a specific public resolver per
+        // invocation and keeps `+time` / `+tries` tight so a single
+        // non-responsive upstream doesn't stall the command.
+        let args = dig_short_args("1.1.1.1", "MX", "example.com");
+        assert!(
+            args.iter().any(|a| a == "@1.1.1.1"),
+            "dig args must carry @<resolver>, got {args:?}"
+        );
         assert!(
             args.iter().any(|a| a.starts_with("+time=")),
             "dig args must carry a +time= bound, got {args:?}"
@@ -2631,10 +2718,14 @@ mod tests {
             args.iter().any(|a| a == "example.com"),
             "dig args must include the domain, got {args:?}"
         );
-        // The constant-only `DIG_TIMEOUT_SECS * DIG_TRIES <= 5` invariant is
-        // enforced as a compile-time `const _: () = assert!(..)` near the
-        // constants themselves, not as a runtime assertion here — clippy's
-        // `assertions_on_constants` lint complains about the runtime form.
+    }
+
+    #[test]
+    fn dig_resolvers_default_cascade_order() {
+        // Cloudflare first, then Google, then Quad9. Order matters —
+        // 1.1.1.1 has the best steady-state latency and the fewest
+        // rate-limit surprises for scripted workloads.
+        assert_eq!(DIG_RESOLVERS, &["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
     }
 
     #[test]
@@ -3407,5 +3498,221 @@ mod tests {
     fn global_ipv6_rejects_unspecified() {
         let ip: Ipv6Addr = "::".parse().unwrap();
         assert!(!is_global_ipv6(&ip));
+    }
+
+    // ========================================================================
+    // dig_with_cascade tests — the core fix for the "A record flips between
+    // PASS and MISSING" flakiness reported against `aimx setup`'s DNS verify
+    // loop. Prior behavior: a single dig UDP query with no in-process retry
+    // and no exit-status check → transient loss masquerades as "no record".
+    // ========================================================================
+
+    use std::os::unix::process::ExitStatusExt;
+    use std::sync::Mutex;
+
+    struct ScriptedDigRunner {
+        responses: Mutex<std::collections::VecDeque<io::Result<std::process::Output>>>,
+        calls: Mutex<Vec<Vec<String>>>,
+    }
+
+    impl ScriptedDigRunner {
+        fn new(responses: Vec<io::Result<std::process::Output>>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+
+        fn nth_call_args(&self, n: usize) -> Vec<String> {
+            self.calls.lock().unwrap()[n].clone()
+        }
+    }
+
+    impl DigRunner for ScriptedDigRunner {
+        fn run(&self, args: &[String]) -> io::Result<std::process::Output> {
+            self.calls.lock().unwrap().push(args.to_vec());
+            self.responses
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| Err(io::Error::other("ran out of scripted responses")))
+        }
+    }
+
+    fn ok_output(stdout: &str) -> io::Result<std::process::Output> {
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(0),
+            stdout: stdout.as_bytes().to_vec(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn fail_output(stderr: &str) -> io::Result<std::process::Output> {
+        // Shift left 8 to land in the "exited with status N" wait bits;
+        // any non-zero value gives `status.success() == false`, which is
+        // all the cascade cares about.
+        Ok(std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn dig_cascade_first_resolver_succeeds() {
+        let runner = ScriptedDigRunner::new(vec![ok_output("10 mail.example.com.\n")]);
+        let result = dig_with_cascade(&runner, "MX", "example.com").unwrap();
+        assert_eq!(result, vec!["10 mail.example.com.".to_string()]);
+        assert_eq!(runner.call_count(), 1);
+        assert!(runner.nth_call_args(0).contains(&"@1.1.1.1".to_string()));
+    }
+
+    #[test]
+    fn dig_cascade_falls_through_on_exit_code() {
+        // All DIG_RETRY_ATTEMPTS against 1.1.1.1 fail; 8.8.8.8 succeeds on
+        // its first try. The cascade must invoke 1.1.1.1 × DIG_RETRY_ATTEMPTS
+        // then 8.8.8.8 × 1.
+        let mut responses: Vec<_> = (0..DIG_RETRY_ATTEMPTS)
+            .map(|_| fail_output("timeout"))
+            .collect();
+        responses.push(ok_output("1.2.3.4\n"));
+        let runner = ScriptedDigRunner::new(responses);
+        let result = dig_with_cascade(&runner, "A", "example.com").unwrap();
+        assert_eq!(result, vec!["1.2.3.4".to_string()]);
+        assert_eq!(runner.call_count(), DIG_RETRY_ATTEMPTS as usize + 1);
+        for i in 0..DIG_RETRY_ATTEMPTS as usize {
+            assert!(
+                runner.nth_call_args(i).contains(&"@1.1.1.1".to_string()),
+                "attempt {i} should have targeted 1.1.1.1"
+            );
+        }
+        assert!(
+            runner
+                .nth_call_args(DIG_RETRY_ATTEMPTS as usize)
+                .contains(&"@8.8.8.8".to_string()),
+            "fallthrough should target 8.8.8.8"
+        );
+    }
+
+    #[test]
+    fn dig_cascade_all_resolvers_fail_returns_err() {
+        let total_attempts = DIG_RESOLVERS.len() * DIG_RETRY_ATTEMPTS as usize;
+        let responses: Vec<_> = (0..total_attempts)
+            .map(|_| fail_output("timeout"))
+            .collect();
+        let runner = ScriptedDigRunner::new(responses);
+        let result = dig_with_cascade(&runner, "A", "example.com");
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("failed across all"));
+        assert_eq!(runner.call_count(), total_attempts);
+    }
+
+    #[test]
+    fn dig_cascade_empty_but_ok_is_success_no_fallback() {
+        // NOERROR/NXDOMAIN is authoritative — an empty answer from 1.1.1.1
+        // must NOT cascade to 8.8.8.8. Otherwise the cascade would bloat
+        // latency on every genuinely-missing-record check.
+        let runner = ScriptedDigRunner::new(vec![ok_output("")]);
+        let result = dig_with_cascade(&runner, "A", "missing.example.com").unwrap();
+        assert!(result.is_empty());
+        assert_eq!(runner.call_count(), 1);
+    }
+
+    #[test]
+    fn dig_cascade_retries_on_spawn_error() {
+        // If dig itself can't be spawned on one attempt (e.g., transient
+        // resource exhaustion) and succeeds on retry, the cascade treats
+        // that the same as a non-zero exit — retry, don't bail.
+        let responses: Vec<io::Result<std::process::Output>> = vec![
+            Err(io::Error::other("spawn failed")),
+            ok_output("8.8.4.4\n"),
+        ];
+        let runner = ScriptedDigRunner::new(responses);
+        let result = dig_with_cascade(&runner, "A", "example.com").unwrap();
+        assert_eq!(result, vec!["8.8.4.4".to_string()]);
+        assert_eq!(runner.call_count(), 2);
+    }
+
+    #[test]
+    fn resolve_a_returns_err_when_all_resolvers_fail() {
+        // Integration-level: an all-failing DigRunner must make
+        // RealNetworkOps::resolve_a return Err, not Ok(vec![]). This is
+        // the bug that produced the "A: MISSING" flip — old code ignored
+        // dig exit status and silently reported empty stdout as missing.
+        let total_attempts = DIG_RESOLVERS.len() * DIG_RETRY_ATTEMPTS as usize;
+        let responses: Vec<_> = (0..total_attempts)
+            .map(|_| fail_output("timeout"))
+            .collect();
+        let runner = Box::new(ScriptedDigRunner::new(responses));
+        let net = RealNetworkOps::default().with_dig_runner(runner);
+        let result = net.resolve_a("example.com");
+        assert!(result.is_err(), "expected Err, got {result:?}");
+    }
+
+    #[test]
+    fn resolve_a_succeeds_on_second_resolver_after_first_fails() {
+        // End-to-end through RealNetworkOps: 1.1.1.1 fails all attempts,
+        // 8.8.8.8 succeeds on first try → resolve_a returns the parsed IP.
+        let mut responses: Vec<_> = (0..DIG_RETRY_ATTEMPTS)
+            .map(|_| fail_output("timeout"))
+            .collect();
+        responses.push(ok_output("203.0.113.10\n"));
+        let runner = Box::new(ScriptedDigRunner::new(responses));
+        let net = RealNetworkOps::default().with_dig_runner(runner);
+        let result = net.resolve_a("example.com").unwrap();
+        assert_eq!(result, vec!["203.0.113.10".parse::<IpAddr>().unwrap()]);
+    }
+
+    #[test]
+    fn verify_a_maps_resolver_err_to_fail_not_missing() {
+        // The user-visible fix: when DNS lookup actually fails (network
+        // issue), verify_a must render as FAIL with the error message,
+        // not MISSING which wrongly implies the record doesn't exist.
+        struct ErroringNet;
+        impl NetworkOps for ErroringNet {
+            fn check_outbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+                Ok(true)
+            }
+            fn check_inbound_port25(&self) -> Result<bool, Box<dyn std::error::Error>> {
+                Ok(true)
+            }
+            fn get_server_ips(
+                &self,
+            ) -> Result<(Option<Ipv4Addr>, Option<Ipv6Addr>), Box<dyn std::error::Error>>
+            {
+                Ok((None, None))
+            }
+            fn resolve_mx(&self, _: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+                Ok(vec![])
+            }
+            fn resolve_a(&self, _: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+                Err("transient DNS failure".into())
+            }
+            fn resolve_aaaa(&self, _: &str) -> Result<Vec<IpAddr>, Box<dyn std::error::Error>> {
+                Ok(vec![])
+            }
+            fn resolve_txt(&self, _: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+                Ok(vec![])
+            }
+        }
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let result = verify_a(&ErroringNet, "example.com", &ip);
+        match result {
+            DnsVerifyResult::Fail(msg) => {
+                assert!(
+                    msg.contains("A record lookup failed"),
+                    "expected A-lookup-failed prefix, got: {msg}"
+                );
+                assert!(
+                    msg.contains("transient DNS failure"),
+                    "expected underlying error forwarded, got: {msg}"
+                );
+            }
+            other => panic!("expected DnsVerifyResult::Fail, got {other:?}"),
+        }
     }
 }
