@@ -187,7 +187,7 @@ Outbound (sent) emails additionally carry `outbound = true`, `delivery_status`, 
 Two reference documents help agents understand AIMX:
 
 - **`agents/common/aimx-primer.md`** — the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, and common workflows.
-- **`/var/lib/aimx/README.md`** — the runtime datadir guide, regenerated on each AIMX upgrade. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
+- **`/var/lib/aimx/README.md`** — the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
 
 ## Compatible agent frameworks
 

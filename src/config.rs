@@ -178,11 +178,6 @@ impl Config {
             }
         })?;
         let config: Config = toml::from_str(&content)?;
-        // S44-1: legacy user-controlled placeholders in on_receive.command
-        // are a shell-injection vector — refuse to load rather than run
-        // them. Pre-launch hard break; no compat shim.
-        crate::channel::validate_on_receive_commands(&config.mailboxes)
-            .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         Ok(config)
     }
@@ -485,39 +480,6 @@ trust = "none"
         assert_eq!(m.from.as_deref(), Some("*@gmail.com"));
         assert_eq!(m.subject.as_deref(), Some("urgent"));
         assert_eq!(m.has_attachment, Some(true));
-    }
-
-    #[test]
-    fn load_rejects_legacy_from_placeholder() {
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-
-[[mailboxes.support.on_receive]]
-type = "cmd"
-command = 'echo {from}'
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.contains("legacy placeholder '{from}'"),
-            "error should name the offender: {err}"
-        );
-        assert!(
-            err.contains("support"),
-            "error should name the mailbox: {err}"
-        );
-        assert!(
-            err.contains("AIMX_FROM"),
-            "error should point at the env-var migration: {err}"
-        );
     }
 
     #[test]
@@ -830,14 +792,6 @@ verify_host = "https://verify.example.com"
     }
 
     #[test]
-    fn legacy_verify_address_field_ignored() {
-        // Config with removed verify_address should still parse (serde ignores unknown fields)
-        let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.domain, "test.com");
-    }
-
-    #[test]
     fn enable_ipv6_defaults_to_false() {
         let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -897,21 +851,6 @@ enable_ipv6 = true
 
         let config = Config::load_resolved().unwrap();
         assert_eq!(config.domain, "resolved.example.com");
-    }
-
-    #[test]
-    fn legacy_probe_url_field_silently_ignored() {
-        // Pre-rename configs used `probe_url`; serde drops unknown fields so those
-        // configs still load, but `verify_host` is left unset (falls back to default).
-        let toml_str = r#"
-domain = "test.com"
-probe_url = "https://old.example.com/probe"
-
-[mailboxes]
-"#;
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.domain, "test.com");
-        assert!(config.verify_host.is_none());
     }
 
     #[test]

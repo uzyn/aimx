@@ -41,11 +41,11 @@ pub struct SmtpServer {
 }
 
 impl SmtpServer {
-    /// Legacy constructor that wraps a freshly-built `ConfigHandle` around
-    /// `config`. Retained only for tests — production always owns the
-    /// handle outside the server so `aimx serve` can share one `Config`
-    /// across the SMTP listener, the send handler, the state handler, and
-    /// the mailbox handler.
+    /// Test-only constructor that wraps a freshly-built `ConfigHandle`
+    /// around `config`. Production always owns the handle outside the
+    /// server so `aimx serve` can share one `Config` across the SMTP
+    /// listener, the send handler, the state handler, and the mailbox
+    /// handler.
     #[cfg(test)]
     pub fn new(config: Config) -> Self {
         Self::with_handle(ConfigHandle::new(config))
