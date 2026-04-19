@@ -56,7 +56,7 @@ sudo systemctl status aimx --no-pager
 
 sudo ss -tlnp sport :25          # aimx listening on :25
 ls -la /run/aimx/send.sock       # UDS present, mode 0666
-sudo aimx status                 # summary output
+sudo aimx doctor                 # summary output
 sudo aimx portcheck              # port 25 reachability probe
 ```
 
@@ -410,7 +410,7 @@ Wait until SSH reconnects (typically ~30-90s depending on provider), then:
 systemctl status aimx --no-pager   # active (running)
 ss -tlnp sport :25                 # bound
 ls /run/aimx/send.sock             # present
-aimx status
+aimx doctor
 ```
 
 **Handoff.** Send one more email from Gmail to `inbox@mail.example.com` with subject `post-reboot`.

@@ -146,7 +146,7 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("mailbox"))
         .stdout(predicate::str::contains("mcp"))
         .stdout(predicate::str::contains("setup"))
-        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("portcheck"))
         .stdout(predicate::str::contains("dkim-keygen"));
@@ -1432,7 +1432,7 @@ fn setup_without_domain_proceeds_to_root_check() {
 }
 
 #[test]
-fn status_shows_domain_and_mailboxes() {
+fn doctor_shows_domain_and_mailboxes() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -1449,7 +1449,7 @@ fn status_shows_domain_and_mailboxes() {
     aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
-        .arg("status")
+        .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("agent.example.com"))
@@ -1459,13 +1459,31 @@ fn status_shows_domain_and_mailboxes() {
 }
 
 #[test]
-fn status_help_works() {
+fn doctor_help_works() {
     Command::cargo_bin("aimx")
         .unwrap()
-        .args(["status", "--help"])
+        .args(["doctor", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("status"));
+        .stdout(predicate::str::contains("doctor"));
+}
+
+#[test]
+fn status_subcommand_no_longer_exists() {
+    // S48-1 clean rename: `aimx status` must produce a clap "unrecognized
+    // subcommand" error. No alias was kept.
+    let assert = Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("status")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("unrecognized subcommand")
+            || stderr.contains("invalid")
+            || stderr.contains("error"),
+        "expected clap error for removed `status` subcommand, got stderr: {stderr}"
+    );
 }
 
 #[test]

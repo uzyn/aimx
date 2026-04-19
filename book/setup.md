@@ -181,10 +181,10 @@ sudo aimx portcheck
 
 This tests outbound port 25 connectivity (via EHLO handshake) and inbound SMTP reachability (via EHLO probe). Requires root.
 
-Check server status at any time:
+Check server health at any time:
 
 ```bash
-aimx status
+aimx doctor
 ```
 
 ### Manual testing

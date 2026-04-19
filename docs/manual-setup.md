@@ -344,10 +344,10 @@ sudo aimx portcheck
 
 `aimx portcheck` runs two checks: outbound port 25 (EHLO handshake to the verifier service's built-in TCP listener) and inbound port 25 (via `/probe`, which connects back to your server). It does not send an actual email or wait for an echo reply.
 
-**Check server status:**
+**Check server health:**
 
 ```bash
-aimx status
+aimx doctor
 ```
 
 **Manual inbound test:**
@@ -460,13 +460,14 @@ The only directory to back up is `/var/lib/aimx/`. It contains everything: confi
 | `sudo aimx portcheck` shows inbound FAIL | The verifier service's `/probe` endpoint could not reach your port 25 (firewall, VPS block, `aimx serve` down, or DNS `A` record not yet resolving) | `sudo systemctl status aimx`, `sudo ufw status`, `dig +short A agent.yourdomain.com`, check VPS firewall |
 | Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all DNS records, configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or misconfigured | `sudo systemctl status aimx` and `journalctl -u aimx -e` |
-| Emails not being delivered to mailbox | Ingest misconfigured | Check config and mailbox setup with `aimx status` |
+| Emails not being delivered to mailbox | Ingest misconfigured | Check config and mailbox setup with `aimx doctor` |
 
 **Useful commands:**
 
 ```bash
 sudo aimx portcheck            # Re-run port 25 checks
-aimx status                 # Show config, mailboxes, and message counts
+aimx doctor                 # Show config, mailboxes, and message counts
+aimx logs                   # Tail recent aimx serve logs
 sudo systemctl status aimx  # Check aimx serve service status
 journalctl -u aimx -e       # View aimx serve logs
 ```

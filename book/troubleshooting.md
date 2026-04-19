@@ -9,8 +9,13 @@ Diagnostic commands and solutions for common issues.
 # Requires root
 sudo aimx portcheck
 
-# Show server status, configuration, and mailbox counts
-aimx status
+# Show server health, configuration, mailbox counts, and a tail of the service log
+aimx doctor
+
+# Stream the service log on its own (last 50 lines by default)
+aimx logs
+aimx logs --lines 200
+aimx logs --follow
 
 # Test against a self-hosted verify service instead of the default
 sudo aimx portcheck --verify-host https://verify.yourdomain.com
@@ -170,13 +175,14 @@ If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx
 | Command | Purpose |
 |---------|---------|
 | `sudo aimx portcheck` | Check port 25 connectivity (requires root) |
-| `aimx status` | Show config, mailboxes, message counts, and DNS record verification |
-| `aimx mailbox list` | List all mailboxes |
+| `aimx doctor` | Show config, mailboxes, message counts, DNS record verification, and recent log lines |
+| `aimx logs [--lines N] [--follow]` | Tail or follow the aimx service log |
+| `aimx mailboxes list` | List all mailboxes |
 | `aimx dkim-keygen` | Generate DKIM keypair |
 | `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |
-| `aimx --data-dir /path status` | Use a custom data directory |
+| `aimx --data-dir /path doctor` | Use a custom data directory |
 | `sudo systemctl status aimx` | Check aimx serve service |
-| `journalctl -u aimx -e` | View aimx serve logs |
+| `journalctl -u aimx -e` | View aimx serve logs (or use `aimx logs`) |
 | `dig +short TXT agent.yourdomain.com` | Check DNS records |
 | `cat /etc/aimx/dkim/public.key` | View DKIM public key |
 

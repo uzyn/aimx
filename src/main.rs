@@ -4,6 +4,7 @@ mod cli;
 mod config;
 mod datadir_readme;
 mod dkim;
+mod doctor;
 mod frontmatter;
 mod ingest;
 mod mailbox;
@@ -21,7 +22,6 @@ mod setup;
 mod slug;
 mod smtp;
 mod state_handler;
-mod status;
 mod term;
 mod transport;
 mod trust;
@@ -102,7 +102,7 @@ fn dispatch_with_config(
             tls_key.as_deref(),
             config,
         ),
-        Command::Status => status::run(config),
+        Command::Doctor => doctor::run(config),
         Command::Setup { .. }
         | Command::Uninstall { .. }
         | Command::Portcheck { .. }
