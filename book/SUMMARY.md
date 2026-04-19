@@ -10,3 +10,4 @@
 - [MCP Server](mcp.md)
 - [Agent Integration](agent-integration.md)
 - [Troubleshooting](troubleshooting.md)
+- [FAQ](faq.md)
