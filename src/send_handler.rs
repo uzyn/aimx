@@ -54,7 +54,7 @@ pub struct RegisteredMailbox {
 pub struct SendContext {
     /// DKIM private key, loaded once at `aimx serve` startup.
     pub dkim_key: Arc<RsaPrivateKey>,
-    /// DKIM selector (`dkim._domainkey.<domain>`).
+    /// DKIM selector (`<selector>._domainkey.<domain>`).
     pub dkim_selector: String,
     /// Live handle to the daemon's `Config`. Read briefly at the top of
     /// `handle_send` to capture the snapshot used for this request.
@@ -613,7 +613,7 @@ mod tests {
         let config = crate::config::Config {
             domain: "example.com".to_string(),
             data_dir: dir.clone(),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
@@ -623,7 +623,7 @@ mod tests {
         let config_handle = ConfigHandle::new(config);
         SendContext {
             dkim_key: Arc::new(key),
-            dkim_selector: "dkim".to_string(),
+            dkim_selector: "aimx".to_string(),
             config_handle,
             transport,
             data_dir: dir,

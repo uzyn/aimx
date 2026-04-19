@@ -92,7 +92,7 @@ The generated OpenRC init script uses `supervise-daemon`, which routes daemon ou
 ### Check DKIM DNS record
 
 ```bash
-dig +short TXT dkim._domainkey.agent.yourdomain.com
+dig +short TXT aimx._domainkey.agent.yourdomain.com
 ```
 
 The output should contain `v=DKIM1; k=rsa; p=...` matching your public key.

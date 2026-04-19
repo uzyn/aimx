@@ -148,7 +148,7 @@ domain = "agent.yourdomain.com"
 data_dir = "/var/lib/aimx"
 
 # DKIM selector name (default: dkim)
-dkim_selector = "dkim"
+dkim_selector = "aimx"
 
 # Verifier service base URL (default: https://check.aimx.email)
 # Used by `aimx portcheck` and `aimx setup`. Set this only if
@@ -324,7 +324,7 @@ Precedence is **CLI flag > config > default** (`https://check.aimx.email`).
 | A | agent.yourdomain.com | Your server IP |
 | MX | agent.yourdomain.com | 10 agent.yourdomain.com. |
 | TXT | agent.yourdomain.com | v=spf1 ip4:YOUR_IP -all |
-| TXT | dkim._domainkey.agent.yourdomain.com | v=DKIM1; k=rsa; p=... |
+| TXT | aimx._domainkey.agent.yourdomain.com | v=DKIM1; k=rsa; p=... |
 | TXT | _dmarc.agent.yourdomain.com | v=DMARC1; p=reject |
 
 Reverse DNS (PTR) is configured at your VPS provider's control panel. Setting a correct PTR record improves deliverability but is the operator's responsibility and is out of scope for `aimx setup`.
