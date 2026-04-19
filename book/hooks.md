@@ -47,7 +47,7 @@ cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 | `from` | glob | no | `on_receive` only: match the sender. |
 | `to` | glob | no | `after_send` only: match the recipient. |
 | `subject` | string | no | Case-insensitive substring match against the email subject. |
-| `has_attachment` | bool | no | `true` requires attachments, `false` requires none. |
+| `has_attachment` | bool | no | `on_receive` only: `true` requires attachments, `false` requires none. Rejected on `after_send` — outbound submissions over UDS are text-only in v0.2. |
 | `dangerously_support_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. |
 
 Multiple hooks can be defined per mailbox; each is evaluated independently.

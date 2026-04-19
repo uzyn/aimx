@@ -235,6 +235,14 @@ fn validate_hooks(config: &Config) -> Result<(), String> {
                             hook.id
                         ));
                     }
+                    if hook.has_attachment.is_some() {
+                        return Err(format!(
+                            "hook '{}' on mailbox '{mailbox_name}': `has_attachment` \
+                             filter is only valid on `on_receive` hooks \
+                             (outbound submissions via UDS are text-only in v0.2)",
+                            hook.id
+                        ));
+                    }
                 }
             }
             if let Some(prior) = seen.insert(hook.id.clone(), mailbox_name.clone()) {
@@ -885,6 +893,41 @@ cmd = "echo two"
         assert!(
             err.contains("one") && err.contains("two"),
             "error should name both mailboxes: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_has_attachment_on_after_send() {
+        // `has_attachment` on `after_send` is rejected because v0.2
+        // UDS submissions are text-only, so the filter can never
+        // meaningfully match. Better to fail loudly at load than to
+        // silently ignore the predicate.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.alice]
+address = "alice@test.com"
+
+[[mailboxes.alice.hooks]]
+id = "aaaabbbbcccc"
+event = "after_send"
+cmd = "echo hi"
+has_attachment = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("has_attachment"),
+            "error should name the filter: {err}"
+        );
+        assert!(
+            err.contains("on_receive"),
+            "error should mention on_receive: {err}"
         );
     }
 

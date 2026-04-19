@@ -148,6 +148,11 @@ pub struct AfterSendContext<'a> {
     /// Path to the persisted sent-copy `.md` (empty string when the send
     /// wasn't persisted — e.g. TEMP failures).
     pub filepath: &'a str,
+    /// RFC Message-ID of the outbound message. Always known by the send
+    /// handler even when delivery failed before persistence, so the
+    /// structured log line can surface a useful identifier on TEMP errors
+    /// where `filepath` (and therefore `email_id`) is empty.
+    pub message_id: &'a str,
     pub send_status: SendStatus,
 }
 
@@ -186,10 +191,15 @@ pub fn should_fire_on_receive(hook: &Hook, email_trusted: TrustedValue) -> bool 
 }
 
 fn extract_email_for_match(addr: &str) -> String {
-    if let Some(start) = addr.find('<')
-        && let Some(end) = addr.find('>')
-    {
-        return addr[start + 1..end].to_lowercase();
+    // Match RFC 5322 display-name form `"Name" <addr>` by taking the LAST
+    // `<` and the first `>` after it. Mirrors `send_handler::extract_bare_address`
+    // and avoids slice-panics on pathological input like `"foo>bar<baz>"`
+    // where a stray `>` precedes the opening `<`.
+    if let Some(start) = addr.rfind('<') {
+        let tail = &addr[start + 1..];
+        if let Some(end) = tail.find('>') {
+            return tail[..end].to_lowercase();
+        }
     }
     addr.to_lowercase()
 }
@@ -317,7 +327,7 @@ pub fn execute_after_send(mailbox_config: &MailboxConfig, ctx: &AfterSendContext
             &expanded,
             &env,
             ctx.mailbox,
-            LogSubject::Email(&id_for_template, ""),
+            LogSubject::Email(&id_for_template, ctx.message_id),
         );
     }
 }
@@ -592,6 +602,61 @@ mod tests {
     }
 
     #[test]
+    fn extract_email_for_match_handles_inverted_angle_brackets() {
+        // Regression: the old implementation used `find('<')` + `find('>')`
+        // and panicked on pathological input where `>` preceded `<`
+        // (e.g. `"foo>bar<baz>"` — `start+1 > end` when the naive slice
+        // `addr[start+1..end]` was formed). Confirm the hardened form
+        // returns a non-panicking, useful result.
+        let out = extract_email_for_match("foo>bar<baz@example.com>");
+        assert_eq!(out, "baz@example.com");
+    }
+
+    #[test]
+    fn extract_email_for_match_no_panic_on_leading_close_bracket() {
+        // Even without a trailing `>`, the function must not panic.
+        let out = extract_email_for_match("weird> input");
+        // No `<` at all → falls through to lowercase of the whole string.
+        assert_eq!(out, "weird> input");
+    }
+
+    #[test]
+    fn extract_email_for_match_takes_last_open_bracket() {
+        // Display name may itself contain `<`; we pick the LAST one.
+        let out = extract_email_for_match("<spoofed@attacker.com> real <user@example.com>");
+        assert_eq!(out, "user@example.com");
+    }
+
+    #[test]
+    fn after_send_filter_to_does_not_panic_on_pathological_input() {
+        // Ensures the `after_send` filter path itself does not slice-panic.
+        let hook = Hook {
+            id: "panicguard01".to_string(),
+            event: HookEvent::AfterSend,
+            r#type: "cmd".to_string(),
+            cmd: "true".to_string(),
+            from: None,
+            to: Some("*@example.com".to_string()),
+            subject: None,
+            has_attachment: None,
+            dangerously_support_untrusted: false,
+        };
+        let ctx = AfterSendContext {
+            mailbox: "alice",
+            from: "alice@test.com",
+            to: "foo>bar<malformed",
+            subject: "x",
+            has_attachment: false,
+            filepath: "",
+            message_id: "<x@test.com>",
+            send_status: SendStatus::Failed,
+        };
+        // Does not panic; returns false because the `to` glob doesn't match
+        // the lowercased fallback.
+        assert!(!after_send_filter_matches(&hook, &ctx));
+    }
+
+    #[test]
     fn substitute_template_id_and_date_only() {
         let out = substitute_template(
             "echo {id} {date} {filepath}",
@@ -772,6 +837,7 @@ mod tests {
             subject: "Hi",
             has_attachment: false,
             filepath: "/tmp/sent/alice/2025.md",
+            message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Delivered,
         };
         execute_after_send(&mailbox, &ctx);
@@ -822,6 +888,7 @@ mod tests {
             subject: "Hi",
             has_attachment: false,
             filepath: "/tmp/sent/alice/x.md",
+            message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Delivered,
         };
         execute_after_send(&mailbox, &ctx);
@@ -856,6 +923,7 @@ mod tests {
             subject: "Hi",
             has_attachment: false,
             filepath: "/tmp/sent/alice/x.md",
+            message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Delivered,
         };
         execute_after_send(&mailbox, &ctx);
@@ -888,6 +956,7 @@ mod tests {
             subject: "Hi",
             has_attachment: false,
             filepath: "/tmp/sent/alice/x.md",
+            message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Failed,
         };
         execute_after_send(&mailbox, &ctx);
@@ -965,6 +1034,52 @@ mod tests {
 
         assert!(logs_contain("hook_id=logid0000002"));
         assert!(logs_contain("exit_code=1"));
+    }
+
+    #[test]
+    #[tracing_test::traced_test]
+    fn after_send_log_line_falls_back_to_message_id_when_filepath_empty() {
+        // On TEMP delivery failures the send handler doesn't persist the
+        // sent copy, so `filepath` is empty and the `email_id` tag would
+        // be empty too. The structured log line must still surface the
+        // RFC Message-ID so operators can grep by a stable identifier.
+        let hook = Hook {
+            id: "tempfailid01".to_string(),
+            event: HookEvent::AfterSend,
+            r#type: "cmd".to_string(),
+            cmd: "true".to_string(),
+            from: None,
+            to: None,
+            subject: None,
+            has_attachment: None,
+            dangerously_support_untrusted: false,
+        };
+        let mailbox = MailboxConfig {
+            address: "alice@test.com".to_string(),
+            hooks: vec![hook],
+            trust: None,
+            trusted_senders: None,
+        };
+        let ctx = AfterSendContext {
+            mailbox: "alice",
+            from: "alice@test.com",
+            to: "bob@example.com",
+            subject: "Hi",
+            has_attachment: false,
+            filepath: "", // TEMP failure: nothing persisted
+            message_id: "<deferred-uuid@test.com>",
+            send_status: SendStatus::Deferred,
+        };
+        execute_after_send(&mailbox, &ctx);
+
+        assert!(
+            logs_contain("hook_id=tempfailid01"),
+            "log line should carry hook_id=..."
+        );
+        assert!(
+            logs_contain("message_id=<deferred-uuid@test.com>"),
+            "log line should fall back to message_id when email_id is empty"
+        );
     }
 
     // --- Tests preserved from the old channel.rs that remain relevant ---

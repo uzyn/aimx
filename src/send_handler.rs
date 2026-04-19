@@ -310,6 +310,7 @@ where
         &from_header,
         &to_header,
         &subject,
+        &message_id,
         persisted_path.as_deref(),
         send_status,
     );
@@ -317,12 +318,14 @@ where
     response
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fire_after_send_hooks(
     config: &crate::config::Config,
     from_mailbox: &str,
     from_header: &str,
     to_header: &str,
     subject: &str,
+    message_id: &str,
     persisted_path: Option<&std::path::Path>,
     send_status: SendStatus,
 ) {
@@ -342,6 +345,7 @@ fn fire_after_send_hooks(
         subject,
         has_attachment: false, // outbound via UDS is text-only in v0.2
         filepath: &filepath,
+        message_id,
         send_status,
     };
     hook::execute_after_send(mailbox_config, &ctx);

@@ -104,7 +104,7 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays:
 | `from` | glob | `on_receive` only: sender filter |
 | `to` | glob | `after_send` only: recipient filter |
 | `subject` | string | Case-insensitive substring filter |
-| `has_attachment` | bool | Attachment-presence filter |
+| `has_attachment` | bool | `on_receive` only: attachment-presence filter (rejected on `after_send`, which is text-only in v0.2) |
 | `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"` |
 
 See [Hooks & Trust](hooks.md) for full details on events, match filters, and trust policies.

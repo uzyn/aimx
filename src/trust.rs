@@ -103,10 +103,15 @@ pub fn evaluate_trust(
 }
 
 fn extract_email_for_match(from: &str) -> String {
-    if let Some(start) = from.find('<')
-        && let Some(end) = from.find('>')
-    {
-        return from[start + 1..end].to_lowercase();
+    // Match RFC 5322 display-name form `"Name" <addr>` by taking the LAST
+    // `<` and the first `>` after it. Mirrors `send_handler::extract_bare_address`
+    // and avoids slice-panics on pathological input like `"foo>bar<baz>"`
+    // where a stray `>` precedes the opening `<`.
+    if let Some(start) = from.rfind('<') {
+        let tail = &from[start + 1..];
+        if let Some(end) = tail.find('>') {
+            return tail[..end].to_lowercase();
+        }
     }
     from.to_lowercase()
 }
@@ -378,5 +383,23 @@ mod tests {
         for trusted in [TrustedValue::None, TrustedValue::False, TrustedValue::True] {
             assert!(should_fire_on_receive(&yolo, trusted));
         }
+    }
+
+    #[test]
+    fn extract_email_for_match_no_panic_on_inverted_brackets() {
+        // Regression: the pre-hardening `find('<') + find('>')` slice
+        // panicked when `>` preceded `<`. After the rfind/tail-find
+        // hardening, this must return a well-formed lowercased address
+        // and never panic — even on adversarial sender headers.
+        let out = extract_email_for_match("foo>bar<baz@example.com>");
+        assert_eq!(out, "baz@example.com");
+
+        // No `<` at all — fall through cleanly.
+        let out = extract_email_for_match("weird> input");
+        assert_eq!(out, "weird> input");
+
+        // Multiple `<` — pick the last one (matches send_handler semantics).
+        let out = extract_email_for_match("<spoof@bad> real <user@example.com>");
+        assert_eq!(out, "user@example.com");
     }
 }
