@@ -4,58 +4,26 @@
 
 **SMTP for agents. No middleman.**
 
-One command to give your AI agents their own email addresses -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, and any MCP-capable agent that needs an email channel.
+Self-hosted SMTP for AI agents. It's the only mail server built from scratch for AI — stores every message as Markdown with TOML frontmatter, perfect for LLMs and RAG. AIMX signs outbound with DKIM, verifies inbound DKIM/SPF/DMARC on arrival, so your email channel is secure. AIMX triggers your AI agents the moment mail lands, and exposes the whole inbox over MCP to Claude Code, OpenClaw and your other favorite AI agents with a one-line install. Run it on VPS with open port 25. One binary, one daemon — no Postfix, no Dovecot, no SaaS in the loop. Your emails stay truly private. Your agents send and receive from their own domain, and the mail lives on your disk.
 
-```bash
-aimx setup agent.mydomain.com
-```
+AIMX takes a 40-year-old open protocol and rebuilds it into a fast, private, signed channel for the agentic era.                                                                                                      
 
-Done. Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed. MCP is built in. Channel rules trigger agent actions on incoming mail.
-
-## How it works
-
-```
-Inbound:
-  Sender -> port 25 -> aimx serve -> ingest -> .md file
-                                             -> channel manager (triggers agent)
-
-Outbound:
-  MCP tool call -> aimx send -> UDS (/run/aimx/send.sock) -> aimx serve
-                                                          -> DKIM sign
-                                                          -> direct SMTP to recipient MX
-```
-
-- **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.
-- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound. All other commands are short-lived.
-- **No IMAP/POP3.** Agents read `.md` files via MCP or filesystem.
-- **Markdown-first.** Emails stored as Markdown with TOML frontmatter -- agents can `cat` and understand immediately.
-
-## Features
-
-- **Setup wizard** -- preflight checks, service file generation, DKIM keygen, DNS guidance, verification
-- **Email delivery** -- EML to Markdown with TOML frontmatter, attachment extraction, mailbox routing
-- **Email sending** -- RFC 5322 composition on the client, DKIM signing (RSA-SHA256) and MX delivery inside `aimx serve` (via `/run/aimx/send.sock`), threading support, attachments
-- **MCP server** -- stdio transport for Claude Code and any MCP client: list, read, send, reply, manage mailboxes
-- **Channel manager** -- trigger shell commands on incoming mail with match filters (from, subject, attachments)
-- **Inbound trust** -- DKIM / SPF / DMARC verification recorded on every email, per-mailbox trust policies, trusted sender allowlists
-- **Verifier service** -- self-hostable port probe and port 25 listener for setup verification
+- **Single binary, lightweight daemon.** One binary is all your need. No other dependencies.
+- **Email as a secure & fast channel.** Email has become a send-and-pray best-effort. AIMX turns email back again into direct MTA-to-MTA communication, bringing it closer to API-like experience.
+- **Push, not poll.** Inbound mail fires channel triggers the moment SMTP `DATA` completes. No cron, no heartbeat.
+- **Trust modeling.** DKIM/SPF/DMARC verified on ingest, result stamped into the frontmatter. Configure trust globally or per mailbox.
+- **IPv6-ready.** Opt into IPv6 with one config flag. IPv4 by default, so your SPF record stays simple.
+- **Markdown-first storage.** No `.eml`, no database. Emails are simply Markdown with TOML frontmatter — easy for LLMs and RAG to parse. Skip the search API; your agent can just `cat` the mailbox. Your inbox becomes your knowledge base.
+- **You own the inbox.** Mail lives entirely on your disk, under your domain. Nothing phones home. 
+- **Hot-swappable mailboxes.** Let your agents create and manage your mailboxes, or manage them manually. Changes take effect live. 
+- **Built-in MCP server.** MCP tools over efficient stdio — list, read, send, reply, mark read/unread, and mailbox CRUD.
+- **One-line agent integration.** `aimx agent-setup` wires AIMX into Claude Code, OpenClaw, Codex CLI, Gemini CLI, OpenCode, and Goose in one command.
+- **MIT licensed.** No license server, no telemetry, no account.
 
 ## Requirements
 
-- Any Unix where Rust compiles and port 25 is available (CI tests Ubuntu, Alpine, Fedora)
-- A VPS with port 25 open (inbound and outbound)
-- A domain you control
-- Rust toolchain (for building from source)
-
-### Compatible VPS providers
-
-| Provider | Port 25 | Notes |
-|----------|---------|-------|
-| Hetzner Cloud | After unblock request | Request via support after first invoice |
-| OVH / Kimsufi | Open by default | |
-| Vultr | Unblockable on request | |
-| BuyVM (Frantech) | Open by default | |
-| Linode / Akamai | On request | Submit support ticket |
+- A Linux server (VPS) with port 25 open (inbound and outbound)
+- A domain or subdomain you control
 
 ## Quick start
 
