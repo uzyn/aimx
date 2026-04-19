@@ -454,7 +454,7 @@ or
 
 ---
 
-## Sprint 48 — `aimx doctor` + `aimx logs` + Mailbox Delete Force + Shell Completion (Days 133–135.5) [NOT STARTED]
+## Sprint 48 — `aimx doctor` + `aimx logs` + Mailbox Delete Force + Shell Completion (Days 133–135.5) [DONE]
 
 **Goal:** DX/diagnostic polish. Clean rename `aimx status` → `aimx doctor`. Add dedicated `aimx logs` subcommand (journalctl wrapper). Doctor output expands with config path, per-mailbox trust + hooks summary, and a "Recent logs" tail (last 10 lines, always on). Add `aimx mailbox delete --force` with interactive confirmation for wiping mailboxes with mail. MCP `mailbox_delete` emits a hint pointing at the CLI when it hits NONEMPTY. Rename `aimx mailbox` → `aimx mailboxes` (singular alias retained). Add `aimx completion <shell>` for tab-completion.
 
@@ -570,7 +570,7 @@ or
 
 ---
 
-## Sprint 49 — Frontmatter `read_at` Timestamp (Days 135.5–138) [NOT STARTED]
+## Sprint 49 — Frontmatter `read_at` Timestamp (Days 135.5–138) [IN PROGRESS]
 
 **Goal:** Add optional `read_at` RFC 3339 UTC timestamp to inbound email frontmatter. Written by the MARK-READ handler; removed on MARK-UNREAD. Lets agents and operators see *when* an email was first marked read without a separate audit log.
 
@@ -794,8 +794,8 @@ or
 | 45 | 125.5–128 | Strict Outbound + MCP Writes via Daemon | `aimx send` stops reading config.toml (daemon resolves From), strict outbound (concrete mailbox + configured domain only, wildcard is inbound-only), UDS `MARK-READ`/`MARK-UNREAD` verbs + MCP write ops via daemon with per-mailbox RwLock | Done |
 | 46 | 128–130.5 | Mailbox CRUD via UDS (Daemon Picks Up Changes Live) | UDS `MAILBOX-CREATE`/`MAILBOX-DELETE` verbs + daemon hot-swaps `Arc<Config>`, `aimx mailbox create/delete` route through daemon first and suppress restart hint on success, directory lifecycle + NONEMPTY safety on delete | Done |
 | 47 | 130.5–133 | Post-v1 Non-blocking Cleanup | DKIM startup integration test + runtime-flavor contract, exhaustive `InitSystem` match + `.env_clear()` defense-in-depth, `validate_mailbox_name` tightening + `write_config_atomic` preservation + stronger rename-failure test, unify ingest + MARK writers under one per-mailbox lock | Done |
-| 48 | 133–135.5 | Doctor + Logs + Delete --force + Completion | `aimx status` → `aimx doctor` (clean rename), extended output with config path + trust + hooks summary + last 10 log lines, new `aimx logs` subcommand, `aimx mailbox delete --force` with interactive confirmation, MCP NONEMPTY hint, `aimx mailbox` → `aimx mailboxes` (singular alias retained), `aimx completion <shell>` for tab-completion | Not Started |
-| 49 | 135.5–138 | Frontmatter `read_at` | MARK-READ writes `read_at` timestamp; MARK-UNREAD removes the field | Not Started |
+| 48 | 133–135.5 | Doctor + Logs + Delete --force + Completion | `aimx status` → `aimx doctor` (clean rename), extended output with config path + trust + hooks summary + last 10 log lines, new `aimx logs` subcommand, `aimx mailbox delete --force` with interactive confirmation, MCP NONEMPTY hint, `aimx mailbox` → `aimx mailboxes` (singular alias retained), `aimx completion <shell>` for tab-completion | Done |
+| 49 | 135.5–138 | Frontmatter `read_at` | MARK-READ writes `read_at` timestamp; MARK-UNREAD removes the field | In Progress |
 | 50 | 138–140.5 | Hooks Foundation | Rename `channels` → `hooks` across code/config/docs, 12-char alphanumeric hook IDs, trust gate rewrite (`on_receive` trusted-only + per-hook `dangerously_support_untrusted` opt-in), `after_send` event, structured journald hook-fire logs | Not Started |
 | 51 | 140.5–143 | Hooks CLI + UDS Hot-Swap | `aimx mailboxes show <name>`, `aimx hooks list \| create \| delete` (flag-based, `hook` alias), UDS `HOOK-CREATE` / `HOOK-DELETE` verbs with live `Arc<Config>` swap | Not Started |
 
@@ -845,6 +845,10 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 46, PR #81)** `validate_mailbox_name` accepts whitespace and RFC-5322-unsafe local parts. _Triaged into Sprint 47 (S47-3)._
 - [x] **(Sprint 46, PR #81)** `create_failure_at_disk_write_leaves_handle_and_disk_unchanged` never exercises the rename failure branch. _Triaged into Sprint 47 (S47-3)._
 - [x] **(Sprint 45, PR #78 → Sprint 46, PR #81)** MARK-* and inbound ingest are not serialized against each other; unify writers under one per-mailbox lock. _Triaged into Sprint 47 (S47-4)._
+- [ ] **(Sprint 48, PR #96)** Add integration test for `aimx mailboxes delete --force` socket-missing fallback path — currently the shared logic with the non-force path is covered, but no explicit test pins `ENOENT`/`ECONNREFUSED` behaviour for the force variant.
+- [ ] **(Sprint 48, PR #96)** Structure the NONEMPTY ack response (`AckResponse`) to carry `inbox_count` and `sent_count` as typed fields instead of the MCP client regex-parsing `"{} files"` out of the reason string — enables dropping the `parse_nonempty_counts` fallback and the defensive `(0,0)` path.
+- [ ] **(Sprint 48, PR #96)** Daemon-side NONEMPTY reason string at `src/mailbox_handler.rs:195-201` still uses `"{} files"` uniformly (the CLI prompt was fixed by `pluralize_files`, but the MCP-facing wire string was not). Will clean up naturally once the structured `AckResponse` from the item above lands.
+- [ ] **(Sprint 48, PR #96)** Replace `->` with `→` on the doctor trust/hooks sub-lines for visual consistency with other commands — deferred because it would churn three pinned tests; no operator has reported garbled output.
 
 ### Deferred Feature Sprints
 
