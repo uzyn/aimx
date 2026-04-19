@@ -2,6 +2,16 @@
 name = "aimx"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88.0"
+authors = ["U-Zyn Chua <chua@uzyn.com>"]
+description = "AI Mail Exchange - SMTP server for AI Agents"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/uzyn/aimx"
+homepage = "https://aimx.email"
+keywords = ["email", "smtp", "mcp", "self-hosted", "ai-agent"]
+categories = ["command-line-utilities", "email"]
+exclude = ["/docs"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
