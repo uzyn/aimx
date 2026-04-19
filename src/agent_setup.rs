@@ -459,6 +459,13 @@ pub fn run_with_env_to_writer(
         return Ok(());
     }
 
+    // Enforce the per-user constraint before doing any work so all three
+    // entry paths (positional agent, unknown agent, guided menu) produce the
+    // same root error rather than menus or "unknown agent" first.
+    if env.is_root() {
+        return Err("agent-setup is a per-user operation — run without sudo or as root".into());
+    }
+
     let opts = InstallOptions {
         force,
         print,
@@ -485,14 +492,7 @@ pub fn run_with_env_to_writer(
     };
 
     match selection {
-        Selection::Agent(spec) => {
-            if env.is_root() {
-                return Err(
-                    "agent-setup is a per-user operation — run without sudo or as root".into(),
-                );
-            }
-            install_to_writer(spec, &opts, env, out)
-        }
+        Selection::Agent(spec) => install_to_writer(spec, &opts, env, out),
         Selection::McpGeneral => print_mcp_general(data_dir, out),
     }
 }
@@ -526,6 +526,8 @@ fn prompt_agent_selection(
 
     let parse_choice = |raw: &str| -> Option<Selection> {
         let n: usize = raw.trim().parse().ok()?;
+        // Slots are 1-indexed; guard against `0` so `n - 1` never underflows
+        // usize when indexing into `agents`.
         if n == 0 {
             return None;
         }
@@ -552,6 +554,12 @@ fn prompt_agent_selection(
     write!(out, "Choice [1-{mcp_general_slot}]: ")?;
     out.flush()?;
     let second = env.read_line()?;
+    // A blank retry is the same signal as a blank first input: the user has
+    // given up, so surface the same friendly "aborted by user" message rather
+    // than "invalid choice ''".
+    if second.trim().is_empty() {
+        return Err("aborted by user".into());
+    }
     if let Some(sel) = parse_choice(&second) {
         return Ok(sel);
     }
@@ -577,7 +585,7 @@ fn print_mcp_general(
 
 /// Build the `{ "command": ..., "args": [...] }` JSON snippet. Routed through
 /// `serde_json` so a `--data-dir` path containing `"` or `\` escapes safely.
-pub fn render_mcp_general_snippet(data_dir: Option<&Path>) -> String {
+fn render_mcp_general_snippet(data_dir: Option<&Path>) -> String {
     let args: Vec<String> = match data_dir {
         Some(dd) => vec![
             "--data-dir".to_string(),
@@ -2783,11 +2791,79 @@ mod tests {
         )
         .unwrap();
 
-        // Second install via menu, with --force: should not prompt, not error.
+        let plugin_path = tmp
+            .path()
+            .join(".claude/plugins/aimx/.claude-plugin/plugin.json");
+        assert!(
+            plugin_path.exists(),
+            "initial install should write plugin.json"
+        );
+        // Sentinel content to prove --force actually rewrote the file.
+        std::fs::write(&plugin_path, "SENTINEL\n").unwrap();
+
+        // Second install via menu with --force: must not prompt (only one
+        // scripted response is available — any extra read_line would panic
+        // on `remove(0)`), must rewrite the sentinel content back to real
+        // plugin.json, and must leave no unconsumed menu responses.
         let mut env_menu = MockEnv::new(tmp.path().to_path_buf());
         env_menu.tty = true;
         env_menu.responses = RefCell::new(vec!["1\n".to_string()]);
         let mut out: Vec<u8> = Vec::new();
         run_with_env_to_writer(None, false, true, false, None, &env_menu, &mut out).unwrap();
+
+        assert!(
+            env_menu.responses.borrow().is_empty(),
+            "menu should have consumed exactly one read_line; leftovers: {:?}",
+            env_menu.responses.borrow()
+        );
+        let rewritten = std::fs::read_to_string(&plugin_path).unwrap();
+        assert_ne!(
+            rewritten, "SENTINEL\n",
+            "--force path must have overwritten the sentinel plugin.json"
+        );
+        assert!(
+            rewritten.contains("\"mcpServers\""),
+            "rewritten plugin.json should contain the real mcpServers block: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn menu_root_still_refused_up_front() {
+        // Root + TTY + no positional agent: the root check must fire before
+        // the menu is rendered, so no read_line is ever called and no files
+        // are installed.
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.root = true;
+        env.tty = true;
+        // No responses queued — if the menu is shown, read_line() panics.
+        let mut out: Vec<u8> = Vec::new();
+        let err =
+            run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("per-user"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            out.is_empty(),
+            "no menu output expected when root is rejected up front: {}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(!tmp.path().join(".claude").exists());
+    }
+
+    #[test]
+    fn menu_blank_retry_aborts_cleanly() {
+        // Invalid first entry then Enter-alone on the retry should surface
+        // the same "aborted by user" message as a blank first entry, not
+        // "invalid choice ''".
+        let tmp = TempDir::new().unwrap();
+        let (res, _out, _env) = run_menu(&tmp, vec!["abc\n", "\n"], None);
+        let err = res.unwrap_err();
+        assert!(
+            err.to_string().contains("aborted by user"),
+            "expected friendly abort on blank retry, got: {err}"
+        );
+        assert!(!tmp.path().join(".claude").exists());
     }
 }
