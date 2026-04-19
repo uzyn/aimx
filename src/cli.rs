@@ -44,8 +44,8 @@ pub enum Command {
     Send(SendArgs),
 
     /// Manage mailboxes
-    #[command(subcommand)]
-    Mailbox(MailboxCommand),
+    #[command(subcommand, alias = "mailbox")]
+    Mailboxes(MailboxCommand),
 
     /// Start MCP server in stdio mode
     Mcp,

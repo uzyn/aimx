@@ -76,15 +76,15 @@ sudo aimx portcheck              # port 25 reachability probe
 
 ```bash
 # [VPS]
-sudo aimx mailbox list
-sudo aimx mailbox create inbox
-sudo aimx mailbox create agent
-sudo aimx mailbox create test
-sudo aimx mailbox list
+sudo aimx mailboxes list
+sudo aimx mailboxes create inbox
+sudo aimx mailboxes create agent
+sudo aimx mailboxes create test
+sudo aimx mailboxes list
 ls /var/lib/aimx/inbox/
 ```
 
-**Acceptance.** Four mailbox directories exist under `/var/lib/aimx/inbox/` and `/var/lib/aimx/sent/`: `catchall/` (created by `aimx setup` as the default fallback — see `src/setup.rs`), plus `inbox/`, `agent/`, and `test/` just created. The `catchall` mailbox also appears in `aimx mailbox list` and in `/etc/aimx/config.toml`.
+**Acceptance.** Four mailbox directories exist under `/var/lib/aimx/inbox/` and `/var/lib/aimx/sent/`: `catchall/` (created by `aimx setup` as the default fallback — see `src/setup.rs`), plus `inbox/`, `agent/`, and `test/` just created. The `catchall` mailbox also appears in `aimx mailboxes list` and in `/etc/aimx/config.toml`.
 
 ---
 
@@ -286,7 +286,7 @@ codex exec "List unread mail in mailbox 'inbox'. Read the most recent one, summa
 
 **Goal.** A configured `on_receive` shell command runs when a trusted sender emails, and receives the expanded template variables.
 
-Edit `/etc/aimx/config.toml` to **update the existing `[mailboxes.test]` section** (created by `aimx mailbox create test` in T2). Set `trust` and `trusted_senders` on the existing table, and append the `on_receive` sub-table under it:
+Edit `/etc/aimx/config.toml` to **update the existing `[mailboxes.test]` section** (created by `aimx mailboxes create test` in T2). Set `trust` and `trusted_senders` on the existing table, and append the `on_receive` sub-table under it:
 
 ```toml
 [mailboxes.test]

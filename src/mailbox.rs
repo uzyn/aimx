@@ -22,7 +22,7 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
 /// actually accept without quoting, which is what we care about in
 /// practice.
 ///
-/// Used both by the CLI path (`aimx mailbox create`) and by the UDS
+/// Used both by the CLI path (`aimx mailboxes create`) and by the UDS
 /// handler (`MAILBOX-CREATE`/`MAILBOX-DELETE`). Keeping a single source of
 /// truth prevents drift between the two.
 pub(crate) fn validate_mailbox_name(name: &str) -> Result<(), String> {

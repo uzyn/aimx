@@ -88,7 +88,7 @@ fn dispatch_with_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
-        Command::Mailbox(cmd) => mailbox::run(cmd, config),
+        Command::Mailboxes(cmd) => mailbox::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }

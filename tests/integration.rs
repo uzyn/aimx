@@ -143,7 +143,7 @@ fn help_shows_subcommands() {
         .success()
         .stdout(predicate::str::contains("ingest"))
         .stdout(predicate::str::contains("send"))
-        .stdout(predicate::str::contains("mailbox"))
+        .stdout(predicate::str::contains("mailboxes"))
         .stdout(predicate::str::contains("mcp"))
         .stdout(predicate::str::contains("setup"))
         .stdout(predicate::str::contains("doctor"))
@@ -1466,6 +1466,37 @@ fn doctor_help_works() {
         .assert()
         .success()
         .stdout(predicate::str::contains("doctor"));
+}
+
+#[test]
+fn mailboxes_and_mailbox_alias_produce_identical_output() {
+    // S48-7: `mailboxes` is the canonical subcommand name; the singular
+    // `mailbox` is retained as a clap alias for muscle memory. Both must
+    // produce byte-identical output for `list`.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let plural = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("list")
+        .assert()
+        .success();
+    let singular = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("list")
+        .assert()
+        .success();
+
+    let plural_out = String::from_utf8_lossy(&plural.get_output().stdout).to_string();
+    let singular_out = String::from_utf8_lossy(&singular.get_output().stdout).to_string();
+    assert_eq!(
+        plural_out, singular_out,
+        "`aimx mailboxes list` and `aimx mailbox list` must produce identical output"
+    );
 }
 
 #[test]

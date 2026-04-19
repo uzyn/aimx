@@ -378,9 +378,9 @@ Check your inbox (and spam folder). If the email lands in spam, see the Producti
 Create additional mailboxes beyond the default catchall:
 
 ```bash
-aimx mailbox create support
-aimx mailbox create notifications
-aimx mailbox list
+aimx mailboxes create support
+aimx mailboxes create notifications
+aimx mailboxes list
 ```
 
 Edit `/etc/aimx/config.toml` to configure channel rules (triggers on incoming mail):
