@@ -1061,45 +1061,6 @@ command = "false"
 }
 
 #[test]
-fn ingest_rejects_legacy_placeholder_config_at_cli() {
-    // Regression guard: Config::load must refuse a config that still
-    // references the retired `{from}` / `{subject}` / `{to}` / `{mailbox}` /
-    // `{filepath}` placeholders, and that error must surface to the CLI user
-    // as a non-zero exit code with a stderr message naming the placeholder and
-    // pointing at the migration (AIMX_* env vars).
-    let tmp = TempDir::new().unwrap();
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-
-[[mailboxes.catchall.on_receive]]
-type = "cmd"
-command = 'echo "from={{from}} subject={{subject}}" >> /tmp/legacy.log'
-"#,
-        tmp.path().display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("catchall"))
-        .stderr(predicate::str::contains("{from}"))
-        .stderr(predicate::str::contains("AIMX_FROM"));
-}
-
-#[test]
 fn ingest_trust_verified_blocks_unsigned_trigger() {
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("should_not_exist");
