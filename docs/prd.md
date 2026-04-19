@@ -131,7 +131,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 
 ### 6.6 Channel Manager
 - FR-29: Read trigger rules from `config.toml` per mailbox.
-- FR-30: Support `cmd` trigger type: execute shell command with aimx-controlled template variables `{id}` and `{date}` substituted into the command string. User-controlled fields are exposed as environment variables (`AIMX_FROM`, `AIMX_TO`, `AIMX_SUBJECT`, `AIMX_MAILBOX`, `AIMX_FILEPATH`) to avoid shell-injection via header values. Legacy `{from}`/`{to}`/`{subject}`/`{mailbox}`/`{filepath}` placeholders are rejected at config load with a migration hint (Sprint 44).
+- FR-30: Support `cmd` trigger type: execute shell command with aimx-controlled template variables `{id}` and `{date}` substituted into the command string. User-controlled fields are exposed as environment variables (`AIMX_FROM`, `AIMX_TO`, `AIMX_SUBJECT`, `AIMX_MAILBOX`, `AIMX_FILEPATH`) to avoid shell-injection via header values.
 - FR-31: Support optional match filters: `from` (glob), `subject` (substring), `has_attachment` (bool). All conditions AND.
 - FR-32: Execute triggers synchronously during delivery. Log failures, never block delivery.
 
@@ -148,7 +148,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
   The frontmatter field is `trusted` (distinct from the mailbox config field `trust`) to reflect that the value is the result of the evaluation, not the policy itself. `trusted == "true"` is equivalent to "this email passed the trigger gate for this mailbox," so the channel manager's gating logic (FR-35/36/37) can be expressed as `if mailbox.trust == "verified" then require trusted == "true"`.
 
 ### 6.8 Verifier Service
-- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx verify` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
+- FR-38: Hosted verifier service at `check.aimx.email` exposing an HTTP `/probe` endpoint that identifies the caller via a Caddy-injected `X-AIMX-Client-IP` header and performs a full SMTP EHLO handshake against the caller's IP on port 25 (used by `aimx setup` and `aimx portcheck` to confirm `aimx serve` is responding after setup). The endpoint applies a target guard that rejects loopback, unspecified, link-local, and RFC 1918 / RFC 4193 ranges so the service cannot be used as a port-scanner proxy. `/probe` (EHLO handshake) is the single endpoint.
 - FR-39: ~~Hosted email endpoint at `verify@aimx.email` that receives test email and sends reply.~~ _Removed: email echo eliminated to avoid backscatter risk and MTA dependency on the verify server. DKIM/SPF verification is handled by DNS record checks during setup instead._
 - FR-39b: Port 25 listener on the verifier service that accepts SMTP connections (responds to EHLO), allowing `aimx` clients to test outbound port 25 connectivity via EHLO handshake. _Note: outbound check now performs EHLO handshake directly from the client, not via `/reach`._
 - FR-40: Verifier service is open source and self-hostable. No MTA required on the verifier server.
@@ -167,7 +167,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
         └── troubleshooting.md        # error codes and recovery steps
     ```
   The main `aimx-primer.md` covers identity/purpose, the two access surfaces (MCP for writes/sends, direct filesystem for reads), quick-reference summaries of the 9+ MCP tools, the frontmatter fields agents most often check (`trusted`, `thread_id`, `list_id`, `auto_submitted`, `read`, `labels`), the 4–5 most common workflows inline (check inbox, send, reply, summarize a thread, handle auto-submitted mail), a short trust-model overview, pointers to `references/*.md` for depth, a pointer to `/var/lib/aimx/README.md` as the runtime authoritative layout reference, and a "what you must not do" safety list.
-- FR-50b: (v0.2) `aimx serve` maintains an always-present `/var/lib/aimx/README.md` agent-readable guide to the datadir. The README is baked into the binary via `include_str!`, written on `aimx setup`, and refreshed by `aimx serve` on startup if the baked-in version string (`<!-- aimx-readme-version: N -->` at top of file; exact string match, not semver) differs from the on-disk version. The file is deterministic and idempotent (same bytes for a given AIMX version), states at the top that user edits are overwritten on upgrade, and covers: directory purpose, read vs write access model, directory layout, file naming rules, slug algorithm, bundle rule, frontmatter reference, trust/DKIM/SPF/DMARC explanation, thread grouping, handling auto-submitted/list mail, attachments, and a pointer to the `aimx` MCP server for all mutations. Refresh on `aimx setup` re-run is also performed; out-of-band refresh (e.g., on every command) is out of scope for v0.2.
+- FR-50b: (v0.2) `aimx serve` maintains an always-present `/var/lib/aimx/README.md` agent-readable guide to the datadir. The README is baked into the binary via `include_str!`, written on `aimx setup`, and refreshed by `aimx serve` on startup if the baked-in version string (`<!-- aimx-readme-version: N -->` at top of file; exact string match, not semver) differs from the on-disk version. The file is deterministic and idempotent (same bytes for a given AIMX version), states at the top that user edits will be overwritten, and covers: directory purpose, read vs write access model, directory layout, file naming rules, slug algorithm, bundle rule, frontmatter reference, trust/DKIM/SPF/DMARC explanation, thread grouping, handling auto-submitted/list mail, attachments, and a pointer to the `aimx` MCP server for all mutations. Refresh on `aimx setup` re-run is also performed; out-of-band refresh (e.g., on every command) is out of scope for v0.2.
 - FR-50c: (v0.2) Storage-layout exposure policy — the agent primer **documents the datadir layout explicitly**. (Reverses an earlier draft that proposed redacting layout references for "security.") Rationale: `/var/lib/aimx/` is world-readable, agents already have filesystem access, and concealing the layout makes them less effective without making anything safer. The real security boundary is enforced elsewhere — writes require root + UDS, and DKIM keys live at `/etc/aimx/` root-only.
 - FR-51: (v0.2) Plugin sources live under `agents/<agent>/` and `agents/common/` in the AIMX repo and are bundled into the binary at compile time (e.g., via `include_dir!`) so `aimx agent-setup` works offline and is version-locked to the installed binary. Install-time concatenation in `src/agent_setup.rs` extends to support `<platform-prefix>.header → SKILL.md top`, `common primer body → SKILL.md middle`, `<platform-suffix>.footer → SKILL.md bottom` (suffix optional, new in v0.2), and `references/*.md → copied alongside SKILL.md, untouched`. Platforms that support progressive disclosure (Claude Code, Codex) get the full bundle including `references/`. Platforms that take a single blob (Goose recipes, Gemini prompts) receive the main primer only; references are inlined selectively per platform at install time if size permits, or omitted with a pointer to the repo.
 - FR-52: `aimx agent-setup --list` prints the registry of supported agents, their destination paths, and their activation commands. `--force` overwrites an existing destination without prompting; `--print` writes plugin contents to stdout instead of disk for dry-run / CI use.
@@ -175,14 +175,14 @@ All routes expose sensitive communications to third parties, which is absurd whe
 ### 6.9 CLI Commands
 - FR-41: `aimx setup [domain]` — interactive setup wizard. When domain is omitted, prompt interactively for domain and confirm DNS access.
 - FR-41b: ~~Pre-seed OpenSMTPD debconf answers.~~ _Removed: OpenSMTPD replaced by embedded SMTP server. Setup now generates a systemd/OpenRC service file for `aimx serve`._
-- FR-42: ~~`aimx preflight` — run port 25 reachability checks (outbound and inbound) without installing.~~ _Removed: preflight functionality merged into `aimx verify`._
+- FR-42: ~~`aimx preflight` — run port 25 reachability checks (outbound and inbound) without installing.~~ _Removed: preflight functionality merged into `aimx portcheck`._
 - FR-42b: `aimx serve` — start the embedded SMTP listener daemon. Options: `--bind` (default `0.0.0.0:25`), `--tls-cert`, `--tls-key`. Runs until SIGTERM/SIGINT.
 - FR-43: `aimx ingest <rcpt>` — delivery command for manual/pipe usage (reads raw email from stdin). Also called in-process by `aimx serve`.
 - FR-44: `aimx send` — compose, sign, and send email.
 - FR-45: `aimx mcp` — start MCP server in stdio mode.
 - FR-46: `aimx mailbox create|list|delete <name>` — mailbox management.
 - FR-47: `aimx status` — show server status, mailbox counts, recent activity.
-- FR-48: `aimx verify` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
+- FR-48: `aimx portcheck` — check port 25 connectivity. Requires root. If `aimx serve` is running: outbound EHLO + inbound EHLO probe. If port 25 is free: spawn temp SMTP listener and run checks. If port 25 is occupied by another process: report process name and exit.
 - FR-48b: `aimx agent-setup <agent> [--list] [--force] [--print]` — install per-agent plugin/skill/recipe (see §6.10). Runs as the current user.
 
 ## 7. Non-Functional Requirements
@@ -215,7 +215,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
     └── public.key                      # root:root 644 — publishable
 
 /var/lib/aimx/                          # root:root 755 — world-readable datadir
-├── README.md                           # agent-facing layout guide, regenerated on upgrade
+├── README.md                           # agent-facing layout guide, written by setup, refreshed on serve
 ├── inbox/
 │   ├── <mailbox>/
 │   │   ├── 2026-04-15-143022-meeting-notes.md
@@ -278,7 +278,6 @@ All routes expose sensitive communications to third parties, which is absurd whe
 - Plugin/extension author metadata standardized to `U-Zyn Chua <chua@uzyn.com>`
 
 ### Out of Scope (future consideration)
-- (v0.2) Config/data migration tooling — pre-launch, no existing installs to migrate
 - (v0.2) Per-user mailbox ACLs on send — UDS socket is world-writable; any local user can submit
 - (v0.2) Multi-domain or subdomain aliasing in `aimx serve`'s send-side domain validation
 - (v0.2) Wildcard entries in `trusted_senders` beyond the existing glob pattern semantics
@@ -309,7 +308,7 @@ All routes expose sensitive communications to third parties, which is absurd whe
 | M5: Inbound Trust | Gate triggers on sender verification | DKIM/SPF verification during ingest, per-mailbox trust policy, trusted_senders allowlist |
 | M6: Setup Wizard | One-command setup | `aimx setup`, preflight checks, service file generation, DNS guidance, verification |
 | M7: Verifier Service | Hosted verification endpoint | `check.aimx.email` probe + reach endpoints, self-hostable |
-| M8: Polish | CLI completeness and docs | `aimx status`, `aimx verify`, README, usage docs |
+| M8: Polish | CLI completeness and docs | `aimx status`, `aimx portcheck`, README, usage docs |
 | M9: Embedded SMTP | Replace OpenSMTPD with built-in SMTP | `aimx serve` daemon, hand-rolled tokio SMTP receiver, lettre outbound, systemd/OpenRC service |
 
 ## 10. Risks and Mitigations
@@ -336,5 +335,4 @@ All routes expose sensitive communications to third parties, which is absurd whe
 9. **(v0.2) Privileged send via Unix domain socket** — `aimx send` no longer signs locally. The DKIM private key is root-owned (`/etc/aimx/dkim/private.key`, mode `600`) and never readable by non-root processes. `aimx send` writes a length-prefixed `AIMX/1 SEND` request to `/run/aimx/send.sock` (`root:root 0666`, world-writable); `aimx serve` parses the `From:`, validates the sender domain against the configured primary domain, signs, delivers to MX, and persists the signed copy to `sent/<from-mailbox>/`. **Authorization is explicitly out of scope in v0.2** — any local user can submit mail through the socket. `SO_PEERCRED` is logged for diagnostics but not enforced. Rationale: shrinks the trust boundary so any non-root process that can read the datadir cannot also forge DKIM-signed mail; per-user authorization on top of that is deferred until a real demand surfaces.
 10. **(v0.2) Filesystem split — `/etc/aimx/` for config + secrets, `/var/lib/aimx/` for data** — Configuration and DKIM keys move to `/etc/aimx/` (root-owned). Data stays under `/var/lib/aimx/` and is world-readable. Rationale: matches Unix conventions, isolates secrets from agents that need filesystem read access to mail, and lets the datadir stay world-readable without leaking the DKIM key. AIMX targets single-admin servers — on shared multi-tenant hosts mail is visible to any local user, and this is documented in `book/getting-started.md`.
 11. **(v0.2) `trusted` frontmatter field, per-mailbox trust model preserved** — The v1 per-mailbox `trust: none|verified` + `trusted_senders` model and trigger-gating semantics are preserved unchanged. v0.2 adds an always-written `trusted` field to inbound frontmatter (`"none"` | `"true"` | `"false"`) so agents and operators can read the trust outcome directly per email instead of inferring it from "did a trigger fire." `trusted == "true"` is exactly the condition under which a `trust: verified` mailbox would fire its triggers. Rationale: the agent-facing payoff of trust evaluation should be visible at the email level, not buried in trigger behavior.
-12. **(v0.2) Pre-launch — no migration path** — There are no existing AIMX installs to migrate. `aimx setup` writes directly to the new locations; the v0.2 reshape ships in one cut without backwards-compatibility shims, dual-read code paths, or upgrade tooling. Future versions that ship after v0.2 launches must reintroduce a migration story; v0.2 itself does not.
 
