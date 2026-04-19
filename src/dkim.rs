@@ -524,13 +524,13 @@ mod tests {
             \r\n\
             Hello world\r\n";
 
-        let signed = sign_message(message, &private_key, "example.com", "dkim").unwrap();
+        let signed = sign_message(message, &private_key, "example.com", "aimx").unwrap();
         let signed_str = String::from_utf8_lossy(&signed);
 
         assert!(signed_str.contains("DKIM-Signature:"));
         assert!(signed_str.contains("a=rsa-sha256"));
         assert!(signed_str.contains("d=example.com"));
-        assert!(signed_str.contains("s=dkim"));
+        assert!(signed_str.contains("s=aimx"));
 
         assert!(signed_str.contains("From: test@example.com"));
     }
@@ -594,7 +594,7 @@ mod tests {
             \r\n\
             Hello world\r\n";
 
-        let signed = sign_message(message, &private_key, "example.com", "dkim").unwrap();
+        let signed = sign_message(message, &private_key, "example.com", "aimx").unwrap();
         let signed_str = String::from_utf8_lossy(&signed);
 
         let dkim_header = signed_str
@@ -653,7 +653,7 @@ mod tests {
             \r\n\
             Hello world\r\n";
 
-        let signed = sign_message(message, &private_key, "example.com", "dkim").unwrap();
+        let signed = sign_message(message, &private_key, "example.com", "aimx").unwrap();
         let signed_str = String::from_utf8_lossy(&signed);
 
         assert!(
@@ -683,7 +683,7 @@ mod tests {
             \r\n\
             Hello world\r\n";
 
-        let signed = sign_message(message, &private_key, "example.com", "dkim").unwrap();
+        let signed = sign_message(message, &private_key, "example.com", "aimx").unwrap();
         let signed_str = String::from_utf8_lossy(&signed);
 
         // Collect the full DKIM-Signature header (may span multiple lines)
