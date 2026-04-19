@@ -31,7 +31,7 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 | OpenClaw | Yes (`aimx agent-setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw; `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
 | Aider | No (no MCP server) | `aider --message "<prompt>"` | `--yes-always` | Aider is a code-editing agent; recipes below pattern it as "take email, apply patch, commit." |
 
-All six agents with an `aimx agent-setup <agent>` installer can ALSO be wired as channel triggers — MCP support and channel-trigger support are orthogonal. MCP gives the agent a way to read/send mail on demand; a channel trigger is AIMX pushing an email into the agent when it arrives.
+Every agent with an `aimx agent-setup <agent>` installer can ALSO be wired as channel triggers — MCP support and channel-trigger support are orthogonal. MCP gives the agent a way to read/send mail on demand; a channel trigger is AIMX pushing an email into the agent when it arrives. (Hermes is intentionally not covered by a recipe below yet; it has an installer but no canonical non-interactive CLI story today.)
 
 > **Flag drift warning.** CLI flags for every agent below were verified against each project's current `--help` output and public docs at the time of writing. Agent CLIs evolve fast — always run `<agent> --help` yourself before deploying a recipe to a production mailbox, and check the linked docs for current flag names.
 
