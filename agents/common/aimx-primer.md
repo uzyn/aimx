@@ -39,7 +39,11 @@ on success and error strings on failure.
 
 - `mailbox_create(name)` — create a new mailbox identity (inbox + sent).
 - `mailbox_list()` — list all mailboxes with message counts.
-- `mailbox_delete(name)` — delete a mailbox and all its mail. Irreversible.
+- `mailbox_delete(name)` — delete an empty mailbox. The daemon refuses
+  when `inbox/<name>/` or `sent/<name>/` still contains files; the MCP
+  error spells out the per-directory file counts and tells you to run
+  `sudo aimx mailboxes delete --force <name>` on the host. MCP does not
+  wipe mail — that stays on the CLI where the operator sees the prompt.
 
 ### Email tools
 
@@ -251,8 +255,11 @@ and `spf`. Treat `"false"` and `"none"` as untrusted.
   outbound copies.
 - `mailbox_list()` shows all mailboxes with message counts for both inbox
   and sent folders.
-- `mailbox_delete(name)` removes both `inbox/<name>/` and `sent/<name>/`
-  permanently.
+- `mailbox_delete(name)` only succeeds when both `inbox/<name>/` and
+  `sent/<name>/` are empty. On non-empty the MCP error tells you the
+  file counts and points at the host CLI command that wipes-and-deletes
+  (`sudo aimx mailboxes delete --force <name>`); MCP itself never wipes
+  mail.
 
 ## Attachments
 

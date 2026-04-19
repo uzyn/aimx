@@ -73,7 +73,15 @@ mailbox_delete(name: "old-project")
 
 **Errors:**
 - Mailbox does not exist.
-- Mailbox is non-empty (inbox or sent contains files).
+- Mailbox is non-empty (inbox or sent contains files). The error
+  payload spells out the per-directory file counts and points at the
+  CLI command that wipes-and-deletes:
+  `Cannot delete mailbox 'foo' — inbox: 5 files, sent: 2 files. MCP
+  `mailbox_delete` does not wipe mail; run `sudo aimx mailboxes delete
+  --force foo` on the host to wipe and remove.`
+  MCP deliberately does **not** expose a force variant — destructive
+  wipes stay on the CLI where the operator sees the prompt and the
+  request can't be triggered remotely by an agent.
 - Attempt to delete the `catchall` mailbox.
 
 ---

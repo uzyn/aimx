@@ -183,5 +183,13 @@ pub enum MailboxCommand {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Wipe `inbox/<name>/` and `sent/<name>/` contents before
+        /// deleting. Without this flag, a non-empty mailbox is refused
+        /// with the daemon's `ERR NONEMPTY` error. Refuses to wipe the
+        /// catchall mailbox; prompts interactively unless `--yes` is
+        /// also passed.
+        #[arg(long)]
+        force: bool,
     },
 }

@@ -3101,6 +3101,147 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
+// S48-5 — `aimx mailboxes delete --force` (CLI-only wipe + delete)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
+
+    // Create a mailbox and ingest one message into it so a plain delete
+    // would be refused with NONEMPTY.
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("zed")
+        .assert()
+        .success();
+    let zed_inbox = inbox(tmp.path(), "zed");
+    std::fs::write(zed_inbox.join("2025-04-01-120000-held.md"), "content").unwrap();
+
+    // Force-delete with `--yes` skips the prompt and proceeds.
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("--yes")
+        .arg("zed")
+        .assert()
+        .success();
+
+    // Stanza is gone.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        !config_text.contains("[mailboxes.zed]"),
+        "stanza should be removed after force-delete: {config_text}"
+    );
+    // Inbox dir is empty (the daemon leaves the empty dir on disk per S46).
+    let leftover: Vec<_> = std::fs::read_dir(&zed_inbox)
+        .map(|r| r.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftover.is_empty(),
+        "inbox dir must be empty after --force wipe (got {leftover:?})"
+    );
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
+
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("yon")
+        .assert()
+        .success();
+    let yon_inbox = inbox(tmp.path(), "yon");
+    std::fs::write(yon_inbox.join("2025-04-01-130000-keep.md"), "stay").unwrap();
+
+    // Pipe `n\n` on stdin — the prompt must abort the delete and leave
+    // the file in place.
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("yon")
+        .write_stdin("n\n")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Cancelled."),
+        "abort path must print Cancelled, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("inbox/yon/: 1 files"),
+        "prompt must show per-directory file counts, got: {stdout}"
+    );
+
+    // File still there.
+    assert!(
+        yon_inbox.join("2025-04-01-130000-keep.md").is_file(),
+        "abort must leave the email on disk"
+    );
+    // Stanza still present.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(config_text.contains("[mailboxes.yon]"));
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_refuses_catchall() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("--yes")
+        .arg("catchall")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("catchall"),
+        "catchall refusal must surface verbatim, got stderr: {stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DKIM startup check wired into `run_serve`. These tests exercise the
 // full daemon against a canned resolver override so the check runs
 // through the real code path (not just the evaluator unit tests) and we
