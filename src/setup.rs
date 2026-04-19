@@ -858,15 +858,13 @@ pub fn verify_all_dns(
     local_dkim_pubkey: Option<&str>,
 ) -> Vec<(String, DnsVerifyResult)> {
     let ip_str = server_ip.to_string();
-    let mut results = vec![
-        ("MX".into(), verify_mx(net, domain)),
-        ("A".into(), verify_a(net, domain, server_ip)),
-    ];
+    let mut results = vec![("A".into(), verify_a(net, domain, server_ip))];
 
     if let Some(ipv6) = server_ipv6 {
         results.push(("AAAA".into(), verify_aaaa(net, domain, ipv6)));
     }
 
+    results.push(("MX".into(), verify_mx(net, domain)));
     results.push(("SPF".into(), verify_spf(net, domain, &ip_str)));
 
     if let Some(ipv6) = server_ipv6 {
@@ -2131,6 +2129,52 @@ mod tests {
         assert_eq!(
             verify_spf(&net, "example.com", "1.2.3.4"),
             DnsVerifyResult::Pass
+        );
+    }
+
+    #[test]
+    fn verify_all_dns_orders_results_to_match_display() {
+        // The [DNS] display table is produced by generate_dns_records in the
+        // order A, [AAAA], MX, TXT(SPF), [TXT(SPF IPv6)], TXT(DKIM),
+        // TXT(DMARC). Verification output must follow the same order so
+        // operators can scan one against the other — anything else is a
+        // regression of the fix from PR for fix/dns-verification-order.
+        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let mut net = MockNetworkOps::default();
+        net.mx_records
+            .insert("example.com".into(), vec!["10 example.com.".into()]);
+        net.a_records.insert("example.com".into(), vec![ip]);
+        net.txt_records
+            .insert("example.com".into(), vec!["v=spf1 ip4:1.2.3.4 -all".into()]);
+        net.txt_records.insert(
+            "dkim._domainkey.example.com".into(),
+            vec!["v=DKIM1; k=rsa; p=ABC".into()],
+        );
+        net.txt_records.insert(
+            "_dmarc.example.com".into(),
+            vec!["v=DMARC1; p=reject".into()],
+        );
+
+        let names_v4: Vec<String> = verify_all_dns(&net, "example.com", &ip, None, "dkim", None)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert_eq!(names_v4, vec!["A", "MX", "SPF", "DKIM", "DMARC"]);
+
+        let ipv6: IpAddr = "2001:db8::1".parse().unwrap();
+        net.aaaa_records.insert("example.com".into(), vec![ipv6]);
+        net.txt_records.insert(
+            "example.com".into(),
+            vec!["v=spf1 ip4:1.2.3.4 ip6:2001:db8::1 -all".into()],
+        );
+        let names_v6: Vec<String> =
+            verify_all_dns(&net, "example.com", &ip, Some(&ipv6), "dkim", None)
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect();
+        assert_eq!(
+            names_v6,
+            vec!["A", "AAAA", "MX", "SPF", "SPF (IPv6)", "DKIM", "DMARC"]
         );
     }
 
