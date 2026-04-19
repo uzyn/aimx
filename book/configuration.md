@@ -14,11 +14,11 @@ The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only in v0.
 
 ```bash
 # CLI flag (works with any command)
-aimx --data-dir /custom/path status
+aimx --data-dir /custom/path doctor
 
 # Environment variable
 export AIMX_DATA_DIR=/custom/path
-aimx status
+aimx doctor
 ```
 
 The `--data-dir` flag takes precedence over the environment variable.

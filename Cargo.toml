@@ -15,6 +15,7 @@ exclude = ["/docs"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 toml = "1"
 mail-parser = "0.11"

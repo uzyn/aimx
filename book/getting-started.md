@@ -84,8 +84,8 @@ After DNS records propagate, verify the setup:
 # Check port 25 connectivity (requires root)
 sudo aimx portcheck
 
-# Check server status, mailbox counts, and DNS verification
-aimx status
+# Check server health, mailbox counts, and DNS verification
+aimx doctor
 ```
 
 ## Send a test email
@@ -110,6 +110,29 @@ destination path, and see the [Agent Integration](agent-integration.md)
 chapter for per-agent activation steps.
 
 Your agent can now list, read, send, and reply to email. See the [MCP Server](mcp.md) guide for all available tools.
+
+## Shell completion
+
+`aimx completion <shell>` prints a completion script to stdout. Pipe it
+into the shell-specific location for your distribution:
+
+```bash
+# Bash (system-wide; requires root)
+aimx completion bash | sudo tee /etc/bash_completion.d/aimx > /dev/null
+
+# Zsh (user-local; assumes ~/.zsh/completions is in your fpath)
+mkdir -p ~/.zsh/completions
+aimx completion zsh > ~/.zsh/completions/_aimx
+
+# Fish
+aimx completion fish > ~/.config/fish/completions/aimx.fish
+
+# Elvish
+aimx completion elvish > ~/.config/elvish/lib/aimx-completion.elv
+```
+
+Open a new shell and `aimx <Tab>` will expand subcommands and flags
+(e.g. `aimx ma<Tab>` → `aimx mailboxes`).
 
 ## Next steps
 

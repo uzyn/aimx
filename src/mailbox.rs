@@ -8,7 +8,7 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),
-        MailboxCommand::Delete { name, yes } => delete(&config, &name, yes),
+        MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
     }
 }
 
@@ -22,7 +22,7 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
 /// actually accept without quoting, which is what we care about in
 /// practice.
 ///
-/// Used both by the CLI path (`aimx mailbox create`) and by the UDS
+/// Used both by the CLI path (`aimx mailboxes create`) and by the UDS
 /// handler (`MAILBOX-CREATE`/`MAILBOX-DELETE`). Keeping a single source of
 /// truth prevents drift between the two.
 pub(crate) fn validate_mailbox_name(name: &str) -> Result<(), String> {
@@ -154,9 +154,28 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// Grammatical plural of "file"/"files" for counts used in operator-facing
+/// prompts. Keeps the `N file` / `N files` distinction out of inline
+/// `format!` calls so every caller stays consistent.
+fn pluralize_files(count: usize) -> String {
+    if count == 1 {
+        format!("{count} file")
+    } else {
+        format!("{count} files")
+    }
+}
+
 /// Count emails in a mailbox directory. Each flat `<stem>.md` counts as
 /// one, and each bundle directory containing `<stem>.md` counts as one.
 /// Stray files or non-bundle directories are ignored.
+///
+/// NOTE: this is the CLI-side count used only for the `--force` confirmation
+/// prompt. The daemon's NONEMPTY check in `mailbox_handler.rs` uses a raw
+/// `read_dir().count()` via `count_files_if_exists`, so a mailbox with
+/// stray files (editor backups, dotfiles, a bundle missing its `<stem>.md`)
+/// can show `0 files` here while the daemon still refuses to delete it
+/// without `--force`. After a `--force` wipe both counts land at zero, so
+/// the display divergence is cosmetic.
 pub fn count_messages(dir: &Path) -> usize {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -236,8 +255,45 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
-    if !yes {
+fn delete(
+    config: &Config,
+    name: &str,
+    yes: bool,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // S48-5: `--force` wipes `inbox/<name>/` and `sent/<name>/`
+    // contents before invoking the normal delete path. The wipe is
+    // CLI-only (the MCP `mailbox_delete` tool does not gain a force
+    // variant per S48-6) and refuses on the catchall.
+    if force {
+        if name == "catchall" {
+            return Err("Cannot delete the catchall mailbox".into());
+        }
+        let inbox_dir = config.inbox_dir(name);
+        let sent_dir = config.sent_dir(name);
+        let inbox_count = count_messages(&inbox_dir);
+        let sent_count = count_messages(&sent_dir);
+
+        if !yes {
+            println!(
+                "{} About to permanently delete mailbox '{name}':",
+                term::warn("DESTRUCTIVE:"),
+            );
+            println!("  inbox/{name}/: {}", pluralize_files(inbox_count));
+            println!("  sent/{name}/:  {}", pluralize_files(sent_count));
+            print!("Continue? [y/N] ");
+            io::stdout().flush()?;
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            if !input.trim().eq_ignore_ascii_case("y") {
+                println!("Cancelled.");
+                return Ok(());
+            }
+        }
+
+        wipe_mailbox_contents(&inbox_dir)?;
+        wipe_mailbox_contents(&sent_dir)?;
+    } else if !yes {
         print!("Delete mailbox '{name}' and all its emails? [y/N] ");
         io::stdout().flush()?;
         let mut input = String::new();
@@ -252,7 +308,9 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     // refuses to delete a non-empty mailbox (ERR NONEMPTY); we surface
     // that error verbatim rather than falling back to the direct-edit
     // path, because "daemon says no" is not a socket-missing condition.
-    // Fall back to direct edit only when the socket is absent.
+    // Fall back to direct edit only when the socket is absent. After a
+    // successful `--force` wipe the daemon sees empty directories and
+    // succeeds normally.
     match crate::mcp::submit_mailbox_crud_via_daemon(name, false) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
@@ -270,6 +328,30 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
         Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
+}
+
+/// Recursively remove every entry inside `dir` while leaving `dir` itself
+/// in place. This matches the daemon's NONEMPTY check (which is a top-level
+/// `read_dir` count) — once the directory is empty, the daemon-side
+/// MAILBOX-DELETE succeeds. Missing directory is treated as already-empty
+/// (no error). Each entry is removed via `remove_dir_all` (for bundle
+/// directories) or `remove_file` (for flat .md files); errors propagate
+/// so the caller can surface the failure verbatim.
+fn wipe_mailbox_contents(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.into()),
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            std::fs::remove_dir_all(&path)?;
+        } else {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
 }
 
 /// Dispatch table: init system -> the canonical restart command. OpenRC is
@@ -718,5 +800,37 @@ mod tests {
             !joined.contains("systemctl"),
             "OpenRC hint must not reference systemctl: {joined}"
         );
+    }
+
+    // ----- S48-5 wipe_mailbox_contents helper --------------------------
+
+    #[test]
+    fn wipe_mailbox_contents_empties_flat_and_bundle_entries() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path().join("inbox").join("eve");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("2025-04-01-120000-flat.md"), "hi").unwrap();
+        let bundle = dir.join("2025-04-01-130000-bundle");
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join("2025-04-01-130000-bundle.md"), "hi").unwrap();
+        std::fs::write(bundle.join("att.txt"), "data").unwrap();
+
+        super::wipe_mailbox_contents(&dir).unwrap();
+
+        // The mailbox directory itself remains, but it is now empty.
+        assert!(
+            dir.is_dir(),
+            "wipe must leave the parent directory in place"
+        );
+        let remaining: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert!(remaining.is_empty(), "all entries must be removed");
+    }
+
+    #[test]
+    fn wipe_mailbox_contents_missing_dir_is_noop() {
+        // Force-deleting a mailbox that never had a sent/ subdirectory must
+        // not error; treat missing directory as already-empty.
+        let tmp = TempDir::new().unwrap();
+        super::wipe_mailbox_contents(&tmp.path().join("does-not-exist")).unwrap();
     }
 }

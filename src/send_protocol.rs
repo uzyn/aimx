@@ -53,7 +53,7 @@
 //! - `MAILBOX-CREATE` / `MAILBOX-DELETE` join the same codec, carrying a
 //!   single `Name:` header. The daemon handles `config.toml`
 //!   rewrite-and-rename plus the in-memory `RwLock<Arc<Config>>` swap,
-//!   which is why `aimx mailbox create/delete` does not require a daemon
+//!   which is why `aimx mailboxes create/delete` does not require a daemon
 //!   restart for inbound routing to pick up the change. Error codes
 //!   reuse the existing set plus `VALIDATION` (name validation failures)
 //!   and `NONEMPTY` (delete refused because the mailbox still holds files).

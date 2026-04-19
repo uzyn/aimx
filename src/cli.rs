@@ -44,8 +44,8 @@ pub enum Command {
     Send(SendArgs),
 
     /// Manage mailboxes
-    #[command(subcommand)]
-    Mailbox(MailboxCommand),
+    #[command(subcommand, alias = "mailbox")]
+    Mailboxes(MailboxCommand),
 
     /// Start MCP server in stdio mode
     Mcp,
@@ -67,8 +67,19 @@ pub enum Command {
         yes: bool,
     },
 
-    /// Show server status, mailbox counts, configuration, and DNS record verification
-    Status,
+    /// Show server health, mailbox counts, configuration, DNS verification, and recent logs
+    Doctor,
+
+    /// Tail or follow the aimx service log
+    Logs {
+        /// Number of lines to show (default: 50)
+        #[arg(long)]
+        lines: Option<usize>,
+
+        /// Stream the log live (like `journalctl -f`)
+        #[arg(short = 'f', long)]
+        follow: bool,
+    },
 
     /// Start the embedded SMTP listener daemon
     Serve {
@@ -119,6 +130,12 @@ pub enum Command {
         /// Overwrite existing keys
         #[arg(long)]
         force: bool,
+    },
+
+    /// Print a shell-completion script to stdout for the requested shell
+    Completion {
+        /// Shell flavour (bash, zsh, fish, elvish, powershell)
+        shell: clap_complete::Shell,
     },
 }
 
@@ -172,5 +189,13 @@ pub enum MailboxCommand {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+
+        /// Wipe `inbox/<name>/` and `sent/<name>/` contents before
+        /// deleting. Without this flag, a non-empty mailbox is refused
+        /// with the daemon's `ERR NONEMPTY` error. Refuses to wipe the
+        /// catchall mailbox; prompts interactively unless `--yes` is
+        /// also passed.
+        #[arg(long)]
+        force: bool,
     },
 }

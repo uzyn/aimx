@@ -143,10 +143,10 @@ fn help_shows_subcommands() {
         .success()
         .stdout(predicate::str::contains("ingest"))
         .stdout(predicate::str::contains("send"))
-        .stdout(predicate::str::contains("mailbox"))
+        .stdout(predicate::str::contains("mailboxes"))
         .stdout(predicate::str::contains("mcp"))
         .stdout(predicate::str::contains("setup"))
-        .stdout(predicate::str::contains("status"))
+        .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("portcheck"))
         .stdout(predicate::str::contains("dkim-keygen"));
@@ -1432,7 +1432,7 @@ fn setup_without_domain_proceeds_to_root_check() {
 }
 
 #[test]
-fn status_shows_domain_and_mailboxes() {
+fn doctor_shows_domain_and_mailboxes() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -1449,7 +1449,7 @@ fn status_shows_domain_and_mailboxes() {
     aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
-        .arg("status")
+        .arg("doctor")
         .assert()
         .success()
         .stdout(predicate::str::contains("agent.example.com"))
@@ -1458,14 +1458,159 @@ fn status_shows_domain_and_mailboxes() {
         .stdout(predicate::str::contains("MAILBOX"));
 }
 
+// ---------------------------------------------------------------------------
+// S48-8 — `aimx completion <shell>` (clap_complete)
+// ---------------------------------------------------------------------------
+
 #[test]
-fn status_help_works() {
+fn completion_bash_emits_function_definition() {
+    let assert = Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["completion", "bash"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("_aimx"),
+        "bash completion script must define a `_aimx` function: {}",
+        &stdout[..stdout.len().min(200)]
+    );
+    assert!(
+        stdout.contains("complete -F _aimx") || stdout.contains("COMPREPLY"),
+        "bash completion script must wire up COMPREPLY / complete -F"
+    );
+}
+
+#[test]
+fn completion_supports_all_required_shells() {
+    // S48-8 requires at minimum bash, zsh, fish, elvish. Smoke-test
+    // each by asserting the generator exits cleanly with non-empty
+    // output on its respective shell name.
+    for shell in ["bash", "zsh", "fish", "elvish"] {
+        let assert = Command::cargo_bin("aimx")
+            .unwrap()
+            .args(["completion", shell])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        assert!(
+            !stdout.trim().is_empty(),
+            "completion for {shell} must emit a non-empty script"
+        );
+    }
+}
+
+#[test]
+fn completion_subcommand_is_advertised_in_top_level_help() {
     Command::cargo_bin("aimx")
         .unwrap()
-        .args(["status", "--help"])
+        .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("status"));
+        .stdout(predicate::str::contains("completion"));
+}
+
+#[test]
+fn logs_help_advertises_lines_and_follow_flags() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["logs", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--lines"))
+        .stdout(predicate::str::contains("--follow"));
+}
+
+#[test]
+fn logs_subcommand_is_advertised_in_top_level_help() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("logs"));
+}
+
+#[test]
+fn doctor_renders_recent_logs_section_header() {
+    // S48-4: doctor always appends a "Recent logs" section. On a fresh
+    // test host journalctl will most likely return either an empty
+    // result or an error — either way, the header must render and the
+    // "no logs available" fallback must be present, and doctor must exit
+    // 0 (it never errors out on a missing journal).
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Recent logs"),
+        "doctor output must contain a 'Recent logs' header, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn doctor_help_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["doctor", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("doctor"));
+}
+
+#[test]
+fn mailboxes_and_mailbox_alias_produce_identical_output() {
+    // S48-7: `mailboxes` is the canonical subcommand name; the singular
+    // `mailbox` is retained as a clap alias for muscle memory. Both must
+    // produce byte-identical output for `list`.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let plural = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("list")
+        .assert()
+        .success();
+    let singular = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailbox")
+        .arg("list")
+        .assert()
+        .success();
+
+    let plural_out = String::from_utf8_lossy(&plural.get_output().stdout).to_string();
+    let singular_out = String::from_utf8_lossy(&singular.get_output().stdout).to_string();
+    assert_eq!(
+        plural_out, singular_out,
+        "`aimx mailboxes list` and `aimx mailbox list` must produce identical output"
+    );
+}
+
+#[test]
+fn status_subcommand_no_longer_exists() {
+    // S48-1 clean rename: `aimx status` must produce a clap "unrecognized
+    // subcommand" error. No alias was kept.
+    let assert = Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("status")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("unrecognized subcommand")
+            || stderr.contains("invalid")
+            || stderr.contains("error"),
+        "expected clap error for removed `status` subcommand, got stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -3005,6 +3150,151 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
     );
 
     stop_serve(daemon);
+}
+
+// ---------------------------------------------------------------------------
+// S48-5 — `aimx mailboxes delete --force` (CLI-only wipe + delete)
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
+
+    // Create a mailbox and ingest one message into it so a plain delete
+    // would be refused with NONEMPTY.
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("zed")
+        .assert()
+        .success();
+    let zed_inbox = inbox(tmp.path(), "zed");
+    std::fs::write(zed_inbox.join("2025-04-01-120000-held.md"), "content").unwrap();
+
+    // Force-delete with `--yes` skips the prompt and proceeds.
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("--yes")
+        .arg("zed")
+        .assert()
+        .success();
+
+    // Stanza is gone.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        !config_text.contains("[mailboxes.zed]"),
+        "stanza should be removed after force-delete: {config_text}"
+    );
+    // Inbox dir is empty (the daemon leaves the empty dir on disk per S46).
+    let leftover: Vec<_> = std::fs::read_dir(&zed_inbox)
+        .map(|r| r.filter_map(|e| e.ok()).collect())
+        .unwrap_or_default();
+    assert!(
+        leftover.is_empty(),
+        "inbox dir must be empty after --force wipe (got {leftover:?})"
+    );
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("send.sock");
+    assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
+
+    aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("yon")
+        .assert()
+        .success();
+    let yon_inbox = inbox(tmp.path(), "yon");
+    std::fs::write(yon_inbox.join("2025-04-01-130000-keep.md"), "stay").unwrap();
+
+    // Pipe `n\n` on stdin — the prompt must abort the delete and leave
+    // the file in place.
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("yon")
+        .write_stdin("n\n")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Cancelled."),
+        "abort path must print Cancelled, got: {stdout}"
+    );
+    assert!(
+        stdout.contains("inbox/yon/: 1 file"),
+        "prompt must show per-directory file counts with grammatical plural, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("inbox/yon/: 1 files"),
+        "prompt must not use the ungrammatical `1 files` form, got: {stdout}"
+    );
+
+    // File still there.
+    assert!(
+        yon_inbox.join("2025-04-01-130000-keep.md").is_file(),
+        "abort must leave the email on disk"
+    );
+    // Stanza still present.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(config_text.contains("[mailboxes.yon]"));
+
+    stop_serve(daemon);
+}
+
+#[cfg(unix)]
+#[test]
+fn mailbox_delete_force_refuses_catchall() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("--yes")
+        .arg("catchall")
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("catchall"),
+        "catchall refusal must surface verbatim, got stderr: {stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------

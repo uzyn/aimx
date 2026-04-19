@@ -48,6 +48,29 @@ pub trait SystemOps {
     ) -> Result<(), Box<dyn std::error::Error>> {
         crate::portcheck::with_temp_smtp_listener(f)
     }
+    /// Return the last `n` log lines for `unit` from the active init system.
+    /// systemd: `journalctl -u <unit> -n <n> --no-pager`. OpenRC: best-effort
+    /// `tail` of `/var/log/aimx/*.log` or `/var/log/messages`. Returns an
+    /// error when no log source is reachable so callers can render a
+    /// human-friendly fallback line ("no logs available").
+    ///
+    /// The default impl delegates to the real systemd/OpenRC dispatch in
+    /// [`crate::serve::service`]. Tests override the method on their own
+    /// `SystemOps` mocks so they don't shell out.
+    fn tail_service_logs(
+        &self,
+        unit: &str,
+        n: usize,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        crate::serve::service::tail_service_logs_default(unit, n)
+    }
+    /// Stream the live log for `unit`, following new lines as they arrive.
+    /// systemd: replaces the current process with `journalctl -f -u <unit>`.
+    /// OpenRC: best-effort `tail -F /var/log/messages` (filtered if possible).
+    /// Returns an error when no follow source is reachable.
+    fn follow_service_logs(&self, unit: &str) -> Result<(), Box<dyn std::error::Error>> {
+        crate::serve::service::follow_service_logs_default(unit)
+    }
 }
 
 pub trait NetworkOps {

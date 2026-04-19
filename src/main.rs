@@ -4,8 +4,10 @@ mod cli;
 mod config;
 mod datadir_readme;
 mod dkim;
+mod doctor;
 mod frontmatter;
 mod ingest;
+mod logs;
 mod mailbox;
 mod mailbox_handler;
 mod mailbox_locks;
@@ -21,7 +23,6 @@ mod setup;
 mod slug;
 mod smtp;
 mod state_handler;
-mod status;
 mod term;
 mod transport;
 mod trust;
@@ -74,6 +75,17 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.
         Command::Send(args) => send::run(args),
+        // `aimx logs` is a thin wrapper around journalctl; it does not
+        // read config.toml.
+        Command::Logs { lines, follow } => logs::run(lines, follow),
+        // `aimx completion` prints a shell-completion script generated
+        // from the clap command tree. It needs no config.
+        Command::Completion { shell } => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(shell, &mut cmd, "aimx", &mut std::io::stdout());
+            Ok(())
+        }
         // Everything else loads Config once here and takes it by value.
         other => {
             let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
@@ -88,7 +100,7 @@ fn dispatch_with_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
-        Command::Mailbox(cmd) => mailbox::run(cmd, config),
+        Command::Mailboxes(cmd) => mailbox::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
         }
@@ -102,12 +114,14 @@ fn dispatch_with_config(
             tls_key.as_deref(),
             config,
         ),
-        Command::Status => status::run(config),
+        Command::Doctor => doctor::run(config),
         Command::Setup { .. }
         | Command::Uninstall { .. }
         | Command::Portcheck { .. }
         | Command::Mcp
         | Command::Send(_)
+        | Command::Logs { .. }
+        | Command::Completion { .. }
         | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
     }
 }
