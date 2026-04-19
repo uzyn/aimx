@@ -119,7 +119,7 @@ This format is designed to be agent-readable without parsing libraries. An agent
 | `dkim` | string | DKIM verification result: `pass`, `fail`, or `none` |
 | `spf` | string | SPF verification result: `pass`, `fail`, `softfail`, `neutral`, or `none` |
 | `dmarc` | string | DMARC alignment result: `pass`, `fail`, or `none` |
-| `trusted` | string | Per-mailbox trust evaluation: `none`, `true`, or `false` |
+| `trusted` | string | Effective trust evaluation for the email's mailbox (per-mailbox override if set, otherwise the top-level default): `none`, `true`, or `false` |
 | `mailbox` | string | Mailbox name this email was routed to |
 | `read` | bool | Read status (`false` on ingest) |
 

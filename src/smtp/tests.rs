@@ -61,8 +61,8 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         MailboxConfig {
             address: "*@test.local".to_string(),
             on_receive: vec![],
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: None,
+            trusted_senders: None,
         },
     );
     mailboxes.insert(
@@ -70,14 +70,16 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         MailboxConfig {
             address: "alice@test.local".to_string(),
             on_receive: vec![],
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: None,
+            trusted_senders: None,
         },
     );
     Config {
         domain: "test.local".to_string(),
         data_dir: data_dir.to_path_buf(),
         dkim_selector: "dkim".to_string(),
+        trust: "none".to_string(),
+        trusted_senders: vec![],
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
@@ -673,6 +675,8 @@ async fn test_ingest_failure_returns_451() {
         domain: "test.local".to_string(),
         data_dir: bad_data_dir,
         dkim_selector: "dkim".to_string(),
+        trust: "none".to_string(),
+        trusted_senders: vec![],
         mailboxes: HashMap::new(),
         verify_host: None,
         enable_ipv6: false,

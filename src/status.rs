@@ -480,6 +480,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -754,8 +756,8 @@ mod tests {
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
 
@@ -763,6 +765,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -847,8 +851,8 @@ mod tests {
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
                 on_receive: vec![],
-                trust: "none".to_string(),
-                trusted_senders: vec![],
+                trust: None,
+                trusted_senders: None,
             },
         );
 
@@ -856,6 +860,8 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: data_dir.to_path_buf(),
             dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
