@@ -1480,6 +1480,29 @@ fn logs_subcommand_is_advertised_in_top_level_help() {
 }
 
 #[test]
+fn doctor_renders_recent_logs_section_header() {
+    // S48-4: doctor always appends a "Recent logs" section. On a fresh
+    // test host journalctl will most likely return either an empty
+    // result or an error — either way, the header must render and the
+    // "no logs available" fallback must be present, and doctor must exit
+    // 0 (it never errors out on a missing journal).
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("doctor")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Recent logs"),
+        "doctor output must contain a 'Recent logs' header, got:\n{stdout}"
+    );
+}
+
+#[test]
 fn doctor_help_works() {
     Command::cargo_bin("aimx")
         .unwrap()
