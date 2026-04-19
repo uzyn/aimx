@@ -8,21 +8,12 @@ pub struct TriggerContext<'a> {
     pub metadata: &'a InboundFrontmatter,
 }
 
-/// Placeholders rejected in `on_receive.cmd` at config-load time. Pre-launch,
-/// the shell-injection fix in S44-1 drops string substitution for
-/// user-controlled fields (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
-/// `{filepath}`) and surfaces them as `AIMX_*` env vars instead. Keeping
-/// legacy placeholders working would reintroduce the injection; refusing to
-/// load is the safer break.
-pub const LEGACY_PLACEHOLDERS: &[&str] =
-    &["{from}", "{subject}", "{to}", "{mailbox}", "{filepath}"];
-
-/// Expand the aimx-controlled `{id}` and `{date}` placeholders. Every
-/// user-controlled field (`{from}`, `{subject}`, `{to}`, `{mailbox}`,
-/// `{filepath}`) is deliberately **not** substituted — those are passed to
-/// the trigger shell via `AIMX_*` env vars by [`execute_triggers`], which
-/// the shell expands safely even for hostile payloads. `{id}` and `{date}`
-/// are opaque aimx-generated strings (hex and ISO-8601), safe to splice.
+/// Expand the aimx-controlled `{id}` and `{date}` placeholders. User-controlled
+/// fields (`from`, `subject`, `to`, `mailbox`, `filepath`) are deliberately
+/// **not** substituted — those are passed to the trigger shell via `AIMX_*`
+/// env vars by [`execute_triggers`], which the shell expands safely even for
+/// hostile payloads. `{id}` and `{date}` are opaque aimx-generated strings
+/// (hex and ISO-8601), safe to splice.
 pub fn substitute_template(command: &str, ctx: &TriggerContext) -> String {
     command
         .replace("{id}", &ctx.metadata.id)
@@ -174,57 +165,6 @@ pub fn execute_triggers(mailbox_config: &MailboxConfig, ctx: &TriggerContext) {
     }
 }
 
-/// Error type returned by [`validate_on_receive_commands`] when a config
-/// contains a legacy placeholder that was dropped by S44-1.
-#[derive(Debug)]
-pub struct LegacyPlaceholderError {
-    pub mailbox: String,
-    pub placeholder: String,
-}
-
-impl std::fmt::Display for LegacyPlaceholderError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "mailbox '{}': legacy placeholder '{}' in on_receive.command is no longer supported. \
-             Migrate to AIMX_* env vars: replace '{{from}}' with \"$AIMX_FROM\", \
-             '{{subject}}' with \"$AIMX_SUBJECT\", '{{to}}' with \"$AIMX_TO\", \
-             '{{mailbox}}' with \"$AIMX_MAILBOX\", '{{filepath}}' with \"$AIMX_FILEPATH\". \
-             The aimx-controlled placeholders {{id}} and {{date}} still work. \
-             See book/channel-recipes.md for updated examples.",
-            self.mailbox, self.placeholder
-        )
-    }
-}
-
-impl std::error::Error for LegacyPlaceholderError {}
-
-/// Scan every `on_receive.command` in the config for legacy user-controlled
-/// placeholders. Returns the first offender so the operator can fix
-/// mailboxes one at a time.
-pub fn validate_on_receive_commands(
-    mailboxes: &std::collections::HashMap<String, MailboxConfig>,
-) -> Result<(), LegacyPlaceholderError> {
-    // Sort keys so the error is deterministic when multiple mailboxes are
-    // broken — stable ordering keeps CI logs and test expectations sane.
-    let mut names: Vec<&String> = mailboxes.keys().collect();
-    names.sort();
-    for name in names {
-        let mailbox = &mailboxes[name];
-        for rule in &mailbox.on_receive {
-            for placeholder in LEGACY_PLACEHOLDERS {
-                if rule.command.contains(placeholder) {
-                    return Err(LegacyPlaceholderError {
-                        mailbox: name.clone(),
-                        placeholder: (*placeholder).to_string(),
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -268,9 +208,9 @@ mod tests {
 
     #[test]
     fn substitute_only_id_and_date() {
-        // S44-1: string substitution is restricted to aimx-controlled fields.
-        // Every user-controlled placeholder must pass through untouched so
-        // the shell never sees attacker-controlled bytes as code.
+        // String substitution is restricted to aimx-controlled fields. Every
+        // user-controlled placeholder passes through untouched so the shell
+        // never sees attacker-controlled bytes as code.
         let meta = sample_metadata();
         let filepath = PathBuf::from("/var/lib/aimx/catchall/2025-06-01-001.md");
         let ctx = sample_ctx(&filepath, &meta);
@@ -287,9 +227,6 @@ mod tests {
             result.contains("2025-06-01T12:00:00Z"),
             "{{date}} must expand: {result}"
         );
-        // Legacy placeholders MUST remain literal in the expanded script —
-        // the config loader refuses configs that carry them, but the
-        // substitute_template function itself simply leaves them alone.
         assert!(
             result.contains("{filepath}"),
             "{{filepath}} must NOT be substituted: {result}"
@@ -310,23 +247,6 @@ mod tests {
             result.contains("{mailbox}"),
             "{{mailbox}} must NOT be substituted: {result}"
         );
-    }
-
-    #[test]
-    fn substitute_leaves_legacy_placeholders_literal() {
-        // Paranoid repro of the T8 bug from the 2026-04-17 manual test run:
-        // a `From:` with a display name + angle brackets would previously
-        // leak unescaped into the shell.
-        let mut meta = sample_metadata();
-        meta.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
-        meta.subject = "Re: \"urgent\" & important".to_string();
-        let filepath = PathBuf::from("/tmp/test.md");
-        let ctx = sample_ctx(&filepath, &meta);
-
-        let result = substitute_template("echo {from} {subject}", &ctx);
-        // The substitute step does not touch these — the env-var path is
-        // what safely delivers them to the shell.
-        assert_eq!(result, "echo {from} {subject}");
     }
 
     #[test]
@@ -684,10 +604,10 @@ mod tests {
 
     #[test]
     fn execute_triggers_with_env_vars() {
-        // S44-1: the env-var path is now how user-controlled values reach
-        // the trigger shell. `$AIMX_FROM` / `$AIMX_SUBJECT` expand inside
-        // double quotes, so whitespace and metacharacters are preserved but
-        // never interpreted as shell code.
+        // User-controlled values reach the trigger shell through env vars:
+        // `$AIMX_FROM` / `$AIMX_SUBJECT` expand inside double quotes, so
+        // whitespace and metacharacters are preserved but never interpreted
+        // as shell code.
         let tmp = tempfile::TempDir::new().unwrap();
         let output_file = tmp.path().join("output.txt");
         let meta = sample_metadata();
@@ -739,9 +659,9 @@ mod tests {
 
     #[test]
     fn execute_triggers_clears_parent_env() {
-        // S47-2: `execute_triggers` calls `.env_clear()` before selectively
-        // re-adding `PATH`/`HOME`/`AIMX_*`. An unrelated env var set on the
-        // parent process must NOT be visible inside the trigger subshell.
+        // `execute_triggers` calls `.env_clear()` before selectively re-adding
+        // `PATH`/`HOME`/`AIMX_*`. An unrelated env var set on the parent
+        // process must NOT be visible inside the trigger subshell.
         //
         // This test intentionally uses a unique variable name and is not
         // parallelized against other env-var-touching tests because
@@ -823,9 +743,8 @@ mod tests {
 
     #[test]
     fn env_var_preserves_angle_bracket_from() {
-        // T8 repro: `U-Zyn Chua <chua@uzyn.com>`. Previously this broke
-        // shell-escape quoting on the substitution path. With env-vars, the
-        // payload lands verbatim — no redirection, no execution.
+        // `U-Zyn Chua <chua@uzyn.com>` lands in the env var verbatim — no
+        // redirection, no execution.
         let (_tmp, content) = run_env_capture_trigger(|m| {
             m.from = "U-Zyn Chua <chua@uzyn.com>".to_string();
         });
@@ -922,93 +841,6 @@ mod tests {
             !marker.exists(),
             "env-var payload MUST NOT be interpreted as shell code"
         );
-    }
-
-    #[test]
-    fn validate_on_receive_rejects_legacy_from() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "support".to_string(),
-            MailboxConfig {
-                address: "support@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo {from}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
-        assert_eq!(err.mailbox, "support");
-        assert_eq!(err.placeholder, "{from}");
-        let msg = err.to_string();
-        assert!(msg.contains("support"), "mailbox named: {msg}");
-        assert!(msg.contains("{from}"), "placeholder named: {msg}");
-        assert!(msg.contains("AIMX_FROM"), "migration hinted: {msg}");
-    }
-
-    #[test]
-    fn validate_on_receive_rejects_legacy_filepath() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "ops".to_string(),
-            MailboxConfig {
-                address: "ops@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "cat {filepath}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        let err = validate_on_receive_commands(&mailboxes).unwrap_err();
-        assert_eq!(err.placeholder, "{filepath}");
-    }
-
-    #[test]
-    fn validate_on_receive_accepts_id_and_date() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "log".to_string(),
-            MailboxConfig {
-                address: "log@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo id={id} date={date}".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        assert!(validate_on_receive_commands(&mailboxes).is_ok());
-    }
-
-    #[test]
-    fn validate_on_receive_accepts_env_var_recipe() {
-        use std::collections::HashMap;
-        let mut mailboxes = HashMap::new();
-        mailboxes.insert(
-            "inbox".to_string(),
-            MailboxConfig {
-                address: "inbox@test.com".to_string(),
-                trust: "none".to_string(),
-                trusted_senders: vec![],
-                on_receive: vec![OnReceiveRule {
-                    rule_type: "cmd".to_string(),
-                    command: "echo \"$AIMX_FROM\" \"$AIMX_SUBJECT\"".to_string(),
-                    r#match: None,
-                }],
-            },
-        );
-        assert!(validate_on_receive_commands(&mailboxes).is_ok());
     }
 
     #[test]
