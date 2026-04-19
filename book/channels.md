@@ -110,6 +110,8 @@ All specified filters must match (AND logic). If no `match` section is provided,
 
 Trust policies gate whether channel triggers execute based on sender authentication. This prevents untrusted senders from triggering agent actions.
 
+Trust is configured globally at the top of `config.toml` and applies to every mailbox. Individual mailboxes can override the global default when they need a different policy. `aimx setup` prompts for the default trust policy interactively on the first run.
+
 ### Trust modes
 
 | Mode | Behavior |
@@ -118,19 +120,27 @@ Trust policies gate whether channel triggers execute based on sender authenticat
 | `verified` | Triggers only fire when the sender's DKIM signature passes verification |
 
 ```toml
-[mailboxes.support]
-address = "support@agent.yourdomain.com"
+# Global default — applies to every mailbox unless overridden
 trust = "verified"
+
+[mailboxes.public]
+address = "hello@agent.yourdomain.com"
+# Explicit override: disable trust for this one mailbox
+trust = "none"
 ```
 
 ### Trusted senders
 
-The `trusted_senders` list allows specific senders to bypass DKIM verification. It supports glob patterns:
+The `trusted_senders` list allows specific senders to bypass DKIM verification. It supports glob patterns. Set it at the top level to apply everywhere, or on a mailbox to replace the global list for that mailbox (per-mailbox lists **replace** the global list — there is no merging):
 
 ```toml
+# Global allowlist — applies to every mailbox unless overridden
+trust = "verified"
+trusted_senders = ["*@yourcompany.com"]
+
 [mailboxes.support]
 address = "support@agent.yourdomain.com"
-trust = "verified"
+# Per-mailbox override fully replaces the global list
 trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 ```
 

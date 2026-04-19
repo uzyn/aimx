@@ -1,4 +1,4 @@
-use crate::config::MailboxConfig;
+use crate::config::{Config, MailboxConfig};
 use crate::frontmatter::AuthResults;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -63,26 +63,34 @@ impl<'de> Deserialize<'de> for TrustedValue {
     }
 }
 
-/// Evaluate the trust outcome for an inbound email against a mailbox's
-/// trust policy.
+/// Evaluate the trust outcome for an inbound email against the effective
+/// trust policy for `mailbox` (its own override if set, otherwise the
+/// global default on `config`).
 ///
 /// Logic:
-/// - `trust: none` -> `TrustedValue::None` (no evaluation)
-/// - `trust: verified` AND sender matches `trusted_senders` AND DKIM pass
-///   -> `TrustedValue::True`
-/// - `trust: verified`, any other outcome -> `TrustedValue::False`
+/// - effective `trust == "none"` -> `TrustedValue::None` (no evaluation)
+/// - effective `trust == "verified"` AND sender matches effective
+///   `trusted_senders` AND DKIM pass -> `TrustedValue::True`
+/// - effective `trust == "verified"`, any other outcome -> `TrustedValue::False`
 ///
 /// Note: this is stricter than the channel-trigger gate in `channel.rs`,
 /// which fires when the sender is allowlisted OR DKIM passes. The
 /// `trusted` field requires BOTH. See `channel::should_execute_triggers`
 /// for the v1 gate semantics and the rationale comment there.
-pub fn evaluate_trust(mailbox: &MailboxConfig, auth: &AuthResults, from: &str) -> TrustedValue {
-    if mailbox.trust == "none" {
+pub fn evaluate_trust(
+    config: &Config,
+    mailbox: &MailboxConfig,
+    auth: &AuthResults,
+    from: &str,
+) -> TrustedValue {
+    let trust = mailbox.effective_trust(config);
+    if trust == "none" {
         return TrustedValue::None;
     }
 
-    if mailbox.trust == "verified" {
-        let sender_allowlisted = is_sender_in_trusted_senders(mailbox, from);
+    if trust == "verified" {
+        let senders = mailbox.effective_trusted_senders(config);
+        let sender_allowlisted = is_sender_in_trusted_senders(senders, from);
         let dkim_passed = auth.dkim == "pass";
 
         if sender_allowlisted && dkim_passed {
@@ -104,9 +112,9 @@ fn extract_email_for_match(from: &str) -> String {
     from.to_lowercase()
 }
 
-fn is_sender_in_trusted_senders(mailbox: &MailboxConfig, from: &str) -> bool {
+fn is_sender_in_trusted_senders(senders: &[String], from: &str) -> bool {
     let from_lower = extract_email_for_match(from);
-    for pattern in &mailbox.trusted_senders {
+    for pattern in senders {
         if glob_match::glob_match(pattern, &from_lower) {
             return true;
         }
@@ -117,14 +125,29 @@ fn is_sender_in_trusted_senders(mailbox: &MailboxConfig, from: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MailboxConfig;
+    use crate::config::{Config, MailboxConfig};
     use crate::frontmatter::AuthResults;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn bare_config() -> Config {
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: PathBuf::from("/tmp/aimx-test"),
+            dkim_selector: "dkim".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes: HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
 
     fn mailbox_none() -> MailboxConfig {
         MailboxConfig {
             address: "*@test.com".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         }
     }
@@ -132,8 +155,8 @@ mod tests {
     fn mailbox_verified(trusted_senders: Vec<String>) -> MailboxConfig {
         MailboxConfig {
             address: "secure@test.com".to_string(),
-            trust: "verified".to_string(),
-            trusted_senders,
+            trust: Some("verified".to_string()),
+            trusted_senders: Some(trusted_senders),
             on_receive: vec![],
         }
     }
@@ -148,87 +171,157 @@ mod tests {
 
     #[test]
     fn trust_none_returns_none() {
+        let cfg = bare_config();
         let mb = mailbox_none();
-        let result = evaluate_trust(&mb, &auth("pass"), "anyone@example.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "anyone@example.com");
         assert_eq!(result, TrustedValue::None);
         assert_eq!(result.as_str(), "none");
     }
 
     #[test]
     fn trust_none_returns_none_even_with_dkim_fail() {
+        let cfg = bare_config();
         let mb = mailbox_none();
-        let result = evaluate_trust(&mb, &auth("fail"), "anyone@example.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("fail"), "anyone@example.com");
         assert_eq!(result, TrustedValue::None);
     }
 
     #[test]
     fn verified_allowlisted_dkim_pass_returns_true() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("pass"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::True);
         assert_eq!(result.as_str(), "true");
     }
 
     #[test]
     fn verified_allowlisted_dkim_fail_returns_false() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("fail"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
         assert_eq!(result.as_str(), "false");
     }
 
     #[test]
     fn verified_not_allowlisted_dkim_pass_returns_false() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@company.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("pass"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
     }
 
     #[test]
     fn verified_not_allowlisted_dkim_fail_returns_false() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@company.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("fail"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
     }
 
     #[test]
     fn verified_empty_trusted_senders_dkim_pass_returns_false() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec![]);
-        let result = evaluate_trust(&mb, &auth("pass"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
     }
 
     #[test]
     fn verified_dkim_none_returns_false() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("none"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("none"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
     }
 
     #[test]
     fn verified_exact_sender_match() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["alice@gmail.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("pass"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::True);
     }
 
     #[test]
     fn verified_display_name_in_from() {
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
-        let result = evaluate_trust(&mb, &auth("pass"), "Alice Smith <alice@gmail.com>");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "Alice Smith <alice@gmail.com>");
         assert_eq!(result, TrustedValue::True);
     }
 
     #[test]
     fn unknown_trust_value_returns_false() {
+        let cfg = bare_config();
         let mb = MailboxConfig {
             address: "test@test.com".to_string(),
-            trust: "typo".to_string(),
-            trusted_senders: vec![],
+            trust: Some("typo".to_string()),
+            trusted_senders: Some(vec![]),
             on_receive: vec![],
         };
-        let result = evaluate_trust(&mb, &auth("pass"), "alice@gmail.com");
+        let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
+    }
+
+    #[test]
+    fn mailbox_inherits_global_trust_when_unset() {
+        let mut cfg = bare_config();
+        cfg.trust = "verified".to_string();
+        cfg.trusted_senders = vec!["*@gmail.com".to_string()];
+
+        let mb = MailboxConfig {
+            address: "any@test.com".to_string(),
+            trust: None,
+            trusted_senders: None,
+            on_receive: vec![],
+        };
+
+        let t = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
+        assert_eq!(t, TrustedValue::True);
+
+        let t = evaluate_trust(&cfg, &mb, &auth("pass"), "bob@yahoo.com");
+        assert_eq!(t, TrustedValue::False);
+    }
+
+    #[test]
+    fn mailbox_trust_none_override_beats_global_verified() {
+        let mut cfg = bare_config();
+        cfg.trust = "verified".to_string();
+        cfg.trusted_senders = vec!["*@gmail.com".to_string()];
+
+        let mb = MailboxConfig {
+            address: "public@test.com".to_string(),
+            trust: Some("none".to_string()),
+            trusted_senders: None,
+            on_receive: vec![],
+        };
+
+        let t = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
+        assert_eq!(t, TrustedValue::None);
+    }
+
+    #[test]
+    fn mailbox_trusted_senders_override_fully_replaces_global() {
+        let mut cfg = bare_config();
+        cfg.trust = "verified".to_string();
+        cfg.trusted_senders = vec!["*@gmail.com".to_string()];
+
+        let mb = MailboxConfig {
+            address: "strict@test.com".to_string(),
+            trust: None,
+            trusted_senders: Some(vec!["boss@company.com".to_string()]),
+            on_receive: vec![],
+        };
+
+        // Global says gmail is trusted; mailbox replaces that list — so an
+        // `@gmail.com` sender is no longer in the effective list.
+        let t = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
+        assert_eq!(t, TrustedValue::False);
+
+        let t = evaluate_trust(&cfg, &mb, &auth("pass"), "boss@company.com");
+        assert_eq!(t, TrustedValue::True);
     }
 
     #[test]
@@ -259,6 +352,7 @@ mod tests {
         use crate::channel;
         use crate::frontmatter::InboundFrontmatter;
 
+        let cfg = bare_config();
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
 
         let test_cases = vec![
@@ -272,7 +366,7 @@ mod tests {
 
         for (from, dkim_result) in test_cases {
             let auth_results = auth(dkim_result);
-            let trusted = evaluate_trust(&mb, &auth_results, from);
+            let trusted = evaluate_trust(&cfg, &mb, &auth_results, from);
 
             let meta = InboundFrontmatter {
                 id: "test".to_string(),
@@ -302,7 +396,7 @@ mod tests {
                 labels: vec![],
             };
 
-            let trigger_would_fire = channel::should_execute_triggers(&mb, &meta);
+            let trigger_would_fire = channel::should_execute_triggers(&cfg, &mb, &meta);
 
             // Forward direction: trusted=true => trigger fires
             if trusted == TrustedValue::True {

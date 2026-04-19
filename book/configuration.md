@@ -42,8 +42,13 @@ This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim
 | `domain` | string | *(required)* | The email domain (e.g. `agent.yourdomain.com`) |
 | `data_dir` | string | `/var/lib/aimx` | Directory for storing mailboxes (config and keys live under `/etc/aimx/`) |
 | `dkim_selector` | string | `dkim` | DKIM selector name used in DNS records |
+| `trust` | string | `none` | Default trust policy for every mailbox: `none` or `verified`. Per-mailbox `trust` replaces this default. |
+| `trusted_senders` | array | `[]` | Default allowlist of glob patterns applied to every mailbox. Per-mailbox `trusted_senders` replaces this list (no merging). |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
+
+`aimx setup` asks for the default trust policy interactively on the first
+run; on re-entry the existing top-level values on disk are preserved.
 
 ### Mailbox settings
 
@@ -52,11 +57,17 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `address` | string | *(required)* | Email address pattern (e.g. `support@domain.com` or `*@domain.com` for catchall) |
-| `trust` | string | `none` | Trust policy: `none` or `verified` |
-| `trusted_senders` | array | `[]` | Glob patterns for senders that bypass DKIM verification |
+| `trust` | string | *(inherited)* | Override the global default. Allowed values: `none` or `verified`. Omit to inherit. |
+| `trusted_senders` | array | *(inherited)* | Override the global allowlist. Setting this **replaces** the global list (no merging). Omit to inherit. |
 | `on_receive` | array | `[]` | Channel rules triggered on incoming email |
 
 See [Mailboxes](mailboxes.md) for mailbox management and [Channel Rules](channels.md) for trigger configuration.
+
+#### Upgrading an older config to use the global defaults
+
+If you edited `config.toml` before the global-default fields existed and explicitly set `trust = "none"` or `trusted_senders = []` on every mailbox, those per-mailbox values now **shadow** any top-level default you add later — an `Option::Some(...)` at the mailbox level always wins.
+
+This is the defined "replace" semantic, but it's an easy foot-gun when tightening policy globally. When you switch the top-level to `trust = "verified"`, also delete the redundant per-mailbox `trust = "none"` / `trusted_senders = []` lines from mailboxes you actually want to inherit the new default. `aimx setup` writes new mailboxes without those lines from the start, so only hand-edited or pre-upgrade configs need the cleanup.
 
 ### Inbound email verification
 
@@ -70,13 +81,13 @@ AIMX verifies three authentication mechanisms on every inbound email and records
 
 All three fields are always written (never omitted), so agents can reliably check authentication status without guessing whether a missing field means "not checked" or "failed."
 
-The `trusted` frontmatter field summarizes the per-mailbox trust evaluation:
+The `trusted` frontmatter field summarizes the effective trust evaluation for the email's mailbox (its own `trust` / `trusted_senders` if set, otherwise the top-level defaults):
 
 | Value | Meaning |
 |-------|---------|
-| `"none"` | Mailbox `trust` is `none` (default) -- no trust evaluation performed. |
-| `"true"` | Mailbox `trust` is `verified`, sender matches `trusted_senders`, AND DKIM passed. |
-| `"false"` | Mailbox `trust` is `verified`, any other outcome. |
+| `"none"` | Effective `trust` is `none` (default) -- no trust evaluation performed. |
+| `"true"` | Effective `trust` is `verified`, sender matches the effective `trusted_senders`, AND DKIM passed. |
+| `"false"` | Effective `trust` is `verified`, any other outcome. |
 
 Trust only gates channel trigger execution -- all email is stored regardless of the `trusted` result.
 
@@ -180,6 +191,12 @@ dkim_selector = "dkim"
 # enable_ipv6 = true
 
 # ----------------------------
+# Default trust policy (applies to every mailbox unless overridden)
+# ----------------------------
+# trust = "verified"
+# trusted_senders = ["*@yourcompany.com"]
+
+# ----------------------------
 # Mailboxes
 # ----------------------------
 
@@ -193,15 +210,14 @@ type = "cmd"
 command = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
 
 # ----------------------------
-# Named mailbox with trust policy
+# Named mailbox with a per-mailbox trust override
 # ----------------------------
 [mailboxes.support]
 address = "support@agent.yourdomain.com"
 
-# Only trigger on DKIM-verified emails
+# Per-mailbox overrides (both optional — omit to inherit the top-level defaults).
+# Setting `trusted_senders` here fully replaces the global list (no merging).
 trust = "verified"
-
-# These senders always trigger, bypassing DKIM check
 trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 
 # Log all incoming emails
