@@ -27,6 +27,8 @@ AIMX takes a 40-year-old open protocol and rebuilds it into a fast, private, sig
 
 ## Quick start
 
+You need `sudo` rights as port 25 is a [privileged port](https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html).
+
 ```bash
 # 1. Build and install the binary into /usr/local/bin
 git clone https://github.com/uzyn/aimx.git
@@ -34,78 +36,39 @@ cd aimx
 cargo build --release
 sudo cp target/release/aimx /usr/local/bin/
 
-# 2. Run setup (writes /etc/aimx/, installs systemd/OpenRC unit, DKIM keygen, DNS guidance)
-sudo aimx setup agent.yourdomain.com
+# 2. Run setup and follow the guided instructions
+sudo aimx setup
 
-# 3. Follow the interactive prompts to add DNS records
-# 4. Verify inbound + outbound port 25 reachability
-sudo aimx portcheck
-
-# 5. Check status
+# 3. Check status
 aimx status
 ```
 
-## Installation
+### CLI Commands
 
-AIMX is built from source. There are no prebuilt binaries or package-manager distributions yet.
-
-```bash
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo cp target/release/aimx /usr/local/bin/
 ```
+$ aimx
+SMTP for agents. No middleman.
 
-## Usage
+Usage: aimx [OPTIONS] <COMMAND>
 
-### Setup
+Commands:
+  ingest       Ingest an email from stdin (called by aimx serve or via stdin)
+  send         Compose and send an email
+  mailbox      Manage mailboxes
+  mcp          Start MCP server in stdio mode
+  setup        Run interactive setup wizard
+  uninstall    Uninstall the aimx daemon service (config and data are retained)
+  status       Show server status, mailbox counts, configuration, and DNS record verification
+  serve        Start the embedded SMTP listener daemon
+  portcheck    Check port 25 connectivity (outbound, inbound)
+  agent-setup  Install AIMX plugin/skill for an AI agent into the current user's config
+  dkim-keygen  Generate DKIM keypair for email signing
+  help         Print this message or the help of the given subcommand(s)
 
-```bash
-# Full interactive setup (generates service file, DKIM keys, guides DNS)
-sudo aimx setup agent.yourdomain.com
-
-# Check server status
-aimx status
-
-# Check port 25 connectivity (requires root)
-sudo aimx portcheck
-```
-
-### Mailbox management
-
-```bash
-# Create a mailbox
-aimx mailbox create support
-
-# List mailboxes with message counts
-aimx mailbox list
-
-# Delete a mailbox (with confirmation)
-aimx mailbox delete support
-```
-
-### Sending email
-
-```bash
-# Send an email
-aimx send --from support@agent.yourdomain.com \
-          --to recipient@gmail.com \
-          --subject "Hello" \
-          --body "Message body"
-
-# Send with attachments
-aimx send --from support@agent.yourdomain.com \
-          --to recipient@gmail.com \
-          --subject "Report" \
-          --body "See attached." \
-          --attachment /path/to/report.pdf
-
-# Reply to a message (preserves threading)
-aimx send --from support@agent.yourdomain.com \
-          --to recipient@gmail.com \
-          --subject "Re: Hello" \
-          --body "Reply body" \
-          --reply-to "<original-message-id@example.com>"
+Options:
+      --data-dir <DATA_DIR>  Data directory override (default: /var/lib/aimx) [env: AIMX_DATA_DIR=]
+  -h, --help                 Print help (see more with '--help')
+  -V, --version              Print version
 ```
 
 ### MCP server (for AI agents)
@@ -398,8 +361,7 @@ Under a normal install you won't need either — `aimx setup` writes to the cano
 
 ## License
 
-MIT
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-## Author
+Copyright (c) [U-Zyn Chua](https://uzyn.com).
 
-[U-Zyn Chua](https://uzyn.com) <chua@uzyn.com>
