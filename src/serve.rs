@@ -902,9 +902,11 @@ pub mod service {
     }
 
     /// Default `follow_service_logs` implementation used by `RealSystemOps`.
-    /// On systemd this `exec`s `journalctl -f -u <unit>` so the user can
-    /// Ctrl-C the tail naturally. On OpenRC and unknown init systems we
-    /// return a clear error rather than guess at a log file.
+    /// On systemd this spawns `journalctl -f -u <unit>` as a child process
+    /// and waits on it; Ctrl-C in a TTY reaches both the parent and child
+    /// via the process group so the tail terminates naturally. On OpenRC
+    /// and unknown init systems we return a clear error rather than guess
+    /// at a log file.
     pub fn follow_service_logs_default(unit: &str) -> Result<(), Box<dyn std::error::Error>> {
         let init = detect_init_system();
         if let Some((program, args)) = follow_service_logs_command(&init, unit) {

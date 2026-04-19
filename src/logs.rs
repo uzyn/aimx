@@ -27,9 +27,10 @@ pub fn run_with_ops<S: SystemOps>(
     sys: &S,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if follow {
-        // `--follow` replaces the current process with `journalctl -f`
-        // (or the OpenRC equivalent), so on success this call does not
-        // return. On failure we fall through and print the error.
+        // `--follow` spawns `journalctl -f -u <unit>` (or the OpenRC
+        // equivalent) as a child process and waits; Ctrl-C reaches both
+        // the parent and the child via the TTY process group, so the
+        // tail terminates naturally.
         return sys.follow_service_logs(SERVICE_UNIT);
     }
 
@@ -37,15 +38,20 @@ pub fn run_with_ops<S: SystemOps>(
     match sys.tail_service_logs(SERVICE_UNIT, n) {
         Ok(out) => {
             print!("{out}");
-            if !out.ends_with('\n') {
+            // Only add a trailing newline when there is actual output
+            // that does not already end in one. An empty tail must not
+            // emit a stray blank line.
+            if !out.is_empty() && !out.ends_with('\n') {
                 println!();
             }
             Ok(())
         }
         Err(e) => {
+            // Print the follow-up hint on its own line and let `main`
+            // render the error itself via its standard `Error: <e>`
+            // path — we deliberately do NOT print the error twice.
             eprintln!(
-                "{} {e}\n  {}",
-                term::warn("warning:"),
+                "  {}",
                 term::dim(
                     "If you are on systemd, run `journalctl -u aimx` directly. \
                      On OpenRC, check /var/log/messages or your syslog config."
@@ -191,5 +197,16 @@ mod tests {
             result.is_err(),
             "tail failure must surface as a non-zero exit"
         );
+    }
+
+    /// An empty tail from `tail_service_logs` must still succeed — the
+    /// code used to `println!()` an unconditional trailing newline, which
+    /// produced a stray blank line. The fix guards on `!out.is_empty()`;
+    /// this test pins the Ok-on-empty contract so the guard can't
+    /// regress.
+    #[test]
+    fn run_succeeds_on_empty_tail_output() {
+        let ops = FakeLogsOps::new("");
+        run_with_ops(None, false, &ops).expect("empty tail must succeed, not error");
     }
 }

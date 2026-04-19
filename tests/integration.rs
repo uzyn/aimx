@@ -3254,8 +3254,12 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
         "abort path must print Cancelled, got: {stdout}"
     );
     assert!(
-        stdout.contains("inbox/yon/: 1 files"),
-        "prompt must show per-directory file counts, got: {stdout}"
+        stdout.contains("inbox/yon/: 1 file"),
+        "prompt must show per-directory file counts with grammatical plural, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("inbox/yon/: 1 files"),
+        "prompt must not use the ungrammatical `1 files` form, got: {stdout}"
     );
 
     // File still there.

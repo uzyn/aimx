@@ -154,9 +154,28 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     Ok(())
 }
 
+/// Grammatical plural of "file"/"files" for counts used in operator-facing
+/// prompts. Keeps the `N file` / `N files` distinction out of inline
+/// `format!` calls so every caller stays consistent.
+fn pluralize_files(count: usize) -> String {
+    if count == 1 {
+        format!("{count} file")
+    } else {
+        format!("{count} files")
+    }
+}
+
 /// Count emails in a mailbox directory. Each flat `<stem>.md` counts as
 /// one, and each bundle directory containing `<stem>.md` counts as one.
 /// Stray files or non-bundle directories are ignored.
+///
+/// NOTE: this is the CLI-side count used only for the `--force` confirmation
+/// prompt. The daemon's NONEMPTY check in `mailbox_handler.rs` uses a raw
+/// `read_dir().count()` via `count_files_if_exists`, so a mailbox with
+/// stray files (editor backups, dotfiles, a bundle missing its `<stem>.md`)
+/// can show `0 files` here while the daemon still refuses to delete it
+/// without `--force`. After a `--force` wipe both counts land at zero, so
+/// the display divergence is cosmetic.
 pub fn count_messages(dir: &Path) -> usize {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -260,8 +279,8 @@ fn delete(
                 "{} About to permanently delete mailbox '{name}':",
                 term::warn("DESTRUCTIVE:"),
             );
-            println!("  inbox/{name}/: {inbox_count} files");
-            println!("  sent/{name}/:  {sent_count} files");
+            println!("  inbox/{name}/: {}", pluralize_files(inbox_count));
+            println!("  sent/{name}/:  {}", pluralize_files(sent_count));
             print!("Continue? [y/N] ");
             io::stdout().flush()?;
             let mut input = String::new();
