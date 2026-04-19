@@ -10,9 +10,18 @@ use std::path::{Path, PathBuf};
 pub struct StatusInfo {
     pub domain: String,
     pub data_dir: String,
+    /// Resolved `/etc/aimx/config.toml` path, honouring `AIMX_CONFIG_DIR`.
+    /// Surfaced in the Configuration section so operators troubleshooting
+    /// "is doctor reading the file I think it is" don't have to grep.
+    pub config_path: String,
     pub dkim_selector: String,
     pub dkim_key_present: bool,
     pub smtp_running: bool,
+    /// Top-level default trust policy from `Config::trust`. Per-mailbox
+    /// overrides are surfaced on each `MailboxStatus` row.
+    pub default_trust: String,
+    /// Number of entries in the top-level `Config::trusted_senders` list.
+    pub default_trusted_senders_count: usize,
     pub mailboxes: Vec<MailboxStatus>,
     pub recent_activity: Vec<RecentEmail>,
     pub dns: Option<DnsSection>,
@@ -35,6 +44,15 @@ pub struct MailboxStatus {
     pub address: String,
     pub total: usize,
     pub unread: usize,
+    /// Effective trust policy for this mailbox after resolving any
+    /// per-mailbox override against the top-level default.
+    pub trust: String,
+    /// Number of entries in the effective `trusted_senders` list (per-mailbox
+    /// override if present, otherwise the top-level default).
+    pub trusted_senders_count: usize,
+    /// Number of `on_receive` triggers (post-S50 these are renamed to "hooks";
+    /// pre-S50 the per-event count is collapsed under the same label below).
+    pub on_receive_count: usize,
 }
 
 pub struct RecentEmail {
@@ -73,6 +91,9 @@ pub fn gather_status_with_ops<S: SystemOps>(
                 address: mb_config.address.clone(),
                 total,
                 unread,
+                trust: mb_config.effective_trust(config).to_string(),
+                trusted_senders_count: mb_config.effective_trusted_senders(config).len(),
+                on_receive_count: mb_config.on_receive.len(),
             }
         })
         .collect();
@@ -86,9 +107,12 @@ pub fn gather_status_with_ops<S: SystemOps>(
     StatusInfo {
         domain: config.domain.clone(),
         data_dir: config.data_dir.to_string_lossy().to_string(),
+        config_path: crate::config::config_path().to_string_lossy().to_string(),
         dkim_selector: config.dkim_selector.clone(),
         dkim_key_present,
         smtp_running,
+        default_trust: config.trust.clone(),
+        default_trusted_senders_count: config.trusted_senders.len(),
         mailboxes,
         recent_activity,
         dns,
@@ -279,6 +303,7 @@ pub fn format_status(info: &StatusInfo) -> String {
 
     out.push_str(&format!("{}\n", term::header("Configuration")));
     out.push_str(&format!("Domain:           {}\n", info.domain));
+    out.push_str(&format!("Config file:      {}\n", info.config_path));
     out.push_str(&format!("Data directory:   {}\n", info.data_dir));
     out.push_str(&format!("DKIM selector:    {}\n", info.dkim_selector));
     out.push_str(&format!(
@@ -288,6 +313,11 @@ pub fn format_status(info: &StatusInfo) -> String {
         } else {
             term::warn("MISSING - run `aimx dkim-keygen`")
         }
+    ));
+    out.push_str(&format!(
+        "Default trust:    {} ({} trusted_senders)\n",
+        term::info(&info.default_trust),
+        info.default_trusted_senders_count,
     ));
 
     out.push_str(&format!("\n{}\n", term::header("Service")));
@@ -326,6 +356,17 @@ pub fn format_status(info: &StatusInfo) -> String {
                 mb.total,
                 mb.unread,
                 pad = name_pad,
+            ));
+            // S48-2: per-mailbox trust + triggers/hooks summary line.
+            // Indented under the row so the table itself stays narrow.
+            // The "triggers" wording is preserved pre-S50; once S50
+            // lands the same field can be re-labelled to "hooks".
+            out.push_str(&format!(
+                "    {} trust = {:?}, trusted_senders: {} entries, triggers: {} on_receive\n",
+                term::dim("→"),
+                mb.trust,
+                mb.trusted_senders_count,
+                mb.on_receive_count,
             ));
         }
     }
@@ -588,8 +629,11 @@ mod tests {
             domain: "test.example.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -608,20 +652,29 @@ mod tests {
             domain: "agent.example.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![
                 MailboxStatus {
                     name: "catchall".to_string(),
                     address: "*@agent.example.com".to_string(),
                     total: 10,
                     unread: 3,
+                    trust: "none".to_string(),
+                    trusted_senders_count: 0,
+                    on_receive_count: 0,
                 },
                 MailboxStatus {
                     name: "support".to_string(),
                     address: "support@agent.example.com".to_string(),
                     total: 5,
                     unread: 1,
+                    trust: "none".to_string(),
+                    trusted_senders_count: 0,
+                    on_receive_count: 0,
                 },
             ],
             recent_activity: vec![],
@@ -645,20 +698,29 @@ mod tests {
             domain: "ex.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![
                 MailboxStatus {
                     name: "ops".to_string(),
                     address: "ops@ex.com".to_string(),
                     total: 1,
                     unread: 0,
+                    trust: "none".to_string(),
+                    trusted_senders_count: 0,
+                    on_receive_count: 0,
                 },
                 MailboxStatus {
                     name: "catchall".to_string(),
                     address: "*@ex.com".to_string(),
                     total: 2,
                     unread: 1,
+                    trust: "none".to_string(),
+                    trusted_senders_count: 0,
+                    on_receive_count: 0,
                 },
             ],
             recent_activity: vec![],
@@ -726,8 +788,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: false,
             smtp_running: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -854,8 +919,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![
                 RecentEmail {
@@ -895,8 +963,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -1121,8 +1192,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: Some(DnsSection { results, records }),
@@ -1150,8 +1224,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -1212,8 +1289,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -1243,8 +1323,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -1269,8 +1352,11 @@ mod tests {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
             dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
@@ -1278,5 +1364,163 @@ mod tests {
         };
         let output = format_status(&info);
         assert!(output.contains("no logs available"));
+    }
+
+    // ----- S48-2 config path + per-mailbox trust + hooks summary -----
+
+    #[test]
+    fn format_status_renders_config_file_path() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "verified".to_string(),
+            default_trusted_senders_count: 2,
+            mailboxes: vec![],
+            recent_activity: vec![],
+            dns: None,
+            recent_logs: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("Config file:"),
+            "Configuration section must include 'Config file:' label: {output}"
+        );
+        assert!(
+            output.contains("/etc/aimx/config.toml"),
+            "config path must render verbatim so operators can copy it: {output}"
+        );
+        assert!(
+            output.contains("Default trust:"),
+            "Configuration section must include 'Default trust:' label: {output}"
+        );
+        assert!(
+            output.contains("verified"),
+            "default trust value must render: {output}"
+        );
+        assert!(
+            output.contains("(2 trusted_senders)"),
+            "default trusted_senders count must render: {output}"
+        );
+    }
+
+    #[test]
+    fn format_status_per_mailbox_section_includes_trust_and_hook_counts() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
+            mailboxes: vec![MailboxStatus {
+                name: "ops".to_string(),
+                address: "ops@test.com".to_string(),
+                total: 4,
+                unread: 1,
+                trust: "verified".to_string(),
+                trusted_senders_count: 3,
+                on_receive_count: 2,
+            }],
+            recent_activity: vec![],
+            dns: None,
+            recent_logs: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("trust = \"verified\""),
+            "per-mailbox trust must render in TOML-like form: {output}"
+        );
+        assert!(
+            output.contains("trusted_senders: 3 entries"),
+            "per-mailbox trusted_senders count must render: {output}"
+        );
+        assert!(
+            output.contains("triggers: 2 on_receive"),
+            "per-mailbox trigger count must render under the 'triggers' label \
+             (re-labelled to 'hooks' once S50 lands): {output}"
+        );
+    }
+
+    #[test]
+    fn gather_status_propagates_per_mailbox_trust_and_hook_counts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            crate::config::MailboxConfig {
+                address: "*@test.com".to_string(),
+                on_receive: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        mailboxes.insert(
+            "ops".to_string(),
+            crate::config::MailboxConfig {
+                address: "ops@test.com".to_string(),
+                on_receive: vec![crate::config::OnReceiveRule {
+                    rule_type: "cmd".to_string(),
+                    command: "true".to_string(),
+                    r#match: None,
+                }],
+                trust: Some("verified".to_string()),
+                trusted_senders: Some(vec!["alice@example.com".to_string()]),
+            },
+        );
+
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+
+        let info = gather_status_with_ops(
+            &config,
+            &FakeServiceOps::new(false),
+            &MockNetworkOps::default(),
+        );
+
+        // The per-mailbox override must show through to the status row,
+        // overriding the top-level "none" default.
+        let ops = info
+            .mailboxes
+            .iter()
+            .find(|m| m.name == "ops")
+            .expect("ops mailbox must be in the snapshot");
+        assert_eq!(ops.trust, "verified");
+        assert_eq!(ops.trusted_senders_count, 1);
+        assert_eq!(ops.on_receive_count, 1);
+
+        // Catchall inherits the top-level default → "none" with zero senders.
+        let catchall = info
+            .mailboxes
+            .iter()
+            .find(|m| m.name == "catchall")
+            .expect("catchall mailbox must be in the snapshot");
+        assert_eq!(catchall.trust, "none");
+        assert_eq!(catchall.trusted_senders_count, 0);
+        assert_eq!(catchall.on_receive_count, 0);
+
+        // Top-level snapshot fields surface too.
+        assert_eq!(info.default_trust, "none");
+        assert_eq!(info.default_trusted_senders_count, 0);
+        assert!(
+            info.config_path.ends_with("config.toml"),
+            "config_path should resolve to a config.toml path under the override: {}",
+            info.config_path
+        );
     }
 }

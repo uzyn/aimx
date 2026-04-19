@@ -905,9 +905,7 @@ pub mod service {
     /// On systemd this `exec`s `journalctl -f -u <unit>` so the user can
     /// Ctrl-C the tail naturally. On OpenRC and unknown init systems we
     /// return a clear error rather than guess at a log file.
-    pub fn follow_service_logs_default(
-        unit: &str,
-    ) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn follow_service_logs_default(unit: &str) -> Result<(), Box<dyn std::error::Error>> {
         let init = detect_init_system();
         if let Some((program, args)) = follow_service_logs_command(&init, unit) {
             let status = std::process::Command::new(program).args(&args).status()?;
@@ -927,10 +925,7 @@ pub mod service {
 
     /// OpenRC log-file fallback: try `/var/log/<unit>/*.log` first, then
     /// `/var/log/messages`. Returns an error when neither is readable.
-    fn openrc_tail_log_files(
-        unit: &str,
-        n: usize,
-    ) -> Result<String, Box<dyn std::error::Error>> {
+    fn openrc_tail_log_files(unit: &str, n: usize) -> Result<String, Box<dyn std::error::Error>> {
         use std::path::PathBuf;
 
         let unit_dir = PathBuf::from(format!("/var/log/{unit}"));
