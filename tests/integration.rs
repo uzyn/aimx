@@ -1458,6 +1458,58 @@ fn doctor_shows_domain_and_mailboxes() {
         .stdout(predicate::str::contains("MAILBOX"));
 }
 
+// ---------------------------------------------------------------------------
+// S48-8 — `aimx completion <shell>` (clap_complete)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn completion_bash_emits_function_definition() {
+    let assert = Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["completion", "bash"])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("_aimx"),
+        "bash completion script must define a `_aimx` function: {}",
+        &stdout[..stdout.len().min(200)]
+    );
+    assert!(
+        stdout.contains("complete -F _aimx") || stdout.contains("COMPREPLY"),
+        "bash completion script must wire up COMPREPLY / complete -F"
+    );
+}
+
+#[test]
+fn completion_supports_all_required_shells() {
+    // S48-8 requires at minimum bash, zsh, fish, elvish. Smoke-test
+    // each by asserting the generator exits cleanly with non-empty
+    // output on its respective shell name.
+    for shell in ["bash", "zsh", "fish", "elvish"] {
+        let assert = Command::cargo_bin("aimx")
+            .unwrap()
+            .args(["completion", shell])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        assert!(
+            !stdout.trim().is_empty(),
+            "completion for {shell} must emit a non-empty script"
+        );
+    }
+}
+
+#[test]
+fn completion_subcommand_is_advertised_in_top_level_help() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("completion"));
+}
+
 #[test]
 fn logs_help_advertises_lines_and_follow_flags() {
     Command::cargo_bin("aimx")

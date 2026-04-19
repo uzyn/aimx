@@ -111,6 +111,29 @@ chapter for per-agent activation steps.
 
 Your agent can now list, read, send, and reply to email. See the [MCP Server](mcp.md) guide for all available tools.
 
+## Shell completion
+
+`aimx completion <shell>` prints a completion script to stdout. Pipe it
+into the shell-specific location for your distribution:
+
+```bash
+# Bash (system-wide; requires root)
+aimx completion bash | sudo tee /etc/bash_completion.d/aimx > /dev/null
+
+# Zsh (user-local; assumes ~/.zsh/completions is in your fpath)
+mkdir -p ~/.zsh/completions
+aimx completion zsh > ~/.zsh/completions/_aimx
+
+# Fish
+aimx completion fish > ~/.config/fish/completions/aimx.fish
+
+# Elvish
+aimx completion elvish > ~/.config/elvish/lib/aimx-completion.elv
+```
+
+Open a new shell and `aimx <Tab>` will expand subcommands and flags
+(e.g. `aimx ma<Tab>` → `aimx mailboxes`).
+
 ## Next steps
 
 - **[Setup](setup.md)** -- detailed walkthrough of every setup step, DNS records, DKIM management, and production hardening

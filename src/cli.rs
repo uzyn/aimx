@@ -131,6 +131,12 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Print a shell-completion script to stdout for the requested shell
+    Completion {
+        /// Shell flavour (bash, zsh, fish, elvish, powershell)
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(clap::Args, Clone)]
