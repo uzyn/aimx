@@ -494,7 +494,7 @@ fn submit_mark_via_daemon(
 }
 
 #[derive(Debug)]
-enum MarkOutcome {
+pub(crate) enum MarkOutcome {
     Ok,
     Err { code: ErrCode, reason: String },
     Malformed(String),
@@ -583,7 +583,7 @@ async fn submit_mailbox_crud_request(
 /// `true` when the I/O error indicates the daemon socket is not reachable
 /// (not present, connection refused, permission denied). Callers use this
 /// to decide whether to fall back to a direct on-disk edit.
-fn is_socket_missing(e: &std::io::Error) -> bool {
+pub(crate) fn is_socket_missing(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         std::io::ErrorKind::NotFound
@@ -610,7 +610,7 @@ async fn submit_mark_request(
     Ok(parse_ack_response(&buf))
 }
 
-fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
+pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
     let text = match std::str::from_utf8(buf) {
         Ok(s) => s,
         Err(_) => return MarkOutcome::Malformed("response is not UTF-8".to_string()),

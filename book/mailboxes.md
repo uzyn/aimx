@@ -58,6 +58,33 @@ aimx mailboxes list
 
 Shows all mailboxes with their addresses and message counts (total and unread).
 
+### Inspect a single mailbox
+
+```bash
+aimx mailboxes show support
+```
+
+Prints the mailbox's address, effective trust policy, full `trusted_senders` list, configured hooks grouped by event (`on_receive` / `after_send` — each entry shows the hook id, `cmd` truncated to 60 chars with a `…` suffix when longer, filters in compact form, and the `dangerously_support_untrusted=true` flag where set), and inbox + sent + unread message counts. Example output:
+
+```text
+Mailbox: support
+  Address: support@agent.yourdomain.com
+  Trust:   verified
+  Trusted senders:
+    - *@company.com
+    - boss@example.com
+
+Hooks
+  on_receive
+    - aaaabbbbcccc  cmd: curl -fsS https://hooks.example.com/notify   [from=*@gmail.com subject=urgent]
+  after_send
+    - ddddeeeeffff  cmd: /usr/local/bin/notify "$AIMX_TO"             [to=*@client.com]
+
+Messages
+  inbox: 12 (3 unread)
+  sent:  5
+```
+
 ### Delete a mailbox
 
 ```bash

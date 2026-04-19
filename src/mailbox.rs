@@ -8,6 +8,7 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
     match cmd {
         MailboxCommand::Create { name } => create(&config, &name),
         MailboxCommand::List => list(&config),
+        MailboxCommand::Show { name } => show(&config, &name),
         MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
     }
 }
@@ -253,6 +254,160 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Build the formatted lines emitted by `aimx mailboxes show <name>`.
+/// Pure function — no stdout access — so tests can assert on exact
+/// content without capturing process output. The terminal-color helpers
+/// already strip ANSI when `NO_COLOR` is set or stdout is not a TTY.
+pub(crate) fn build_show_lines(
+    config: &Config,
+    name: &str,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let mb = config
+        .mailboxes
+        .get(name)
+        .ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!("Mailbox '{name}' does not exist").into()
+        })?;
+
+    let inbox_dir = config.inbox_dir(name);
+    let sent_dir = config.sent_dir(name);
+    let (inbox_total, inbox_unread) = count_with_unread(&inbox_dir);
+    let (sent_total, _sent_unread) = count_with_unread(&sent_dir);
+
+    let effective_trust = mb.effective_trust(config);
+    let effective_senders = mb.effective_trusted_senders(config);
+
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "{} {}",
+        term::header("Mailbox:"),
+        term::highlight(name)
+    ));
+    lines.push(format!("  {} {}", term::header("Address:"), mb.address));
+    lines.push(format!(
+        "  {} {}",
+        term::header("Trust:  "),
+        term::info(effective_trust)
+    ));
+
+    if effective_senders.is_empty() {
+        lines.push(format!(
+            "  {} {}",
+            term::header("Trusted senders:"),
+            term::dim("(none)")
+        ));
+    } else {
+        lines.push(format!("  {}", term::header("Trusted senders:")));
+        for s in effective_senders {
+            lines.push(format!("    - {s}"));
+        }
+    }
+
+    lines.push(String::new());
+    lines.push(term::header("Hooks").to_string());
+    let on_receive: Vec<_> = mb.on_receive_hooks().collect();
+    let after_send: Vec<_> = mb.after_send_hooks().collect();
+    if on_receive.is_empty() && after_send.is_empty() {
+        lines.push(format!("  {}", term::dim("(none)")));
+    } else {
+        push_event_group(&mut lines, "on_receive", &on_receive);
+        push_event_group(&mut lines, "after_send", &after_send);
+    }
+
+    lines.push(String::new());
+    lines.push(term::header("Messages").to_string());
+    lines.push(format!(
+        "  {} {} ({} unread)",
+        term::header("inbox:"),
+        inbox_total,
+        inbox_unread
+    ));
+    lines.push(format!("  {} {}", term::header("sent: "), sent_total));
+
+    Ok(lines)
+}
+
+fn push_event_group(lines: &mut Vec<String>, event: &str, hooks: &[&crate::hook::Hook]) {
+    if hooks.is_empty() {
+        return;
+    }
+    lines.push(format!("  {}", term::header(event)));
+    for h in hooks {
+        let cmd = crate::hooks::truncate_with_ellipsis(&h.cmd, 60);
+        let filters = crate::hooks::compact_filters(h);
+        let filter_suffix = if filters.is_empty() {
+            String::new()
+        } else {
+            format!("   [{filters}]")
+        };
+        lines.push(format!(
+            "    - {}  cmd: {}{}",
+            term::highlight(&h.id),
+            cmd,
+            filter_suffix
+        ));
+    }
+}
+
+fn show(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let lines = build_show_lines(config, name)?;
+    for line in lines {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Count messages in a mailbox folder and also return the number of
+/// unread inbox entries. Mirrors `doctor::count_messages`; duplicated
+/// here so the show command does not depend on the doctor module's
+/// internal layout (and because the doctor's helper is private).
+fn count_with_unread(dir: &Path) -> (usize, usize) {
+    use crate::frontmatter::InboundFrontmatter;
+
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return (0, 0),
+    };
+
+    let mut total = 0usize;
+    let mut unread = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let md_path = if path.is_dir() {
+            let stem = match path.file_name().and_then(|f| f.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            let candidate = path.join(format!("{stem}.md"));
+            if !candidate.exists() {
+                continue;
+            }
+            candidate
+        } else if path.extension().is_some_and(|ext| ext == "md") {
+            path
+        } else {
+            continue;
+        };
+
+        total += 1;
+        let content = match std::fs::read_to_string(&md_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let toml_str = parts[1].trim();
+        if let Ok(meta) = toml::from_str::<InboundFrontmatter>(toml_str)
+            && !meta.read
+        {
+            unread += 1;
+        }
+    }
+    (total, unread)
 }
 
 fn delete(
@@ -832,5 +987,182 @@ mod tests {
         // not error; treat missing directory as already-empty.
         let tmp = TempDir::new().unwrap();
         super::wipe_mailbox_contents(&tmp.path().join("does-not-exist")).unwrap();
+    }
+
+    // ----- S51-1 mailboxes show ----------------------------------------
+
+    fn show_test_config(tmp: &Path) -> Config {
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        mailboxes.insert(
+            "support".to_string(),
+            MailboxConfig {
+                address: "support@test.com".to_string(),
+                hooks: vec![
+                    crate::hook::Hook {
+                        id: "aaaabbbbcccc".into(),
+                        event: crate::hook::HookEvent::OnReceive,
+                        r#type: "cmd".into(),
+                        cmd: "echo $AIMX_FROM >> /tmp/log".into(),
+                        from: Some("*@gmail.com".into()),
+                        to: None,
+                        subject: Some("urgent".into()),
+                        has_attachment: None,
+                        dangerously_support_untrusted: true,
+                    },
+                    crate::hook::Hook {
+                        id: "ddddeeeeffff".into(),
+                        event: crate::hook::HookEvent::AfterSend,
+                        r#type: "cmd".into(),
+                        cmd: "curl https://webhook.example.com/notify".into(),
+                        from: None,
+                        to: Some("*@client.com".into()),
+                        subject: None,
+                        has_attachment: None,
+                        dangerously_support_untrusted: false,
+                    },
+                ],
+                trust: Some("verified".into()),
+                trusted_senders: Some(vec!["*@company.com".into(), "boss@example.com".into()]),
+            },
+        );
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[test]
+    fn show_unknown_mailbox_errors() {
+        let tmp = TempDir::new().unwrap();
+        let config = show_test_config(tmp.path());
+        let err = super::build_show_lines(&config, "ghost").unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn show_renders_trust_senders_hooks_and_counts() {
+        let tmp = TempDir::new().unwrap();
+        let config = show_test_config(tmp.path());
+
+        // Drop a couple of inbox entries (one unread, one read) so the
+        // counts assertion has content.
+        let inbox = tmp.path().join("inbox").join("support");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let frontmatter = |read: bool| -> String {
+            format!(
+                "+++\nid = \"2025-06-01-001\"\n\
+                 message_id = \"<m@x>\"\n\
+                 thread_id = \"0123456789abcdef\"\n\
+                 from = \"s@x\"\n\
+                 to = \"support@test.com\"\n\
+                 delivered_to = \"support@test.com\"\n\
+                 subject = \"hi\"\n\
+                 date = \"2025-06-01T00:00:00Z\"\n\
+                 received_at = \"2025-06-01T00:00:01Z\"\n\
+                 size_bytes = 10\n\
+                 dkim = \"none\"\n\
+                 spf = \"none\"\n\
+                 dmarc = \"none\"\n\
+                 trusted = \"none\"\n\
+                 mailbox = \"support\"\n\
+                 read = {read}\n\
+                 +++\n\nbody\n"
+            )
+        };
+        std::fs::write(inbox.join("2025-06-01-001.md"), frontmatter(false)).unwrap();
+        std::fs::write(inbox.join("2025-06-02-001.md"), frontmatter(true)).unwrap();
+
+        let lines = super::build_show_lines(&config, "support").unwrap();
+        let joined = strip_ansi(&lines.join("\n"));
+
+        assert!(joined.contains("support@test.com"), "{joined}");
+        // Effective trust is the per-mailbox override.
+        assert!(joined.contains("verified"), "{joined}");
+        // Both trusted-sender entries appear verbatim.
+        assert!(joined.contains("*@company.com"), "{joined}");
+        assert!(joined.contains("boss@example.com"), "{joined}");
+        // Both hook ids appear.
+        assert!(joined.contains("aaaabbbbcccc"), "{joined}");
+        assert!(joined.contains("ddddeeeeffff"), "{joined}");
+        // Each event has its section header.
+        assert!(joined.contains("on_receive"), "{joined}");
+        assert!(joined.contains("after_send"), "{joined}");
+        // Filters are surfaced compactly.
+        assert!(joined.contains("from=*@gmail.com"), "{joined}");
+        assert!(joined.contains("to=*@client.com"), "{joined}");
+        assert!(joined.contains("subject=urgent"), "{joined}");
+        assert!(
+            joined.contains("dangerously_support_untrusted=true"),
+            "{joined}"
+        );
+        // Inbox count + unread + sent count all present.
+        assert!(
+            joined.contains("inbox:") && joined.contains("2"),
+            "{joined}"
+        );
+        assert!(joined.contains("1 unread"), "{joined}");
+        assert!(joined.contains("sent:"), "{joined}");
+    }
+
+    #[test]
+    fn show_renders_empty_hooks_and_senders_as_none_placeholder() {
+        let tmp = TempDir::new().unwrap();
+        let config = show_test_config(tmp.path());
+        let lines = super::build_show_lines(&config, "catchall").unwrap();
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(joined.contains("*@test.com"));
+        assert!(
+            joined.contains("(none)"),
+            "expected (none) placeholder: {joined}"
+        );
+    }
+
+    #[test]
+    fn show_truncates_long_cmd_with_ellipsis() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = show_test_config(tmp.path());
+        let long_cmd = "x".repeat(120);
+        config
+            .mailboxes
+            .get_mut("support")
+            .unwrap()
+            .hooks
+            .push(crate::hook::Hook {
+                id: "bbbbccccdddd".into(),
+                event: crate::hook::HookEvent::OnReceive,
+                r#type: "cmd".into(),
+                cmd: long_cmd.clone(),
+                from: None,
+                to: None,
+                subject: None,
+                has_attachment: None,
+                dangerously_support_untrusted: false,
+            });
+        let lines = super::build_show_lines(&config, "support").unwrap();
+        let joined = strip_ansi(&lines.join("\n"));
+        assert!(
+            joined.contains("…"),
+            "expected ellipsis truncation marker: {joined}"
+        );
+        // The full 120-char cmd must NOT appear verbatim.
+        assert!(
+            !joined.contains(long_cmd.as_str()),
+            "overlong cmd should be truncated"
+        );
     }
 }
