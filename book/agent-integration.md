@@ -346,8 +346,8 @@ tools.
 
 ### "destination files already exist" error
 
-Re-run with `--force` to overwrite. This is the expected behaviour when
-you are upgrading AIMX and want the new plugin version on disk.
+Re-run with `--force` to overwrite when you want to replace the plugin
+files on disk.
 
 ### `agent-setup` refuses to run as root
 

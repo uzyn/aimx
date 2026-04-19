@@ -401,13 +401,6 @@ mod tests {
     }
 
     #[test]
-    fn config_with_legacy_verify_address_parses() {
-        let toml_str = "domain = \"test.com\"\nverify_address = \"verify@old.com\"\n[mailboxes]\n";
-        let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.domain, "test.com");
-    }
-
-    #[test]
     fn default_check_service_smtp_addr() {
         assert_eq!(DEFAULT_CHECK_SERVICE_SMTP_ADDR, "check.aimx.email:25");
     }

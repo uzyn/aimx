@@ -351,11 +351,9 @@ where
                 content_length = Some(n);
             }
             _ => {
-                // Unknown headers are ignored for forward-compatibility.
-                // The `From-Mailbox:` header is deliberately ignored here so
-                // stray older-client submissions still parse (the value is
-                // untrusted anyway — the daemon always re-derives the
-                // mailbox from the message body's `From:` header).
+                // Unknown headers are ignored. The daemon re-derives the
+                // mailbox from the message body's `From:` header; no
+                // header-provided sender is ever trusted.
             }
         }
     }
@@ -452,7 +450,7 @@ where
                 content_length = Some(n);
             }
             _ => {
-                // Unknown headers are ignored for forward-compatibility.
+                // Unknown headers are ignored.
             }
         }
     }
@@ -533,7 +531,7 @@ where
                 content_length = Some(n);
             }
             _ => {
-                // Unknown headers are ignored for forward-compatibility.
+                // Unknown headers are ignored.
             }
         }
     }
@@ -752,16 +750,6 @@ mod tests {
     #[tokio::test]
     async fn send_unknown_headers_ignored() {
         let input = b"AIMX/1 SEND\nX-Future: foo\nContent-Length: 3\n\nabc";
-        let req = parse_send_from_bytes(input).await.unwrap();
-        assert_eq!(req.body, b"abc".to_vec());
-    }
-
-    #[tokio::test]
-    async fn legacy_from_mailbox_header_is_silently_ignored() {
-        // Older clients may still emit `From-Mailbox:` — the codec treats
-        // it as unknown (the value is never trusted anyway; the daemon
-        // re-derives the mailbox from the message body's `From:` header).
-        let input = b"AIMX/1 SEND\nFrom-Mailbox: bob\nContent-Length: 3\n\nabc";
         let req = parse_send_from_bytes(input).await.unwrap();
         assert_eq!(req.body, b"abc".to_vec());
     }
