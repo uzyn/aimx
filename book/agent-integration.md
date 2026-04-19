@@ -13,6 +13,17 @@ Once your agent is installed, see [Channel Recipes](channel-recipes.md)
 for email-triggered workflows — side-by-side non-interactive CLI
 invocations for every supported agent.
 
+## Guided setup
+
+Running `aimx agent-setup` with no argument on an interactive terminal
+prints a numbered menu listing every supported agent plus an **MCP
+(General)** option. Pick an agent to install it; pick **MCP (General)** to
+print a generic MCP stdio JSON snippet you can paste into any MCP-capable
+client that is not yet in the registry. The menu respects `--data-dir`, so
+the printed snippet includes the override when one is set. Non-interactive
+callers (scripts, CI) must still pass the positional `<agent>` argument or
+`--list`.
+
 ## What `aimx agent-setup` does
 
 `aimx agent-setup <agent>`:
@@ -58,11 +69,12 @@ grows as more agents are added.
 | Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body); references inlined |
 | Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar); references inlined |
 | OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. | Primer as skill + `references/` directory copied as siblings |
+| Hermes | `aimx agent-setup hermes` | `~/.hermes/skills/aimx/` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. | Primer as skill + `references/` directory copied as siblings |
 
 ### Progressive disclosure
 
 Every agent receives the same canonical AIMX primer (`agents/common/aimx-primer.md`).
-For agents that support multi-file skill directories (Claude Code, Codex CLI, OpenClaw),
+For agents that support multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes),
 the installer also copies `agents/common/references/` alongside the skill so the agent
 can load detailed reference material on demand without bloating the initial context.
 
@@ -306,6 +318,51 @@ The printed `openclaw mcp set` command's JSON will include
 See [`agents/openclaw/README.md`](https://github.com/uzyn/aimx/tree/main/agents/openclaw)
 for the schema reference.
 
+### Hermes
+
+[Hermes Agent](https://hermes-agent.nousresearch.com/) (by Nous Research)
+loads skills from `~/.hermes/skills/<name>/SKILL.md` (with optional
+`references/` siblings) and reads MCP server definitions from
+`~/.hermes/config.yaml` under the top-level `mcp_servers:` key. There is
+no shell-side CLI for registering external MCP servers in Hermes today
+(`hermes mcp serve` runs Hermes as an MCP server — the opposite
+direction), so AIMX prints a YAML snippet for you to paste into the
+config file, mirroring the Gemini CLI / OpenCode flow.
+
+Install:
+
+```bash
+aimx agent-setup hermes
+```
+
+The installer writes `~/.hermes/skills/aimx/SKILL.md` and the bundled
+`references/` directory, then prints a YAML block like:
+
+```yaml
+mcp_servers:
+  aimx:
+    command: /usr/local/bin/aimx
+    args: [mcp]
+    enabled: true
+```
+
+Add that block to `~/.hermes/config.yaml` under the top-level
+`mcp_servers:` key (create the key if it does not yet exist), save the
+file, then run `/reload-mcp` inside Hermes to pick up the new server
+without restarting.
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agent-setup hermes
+```
+
+The printed YAML's `args` line will become
+`args: [--data-dir, /custom/path, mcp]`.
+
+See [`agents/hermes/README.md`](https://github.com/uzyn/aimx/tree/main/agents/hermes)
+for the schema reference.
+
 ## Manual MCP wiring
 
 If your agent is not yet supported, wire AIMX in manually as a plain MCP
@@ -403,3 +460,13 @@ through your own OpenClaw binary:
 Alternatively, hand-edit `~/.openclaw/openclaw.json` and add the
 printed object under `mcpServers.aimx`. The JSON5 format accepts
 comments and trailing commas but vanilla JSON works too.
+
+### Hermes: AIMX tools missing after editing config.yaml
+
+Hermes does not auto-reload MCP servers when `~/.hermes/config.yaml`
+changes — you must run the in-app `/reload-mcp` slash command (or
+restart Hermes) after pasting the snippet. Confirm the snippet sits
+under the top-level `mcp_servers:` key (not nested inside another
+section) and that YAML indentation uses spaces, not tabs. If you have
+no other MCP servers configured, the block can be the entire
+`mcp_servers:` section.

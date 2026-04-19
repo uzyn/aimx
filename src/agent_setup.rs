@@ -15,6 +15,8 @@ static AGENTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/agents");
 pub struct AgentSpec {
     /// Registry key passed on the CLI (e.g. `claude-code`).
     pub name: &'static str,
+    /// Human-friendly label shown in the guided setup menu (e.g. `Claude Code`).
+    pub display_name: &'static str,
     /// Path inside the `agents/` tree that holds the plugin source.
     pub source_subdir: &'static str,
     /// Destination template, with `$HOME` / `$XDG_CONFIG_HOME` placeholders.
@@ -35,7 +37,7 @@ pub struct AgentSpec {
 /// Static registry of supported agents.
 ///
 /// v1 roster: `claude-code`, `codex`, `opencode`, `gemini`, `goose`,
-/// `openclaw` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
+/// `openclaw`, `hermes` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
 /// design; `assemble_plugin_files` walks each source tree relative to its
 /// root and handles all three shapes. Do not "normalize" the layout —
 /// the destination template determines the depth.
@@ -60,6 +62,7 @@ pub fn registry() -> &'static [AgentSpec] {
     &[
         AgentSpec {
             name: "claude-code",
+            display_name: "Claude Code",
             source_subdir: "claude-code",
             dest_template: "$HOME/.claude/plugins/aimx",
             activation_hint: claude_code_hint,
@@ -67,6 +70,7 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "codex",
+            display_name: "Codex CLI",
             source_subdir: "codex",
             dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
@@ -74,6 +78,7 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "opencode",
+            display_name: "OpenCode",
             source_subdir: "opencode",
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
             activation_hint: opencode_hint,
@@ -81,6 +86,7 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "gemini",
+            display_name: "Gemini CLI",
             source_subdir: "gemini",
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
@@ -88,6 +94,7 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "goose",
+            display_name: "Goose",
             source_subdir: "goose",
             // Goose discovers recipes by filename stem from
             // ~/.config/goose/recipes/ — we install one file, not a
@@ -98,11 +105,25 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "openclaw",
+            display_name: "OpenClaw",
             source_subdir: "openclaw",
             // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md — we ship a
             // skill-directory package (no flat SKILL.md at the root).
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
+            progressive_disclosure: true,
+        },
+        AgentSpec {
+            name: "hermes",
+            display_name: "Hermes",
+            source_subdir: "hermes",
+            // Hermes Agent (Nous Research) loads skills from
+            // ~/.hermes/skills/<name>/SKILL.md with optional `references/`
+            // siblings. MCP servers live in ~/.hermes/config.yaml under
+            // `mcp_servers:`; there is no shell-side `mcp add` CLI today, so
+            // the activation hint prints a YAML snippet to paste in.
+            dest_template: "$HOME/.hermes/skills/aimx",
+            activation_hint: hermes_hint,
             progressive_disclosure: true,
         },
     ]
@@ -236,6 +257,51 @@ fn goose_hint(_data_dir: Option<&Path>) -> String {
      $GOOSE_RECIPE_GITHUB_REPO; Goose loads recipes from that repo when \
      the variable is set.\n"
         .to_string()
+}
+
+fn hermes_hint(data_dir: Option<&Path>) -> String {
+    // Hermes Agent does NOT expose a shell-side CLI for registering external
+    // MCP servers. `hermes mcp serve` runs Hermes itself as an MCP server
+    // (the opposite direction); the canonical registration path per the
+    // official docs is editing ~/.hermes/config.yaml directly. We print a
+    // YAML snippet to paste under the top-level `mcp_servers:` key, then
+    // the user runs `/reload-mcp` inside Hermes to pick up the new server
+    // without restarting.
+    //
+    // The snippet is hand-rendered as YAML rather than serialized via a YAML
+    // library so we avoid a serde_yaml dependency (FR-49 principle: never
+    // mutate agent config files; print snippets instead). The args list uses
+    // YAML inline-flow syntax so the rendered block stays compact.
+    //
+    // YAML flow sequences treat `,`, `[`, `]`, and `#` as structural, so any
+    // `--data-dir` path containing those characters must be quoted. We route
+    // the path through `serde_json::to_string` to produce a valid YAML
+    // double-quoted scalar (matches how `rewrite_recipe_data_dir` handles the
+    // same problem for Goose recipes).
+    let args_inline = match data_dir {
+        Some(dd) => {
+            let dd_str = dd.to_string_lossy();
+            let quoted =
+                serde_json::to_string(dd_str.as_ref()).unwrap_or_else(|_| format!("\"{dd_str}\""));
+            format!("[--data-dir, {quoted}, mcp]")
+        }
+        None => "[mcp]".to_string(),
+    };
+    format!(
+        "Skill installed at ~/.hermes/skills/aimx/. Add the following block \
+         to the top-level `mcp_servers:` key in ~/.hermes/config.yaml \
+         (create the key if it does not yet exist):\n\
+         \n\
+         \x20\x20mcp_servers:\n\
+         \x20\x20\x20\x20aimx:\n\
+         \x20\x20\x20\x20\x20\x20command: /usr/local/bin/aimx\n\
+         \x20\x20\x20\x20\x20\x20args: {args_inline}\n\
+         \x20\x20\x20\x20\x20\x20enabled: true\n\
+         \n\
+         Then run `/reload-mcp` inside Hermes to pick up the new server \
+         without restarting. (Hermes loads MCP servers from \
+         ~/.hermes/config.yaml; `/reload-mcp` re-reads that file at runtime.)"
+    )
 }
 
 fn openclaw_hint(data_dir: Option<&Path>) -> String {
@@ -374,22 +440,31 @@ pub fn run_with_env(
     data_dir: Option<&Path>,
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_env_to_writer(agent, list, force, print, data_dir, env, &mut io::stdout())
+}
+
+/// Testable core of `run_with_env`: writes menu / install output to `out`
+/// rather than real stdout so tests can capture and assert on it.
+pub fn run_with_env_to_writer(
+    agent: Option<String>,
+    list: bool,
+    force: bool,
+    print: bool,
+    data_dir: Option<&Path>,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
     if list {
         print_registry(env);
         return Ok(());
     }
 
-    let name = agent.ok_or_else(|| {
-        "agent-setup requires an agent name, or --list to see supported agents".to_string()
-    })?;
-
+    // Enforce the per-user constraint before doing any work so all three
+    // entry paths (positional agent, unknown agent, guided menu) produce the
+    // same root error rather than menus or "unknown agent" first.
     if env.is_root() {
         return Err("agent-setup is a per-user operation — run without sudo or as root".into());
     }
-
-    let spec = find_agent(&name).ok_or_else(|| {
-        format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
-    })?;
 
     let opts = InstallOptions {
         force,
@@ -397,7 +472,134 @@ pub fn run_with_env(
         data_dir,
     };
 
-    install(spec, &opts, env)
+    let selection = match agent {
+        Some(name) => {
+            let spec = find_agent(&name).ok_or_else(|| {
+                format!(
+                    "unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents"
+                )
+            })?;
+            Selection::Agent(spec)
+        }
+        None => {
+            if !env.is_stdin_tty() {
+                return Err(
+                    "agent-setup requires an agent name, or --list to see supported agents".into(),
+                );
+            }
+            prompt_agent_selection(env, out)?
+        }
+    };
+
+    match selection {
+        Selection::Agent(spec) => install_to_writer(spec, &opts, env, out),
+        Selection::McpGeneral => print_mcp_general(data_dir, out),
+    }
+}
+
+/// Result of the guided menu prompt. `McpGeneral` is a pseudo-selection that
+/// prints a generic MCP stdio JSON snippet instead of installing any files.
+enum Selection {
+    Agent(&'static AgentSpec),
+    McpGeneral,
+}
+
+/// Display the guided setup menu and read a numeric choice from the user.
+/// Blank input aborts. One invalid input re-prompts; a second invalid input
+/// returns an error.
+fn prompt_agent_selection(
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<Selection, Box<dyn std::error::Error>> {
+    let agents = registry();
+    // Slot numbering: 1..=agents.len() are the real agents; the final slot
+    // is "MCP (General)".
+    let mcp_general_slot = agents.len() + 1;
+
+    writeln!(out, "{}", term::header("Select what to configure:"))?;
+    for (idx, spec) in agents.iter().enumerate() {
+        writeln!(out, "  {}) {}", idx + 1, spec.display_name)?;
+    }
+    writeln!(out, "  {mcp_general_slot}) MCP (General)")?;
+    write!(out, "Choice [1-{mcp_general_slot}]: ")?;
+    out.flush()?;
+
+    let parse_choice = |raw: &str| -> Option<Selection> {
+        let n: usize = raw.trim().parse().ok()?;
+        // Slots are 1-indexed; guard against `0` so `n - 1` never underflows
+        // usize when indexing into `agents`.
+        if n == 0 {
+            return None;
+        }
+        if n == mcp_general_slot {
+            return Some(Selection::McpGeneral);
+        }
+        agents.get(n - 1).map(Selection::Agent)
+    };
+
+    let first = env.read_line()?;
+    if first.trim().is_empty() {
+        return Err("aborted by user".into());
+    }
+    if let Some(sel) = parse_choice(&first) {
+        return Ok(sel);
+    }
+
+    writeln!(
+        out,
+        "{} '{}' is not a valid choice.",
+        term::warn("Invalid:"),
+        first.trim()
+    )?;
+    write!(out, "Choice [1-{mcp_general_slot}]: ")?;
+    out.flush()?;
+    let second = env.read_line()?;
+    // A blank retry is the same signal as a blank first input: the user has
+    // given up, so surface the same friendly "aborted by user" message rather
+    // than "invalid choice ''".
+    if second.trim().is_empty() {
+        return Err("aborted by user".into());
+    }
+    if let Some(sel) = parse_choice(&second) {
+        return Ok(sel);
+    }
+
+    Err(format!("invalid choice '{}'; aborting", second.trim()).into())
+}
+
+/// Render the generic MCP stdio JSON snippet for clients that aren't in the
+/// per-agent registry. Honors `--data-dir` the same way per-agent hints do.
+fn print_mcp_general(
+    data_dir: Option<&Path>,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(
+        out,
+        "Generic MCP stdio config for any client that speaks MCP. Paste this \
+         into your client's MCP server config (field names may vary):"
+    )?;
+    writeln!(out)?;
+    writeln!(out, "{}", render_mcp_general_snippet(data_dir))?;
+    Ok(())
+}
+
+/// Build the `{ "command": ..., "args": [...] }` JSON snippet. Routed through
+/// `serde_json` so a `--data-dir` path containing `"` or `\` escapes safely.
+fn render_mcp_general_snippet(data_dir: Option<&Path>) -> String {
+    let args: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
+    };
+    let snippet = serde_json::json!({
+        "command": "/usr/local/bin/aimx",
+        "args": args,
+    });
+    serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string())
 }
 
 fn print_registry(env: &dyn AgentEnv) {
@@ -421,17 +623,13 @@ fn print_registry(env: &dyn AgentEnv) {
     }
 }
 
-fn install(
-    spec: &AgentSpec,
-    opts: &InstallOptions,
-    env: &dyn AgentEnv,
-) -> Result<(), Box<dyn std::error::Error>> {
-    install_to_writer(spec, opts, env, &mut io::stdout())
-}
-
-/// Testable core of `install`: writes user-facing output to `out` instead
-/// of stdout. Tests use this to assert that `--print` emits the activation
-/// snippet.
+/// Writes user-facing output to `out`. Called from `run_with_env_to_writer`
+/// once an `AgentSpec` has been resolved (either from a positional argument
+/// or from the guided menu).
+///
+/// Handles `--print` (dry run; emits file list + activation hint) and the
+/// normal install path (lays files down under `dest_template`, then prints
+/// the activation hint).
 fn install_to_writer(
     spec: &AgentSpec,
     opts: &InstallOptions,
@@ -1505,7 +1703,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_six_agents_in_canonical_order() {
+    fn registry_lists_seven_agents_in_canonical_order() {
         let names: Vec<&str> = registry().iter().map(|s| s.name).collect();
         assert_eq!(
             names,
@@ -1515,7 +1713,8 @@ mod tests {
                 "opencode",
                 "gemini",
                 "goose",
-                "openclaw"
+                "openclaw",
+                "hermes",
             ]
         );
     }
@@ -2087,6 +2286,7 @@ mod tests {
         assert!(by_name("claude-code").progressive_disclosure);
         assert!(by_name("codex").progressive_disclosure);
         assert!(by_name("openclaw").progressive_disclosure);
+        assert!(by_name("hermes").progressive_disclosure);
 
         assert!(!by_name("opencode").progressive_disclosure);
         assert!(!by_name("gemini").progressive_disclosure);
@@ -2112,7 +2312,14 @@ mod tests {
 
     #[test]
     fn author_metadata_in_all_skill_headers() {
-        for agent in ["claude-code", "codex", "opencode", "gemini", "openclaw"] {
+        for agent in [
+            "claude-code",
+            "codex",
+            "opencode",
+            "gemini",
+            "openclaw",
+            "hermes",
+        ] {
             let header_path = match agent {
                 "claude-code" => "claude-code/skills/aimx/SKILL.md.header",
                 _ => &format!("{agent}/SKILL.md.header"),
@@ -2226,5 +2433,437 @@ mod tests {
         assert!(ref_text.contains("\"true\""));
         assert!(ref_text.contains("\"false\""));
         assert!(ref_text.contains("trusted_senders"));
+    }
+
+    #[test]
+    fn registry_contains_hermes() {
+        let spec = find_agent("hermes").expect("registry must include hermes");
+        assert_eq!(spec.dest_template, "$HOME/.hermes/skills/aimx");
+        assert!(spec.progressive_disclosure);
+    }
+
+    #[test]
+    fn install_hermes_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("hermes".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".hermes/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+        assert!(!dest.join("README.md").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(
+            skill.starts_with("---\n"),
+            "missing YAML frontmatter: {skill:.200}"
+        );
+        assert!(skill.contains("name: aimx"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("license: MIT"));
+        assert!(skill.contains("metadata:"));
+        assert!(skill.contains("hermes:"));
+        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("Trust model"));
+    }
+
+    #[test]
+    fn hermes_progressive_disclosure_installs_references() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("hermes".into()), false, false, false, None, &env).unwrap();
+
+        let dest = tmp.path().join(".hermes/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("references/mcp-tools.md").exists());
+        assert!(dest.join("references/frontmatter.md").exists());
+        assert!(dest.join("references/workflows.md").exists());
+        assert!(dest.join("references/troubleshooting.md").exists());
+    }
+
+    #[test]
+    fn hermes_activation_hint_mentions_config_and_reload() {
+        let spec = find_agent("hermes").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("~/.hermes/config.yaml"));
+        assert!(hint.contains("/reload-mcp"));
+        assert!(hint.contains("mcp_servers:"));
+        assert!(hint.contains("aimx:"));
+        assert!(hint.contains("command: /usr/local/bin/aimx"));
+        assert!(hint.contains("args: [mcp]"));
+        assert!(hint.contains("enabled: true"));
+        // Default install must not leak --data-dir into the snippet.
+        assert!(!hint.contains("--data-dir"));
+    }
+
+    #[test]
+    fn hermes_activation_hint_with_custom_data_dir_rewrites_args() {
+        let spec = find_agent("hermes").unwrap();
+        let hint = (spec.activation_hint)(Some(Path::new("/custom/aimx-data")));
+        // The path is routed through a JSON-string serializer so it is always
+        // emitted as a YAML double-quoted scalar, even for "safe" inputs.
+        assert!(hint.contains("args: [--data-dir, \"/custom/aimx-data\", mcp]"));
+        // The other lines remain identical to the default form.
+        assert!(hint.contains("command: /usr/local/bin/aimx"));
+        assert!(hint.contains("enabled: true"));
+    }
+
+    #[test]
+    fn hermes_activation_hint_escapes_yaml_flow_sensitive_chars_in_data_dir() {
+        // YAML flow sequences treat `,`, `[`, `]`, and `#` as structural.
+        // A `--data-dir` containing any of these MUST be quoted, or the
+        // rendered snippet either fails to parse or silently produces the
+        // wrong argv for Hermes. Regression coverage for the blocker raised
+        // on PR #91.
+        let spec = find_agent("hermes").unwrap();
+
+        // Case 1: path with `[` and `]` (previously produced a YAML parse error).
+        let hint = (spec.activation_hint)(Some(Path::new("/opt/aimx [staging]")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/opt/aimx [staging]\", mcp]"),
+            "bracketed path must be quoted: {hint}"
+        );
+        // Three argv entries separated by commas — not nine.
+        let args_line = hint
+            .lines()
+            .find(|l| l.trim_start().starts_with("args:"))
+            .expect("snippet must contain an args: line");
+        assert_eq!(
+            args_count_in_flow_sequence(args_line),
+            3,
+            "args list must contain exactly 3 entries: {args_line}"
+        );
+
+        // Case 2: path containing `,` (previously split into extra argv entries).
+        let hint = (spec.activation_hint)(Some(Path::new("/path,with,commas")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/path,with,commas\", mcp]"),
+            "comma path must be quoted: {hint}"
+        );
+        let args_line = hint
+            .lines()
+            .find(|l| l.trim_start().starts_with("args:"))
+            .unwrap();
+        assert_eq!(
+            args_count_in_flow_sequence(args_line),
+            3,
+            "args list must contain exactly 3 entries: {args_line}"
+        );
+
+        // Case 3: path containing `#` (previously triggered YAML comment handling).
+        let hint = (spec.activation_hint)(Some(Path::new("/opt/aimx #archive")));
+        assert!(
+            hint.contains("args: [--data-dir, \"/opt/aimx #archive\", mcp]"),
+            "hash path must be quoted: {hint}"
+        );
+
+        // Case 4: path containing `"` and `\` — must be JSON-escaped inside
+        // the double-quoted scalar so the resulting YAML is still valid.
+        let hint = (spec.activation_hint)(Some(Path::new(r#"/opt/a"b\c"#)));
+        assert!(
+            hint.contains(r#"args: [--data-dir, "/opt/a\"b\\c", mcp]"#),
+            "quote/backslash path must be JSON-escaped: {hint}"
+        );
+    }
+
+    // Count items in a YAML flow sequence like `args: [a, b, c]` by splitting
+    // on the commas that live OUTSIDE any double-quoted scalar. This mirrors
+    // what a real YAML parser does on the `args:` line and lets us verify
+    // the argv survives round-trip without pulling in a YAML crate.
+    fn args_count_in_flow_sequence(line: &str) -> usize {
+        let lb = line.find('[').expect("expected `[` in flow sequence");
+        let rb = line.rfind(']').expect("expected `]` in flow sequence");
+        let inner = &line[lb + 1..rb];
+
+        let mut count = 0usize;
+        let mut has_content = false;
+        let mut in_quotes = false;
+        let mut escaped = false;
+        for ch in inner.chars() {
+            if escaped {
+                escaped = false;
+                has_content = true;
+                continue;
+            }
+            if in_quotes {
+                match ch {
+                    '\\' => escaped = true,
+                    '"' => in_quotes = false,
+                    _ => {}
+                }
+                has_content = true;
+                continue;
+            }
+            match ch {
+                '"' => {
+                    in_quotes = true;
+                    has_content = true;
+                }
+                ',' => {
+                    if has_content {
+                        count += 1;
+                    }
+                    has_content = false;
+                }
+                c if c.is_whitespace() => {}
+                _ => has_content = true,
+            }
+        }
+        if has_content {
+            count += 1;
+        }
+        count
+    }
+
+    #[test]
+    fn assembled_hermes_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("hermes").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("hermes/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    // --- Guided menu tests ---
+
+    fn run_menu(
+        tmp: &TempDir,
+        responses: Vec<&str>,
+        data_dir: Option<&Path>,
+    ) -> (Result<(), Box<dyn std::error::Error>>, String, MockEnv) {
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.tty = true;
+        env.responses = RefCell::new(responses.into_iter().map(String::from).collect());
+        let mut out: Vec<u8> = Vec::new();
+        let res = run_with_env_to_writer(None, false, false, false, data_dir, &env, &mut out);
+        (res, String::from_utf8(out).unwrap(), env)
+    }
+
+    #[test]
+    fn menu_renders_all_agents_and_mcp_general() {
+        let tmp = TempDir::new().unwrap();
+        // Abort immediately; we only care about the rendered menu text.
+        let (_res, out, _env) = run_menu(&tmp, vec!["\n"], None);
+
+        for spec in registry() {
+            assert!(
+                out.contains(spec.display_name),
+                "menu missing display name {:?}: {out}",
+                spec.display_name
+            );
+        }
+        assert!(
+            out.contains("MCP (General)"),
+            "menu missing MCP (General) row: {out}"
+        );
+        let mcp_slot = registry().len() + 1;
+        assert!(
+            out.contains(&format!("Choice [1-{mcp_slot}]:")),
+            "missing numbered prompt range: {out}"
+        );
+    }
+
+    #[test]
+    fn menu_selects_claude_code_and_installs() {
+        let tmp = TempDir::new().unwrap();
+        let (res, _out, _env) = run_menu(&tmp, vec!["1\n"], None);
+        res.unwrap();
+        let dest = tmp.path().join(".claude/plugins/aimx");
+        assert!(dest.join(".claude-plugin/plugin.json").exists());
+        assert!(dest.join("skills/aimx/SKILL.md").exists());
+    }
+
+    #[test]
+    fn menu_selects_codex_and_installs() {
+        let tmp = TempDir::new().unwrap();
+        // Codex is slot 2 in the current registry order.
+        let (res, _out, _env) = run_menu(&tmp, vec!["2\n"], None);
+        res.unwrap();
+        let dest = tmp.path().join(".codex/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+    }
+
+    #[test]
+    fn menu_selects_mcp_general_prints_generic_snippet() {
+        let tmp = TempDir::new().unwrap();
+        let mcp_slot = registry().len() + 1;
+        let (res, out, _env) = run_menu(&tmp, vec![format!("{mcp_slot}\n").as_str()], None);
+        res.unwrap();
+
+        assert!(
+            out.contains("\"command\": \"/usr/local/bin/aimx\""),
+            "missing command in snippet: {out}"
+        );
+        assert!(out.contains("\"mcp\""), "missing mcp arg in snippet: {out}");
+        assert!(
+            !out.contains("--data-dir"),
+            "unexpected --data-dir when none was set: {out}"
+        );
+        assert!(
+            !tmp.path().join(".claude").exists(),
+            "MCP (General) must not write any agent files"
+        );
+        assert!(!tmp.path().join(".codex").exists());
+    }
+
+    #[test]
+    fn menu_mcp_general_with_data_dir_injects_flag() {
+        let tmp = TempDir::new().unwrap();
+        let mcp_slot = registry().len() + 1;
+        let custom = PathBuf::from("/custom/aimx-data");
+        let (res, out, _env) =
+            run_menu(&tmp, vec![format!("{mcp_slot}\n").as_str()], Some(&custom));
+        res.unwrap();
+        assert!(out.contains("--data-dir"));
+        assert!(out.contains("/custom/aimx-data"));
+    }
+
+    #[test]
+    fn menu_enter_alone_aborts() {
+        let tmp = TempDir::new().unwrap();
+        let (res, _out, _env) = run_menu(&tmp, vec!["\n"], None);
+        let err = res.unwrap_err();
+        assert!(
+            err.to_string().contains("aborted by user"),
+            "unexpected error: {err}"
+        );
+        assert!(!tmp.path().join(".claude").exists());
+    }
+
+    #[test]
+    fn menu_invalid_then_abort() {
+        let tmp = TempDir::new().unwrap();
+        let (res, out, _env) = run_menu(&tmp, vec!["99\n", "abc\n"], None);
+        let err = res.unwrap_err();
+        assert!(
+            err.to_string().contains("invalid choice"),
+            "unexpected error: {err}"
+        );
+        // User saw the "Invalid" reprompt once.
+        assert!(out.contains("Invalid:"), "missing re-prompt banner: {out}");
+        assert!(!tmp.path().join(".claude").exists());
+    }
+
+    #[test]
+    fn non_tty_without_agent_still_errors() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf()); // tty=false by default
+        let mut out: Vec<u8> = Vec::new();
+        let err =
+            run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("agent name"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn menu_force_flag_passed_through() {
+        let tmp = TempDir::new().unwrap();
+        // First install via positional arg (no overwrite prompt needed).
+        let env_pos = MockEnv::new(tmp.path().to_path_buf());
+        run_with_env(
+            Some("claude-code".into()),
+            false,
+            false,
+            false,
+            None,
+            &env_pos,
+        )
+        .unwrap();
+
+        let plugin_path = tmp
+            .path()
+            .join(".claude/plugins/aimx/.claude-plugin/plugin.json");
+        assert!(
+            plugin_path.exists(),
+            "initial install should write plugin.json"
+        );
+        // Sentinel content to prove --force actually rewrote the file.
+        std::fs::write(&plugin_path, "SENTINEL\n").unwrap();
+
+        // Second install via menu with --force: must not prompt (only one
+        // scripted response is available — any extra read_line would panic
+        // on `remove(0)`), must rewrite the sentinel content back to real
+        // plugin.json, and must leave no unconsumed menu responses.
+        let mut env_menu = MockEnv::new(tmp.path().to_path_buf());
+        env_menu.tty = true;
+        env_menu.responses = RefCell::new(vec!["1\n".to_string()]);
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(None, false, true, false, None, &env_menu, &mut out).unwrap();
+
+        assert!(
+            env_menu.responses.borrow().is_empty(),
+            "menu should have consumed exactly one read_line; leftovers: {:?}",
+            env_menu.responses.borrow()
+        );
+        let rewritten = std::fs::read_to_string(&plugin_path).unwrap();
+        assert_ne!(
+            rewritten, "SENTINEL\n",
+            "--force path must have overwritten the sentinel plugin.json"
+        );
+        assert!(
+            rewritten.contains("\"mcpServers\""),
+            "rewritten plugin.json should contain the real mcpServers block: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn menu_root_still_refused_up_front() {
+        // Root + TTY + no positional agent: the root check must fire before
+        // the menu is rendered, so no read_line is ever called and no files
+        // are installed.
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.root = true;
+        env.tty = true;
+        // No responses queued — if the menu is shown, read_line() panics.
+        let mut out: Vec<u8> = Vec::new();
+        let err =
+            run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap_err();
+        assert!(
+            err.to_string().contains("per-user"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            out.is_empty(),
+            "no menu output expected when root is rejected up front: {}",
+            String::from_utf8_lossy(&out)
+        );
+        assert!(!tmp.path().join(".claude").exists());
+    }
+
+    #[test]
+    fn menu_blank_retry_aborts_cleanly() {
+        // Invalid first entry then Enter-alone on the retry should surface
+        // the same "aborted by user" message as a blank first entry, not
+        // "invalid choice ''".
+        let tmp = TempDir::new().unwrap();
+        let (res, _out, _env) = run_menu(&tmp, vec!["abc\n", "\n"], None);
+        let err = res.unwrap_err();
+        assert!(
+            err.to_string().contains("aborted by user"),
+            "expected friendly abort on blank retry, got: {err}"
+        );
+        assert!(!tmp.path().join(".claude").exists());
     }
 }
