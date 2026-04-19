@@ -100,6 +100,7 @@ trusted_senders = ["*@company.com", "alice@gmail.com"]
 |---------|----------|----------|-------|
 | `mailbox`| string  | always   | Name of the mailbox this email was routed to |
 | `read`   | bool    | always   | `false` on ingest. Updated by `email_mark_read`/`email_mark_unread` |
+| `read_at`| datetime| optional | RFC 3339 UTC timestamp set by `email_mark_read` (mirrors the `MARK-READ` UDS verb). Removed entirely by `email_mark_unread`. Reflects the most recent read — re-marking read overwrites the previous value rather than preserving "first read". Omitted when absent |
 | `labels` | string[]| optional | Empty by default. Omitted when empty |
 
 ---

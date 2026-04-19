@@ -393,6 +393,7 @@ mod tests {
                 trusted: trusted.as_str().to_string(),
                 mailbox: "secure".to_string(),
                 read: false,
+                read_at: None,
                 labels: vec![],
             };
 
