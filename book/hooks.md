@@ -52,6 +52,66 @@ cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 
 Multiple hooks can be defined per mailbox; each is evaluated independently.
 
+## Managing hooks via CLI
+
+Use `aimx hooks` (alias: `aimx hook`) to manage hooks without hand-editing `config.toml`. All three sub-subcommands route through the daemon's UDS socket first so newly-created or -deleted hooks take effect on the very next event — **no restart required** while `aimx serve` is running. If the daemon is stopped, the CLI falls back to editing `config.toml` directly and prints a restart hint.
+
+### List hooks
+
+```bash
+aimx hooks list                  # all mailboxes
+aimx hooks list --mailbox support # single mailbox
+```
+
+Prints a table (`ID`, `MAILBOX`, `EVENT`, `CMD`, `FILTERS`). The `CMD` column is truncated to 60 chars with a `…` suffix when longer.
+
+### Create a hook
+
+`create` is flag-based (not interactive) and auto-generates the 12-char hook id. The id is printed on success.
+
+```bash
+# on_receive: fire a webhook for urgent-subject mail from Gmail senders
+aimx hooks create \
+  --mailbox support \
+  --event on_receive \
+  --cmd 'curl -fsS -X POST https://hooks.example.com/notify -d "$AIMX_SUBJECT"' \
+  --from '*@gmail.com' \
+  --subject urgent
+
+# after_send: log successful deliveries to clients
+aimx hooks create \
+  --mailbox alice \
+  --event after_send \
+  --cmd 'printf "%s -> %s: %s\n" "$AIMX_FROM" "$AIMX_TO" "$AIMX_SEND_STATUS" >> /var/log/aimx-outbound.log' \
+  --to '*@client.com'
+
+# on_receive: fire on untrusted mail too (verbose flag is intentional)
+aimx hooks create \
+  --mailbox catchall \
+  --event on_receive \
+  --cmd 'logger -t aimx "inbound from $AIMX_FROM"' \
+  --dangerously-support-untrusted
+```
+
+Flag validation matches the on-load validator:
+
+| Flag | Event constraint |
+|------|------------------|
+| `--from <glob>` | only valid on `--event on_receive` |
+| `--to <glob>` | only valid on `--event after_send` |
+| `--has-attachment` | only valid on `--event on_receive` (outbound submissions via UDS are text-only in v0.2) |
+| `--dangerously-support-untrusted` | only valid on `--event on_receive` |
+| `--subject <sub>` | both events |
+
+### Delete a hook
+
+```bash
+aimx hooks delete aaaabbbbcccc        # interactive prompt
+aimx hooks delete aaaabbbbcccc --yes  # scripted
+```
+
+The prompt shows the hook's `id`, `mailbox`, `event`, and `cmd` (truncated to 60 chars) before asking `[y/N]`. There is no `update` verb — delete the old hook and create a new one if you want to tweak filters.
+
 ## Hook context: env vars and placeholders
 
 User-controlled header fields are delivered to the hook shell as **env vars**; aimx-controlled fields are substituted into the command string as `{...}` placeholders.

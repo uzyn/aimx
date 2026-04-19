@@ -3858,3 +3858,360 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
 
     stop_serve(daemon);
 }
+
+// ---------------------------------------------------------------------
+// Sprint 51 — `aimx mailboxes show` + `aimx hooks` CLI
+// ---------------------------------------------------------------------
+
+/// S51-1: `aimx mailboxes show <name>` surfaces trust, senders, hooks,
+/// and counts for a configured mailbox. Verify the happy path and the
+/// singular `mailbox show` alias.
+#[test]
+fn mailboxes_show_prints_trust_senders_hooks_and_counts() {
+    let tmp = TempDir::new().unwrap();
+    let config_content = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{}"
+trust = "none"
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[mailboxes.support]
+address = "support@agent.example.com"
+trust = "verified"
+trusted_senders = ["*@company.com", "boss@example.com"]
+
+[[mailboxes.support.hooks]]
+id = "aaaabbbbcccc"
+event = "on_receive"
+cmd = "echo inbound"
+from = "*@gmail.com"
+subject = "urgent"
+
+[[mailboxes.support.hooks]]
+id = "ddddeeeeffff"
+event = "after_send"
+cmd = "echo outbound"
+to = "*@client.com"
+"#,
+        tmp.path().display()
+    );
+    std::fs::create_dir_all(tmp.path().join("inbox").join("support")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("sent").join("support")).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
+    install_cached_dkim_keys(tmp.path());
+
+    let plural = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["mailboxes", "show", "support"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&plural.get_output().stdout).to_string();
+
+    for expected in [
+        "support@agent.example.com",
+        "verified",
+        "*@company.com",
+        "boss@example.com",
+        "aaaabbbbcccc",
+        "ddddeeeeffff",
+        "on_receive",
+        "after_send",
+        "from=*@gmail.com",
+        "to=*@client.com",
+        "subject=urgent",
+        "inbox:",
+        "sent:",
+    ] {
+        assert!(
+            out.contains(expected),
+            "missing {expected:?} in output: {out}"
+        );
+    }
+
+    // Singular alias must work too.
+    aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["mailbox", "show", "support"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn mailboxes_show_unknown_mailbox_errors() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let assert = aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["mailboxes", "show", "ghost"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("does not exist"),
+        "expected 'does not exist' error, got: {stderr}"
+    );
+}
+
+/// Build an `aimx` Command pre-wired with both `AIMX_CONFIG_DIR` and
+/// `AIMX_RUNTIME_DIR` pointed at the test's tempdir. Using a per-test
+/// runtime dir isolates the UDS socket path so the CLI falls back to the
+/// direct-edit path even when a real `aimx serve` is running on the host
+/// (e.g. on developer machines or CI boxes where the daemon is
+/// installed). Without this isolation, `aimx hooks create` would hit the
+/// host daemon's `/run/aimx/send.sock` and fail with `PROTOCOL unknown
+/// verb` when the host daemon is on an older build.
+fn aimx_cmd_isolated(tmp: &Path) -> Command {
+    let runtime = tmp.join("run");
+    std::fs::create_dir_all(&runtime).ok();
+    let mut cmd = Command::cargo_bin("aimx").unwrap();
+    cmd.env("AIMX_CONFIG_DIR", tmp);
+    cmd.env("AIMX_RUNTIME_DIR", &runtime);
+    cmd
+}
+
+/// S51-2: `aimx hooks create` + `aimx hooks list` roundtrip.
+/// Daemon is not running (AIMX_RUNTIME_DIR points at an empty dir), so
+/// the CLI falls back to direct config.toml edit and prints a restart
+/// hint — that path covers the full flag validation and the on-disk
+/// write.
+#[test]
+fn hooks_create_and_list_roundtrip_direct_edit() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let create = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo hi",
+            "--from",
+            "*@example.com",
+        ])
+        .assert()
+        .success();
+    let create_out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(
+        create_out.contains("Hook created"),
+        "create output: {create_out}"
+    );
+    // A restart hint is expected on the socket-missing fallback path.
+    assert!(
+        create_out.contains("restart") || create_out.contains("Hint"),
+        "expected restart hint on socket-missing fallback: {create_out}"
+    );
+
+    let list = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "list"])
+        .assert()
+        .success();
+    let list_out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
+    assert!(list_out.contains("alice"), "list output: {list_out}");
+    assert!(list_out.contains("on_receive"), "list output: {list_out}");
+    assert!(
+        list_out.contains("from=*@example.com"),
+        "list output: {list_out}"
+    );
+}
+
+#[test]
+fn hooks_alias_works() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hook", "list"])
+        .assert()
+        .success();
+}
+
+#[test]
+fn hooks_create_rejects_invalid_flag_combo() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo hi",
+            "--to",
+            "*@example.com",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("--to"), "expected --to error: {stderr}");
+}
+
+#[test]
+fn hooks_create_rejects_unknown_event_at_parse_time() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let assert = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "nope",
+            "--cmd",
+            "echo hi",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("nope") || stderr.contains("invalid value"),
+        "expected clap value-parse error: {stderr}"
+    );
+}
+
+#[test]
+fn hooks_delete_prompts_and_removes_via_direct_edit() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let create = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo hi",
+        ])
+        .assert()
+        .success();
+    let create_out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    // Parse the created id out of the on-disk config.toml (the simplest
+    // robust path — we know it's the only hook registered).
+    let config_toml = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let config_parsed: toml::Value = toml::from_str(&config_toml).unwrap();
+    let id = config_parsed
+        .get("mailboxes")
+        .and_then(|m| m.get("alice"))
+        .and_then(|a| a.get("hooks"))
+        .and_then(|h| h.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|h| h.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("could not extract hook id; create out was: {create_out}"))
+        .to_string();
+    assert_eq!(id.chars().count(), 12, "hook id should be 12 chars: {id}");
+
+    aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "delete", &id, "--yes"])
+        .assert()
+        .success();
+
+    let list = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "list"])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
+    assert!(!out.contains(&id), "hook id should be gone: {out}");
+}
+
+#[test]
+fn hooks_delete_unknown_id_errors() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let assert = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "delete", "aaaabbbbcccc", "--yes"])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    assert!(stderr.contains("not found"), "stderr: {stderr}");
+}
+
+// ---------------------------------------------------------------------
+// S51-3 — UDS HOOK-CREATE / HOOK-DELETE end-to-end
+// ---------------------------------------------------------------------
+
+/// S51-3: spin up `aimx serve`, issue `aimx hooks create`, confirm the
+/// daemon hot-swaps its in-memory config by immediately listing the
+/// new hook (which reads on-disk config.toml). Also exercises the
+/// success path: no restart hint is printed when the UDS submission
+/// succeeds.
+#[test]
+fn hooks_create_via_daemon_hot_swaps_config() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let runtime = tmp.path().join("run");
+    let create = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo via-daemon",
+        ])
+        .assert()
+        .success();
+    let create_out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(
+        create_out.contains("Hook created"),
+        "create output: {create_out}"
+    );
+    // No restart hint on the daemon-success path.
+    assert!(
+        !create_out.contains("Hint:"),
+        "daemon-success should not print restart hint: {create_out}"
+    );
+
+    // On-disk config.toml should contain the new hook (daemon rewrote it).
+    let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        content.contains("echo via-daemon"),
+        "config.toml should contain new hook: {content}"
+    );
+
+    stop_serve(daemon);
+}

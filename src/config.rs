@@ -182,7 +182,7 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-fn validate_hooks(config: &Config) -> Result<(), String> {
+pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
     // Globally-unique ID map: id -> owning mailbox.
     let mut seen: HashMap<String, String> = HashMap::new();
 
