@@ -1033,6 +1033,7 @@ mod tests {
             trusted: "none".to_string(),
             mailbox: "alice".to_string(),
             read,
+            read_at: None,
             labels: vec![],
         }
     }

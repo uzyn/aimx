@@ -244,6 +244,7 @@ pub fn ingest_email(
         trusted: trusted_value.as_str().to_string(),
         mailbox: mailbox.clone(),
         read: false,
+        read_at: None,
         labels: vec![],
     };
 
@@ -1613,6 +1614,7 @@ mod tests {
             trusted: "none".to_string(),
             mailbox: "catchall".to_string(),
             read: false,
+            read_at: None,
             labels: vec![],
         };
 

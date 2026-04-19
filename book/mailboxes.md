@@ -145,6 +145,7 @@ This format is designed to be agent-readable without parsing libraries. An agent
 | `trusted` | string | Effective trust evaluation for the email's mailbox (per-mailbox override if set, otherwise the top-level default): `none`, `true`, or `false` |
 | `mailbox` | string | Mailbox name this email was routed to |
 | `read` | bool | Read status (`false` on ingest) |
+| `read_at` | datetime | RFC 3339 UTC timestamp set when the email is marked read. Removed on mark-unread. Reflects the most recent read, not the first. Optional, omitted when absent |
 
 ### Body extraction
 

@@ -672,6 +672,7 @@ mod tests {
             trusted: "none".into(),
             mailbox: "alice".into(),
             read: false,
+            read_at: None,
             labels: vec![],
         };
         let inbox = tmp.path().join("inbox").join("alice");

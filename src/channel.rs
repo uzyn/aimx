@@ -212,6 +212,7 @@ mod tests {
             trusted: "none".to_string(),
             mailbox: "catchall".to_string(),
             read: false,
+            read_at: None,
             labels: vec![],
         }
     }
