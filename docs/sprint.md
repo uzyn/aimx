@@ -679,7 +679,7 @@ or
 
 ---
 
-## Sprint 51 — Hooks CLI + UDS Hot-Swap + `mailboxes show` (Days 140.5–143) [IN PROGRESS]
+## Sprint 51 — Hooks CLI + UDS Hot-Swap + `mailboxes show` (Days 140.5–143) [DONE]
 
 **Goal:** Land the user-facing hooks surface on top of Sprint 50's foundation. Add `aimx mailboxes show <name>` for per-mailbox deep-dive. Add `aimx hooks list | create | delete` for hook CRUD (flag-based, no update — delete and recreate). Extend the UDS protocol with `HOOK-CREATE` / `HOOK-DELETE` verbs so the daemon hot-swaps the in-memory `Arc<Config>` and newly-created hooks fire on the very next event without `systemctl restart aimx`. `hook` is retained as a clap alias for `hooks`.
 
@@ -735,6 +735,52 @@ or
 - [ ] Integration test: concurrent `HOOK-CREATE` on two different mailboxes succeed without stanza loss (mirrors Sprint 46's concurrent-create regression test)
 - [ ] `book/hooks.md` documents the live-update semantics (no restart required when daemon is running)
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+
+---
+
+## Sprint 52 — Non-blocking Cleanup (Days 143–145.5) [NOT STARTED]
+
+**Goal:** Address accumulated non-blocking improvements from Sprints 48, 50, and 51 reviews. Thirteen items across three themes: test-coverage gaps, doc sweep stragglers, and low-risk ergonomic refactors. All items come from `sprint-reviewer` verdicts that shipped with the self-approval-marker's "Ready to merge" path — none block any downstream sprint, but v1 is now feature-complete, so closing these is the natural next step.
+
+**Dependencies:** Sprint 51 (merged).
+
+**Design notes:**
+- Every item below is already described in full context in the Non-blocking Review Backlog at the bottom of this file — this sprint just lifts them to first-class stories, groups by theme, and closes them in one pass.
+- Stories can be worked in any order; no intra-sprint dependencies.
+- S52-3 touches `config.toml` wire strings shared across CLI + MCP; drive by the existing `AckResponse` regression tests rather than adding new end-to-end integration tests.
+
+#### S52-1: Test-coverage gaps (force-delete fallback, hook hot-swap, hook CRUD errors, after_send statuses, delete prompts)
+
+**Context:** Three reviewer cycles across Sprints 48, 50, and 51 flagged that several non-trivial code paths are only transitively covered. Each item below is a specific test whose absence lets a regression land silently.
+
+- [ ] Integration test for `aimx mailboxes delete --force` socket-missing fallback path (`ENOENT`/`ECONNREFUSED`/`EACCES`). Today the non-force path is covered but force-delete is not explicitly exercised. *(from Sprint 48 review, PR #96)*
+- [ ] End-to-end integration test asserting `AIMX_SEND_STATUS` correctly surfaces `deferred` (`Behavior::TempErr`) and `failed` (`Behavior::PermanentErr`) — only `delivered` has end-to-end coverage. Mock transports already exist; straightforward to add. *(from Sprint 50 review, PR #98)*
+- [ ] Integration test for `hooks delete` interactive-stdin confirmation: simulated `y\n` proceeds, simulated `n\n` aborts; test should pin both `--yes` and non-`--yes` paths per the S51-2 AC. *(from Sprint 51 review, PR #99)*
+- [ ] End-to-end integration test: daemon running → `aimx hooks create --event on_receive …` → ingest a matching email → assert the hook fires without restart. Currently only the on-disk rewrite + no-restart-hint invariants are pinned; the actual hot-swap behavior is transitively covered by the unit test that checks the live `Arc<Config>` snapshot contains the new hook. *(from Sprint 51 review, PR #99)*
+- [ ] Integration test for `HookCrudFallback::Daemon` error surface: daemon running, submit a hook whose id already exists, assert the CLI surfaces the daemon's `ERR VALIDATION ... already exists` reason verbatim. *(from Sprint 51 review, PR #99)*
+
+#### S52-2: Doc and config-string sweeps (channel→hook stragglers, `→` glyph, NONEMPTY wire string)
+
+**Context:** Sprint 50 was a `channels` → `hooks` rename and Sprint 48 introduced doctor sub-line formatting. Three user-visible strings drifted; each is a one-line fix but requires test updates.
+
+- [ ] Finish the `channel`→`hook` doc sweep stragglers: `src/cli.rs:23` `long_about` still says "Channel rules"; `src/setup.rs:1373-1374` trust prompt still mentions "channel triggers"; `src/agent_setup.rs:135` has a stale comment referencing "channel-trigger recipes". *(from Sprint 50 review, PR #98)*
+- [ ] Replace `->` with `→` on the doctor trust/hooks sub-lines. Three integration tests currently pin the `->` form; update them to `→`. No operator has reported garbled output, but this aligns with other command palettes. *(from Sprint 48 review, PR #96)*
+- [ ] Update the daemon-side NONEMPTY reason string at `src/mailbox_handler.rs:195-201` to pluralize "file"/"files" consistently (the CLI prompt was fixed by `pluralize_files` in Sprint 48, but the MCP-facing wire string was not). Deferred pending the structured `AckResponse` refactor in S52-3 — either fix both together or delete this item after S52-3 lands. *(from Sprint 48 review, PR #96)*
+
+#### S52-3: Ergonomic refactors (structured AckResponse, UDS ack helper, bounded hook-id loop, formatting helper extraction)
+
+**Context:** Sprint 48, 49, 50, 51 all landed with small ergonomic gaps the reviewer flagged as nice-to-haves. None is urgent; each is worth keeping to prevent drift.
+
+- [ ] Structure the NONEMPTY ack response (`AckResponse`) to carry `inbox_count` and `sent_count` as typed fields instead of the MCP client regex-parsing `"{} files"` out of the reason string. Allows dropping the `parse_nonempty_counts` fallback and the defensive `(0,0)` path; also retires the S52-2 NONEMPTY wire-string pluralization item. *(from Sprint 48 review, PR #96)*
+- [ ] Collapse `submit_hook_create_via_daemon` / `submit_hook_delete_via_daemon` / `submit_mailbox_crud_via_daemon` behind a shared `run_uds_ack_request` helper — they share the same write-request / read-ack / classify-error shape. *(from Sprint 51 review, PR #99)*
+- [ ] Cap `generate_unique_hook_id`'s loop at e.g. 1000 iterations and return a hard error — protects against a pathological RNG that would otherwise spin indefinitely. *(from Sprint 51 review, PR #99)*
+- [ ] Extract `truncate_with_ellipsis` + `compact_filters` into a shared module so `src/mailbox.rs` does not depend on `src/hooks.rs` for formatting. Small layering fix; removes a cross-module coupling introduced by `mailboxes show`. *(from Sprint 51 review, PR #99)*
+
+#### S52-4: PRD reconciliation
+
+**Context:** Sprint 50 surfaced an inconsistency between PRD FR-36 ("when a sender matches `trusted_senders`, `trusted` is set to `\"true\"` without requiring DKIM evaluation") and FR-37b (controlling rule) / the actual implementation in `src/trust.rs` (both allowlist match AND DKIM pass are required). Needs scope clarification before code/PRD can be aligned.
+
+- [ ] Resolve the FR-36 vs FR-37b wording conflict — either (a) update FR-36 to match FR-37b and the implementation (AND semantics, the safer and more-likely-intended reading), or (b) change the implementation to match FR-36 (OR semantics — allowlist bypasses DKIM). Route through `scrum-planner` if the answer is (b) since it's a behavioral change. *(from Sprint 50 review, PR #98)*
 
 ---
 
@@ -797,7 +843,8 @@ or
 | 48 | 133–135.5 | Doctor + Logs + Delete --force + Completion | `aimx status` → `aimx doctor` (clean rename), extended output with config path + trust + hooks summary + last 10 log lines, new `aimx logs` subcommand, `aimx mailbox delete --force` with interactive confirmation, MCP NONEMPTY hint, `aimx mailbox` → `aimx mailboxes` (singular alias retained), `aimx completion <shell>` for tab-completion | Done |
 | 49 | 135.5–138 | Frontmatter `read_at` | MARK-READ writes `read_at` timestamp; MARK-UNREAD removes the field | Done |
 | 50 | 138–140.5 | Hooks Foundation | Rename `channels` → `hooks` across code/config/docs, 12-char alphanumeric hook IDs, trust gate rewrite (`on_receive` trusted-only + per-hook `dangerously_support_untrusted` opt-in), `after_send` event, structured journald hook-fire logs | Done |
-| 51 | 140.5–143 | Hooks CLI + UDS Hot-Swap | `aimx mailboxes show <name>`, `aimx hooks list \| create \| delete` (flag-based, `hook` alias), UDS `HOOK-CREATE` / `HOOK-DELETE` verbs with live `Arc<Config>` swap | In Progress |
+| 51 | 140.5–143 | Hooks CLI + UDS Hot-Swap | `aimx mailboxes show <name>`, `aimx hooks list \| create \| delete` (flag-based, `hook` alias), UDS `HOOK-CREATE` / `HOOK-DELETE` verbs with live `Arc<Config>` swap | Done |
+| 52 | 143–145.5 | Non-blocking Cleanup | Close accumulated non-blocker items from Sprints 48, 50, 51 reviews — test gaps (force-delete socket-missing, hook hot-swap end-to-end, hook CRUD daemon-error surface, AIMX_SEND_STATUS deferred/failed, hooks delete interactive stdin), doc stragglers, ergonomic cleanups (`AckResponse` structure, UDS ack helper, bounded ID loop, formatting helper extraction) | Not Started |
 
 ## Deferred to v2
 
@@ -845,16 +892,22 @@ Concrete items with clear implementation direction. Will be triaged into a clean
 - [x] **(Sprint 46, PR #81)** `validate_mailbox_name` accepts whitespace and RFC-5322-unsafe local parts. _Triaged into Sprint 47 (S47-3)._
 - [x] **(Sprint 46, PR #81)** `create_failure_at_disk_write_leaves_handle_and_disk_unchanged` never exercises the rename failure branch. _Triaged into Sprint 47 (S47-3)._
 - [x] **(Sprint 45, PR #78 → Sprint 46, PR #81)** MARK-* and inbound ingest are not serialized against each other; unify writers under one per-mailbox lock. _Triaged into Sprint 47 (S47-4)._
-- [ ] **(Sprint 48, PR #96)** Add integration test for `aimx mailboxes delete --force` socket-missing fallback path — currently the shared logic with the non-force path is covered, but no explicit test pins `ENOENT`/`ECONNREFUSED` behaviour for the force variant.
-- [ ] **(Sprint 48, PR #96)** Structure the NONEMPTY ack response (`AckResponse`) to carry `inbox_count` and `sent_count` as typed fields instead of the MCP client regex-parsing `"{} files"` out of the reason string — enables dropping the `parse_nonempty_counts` fallback and the defensive `(0,0)` path.
-- [ ] **(Sprint 48, PR #96)** Daemon-side NONEMPTY reason string at `src/mailbox_handler.rs:195-201` still uses `"{} files"` uniformly (the CLI prompt was fixed by `pluralize_files`, but the MCP-facing wire string was not). Will clean up naturally once the structured `AckResponse` from the item above lands.
-- [ ] **(Sprint 48, PR #96)** Replace `->` with `→` on the doctor trust/hooks sub-lines for visual consistency with other commands — deferred because it would churn three pinned tests; no operator has reported garbled output.
+- [x] **(Sprint 48, PR #96)** Add integration test for `aimx mailboxes delete --force` socket-missing fallback path — currently the shared logic with the non-force path is covered, but no explicit test pins `ENOENT`/`ECONNREFUSED` behaviour for the force variant. _Triaged into Sprint 52 (S52-1)._
+- [x] **(Sprint 48, PR #96)** Structure the NONEMPTY ack response (`AckResponse`) to carry `inbox_count` and `sent_count` as typed fields instead of the MCP client regex-parsing `"{} files"` out of the reason string — enables dropping the `parse_nonempty_counts` fallback and the defensive `(0,0)` path. _Triaged into Sprint 52 (S52-3)._
+- [x] **(Sprint 48, PR #96)** Daemon-side NONEMPTY reason string at `src/mailbox_handler.rs:195-201` still uses `"{} files"` uniformly (the CLI prompt was fixed by `pluralize_files`, but the MCP-facing wire string was not). Will clean up naturally once the structured `AckResponse` from the item above lands. _Triaged into Sprint 52 (S52-2 / S52-3)._
+- [x] **(Sprint 48, PR #96)** Replace `->` with `→` on the doctor trust/hooks sub-lines for visual consistency with other commands — deferred because it would churn three pinned tests; no operator has reported garbled output. _Triaged into Sprint 52 (S52-2)._
 - [x] **(Sprint 50, PR #98)** `extract_email_for_match` in `src/hook.rs` + `src/trust.rs` slice-panicked when `>` preceded `<` (e.g. `"foo>bar<baz>"`). _Hardened to `rfind('<')` + tail `find('>')` (mirrors `send_handler::extract_bare_address`); regression tests in `hook::tests::extract_email_for_match_handles_inverted_angle_brackets` + `trust::tests::extract_email_for_match_no_panic_on_inverted_brackets`._
 - [x] **(Sprint 50, PR #98)** `after_send` structured log line never surfaced `message_id`, leaving TEMP failures with an empty `email_id=` tag. _Threaded `message_id` through `AfterSendContext`; `execute_after_send` now passes it to `run_and_log` so the log falls back to `message_id=<id>` when `filepath` is empty. Regression test: `hook::tests::after_send_log_line_falls_back_to_message_id_when_filepath_empty`._
 - [x] **(Sprint 50, PR #98)** `has_attachment` filter on `after_send` hooks was advertised but `send_handler::fire_after_send_hooks` hardcodes `has_attachment: false` — filter could never meaningfully match. _Rejected at `Config::load` (outbound via UDS is text-only in v0.2). Docs updated in `book/hooks.md` + `book/configuration.md`; regression test: `config::tests::load_rejects_has_attachment_on_after_send`._
-- [ ] **(Sprint 50, PR #98)** No integration assertion that `AIMX_SEND_STATUS` correctly surfaces `deferred` / `failed` (only `delivered` is covered end-to-end). Existing `Behavior::TempErr` / `Behavior::PermanentErr` mock transports should make this straightforward.
-- [ ] **(Sprint 50, PR #98)** Finish the channel→hook doc sweep stragglers: `src/cli.rs:23` (`long_about` still says "Channel rules"), `src/setup.rs:1373-1374` (trust prompt still mentions "channel triggers"), `src/agent_setup.rs:135` (stale comment referencing "channel-trigger recipes").
-- [ ] **(Sprint 50, PR #98)** Reconcile PRD FR-36 with FR-37b — FR-36 says "when a sender matches, `trusted` is set to `\"true\"` without requiring DKIM evaluation," but FR-37b (controlling rule) and the implementation in `src/trust.rs` require both allowlist match AND DKIM pass.
+- [x] **(Sprint 50, PR #98)** No integration assertion that `AIMX_SEND_STATUS` correctly surfaces `deferred` / `failed` (only `delivered` is covered end-to-end). Existing `Behavior::TempErr` / `Behavior::PermanentErr` mock transports should make this straightforward. _Triaged into Sprint 52 (S52-1)._
+- [x] **(Sprint 50, PR #98)** Finish the channel→hook doc sweep stragglers: `src/cli.rs:23` (`long_about` still says "Channel rules"), `src/setup.rs:1373-1374` (trust prompt still mentions "channel triggers"), `src/agent_setup.rs:135` (stale comment referencing "channel-trigger recipes"). _Triaged into Sprint 52 (S52-2)._
+- [x] **(Sprint 50, PR #98)** Reconcile PRD FR-36 with FR-37b — FR-36 says "when a sender matches, `trusted` is set to `\"true\"` without requiring DKIM evaluation," but FR-37b (controlling rule) and the implementation in `src/trust.rs` require both allowlist match AND DKIM pass. _Triaged into Sprint 52 (S52-4)._
+- [x] **(Sprint 51, PR #99)** No integration test for `hooks delete` interactive-stdin confirmation — AC called for simulated stdin, but only `--yes` is exercised. _Triaged into Sprint 52 (S52-1)._
+- [x] **(Sprint 51, PR #99)** No end-to-end hook-fires-after-hot-swap integration test — the test verifies on-disk rewrite + no restart hint, but does not drive an ingest to confirm the hook fires without restart. _Triaged into Sprint 52 (S52-1)._
+- [x] **(Sprint 51, PR #99)** No integration test for the `HookCrudFallback::Daemon` branch (e.g., daemon-running validation error surfaced verbatim to CLI). _Triaged into Sprint 52 (S52-1)._
+- [x] **(Sprint 51, PR #99)** Collapse `submit_hook_create_via_daemon` / `submit_hook_delete_via_daemon` / `submit_mailbox_crud_via_daemon` behind a shared `run_uds_ack_request` helper — all three share the write-request / read-ack / classify-error shape. _Triaged into Sprint 52 (S52-3)._
+- [x] **(Sprint 51, PR #99)** Cap `generate_unique_hook_id`'s loop at e.g. 1000 iterations with a hard error, so a pathological RNG cannot hang the CLI. _Triaged into Sprint 52 (S52-3)._
+- [x] **(Sprint 51, PR #99)** Extract `truncate_with_ellipsis` + `compact_filters` into a shared module so `src/mailbox.rs` does not depend on `src/hooks.rs` for formatting. _Triaged into Sprint 52 (S52-3)._
 
 ### Deferred Feature Sprints
 
