@@ -84,6 +84,16 @@ pub struct EmailSendParams {
     pub body: String,
     #[schemars(description = "File paths to attach")]
     pub attachments: Option<Vec<String>>,
+    #[schemars(
+        description = "Message-ID of the email being replied to (sets In-Reply-To header for threading). \
+                       When set, References is built automatically unless overridden by the references field."
+    )]
+    pub reply_to: Option<String>,
+    #[schemars(
+        description = "Full References header chain (space-separated Message-IDs) for threading. \
+                       Typically used alongside reply_to for reply-all or manually threaded sends."
+    )]
+    pub references: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -312,8 +322,8 @@ impl AimxMcpServer {
             to: params.to,
             subject: params.subject,
             body: params.body,
-            reply_to: None,
-            references: None,
+            reply_to: params.reply_to,
+            references: params.references,
             attachments: params.attachments.unwrap_or_default(),
         };
 
@@ -1518,6 +1528,60 @@ mod tests {
         assert!(
             hint.contains("aimx mailboxes delete --force orders"),
             "{hint}"
+        );
+    }
+
+    // ----- email_send threading params --------------------------------
+
+    #[test]
+    fn email_send_params_deserialize_without_threading_fields() {
+        // Existing callers that omit reply_to/references still parse and
+        // default both to None — backward compatibility guarantee.
+        let json = r#"{
+            "from_mailbox": "agent",
+            "to": "alice@example.com",
+            "subject": "Hello",
+            "body": "Hi."
+        }"#;
+        let params: EmailSendParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.from_mailbox, "agent");
+        assert_eq!(params.to, "alice@example.com");
+        assert_eq!(params.subject, "Hello");
+        assert_eq!(params.body, "Hi.");
+        assert!(params.attachments.is_none());
+        assert!(params.reply_to.is_none());
+        assert!(params.references.is_none());
+    }
+
+    #[test]
+    fn email_send_params_deserialize_with_reply_to() {
+        let json = r#"{
+            "from_mailbox": "agent",
+            "to": "alice@example.com",
+            "subject": "Re: Hello",
+            "body": "Thanks.",
+            "reply_to": "<original@example.com>"
+        }"#;
+        let params: EmailSendParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.reply_to.as_deref(), Some("<original@example.com>"));
+        assert!(params.references.is_none());
+    }
+
+    #[test]
+    fn email_send_params_deserialize_with_reply_to_and_references() {
+        let json = r#"{
+            "from_mailbox": "agent",
+            "to": "alice@example.com",
+            "subject": "Re: Hello",
+            "body": "Thanks.",
+            "reply_to": "<third@example.com>",
+            "references": "<first@example.com> <second@example.com> <third@example.com>"
+        }"#;
+        let params: EmailSendParams = serde_json::from_str(json).unwrap();
+        assert_eq!(params.reply_to.as_deref(), Some("<third@example.com>"));
+        assert_eq!(
+            params.references.as_deref(),
+            Some("<first@example.com> <second@example.com> <third@example.com>")
         );
     }
 }
