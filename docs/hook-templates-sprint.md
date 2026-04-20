@@ -208,7 +208,7 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 ---
 
-## Sprint 4 — Default templates + interactive setup + agent-setup hint (Days 7.5–10) [IN PROGRESS]
+## Sprint 4 — Default templates + interactive setup + agent-setup hint (Days 7.5–10) [DONE]
 
 **Goal:** Ship the 8 default templates inside the binary, surface them behind an interactive `aimx setup` checkbox, and make `aimx agent-setup` print the matching template-enable hint for each agent.
 
@@ -220,12 +220,12 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] New `hook-templates/defaults.toml` at the repo root contains eight `[[hook_template]]` blocks matching PRD §6.2; each has `name`, `description`, `cmd`, `params`, `stdin`, `run_as = "aimx-hook"`, `timeout_secs = 60`, `allowed_events = ["on_receive", "after_send"]`
-- [ ] `src/setup.rs` (or a new `src/hook_templates_defaults.rs`) uses `include_str!("../hook-templates/defaults.toml")` to bake the TOML into the binary; a `default_templates() -> Vec<HookTemplate>` helper parses and returns it at runtime
-- [ ] Parser failure on the embedded TOML panics the binary at startup (compile-time validation via a unit test ensures the embedded file is always valid before merge)
-- [ ] Unit test enumerates each default template by name and asserts the `cmd[0]` path, `params` list, and `stdin` mode match PRD §6.2 — a forcing function against accidental drift
-- [ ] `invoke-goose` is flagged with an open question in the implementation notes (PRD §11 Q3): does `stdin = "email"` work for Goose recipes, or do we need a `email_yaml` encoding? Sprint 4 ships with `stdin = "email"`; if manual testing reveals breakage, a follow-up story is added to the v2 backlog
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `hook-templates/defaults.toml` at the repo root contains eight `[[hook_template]]` blocks matching PRD §6.2; each has `name`, `description`, `cmd`, `params`, `stdin`, `run_as = "aimx-hook"`, `timeout_secs = 60`, `allowed_events = ["on_receive", "after_send"]`
+- [x] `src/setup.rs` (or a new `src/hook_templates_defaults.rs`) uses `include_str!("../hook-templates/defaults.toml")` to bake the TOML into the binary; a `default_templates() -> Vec<HookTemplate>` helper parses and returns it at runtime
+- [x] Parser failure on the embedded TOML panics the binary at startup (compile-time validation via a unit test ensures the embedded file is always valid before merge)
+- [x] Unit test enumerates each default template by name and asserts the `cmd[0]` path, `params` list, and `stdin` mode match PRD §6.2 — a forcing function against accidental drift
+- [x] `invoke-goose` is flagged with an open question in the implementation notes (PRD §11 Q3): does `stdin = "email"` work for Goose recipes, or do we need a `email_yaml` encoding? Sprint 4 ships with `stdin = "email"`; if manual testing reveals breakage, a follow-up story is added to the v2 backlog
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S4-2: Interactive checkbox UI in `aimx setup`
 
@@ -233,13 +233,13 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `dialoguer = "0.11"` (or latest stable) added to `Cargo.toml` with the `fuzzy-select` feature for the `MultiSelect` widget; license check (MIT) documented in `CLAUDE.md` if the repo tracks dep licenses
-- [ ] `src/setup.rs::run_setup` grows a new `configure_hook_templates(&Config, &dyn SystemOps) -> Result<Vec<String>>` phase called after DKIM setup, before systemd unit install
-- [ ] The prompt prints the PRD §6.3 copy verbatim (one-line title, three-line explanation, then the checkbox list); defaults are "none checked" on a fresh install, "currently-enabled" on a re-run
-- [ ] Selected templates are appended to `config.toml` via the same atomic-write helper used elsewhere; unselected but previously-enabled templates are removed (re-running setup is idempotent in both directions)
-- [ ] The prompt is skippable with `--non-interactive` or when stdin is not a TTY (CI, piped setup); in that case no templates are installed and a warning is logged
-- [ ] `MockSystemOps` in the test module simulates a TTY with a scripted selection so unit tests cover both the fresh and re-run cases
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `dialoguer = "0.11"` (or latest stable) added to `Cargo.toml` with the `fuzzy-select` feature for the `MultiSelect` widget; license check (MIT) documented in `CLAUDE.md` if the repo tracks dep licenses <!-- Added with default-features = false; MultiSelect is in the default set. License docs skipped — repo does not track dep licenses per existing CLAUDE.md convention -->
+- [x] `src/setup.rs::run_setup` grows a new `configure_hook_templates(&Config, &dyn SystemOps) -> Result<Vec<String>>` phase called after DKIM setup, before systemd unit install
+- [x] The prompt prints the PRD §6.3 copy verbatim (one-line title, three-line explanation, then the checkbox list); defaults are "none checked" on a fresh install, "currently-enabled" on a re-run <!-- Review follow-up: descriptions reconciled to match PRD §6.3 verbatim (dropped "custom"/trailing periods); intro suppressed on skip path -->
+- [x] Selected templates are appended to `config.toml` via the same atomic-write helper used elsewhere; unselected but previously-enabled templates are removed (re-running setup is idempotent in both directions) <!-- Routed through mailbox_handler::write_config_atomic per review non-blocker -->
+- [x] The prompt is skippable with `--non-interactive` or when stdin is not a TTY (CI, piped setup); in that case no templates are installed and a warning is logged
+- [x] `MockSystemOps` in the test module simulates a TTY with a scripted selection so unit tests cover both the fresh and re-run cases <!-- Preselected list now filtered to bundled names so mock and real dialoguer agree -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S4-3: `aimx hooks templates` CLI subcommand
 
@@ -247,12 +247,12 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `src/cli.rs::HookCommand` enum gains a `Templates` variant (no args)
-- [ ] `src/hooks.rs::run` dispatches the new variant to a `list_templates(&Config) -> Result<()>` function that prints the table
-- [ ] Output format matches `aimx hooks list`: 4-column aligned table with colored headers, truncated descriptions past 60 chars
-- [ ] Empty-config output: "No hook templates enabled. Run `sudo aimx setup` and tick the templates you need."
-- [ ] Unit test asserts the table renders correctly for a config with 0, 1, and 8 templates
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/cli.rs::HookCommand` enum gains a `Templates` variant (no args) <!-- Alias `template-list` also registered -->
+- [x] `src/hooks.rs::run` dispatches the new variant to a `list_templates(&Config) -> Result<()>` function that prints the table
+- [x] Output format matches `aimx hooks list`: 4-column aligned table with colored headers, truncated descriptions past 60 chars <!-- Header width trimmed from 24 to 23 to match `{:<23.23}` row spec per review fix -->
+- [x] Empty-config output: "No hook templates enabled. Run `sudo aimx setup` and tick the templates you need."
+- [x] Unit test asserts the table renders correctly for a config with 0, 1, and 8 templates
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S4-4: `aimx agent-setup` post-install template-enable hint
 
@@ -260,15 +260,15 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P1
 
-- [ ] `src/agent_setup.rs::AgentSpec` gains an optional `matching_template: Option<&'static str>` field; populated as `Some("invoke-claude")` for the `claude-code` spec, `Some("invoke-codex")` for `codex`, etc.
-- [ ] Post-install output in `install_plugin` appends a "Hook Templates" section when `matching_template` is `Some`, using the exact PRD §6.4 copy with the correct template name substituted
-- [ ] Hint notes that the `template-enable` CLI is v2 (not in this track) — until then, operators tick the template during `aimx setup` or hand-edit `config.toml`; the hint updates in the v2 sprint that ships `template-enable`
-- [ ] Unit tests verify the hint appears for every `AgentSpec` with `matching_template = Some(...)` and is absent for any spec with `matching_template = None`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/agent_setup.rs::AgentSpec` gains an optional `matching_template: Option<&'static str>` field; populated as `Some("invoke-claude")` for the `claude-code` spec, `Some("invoke-codex")` for `codex`, etc.
+- [x] Post-install output in `install_plugin` appends a "Hook Templates" section when `matching_template` is `Some`, using the exact PRD §6.4 copy with the correct template name substituted
+- [x] Hint notes that the `template-enable` CLI is v2 (not in this track) — until then, operators tick the template during `aimx setup` or hand-edit `config.toml`; the hint updates in the v2 sprint that ships `template-enable`
+- [x] Unit tests verify the hint appears for every `AgentSpec` with `matching_template = Some(...)` and is absent for any spec with `matching_template = None`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 5 — MCP tools + agent primer updates (Days 10–12.5) [NOT STARTED]
+## Sprint 5 — MCP tools + agent primer updates (Days 10–12.5) [IN PROGRESS]
 
 **Goal:** Expose templates through MCP with four new tools, and update the agent-facing primer so every bundled agent knows how to use them.
 
@@ -406,8 +406,8 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 | 1 | 1–2.5 | Foundation | Done (PR #111) | Socket renamed, schema lands, `aimx-hook` user created |
 | 2 | 2.5–5 | Sandboxed executor | Done (PR #112) | argv + systemd-run/setuid + timeout runner replaces `sh -c` |
 | 3 | 5–7.5 | UDS + CLI + SIGHUP | Done (PR #113) | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
-| 4 | 7.5–10 | Templates + setup | In Progress | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
-| 5 | 10–12.5 | MCP tools + primer | Not Started | Four MCP tools live, `agents/common/` updated |
+| 4 | 7.5–10 | Templates + setup | Done (PR #114) | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
+| 5 | 10–12.5 | MCP tools + primer | In Progress | Four MCP tools live, `agents/common/` updated |
 | 6 | 12.5–15 | Tests + docs + doctor | Not Started | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
 
 ## Deferred to v2
@@ -426,7 +426,7 @@ Taken directly from [`hook-templates-prd.md`](hook-templates-prd.md) §9 "Out of
 
 ---
 
-*Status: Sprints 1–3 merged (PRs #111, #112, #113; 2026-04-20). Sprint 4 — Default templates + interactive setup + agent-setup hint — is now active.*
+*Status: Sprints 1–4 merged (PRs #111, #112, #113, #114; 2026-04-20). Sprint 5 — MCP tools + agent primer updates — is now active.*
 
 ---
 
