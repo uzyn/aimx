@@ -584,6 +584,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1013,6 +1014,9 @@ mod tests {
                         r#type: "cmd".into(),
                         cmd: "echo $AIMX_FROM >> /tmp/log".into(),
                         dangerously_support_untrusted: true,
+                        origin: crate::hook::HookOrigin::Operator,
+                        template: None,
+                        params: std::collections::BTreeMap::new(),
                     },
                     crate::hook::Hook {
                         name: Some("outbound_notify".into()),
@@ -1020,6 +1024,9 @@ mod tests {
                         r#type: "cmd".into(),
                         cmd: "curl https://webhook.example.com/notify".into(),
                         dangerously_support_untrusted: false,
+                        origin: crate::hook::HookOrigin::Operator,
+                        template: None,
+                        params: std::collections::BTreeMap::new(),
                     },
                 ],
                 trust: Some("verified".into()),
@@ -1032,6 +1039,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1137,6 +1145,9 @@ mod tests {
                 r#type: "cmd".into(),
                 cmd: long_cmd.clone(),
                 dangerously_support_untrusted: false,
+                origin: crate::hook::HookOrigin::Operator,
+                template: None,
+                params: std::collections::BTreeMap::new(),
             });
         let lines = super::build_show_lines(&config, "support").unwrap();
         let joined = strip_ansi(&lines.join("\n"));

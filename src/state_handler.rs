@@ -285,6 +285,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,

@@ -243,9 +243,9 @@ const DEFAULT_TLS_CERT: &str = "/etc/ssl/aimx/cert.pem";
 const DEFAULT_TLS_KEY: &str = "/etc/ssl/aimx/key.pem";
 const DEFAULT_RUNTIME_DIR: &str = "/run/aimx";
 const RUNTIME_DIR_ENV: &str = "AIMX_RUNTIME_DIR";
-const SEND_SOCKET_NAME: &str = "send.sock";
+const AIMX_SOCKET_NAME: &str = "aimx.sock";
 
-/// Resolve the runtime directory that holds `/run/aimx/send.sock`.
+/// Resolve the runtime directory that holds `/run/aimx/aimx.sock`.
 ///
 /// Precedence:
 /// 1. `AIMX_RUNTIME_DIR` env var (tests and non-standard installs)
@@ -257,9 +257,12 @@ pub fn runtime_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(DEFAULT_RUNTIME_DIR))
 }
 
-/// Path to the world-writable `AIMX/1 SEND` UDS.
-pub fn send_socket_path() -> PathBuf {
-    runtime_dir().join(SEND_SOCKET_NAME)
+/// Path to the world-writable `AIMX/1` UDS used by all verbs (SEND,
+/// MARK-READ / MARK-UNREAD, MAILBOX-CREATE / MAILBOX-DELETE, HOOK-CREATE /
+/// HOOK-DELETE). Named after the service rather than the first verb it
+/// carried — hence the rename from the historical `send.sock`.
+pub fn aimx_socket_path() -> PathBuf {
+    runtime_dir().join(AIMX_SOCKET_NAME)
 }
 
 pub fn run(
@@ -429,7 +432,7 @@ async fn run_serve(
     );
 
     // Bind the UDS send socket. Fatal on failure.
-    let socket_path = send_socket_path();
+    let socket_path = aimx_socket_path();
     let uds_listener =
         bind_send_socket(&socket_path).map_err(|e| -> Box<dyn std::error::Error> {
             format!(
@@ -1211,6 +1214,7 @@ mod tests {
                 dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
+                hook_templates: Vec::new(),
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
@@ -1270,8 +1274,8 @@ mod tests {
             std::path::PathBuf::from("/tmp/some-override")
         );
         assert_eq!(
-            send_socket_path(),
-            std::path::PathBuf::from("/tmp/some-override/send.sock")
+            aimx_socket_path(),
+            std::path::PathBuf::from("/tmp/some-override/aimx.sock")
         );
         unsafe {
             match prev {
@@ -1293,8 +1297,8 @@ mod tests {
         }
         assert_eq!(runtime_dir(), std::path::PathBuf::from("/run/aimx"));
         assert_eq!(
-            send_socket_path(),
-            std::path::PathBuf::from("/run/aimx/send.sock")
+            aimx_socket_path(),
+            std::path::PathBuf::from("/run/aimx/aimx.sock")
         );
         unsafe {
             if let Some(v) = prev {
@@ -1454,7 +1458,7 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let sock = tmp.path().join("send.sock");
+        let sock = tmp.path().join("aimx.sock");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1471,7 +1475,7 @@ mod tests {
     #[test]
     fn bind_send_socket_reclaims_stale_path() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let sock = tmp.path().join("send.sock");
+        let sock = tmp.path().join("aimx.sock");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1516,6 +1520,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1560,7 +1565,7 @@ mod tests {
     #[test]
     fn uds_accept_reads_peer_credentials() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let sock = tmp.path().join("send.sock");
+        let sock = tmp.path().join("aimx.sock");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1613,7 +1618,7 @@ mod tests {
         use std::sync::Mutex;
 
         let tmp = tempfile::TempDir::new().unwrap();
-        let sock = tmp.path().join("send.sock");
+        let sock = tmp.path().join("aimx.sock");
 
         // Transport that captures whatever is delivered.
         struct CapturingTransport {
@@ -1661,6 +1666,7 @@ mod tests {
                 dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
+                hook_templates: Vec::new(),
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
@@ -1741,7 +1747,7 @@ mod tests {
     #[test]
     fn uds_slow_loris_times_out() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let sock = tmp.path().join("send.sock");
+        let sock = tmp.path().join("aimx.sock");
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {

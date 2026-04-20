@@ -798,7 +798,7 @@ fn mcp_email_mark_read_unread() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -2285,7 +2285,7 @@ fn serve_e2e_to_cc_bcc_combined() {
 // UDS send listener integration tests.
 //
 // These tests spawn `aimx serve` as a subprocess (same pattern as the
-// `serve_e2e_*` tests above) and drive the `/run/aimx/send.sock` UDS
+// `serve_e2e_*` tests above) and drive the `/run/aimx/aimx.sock` UDS
 // listener with a raw Unix-socket client. `AIMX_RUNTIME_DIR` is overridden
 // to a tempdir so the socket lives inside the test sandbox; the binary
 // under test creates it with mode `0o666`. We never exercise the real MX
@@ -2315,7 +2315,7 @@ fn serve_creates_send_socket_with_world_writable_mode() {
     let port = find_free_port();
     let child = start_serve(tmp.path(), port);
 
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket {} never appeared",
@@ -2342,7 +2342,7 @@ fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
     let port = find_free_port();
     let child = start_serve(tmp.path(), port);
 
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -2395,7 +2395,7 @@ fn uds_send_listener_rejects_malformed_request() {
     let port = find_free_port();
     let child = start_serve(tmp.path(), port);
 
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -2428,7 +2428,7 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
     let port = find_free_port();
     let child = start_serve(tmp.path(), port);
 
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -2446,7 +2446,7 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
     panic!(
-        "send.sock should be removed on clean shutdown but still exists at {}",
+        "aimx.sock should be removed on clean shutdown but still exists at {}",
         sock.display()
     );
 }
@@ -2497,7 +2497,7 @@ fn start_serve_with_mail_drop(
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
 
-    let sock = runtime.join("send.sock");
+    let sock = runtime.join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -2760,7 +2760,7 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 5 -->"),
+        after.starts_with("<!-- aimx-readme-version: 6 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );
@@ -2845,7 +2845,7 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
     let daemon = start_serve(tmp.path(), port);
 
     let runtime = tmp.path().join("run");
-    let sock = runtime.join("send.sock");
+    let sock = runtime.join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -3000,7 +3000,7 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -3119,7 +3119,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
 
     // Create a mailbox via UDS.
@@ -3218,7 +3218,7 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
 
     // Create a mailbox and ingest one message into it so a plain delete
@@ -3274,7 +3274,7 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(wait_for_socket(&sock, std::time::Duration::from_secs(5)));
 
     aimx_cmd(tmp.path())
@@ -3454,7 +3454,7 @@ fn dkim_startup_check_mismatch_logs_warning_and_binds_listeners() {
 
     // The TCP listener is already accepting connections (start_serve_with_env
     // waits for that). Confirm the UDS listener bound too.
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared despite DKIM mismatch (should be non-fatal)"
@@ -3488,7 +3488,7 @@ fn dkim_startup_check_resolve_error_logs_warning_and_binds_listeners() {
         &[("AIMX_TEST_DKIM_RESOLVER_OVERRIDE", "err:simulated NXDOMAIN")],
     );
 
-    let sock = tmp.path().join("run").join("send.sock");
+    let sock = tmp.path().join("run").join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared after ResolveError (should be non-fatal)"
@@ -3540,7 +3540,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
     let daemon = start_serve(tmp.path(), port);
 
     let runtime = tmp.path().join("run");
-    let sock = runtime.join("send.sock");
+    let sock = runtime.join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -3674,7 +3674,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
     let runtime = tmp.path().join("run");
-    let sock = runtime.join("send.sock");
+    let sock = runtime.join("aimx.sock");
     assert!(
         wait_for_socket(&sock, std::time::Duration::from_secs(5)),
         "UDS send socket never appeared"
@@ -3911,7 +3911,7 @@ fn mailboxes_show_unknown_mailbox_errors() {
 /// direct-edit path even when a real `aimx serve` is running on the host
 /// (e.g. on developer machines or CI boxes where the daemon is
 /// installed). Without this isolation, `aimx hooks create` would hit the
-/// host daemon's `/run/aimx/send.sock` and fail with `PROTOCOL unknown
+/// host daemon's `/run/aimx/aimx.sock` and fail with `PROTOCOL unknown
 /// verb` when the host daemon is on an older build.
 fn aimx_cmd_isolated(tmp: &Path) -> Command {
     let runtime = tmp.join("run");

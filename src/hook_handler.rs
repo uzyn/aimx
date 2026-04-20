@@ -225,6 +225,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -252,6 +253,9 @@ mod tests {
             r#type: "cmd".into(),
             cmd: cmd.into(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         }
     }
 
@@ -328,6 +332,9 @@ mod tests {
             r#type: "cmd".into(),
             cmd: "echo hi".into(),
             dangerously_support_untrusted: true,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let req = HookCreateRequest {
             mailbox: "alice".into(),

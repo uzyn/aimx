@@ -10,7 +10,7 @@
 
 ---
 
-## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [NOT STARTED]
+## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [IN PROGRESS]
 
 **Goal:** Land all low-risk mechanical changes (socket rename, config schema additions, service user creation) so every downstream sprint builds on a clean base.
 
@@ -51,7 +51,7 @@
 - [ ] New `HookOrigin` enum (`Operator`, `Mcp`) with `#[serde(rename_all = "lowercase")]` in `src/hook.rs`; `Operator` is the `Default::default()` value
 - [ ] `Hook` struct gains `#[serde(default)] origin: HookOrigin`, `#[serde(default)] template: Option<String>`, `#[serde(default)] params: BTreeMap<String, String>`
 - [ ] Mutual-exclusion validation: if `template` is `Some`, `cmd` must be absent / empty; if `template` is `None`, `cmd` must be non-empty. Enforced in `Config::load` alongside existing hook validation
-- [ ] `Hook::is_template_bound(&self) -> bool` convenience method; `Hook::resolve_argv(&self, &[HookTemplate], &Builtins) -> Result<Vec<String>>` returns the final argv (template substitution for template hooks, `["/bin/sh", "-c", cmd]` for raw-cmd hooks)
+- [ ] `Hook::is_template_bound(&self) -> bool` convenience method. (Note: `Hook::resolve_argv` was originally listed here but moved to Sprint 2's S2-1, where the `hook_substitute.rs` module it would delegate to actually lives — see the S2-1 bullet list below.)
 - [ ] Unit tests cover: operator-origin hook with raw cmd round-trips; MCP-origin hook with template + params round-trips; mutually-exclusive (`cmd` + `template`) fails validation; missing template reference fails validation
 - [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
@@ -83,6 +83,7 @@
 **Priority:** P0
 
 - [ ] New `src/hook_substitute.rs` module exposing `pub fn substitute_argv(template_cmd: &[String], params: &BTreeMap<String, String>, builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>`
+- [ ] `Hook::resolve_argv(&self, templates: &[HookTemplate], builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>` (moved from S1-3): returns the final argv by delegating to `substitute_argv` for template-bound hooks and returning `vec!["/bin/sh".into(), "-c".into(), self.cmd.clone()]` for raw-cmd hooks. Grouped here because the implementation can't exist without `substitute_argv`
 - [ ] `BuiltinContext { event, mailbox, message_id, from, subject }` populated by the caller at fire time; missing builtins are substituted as empty strings (PRD: builtins are always available but may be empty when irrelevant)
 - [ ] `SubstitutionError` variants: `UnknownPlaceholder`, `ParamContainsWhitespace`, `ParamContainsNul`, `ParamContainsControl`, `ParamTooLong` (>8 KiB per value), `PlaceholderInBinaryPath`
 - [ ] Substitution happens after argv parse: placeholder appears anywhere inside a string slot → replace in-place; a placeholder occupying the entire slot still produces exactly one argv entry

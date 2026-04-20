@@ -2,7 +2,7 @@
 //!
 //! This module does not sign, load DKIM keys, or talk to MX servers
 //! directly. It composes an unsigned RFC 5322 message, opens
-//! `/run/aimx/send.sock`, writes a single `AIMX/1 SEND` request frame,
+//! `/run/aimx/aimx.sock`, writes a single `AIMX/1 SEND` request frame,
 //! and maps the daemon's response to a stable CLI exit code + user
 //! message.
 //!
@@ -17,7 +17,7 @@
 
 use crate::cli::SendArgs;
 use crate::send_protocol::{self, ErrCode, SendRequest};
-use crate::serve::send_socket_path;
+use crate::serve::aimx_socket_path;
 use crate::term;
 use base64::Engine;
 use chrono::Utc;
@@ -374,7 +374,7 @@ fn run_inner(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let socket = send_socket_path();
+    let socket = aimx_socket_path();
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()

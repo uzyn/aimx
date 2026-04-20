@@ -417,7 +417,7 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
     let request = SendRequest {
         body: composed.message,
     };
-    let socket = crate::serve::send_socket_path();
+    let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
     let outcome = match rt {
@@ -476,7 +476,7 @@ fn submit_mark_via_daemon(
         folder,
         read,
     };
-    let socket = crate::serve::send_socket_path();
+    let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
     let outcome = match rt {
@@ -541,7 +541,7 @@ pub(crate) fn submit_mailbox_crud_via_daemon(
         name: name.to_string(),
         create,
     };
-    let socket = crate::serve::send_socket_path();
+    let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
     let io_result: Result<MarkOutcome, std::io::Error> = match rt {
@@ -1006,6 +1006,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
