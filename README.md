@@ -94,11 +94,7 @@ Install AIMX into your agent with one command:
 | OpenClaw | `aimx agent-setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
 | Hermes | `aimx agent-setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
 
-Run `aimx agent-setup` (no args) or `aimx agent-setup --list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md)
-for per-agent activation steps and manual MCP wiring, and
-[`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste
-hook recipes (email-driven agent invocation) covering every
-supported agent plus Aider.
+Run `aimx agent-setup` (no args) or `aimx agent-setup --list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
 
 Available MCP tools:
 - `mailbox_list` -- list all mailboxes with message counts
@@ -131,7 +127,7 @@ See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate log
 
 AIMX fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and can be filtered by `from`, `to`, `subject`, or `has_attachment`; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`.
 
-See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Aider).
+See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider).
 
 
 ## Email format

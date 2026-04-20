@@ -160,7 +160,7 @@ pub struct SendArgs {
     pub reply_to: Option<String>,
 
     /// Full References header chain for threading
-    #[arg(long, hide = true)]
+    #[arg(long)]
     pub references: Option<String>,
 
     /// File paths to attach
