@@ -78,14 +78,46 @@ When run without a domain argument, setup will prompt you to enter the domain an
 4. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`
 5. **DKIM key generation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
 6. **Config creation**: writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
-7. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
-8. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
+7. **Hook user + hook templates**: creates the unprivileged `aimx-hook` system user (no login shell, no home directory) and shows a checkbox UI to pick which hook templates to enable on this box
+8. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
+9. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
 
 After initial setup, the wizard displays three clearly labeled sections:
 
 - **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
 - **[MCP]**: configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
 - **[Deliverability Improvement (Optional)]**: Gmail filter/whitelist instructions
+
+### Hook templates step
+
+Step 7 creates the `aimx-hook` unprivileged user and asks which hook templates to enable:
+
+```text
+[User]
+  Created system user aimx-hook
+
+[Hook Templates]
+Hook templates let your agents create their own on_receive / after_send
+automations via MCP, safely. Each template is a pre-vetted command shape;
+agents can only fill declared parameters. Hook commands run as the
+unprivileged 'aimx-hook' user, never as root.
+
+Which templates should I enable? (space to toggle, enter to confirm)
+ [ ] invoke-claude     Pipe email into Claude Code with a prompt
+ [ ] invoke-codex      Pipe email into Codex CLI with a prompt
+ [ ] invoke-opencode   Pipe email into OpenCode with a prompt
+ [ ] invoke-gemini     Pipe email into Gemini CLI with a prompt
+ [ ] invoke-goose      Pipe email into a Goose recipe
+ [ ] invoke-openclaw   Pipe email into OpenClaw with a prompt
+ [ ] invoke-hermes     Pipe email into Hermes with a prompt
+ [ ] webhook           POST the email as JSON to a URL
+```
+
+No templates are selected by default — you opt in explicitly. Re-running `aimx setup` shows the same picker with your current selection pre-ticked; templates you untick are removed from `config.toml` idempotently.
+
+The `aimx-hook` user is created via `useradd --system --no-create-home --shell /usr/sbin/nologin` (or the BusyBox `adduser` equivalent on Alpine). `aimx setup` also recursively `chown`s `/var/lib/aimx/{inbox,sent}` to `root:aimx-hook` and adds group-read so template hooks with `stdin = "email"` can actually read the piped email content at fire time.
+
+When stdin is not a TTY (CI runs, scripted installs), the picker is skipped and a warning is logged. You can either enable templates later by re-running `aimx setup` interactively, or hand-append `[[hook_template]]` blocks to `config.toml` and SIGHUP the daemon. See [Configuration § Default hook templates](configuration.md#default-hook-templates) for the shipped catalog.
 
 ### Re-running setup
 

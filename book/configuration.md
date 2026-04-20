@@ -96,17 +96,57 @@ Trust only gates hook execution (`on_receive`). All email is stored regardless o
 
 ### Hook settings
 
-Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays:
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is either **template-bound** (`template = "..."`, `params = {...}`) or **raw-cmd** (`cmd = "..."`). Both flavours run sandboxed as `aimx-hook` by default.
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, AIMX derives a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
+| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)` (raw-cmd) or `sha256(event + template + sorted_params)` (template-bound). Names must be globally unique across mailboxes — including derived ones. |
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
-| `cmd` | string | Shell command to execute |
-| `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"` |
+| `cmd` | string | Raw shell command. Required for raw-cmd hooks; forbidden for template-bound hooks. |
+| `template` | string | Name of a `[[hook_template]]` to bind to. Mutually exclusive with `cmd`. |
+| `params` | table | Bound parameter values for template-bound hooks. Keys must match the template's declared `params`; unknown keys rejected. |
+| `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on hooks with `origin = "mcp"`. |
+| `run_as` | string | `"aimx-hook"` (default) or `"root"`. `root` is only settable via hand-edit of `config.toml` — not via CLI or MCP. |
+| `origin` | string | `"operator"` (default) or `"mcp"`. Stamped by the daemon based on submission channel. |
 
 Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
+
+### Hook templates
+
+`[[hook_template]]` blocks declare pre-vetted command shapes that agents can bind to via MCP `hook_create`. Each template's `cmd` is an argv array — no shell is ever invoked, and `{placeholder}` slots can only appear inside string argv entries (never as `cmd[0]` or as new argv entries).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `name` | string | *(required)* | Unique across all templates. Pattern `[a-z0-9-]+`. |
+| `description` | string | *(required)* | One-liner for the `aimx setup` checkbox UI and the `hook_list_templates` MCP response. |
+| `cmd` | array of strings | *(required)* | Argv for the child process. `cmd[0]` is the binary path; subsequent entries may embed `{name}` placeholders in string values. |
+| `params` | array of strings | `[]` | Declared placeholder names the operator/agent fills at hook-create time. Must be a 1:1 set with the placeholders in `cmd` (minus built-ins). |
+| `stdin` | string | `"email"` | `"email"` (pipe the raw `.md`), `"email_json"` (`{"raw": ...}`), or `"none"`. |
+| `run_as` | string | `"aimx-hook"` | Unix user for the child process. Only `"aimx-hook"` or `"root"` are accepted. |
+| `timeout_secs` | int | `60` | Hard subprocess timeout. Range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
+| `allowed_events` | array of strings | `["on_receive", "after_send"]` | Events the template may be wired to. MCP `hook_create` with a disallowed event is rejected. |
+
+**Built-in placeholders** available in every template's `cmd` (no need to declare them in `params`): `{event}`, `{mailbox}`, `{message_id}`, `{from}`, `{subject}`. Populated at fire time; missing values become empty strings.
+
+Validation at config load rejects: duplicate template `name`, unknown placeholder references, declared-but-unused `params`, placeholder in `cmd[0]`, empty `cmd` array, `timeout_secs` out of range, unsupported `run_as`. A malformed template fails daemon startup rather than the first hook fire.
+
+#### Default hook templates
+
+The aimx binary embeds eight default templates you can enable via `aimx setup` or by pasting them into `config.toml`:
+
+| Template | `cmd[0]` | `params` | `stdin` |
+|----------|----------|----------|---------|
+| `invoke-claude` | `/usr/local/bin/claude` | `prompt` | `email` |
+| `invoke-codex` | `/usr/local/bin/codex` | `prompt` | `email` |
+| `invoke-opencode` | `/usr/local/bin/opencode` | `prompt` | `email` |
+| `invoke-gemini` | `/usr/local/bin/gemini` | `prompt` | `email` |
+| `invoke-goose` | `/usr/local/bin/goose` | `recipe` | `email` |
+| `invoke-openclaw` | `/usr/local/bin/openclaw` | `prompt` | `email` |
+| `invoke-hermes` | `/usr/local/bin/hermes` | `prompt` | `email` |
+| `webhook` | `/usr/bin/curl` | `url` | `email_json` |
+
+Override a template's `cmd[0]` in your `config.toml` if your agent binary lives elsewhere. `aimx doctor` flags any enabled template whose `cmd[0]` is not executable on this box.
 
 ## Storage layout
 
@@ -118,7 +158,7 @@ Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](
     └── public.key           # RSA public key (mode 0644)
 
 /run/aimx/                   # Runtime directory (mode 0755, root:root)
-└── send.sock                # World-writable UDS for aimx send
+└── aimx.sock                # World-writable UDS for aimx send / hook / mailbox verbs
 
 /var/lib/aimx/               # Mailbox storage
 ├── inbox/
@@ -137,7 +177,7 @@ Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](
 
 ## IPv6 delivery (advanced)
 
-By default, `aimx serve` delivers outbound email over IPv4 only (submitted to it by `aimx send` via `/run/aimx/send.sock`). This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
+By default, `aimx serve` delivers outbound email over IPv4 only (submitted to it by `aimx send` via `/run/aimx/aimx.sock`). This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
 
 If your server has a global IPv6 address and you want outbound mail to use it:
 

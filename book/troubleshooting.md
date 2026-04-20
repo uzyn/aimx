@@ -147,6 +147,81 @@ head -20 /var/lib/aimx/inbox/catchall/*.md
 
 Look at the `dkim` and `spf` fields. They should show `pass` for properly authenticated senders.
 
+## Hook templates
+
+### `aimx-hook` user missing
+
+Symptom: `aimx doctor` shows `aimx-hook user: missing`, or journalctl shows hook fires warning with `user-not-found: aimx-hook`.
+
+Fix: re-run `sudo aimx setup`. The setup step creates the user idempotently via `useradd --system --no-create-home --shell /usr/sbin/nologin aimx-hook` (or the BusyBox `adduser` equivalent on Alpine) and chowns the mailbox directories so the hook user can read piped email content.
+
+### MCP `hook_create` returns `Unknown template`
+
+Symptom: an agent calls `hook_create` with a template name and gets `ERR unknown-template` (or the MCP-surfaced form `Unknown template: ...`).
+
+Fix: the operator never enabled that template. Run `aimx hooks templates` to list what's on this box, then `sudo aimx setup` and tick the template in the checkbox UI. Re-running `aimx setup` is idempotent — it won't overwrite unrelated config.
+
+### MCP `hook_create` returns `missing-param` or `unknown-param`
+
+Symptom: daemon rejects the hook creation with `missing-param: prompt` or `unknown-param: foo`.
+
+Fix: the agent's `params` map didn't match the template's declared `params` list. Inspect the template via `hook_list_templates` (or `aimx hooks templates`) to see the exact parameter names, then re-issue `hook_create` with the complete set.
+
+### Template hook doesn't fire on inbound mail
+
+Symptom: the hook appears in `aimx hooks list` and `origin = "mcp"`, but it never fires when email lands.
+
+Fix: MCP-origin hooks always fire only on trusted mail (`trusted == "true"` in frontmatter). Check the email's frontmatter:
+
+```bash
+grep '^trusted =' /var/lib/aimx/inbox/<mailbox>/<id>.md
+```
+
+If it reads `trusted = "false"` or `trusted = "none"`, the hook gate blocks it. Either:
+
+- Set mailbox `trust = "verified"` + `trusted_senders = [...]` so legitimate senders evaluate to `true`, or
+- Create an operator-origin raw-cmd hook with `dangerously_support_untrusted = true` (only settable in `config.toml`, not via MCP).
+
+### Sandbox denied reading stdin
+
+Symptom: hook logs show `exit_code != 0` and stderr tail like `cat: '/var/lib/aimx/inbox/...': Permission denied`.
+
+Fix: the `aimx-hook` user doesn't have group-read on the mailbox directories. `aimx setup` normally fixes this. To apply manually:
+
+```bash
+sudo chown -R root:aimx-hook /var/lib/aimx/inbox /var/lib/aimx/sent
+sudo chmod -R g+rX /var/lib/aimx/inbox /var/lib/aimx/sent
+```
+
+`aimx doctor` surfaces a WARN line when this is misconfigured.
+
+### SIGHUP reload failed
+
+Symptom: `aimx hooks create --cmd` completes, prints `Reload:` banner, but the new hook never fires. journalctl shows a `config reloaded with error` warn line.
+
+Fix: the new `config.toml` failed validation (unknown field, duplicate hook name, malformed template) so the daemon kept running on the old config. Check the log:
+
+```bash
+journalctl -u aimx --since="5 minutes ago" | grep -i reload
+```
+
+Edit `/etc/aimx/config.toml` to fix the error, then `sudo kill -HUP $(cat /run/aimx/aimx.pid)` or `sudo systemctl reload aimx`.
+
+### Template's `cmd[0]` binary not found
+
+Symptom: `aimx doctor` flags a template with `cmd[0] (MISSING)`, or hook fires log `exit_code = -1` with `spawn-failed` kind.
+
+Fix: the canonical path baked into the template doesn't exist on this box. Override the `cmd[0]` by editing the template in `/etc/aimx/config.toml`:
+
+```toml
+[[hook_template]]
+name = "invoke-claude"
+cmd = ["/home/alice/.local/bin/claude", "-p", "{prompt}"]
+# ... rest of fields unchanged
+```
+
+SIGHUP the daemon (`sudo systemctl reload aimx`) and the new path takes effect on the next fire.
+
 ## Spam prevention
 
 If outbound emails land in spam:

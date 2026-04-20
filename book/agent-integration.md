@@ -52,6 +52,37 @@ Key properties:
 
 > **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
 
+### Per-agent hook template hint
+
+After every `aimx agent-setup <agent>` run, the installer prints a one-line hint pointing at the matching hook template. Example for Claude Code:
+
+```text
+To let Claude Code create its own hooks via MCP, enable the matching template
+as root:
+
+    sudo aimx hooks template-enable invoke-claude
+
+(Already enabled if you ticked it during `aimx setup`.)
+```
+
+Mapping of agent → matching template:
+
+| Agent | Template |
+|-------|----------|
+| `claude-code` | `invoke-claude` |
+| `codex` | `invoke-codex` |
+| `opencode` | `invoke-opencode` |
+| `gemini` | `invoke-gemini` |
+| `goose` | `invoke-goose` |
+| `openclaw` | `invoke-openclaw` |
+| `hermes` | `invoke-hermes` |
+
+The `template-enable` / `template-disable` CLI commands land in a future release (tracked as v2 in the [hook templates PRD](https://github.com/uzyn/aimx/blob/main/docs/hook-templates-prd.md) §9). Until then, re-run `sudo aimx setup` and tick the matching template in the checkbox UI, or hand-edit `config.toml` to add a `[[hook_template]]` block and SIGHUP the daemon.
+
+Without the matching template enabled, an agent's `hook_create` call returns `ERR unknown-template` pointing back at `hook_list_templates`. The agent's chat surface should then ask the user to run the `sudo aimx setup` step once.
+
+See [MCP Server § Hook template tools](mcp.md#hook-template-tools) for the full tool reference.
+
 ### Claude Code
 
 Claude Code discovers plugins by scanning `~/.claude/plugins/`, but the MCP

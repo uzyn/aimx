@@ -24,7 +24,7 @@ See [Agent Integration](agent-integration.md) for one-line `aimx agent-setup <ag
 
 ## MCP tools
 
-aimx exposes 9 MCP tools organized into mailbox management and email operations.
+aimx exposes 13 MCP tools organized into mailbox management, email operations, and hook templates.
 
 ### Mailbox tools
 
@@ -107,7 +107,7 @@ Compose and send an email with DKIM signing.
 | `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
 | `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
-The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
+The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
 
 For replies to a single sender, prefer `email_reply`. It handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
 
@@ -137,7 +137,7 @@ Mark an email as read.
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
-Updates `read = true` in the email's frontmatter. The MCP server is non-root so it routes the write through `aimx serve` over the local UDS (`/run/aimx/send.sock`) rather than touching the root-owned mailbox file directly. If `aimx serve` is not running the tool returns an error hint to start the daemon.
+Updates `read = true` in the email's frontmatter. The MCP server is non-root so it routes the write through `aimx serve` over the local UDS (`/run/aimx/aimx.sock`) rather than touching the root-owned mailbox file directly. If `aimx serve` is not running the tool returns an error hint to start the daemon.
 
 ---
 
@@ -152,6 +152,103 @@ Mark an email as unread.
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 Updates `read = false` in the email's frontmatter. Same daemon-mediated write path as `email_mark_read`. Requires a running `aimx serve`.
+
+---
+
+### Hook template tools
+
+Four tools let agents safely self-configure hooks without shell access. See [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended) for the model and why raw `cmd` submission over MCP is rejected by design.
+
+#### `hook_list_templates`
+
+Enumerate hook templates enabled on this install.
+
+**Parameters:** none
+
+**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are enabled — the operator must install them via `sudo aimx setup`.
+
+Example:
+
+```json
+[
+  {
+    "name": "invoke-claude",
+    "description": "Pipe email into Claude Code with a prompt",
+    "params": ["prompt"],
+    "allowed_events": ["on_receive", "after_send"]
+  },
+  {
+    "name": "webhook",
+    "description": "POST the email as JSON to a URL",
+    "params": ["url"],
+    "allowed_events": ["on_receive", "after_send"]
+  }
+]
+```
+
+---
+
+#### `hook_create`
+
+Bind a template to a mailbox, creating a new hook. The daemon stamps `origin = "mcp"`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `mailbox` | string | yes | Target mailbox name |
+| `event` | string | yes | `"on_receive"` or `"after_send"` (must be in the template's `allowed_events`) |
+| `template` | string | yes | Template name from `hook_list_templates` |
+| `params` | object | yes | Key/value map for the template's declared `params` |
+| `name` | string | no | Explicit hook name. When omitted, a stable 12-hex-char name is derived from `(event, template, params)` |
+
+**Returns:** `{effective_name, substituted_argv}` — the hook name the daemon wrote and the resolved argv the sandboxed executor will run, for confirmation in the agent's UI.
+
+Safety model: the tool refuses any request body that contains a raw `cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, or `stdin` field. These are template properties, not hook properties. An agent cannot smuggle arbitrary shell past the template boundary.
+
+**Error examples:**
+
+- `Unknown template: foo (run hook_list_templates to see enabled templates)`
+- `missing-param: prompt`
+- `event-not-allowed: after_send on template webhook_receive_only`
+- `mailbox-not-found: accounts`
+
+---
+
+#### `hook_list`
+
+List hooks visible to MCP across all (or one) mailbox.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `mailbox` | string | no | Filter to one mailbox; omit to list all |
+
+**Returns:** JSON array. Each entry has `name`, `mailbox`, `event`, `origin`, and — for `origin = "mcp"` only — `template` + `params`. Operator-origin hooks have `cmd` / `params` **masked** so an agent can avoid duplicates without snooping on operator logic.
+
+```json
+[
+  {"name": "accounts-auto-reply", "mailbox": "accounts", "event": "on_receive", "origin": "mcp", "template": "invoke-claude", "params": {"prompt": "..."}},
+  {"name": "op_audit", "mailbox": "accounts", "event": "on_receive", "origin": "operator"}
+]
+```
+
+---
+
+#### `hook_delete`
+
+Delete a hook by name.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | yes | Effective hook name (explicit or derived) |
+
+MCP can only delete hooks whose `origin = "mcp"`. Attempts to delete an operator-origin hook return `ERR origin-protected`:
+
+```text
+ERR origin-protected: hook was created by the operator — remove via `sudo aimx hooks delete` instead
+```
+
+The agent should surface this verbatim so the user knows the hook is operator-owned.
+
+---
 
 ## Frontmatter reference
 
