@@ -84,7 +84,7 @@ aimx logs --lines 200
 aimx logs --follow
 ```
 
-`aimx doctor` also prints the last 10 lines under a "Recent logs" section, so you usually do not need a separate `aimx logs` invocation when running a quick health check.
+`aimx doctor` prints a `Logs` pointer section at the bottom of its output that reminds you to run `aimx logs` (or `aimx logs --follow`) rather than dumping log lines itself.
 
 **systemd (Ubuntu, Fedora, Debian, etc.)**
 
