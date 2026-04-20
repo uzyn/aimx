@@ -5,7 +5,7 @@ Hooks trigger shell commands on specific email events. Two events are supported 
 - **`on_receive`** fires during inbound ingest, after the email is stored.
 - **`after_send`** fires during outbound delivery, after the MX attempt resolves (success, failure, or deferred).
 
-Combined with the mailbox-level `trust` policy, hooks let you build secure, automated workflows around incoming and outgoing mail. Earlier versions of AIMX called these "channels"; Sprint 50 renamed them to "hooks" to reflect that they now cover both inbound and outbound events.
+Combined with the mailbox-level `trust` policy, hooks gate shell-side automation on DKIM-verified inbound mail and on outbound delivery outcomes.
 
 > For copy-paste agent-specific invocations (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Aider), see [Hook Recipes](hook-recipes.md).
 
@@ -170,8 +170,6 @@ All specified filters must match (AND logic). If a hook has no filter fields, it
 
 ## Trust gate (`on_receive` only)
 
-Sprint 50 reworked the trust-to-hook relationship. Previously the mailbox's `trust` value gated hook execution directly. Now the gate is:
-
 > An `on_receive` hook fires iff `email.trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`.
 
 `email.trusted` is computed from the mailbox's `trust` + `trusted_senders` policy and written to the email's frontmatter on ingest. The frontmatter value is always one of:
@@ -180,14 +178,14 @@ Sprint 50 reworked the trust-to-hook relationship. Previously the mailbox's `tru
 - `"true"` — effective `trust = "verified"`, sender matches `trusted_senders`, AND DKIM passed.
 - `"false"` — effective `trust = "verified"`, but conditions were not met.
 
-**This is a behavioral change from the pre-Sprint-50 gate.** Previously, a mailbox with `trust = "none"` fired hooks for every inbound email. Under the Sprint 50 gate, the same mailbox fires **no** hooks unless each hook opts in with `dangerously_support_untrusted = true`. Operators should:
+The recommended configuration is:
 
 1. Set `trust = "verified"` + `trusted_senders = [...]` at the top level of `config.toml`.
 2. Leave per-hook `dangerously_support_untrusted` off.
 
-If you need a hook to fire on untrusted mail (e.g. a generic notifier that doesn't invoke an agent), set `dangerously_support_untrusted = true` on that hook explicitly. The flag is deliberately verbose to make the security tradeoff visible in code review.
+For hooks that should still fire on untrusted mail (e.g. a generic notifier that does not invoke an agent), set `dangerously_support_untrusted = true` on that hook explicitly. The flag name is deliberately verbose to make the security tradeoff visible in review. It is rejected at config load on any event other than `on_receive`.
 
-`dangerously_support_untrusted = true` is rejected at config load on any event other than `on_receive`.
+> **Migration note.** Before the current gate, a mailbox with `trust = "none"` fired hooks for every inbound email. Under the current gate, the same mailbox fires **no** hooks unless each hook opts in with `dangerously_support_untrusted = true`. Switch to `trust = "verified"` with an explicit `trusted_senders` allowlist, and remove per-hook overrides that are no longer needed.
 
 ### `trust` modes
 
@@ -221,7 +219,7 @@ During email ingest, AIMX verifies DKIM, SPF, and DMARC. Results are stored in t
 
 Every hook fire emits one `info`-level log line to the system logger (journald on systemd, syslog on OpenRC) with a stable format:
 
-```
+```text
 hook_id=<id> event=<on_receive|after_send> mailbox=<m> (email_id=<id>|message_id=<id>) exit_code=<n> duration_ms=<n>
 ```
 

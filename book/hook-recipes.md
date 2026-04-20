@@ -266,7 +266,7 @@ to = "*@customer-co.com"
 
 Every recipe above redirects stdout and stderr to a log file because `aimx serve` runs detached. Without the redirect, the agent's output is lost. AIMX itself emits one structured log line per hook fire to journald:
 
-```
+```text
 hook_id=<id> event=<on_receive|after_send> mailbox=<m> (email_id=<id>|message_id=<id>) exit_code=<n> duration_ms=<n>
 ```
 

@@ -52,7 +52,7 @@ aimx doctor
 
 ### CLI Commands
 
-```
+```text
 $ aimx
 SMTP for agents. No middleman.
 
@@ -82,11 +82,6 @@ Options:
 ```
 
 ### MCP server (for AI agents)
-
-```bash
-# Start MCP server (stdio mode, launched by MCP client)
-aimx mcp
-```
 
 Install AIMX into your agent with one command:
 
@@ -121,23 +116,47 @@ Available MCP tools:
 
 ## Configuration
 
-_(TK: Update with a config brief, link to book/configuration.md for more in-depth details)_
+AIMX reads a single TOML file at `/etc/aimx/config.toml`, written by `aimx setup` with mode `0640 root:root`. Top-level settings cover `domain`, `dkim_selector`, and the defaults for `trust` / `trusted_senders`; per-mailbox tables attach addresses, override those defaults, and declare hooks.
+
+See [`book/configuration.md`](book/configuration.md) for the full field reference.
 
 
 ## Trust policy
 
-_(TK: Update with trust brief, link to book/ for more in-depth details)_
+Every inbound email is checked for DKIM, SPF, and DMARC, and the results are written into the TOML frontmatter alongside a summary `trusted` field (`none`, `true`, or `false`). Trust only gates `on_receive` hook execution — mail is always stored on disk regardless of the outcome, so agents and humans can still read untrusted messages via MCP or the filesystem.
+
+See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate logic and [`book/configuration.md`](book/configuration.md#inbound-email-verification) for the per-field semantics.
+
 
 ## Hooks
 
-_(TK: Update with hook brief, link to book/ for more in-depth details)_
+AIMX fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and can be filtered by `from`, `to`, `subject`, or `has_attachment`; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`.
+
+See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Aider).
 
 
 ## Email format
 
-Inbound emails are stored as Markdown with TOML frontmatter:
+Inbound emails are stored as Markdown with TOML frontmatter. A minimal file looks like:
 
-_(TK: Update with frontmatter table, link to book/ for more in-depth details)_
+```markdown
++++
+id = "2025-04-15-143022-hello"
+from = "Alice <alice@example.com>"
+to = "support@agent.yourdomain.com"
+subject = "Hello"
+date = "2025-04-15T14:30:22Z"
+dkim = "pass"
+spf = "pass"
+trusted = "true"
+mailbox = "support"
+read = false
++++
+
+Hello, this is the email body in plain text.
+```
+
+See [`book/mailboxes.md`](book/mailboxes.md#email-format) for the full field schema, attachment bundles, and outbound sent-copy fields.
 
 
 ## DNS records
