@@ -434,7 +434,8 @@ pub fn run_with_env(
     run_with_env_to_writer(agent, list, force, print, data_dir, env, &mut io::stdout())
 }
 
-/// Testable core of `run_with_env`: writes menu / install output to `out`
+/// Testable core of `run_with_env`: writes install output, `--list` output,
+/// or the bare-invocation registry dump (plus usage-hint footer) to `out`
 /// rather than real stdout so tests can capture and assert on it.
 pub fn run_with_env_to_writer(
     agent: Option<String>,
@@ -1125,9 +1126,19 @@ mod tests {
 
     #[test]
     fn list_mode_runs_without_agent_name() {
+        // `--list` prints the registry without the trailing
+        // `Run \`aimx agent-setup <agent>\`` usage-hint footer. The footer is
+        // reserved for bare invocation — this lock-in prevents the two
+        // output shapes from converging.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
-        run_with_env(None, true, false, false, None, &env).unwrap();
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(None, true, false, false, None, &env, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(
+            !rendered.contains("Run `aimx agent-setup <agent>`"),
+            "--list output must not include the bare-invocation usage hint: {rendered}"
+        );
     }
 
     #[test]

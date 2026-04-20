@@ -109,7 +109,7 @@ pub enum Command {
 
     /// Install AIMX plugin/skill for an AI agent into the current user's config
     AgentSetup {
-        /// Agent short name (e.g. claude-code). Omit with --list.
+        /// Agent short name (e.g. claude-code). Omit to print the supported-agent registry, or pass --list for the same view.
         agent: Option<String>,
 
         /// List supported agents with destinations and activation hints
