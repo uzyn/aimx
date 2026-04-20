@@ -86,12 +86,13 @@ pub struct EmailSendParams {
     pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Message-ID of the email being replied to (sets In-Reply-To header for threading). \
+                       Required to enable threading: without reply_to, the references field is silently ignored and no threading headers are emitted. \
                        When set, References is built automatically unless overridden by the references field."
     )]
     pub reply_to: Option<String>,
     #[schemars(
         description = "Full References header chain (space-separated Message-IDs) for threading. \
-                       Typically used alongside reply_to for reply-all or manually threaded sends."
+                       Only applied when reply_to is also set — supplied alone, it is silently ignored."
     )]
     pub references: Option<String>,
 }
@@ -317,15 +318,7 @@ impl AimxMcpServer {
             ));
         }
 
-        let args = SendArgs {
-            from: from_address.clone(),
-            to: params.to,
-            subject: params.subject,
-            body: params.body,
-            reply_to: params.reply_to,
-            references: params.references,
-            attachments: params.attachments.unwrap_or_default(),
-        };
+        let args = build_send_args(params, from_address);
 
         submit_via_daemon(&args)
     }
@@ -394,6 +387,22 @@ impl AimxMcpServer {
         };
 
         submit_via_daemon(&args)
+    }
+}
+
+/// Build `SendArgs` from `EmailSendParams` and the resolved sender
+/// address. Pure and side-effect-free so it can be unit-tested without
+/// the daemon; keeps the `params.reply_to` / `params.references`
+/// forwarding explicit (see the deserialization tests below).
+fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
+    SendArgs {
+        from: from_address.to_string(),
+        to: params.to,
+        subject: params.subject,
+        body: params.body,
+        reply_to: params.reply_to,
+        references: params.references,
+        attachments: params.attachments.unwrap_or_default(),
     }
 }
 
@@ -1583,5 +1592,50 @@ mod tests {
             params.references.as_deref(),
             Some("<first@example.com> <second@example.com> <third@example.com>")
         );
+    }
+
+    // ----- build_send_args forwards threading params ------------------
+
+    #[test]
+    fn build_send_args_forwards_reply_to_and_references() {
+        // Guards against regression that would re-introduce hardcoded
+        // `None`s on the SendArgs construction inside `email_send`.
+        let params = EmailSendParams {
+            from_mailbox: "agent".to_string(),
+            to: "alice@example.com".to_string(),
+            subject: "Re: Hello".to_string(),
+            body: "Thanks.".to_string(),
+            attachments: None,
+            reply_to: Some("<third@example.com>".to_string()),
+            references: Some(
+                "<first@example.com> <second@example.com> <third@example.com>".to_string(),
+            ),
+        };
+        let args = build_send_args(params, "agent@example.com");
+        assert_eq!(args.from, "agent@example.com");
+        assert_eq!(args.to, "alice@example.com");
+        assert_eq!(args.reply_to.as_deref(), Some("<third@example.com>"));
+        assert_eq!(
+            args.references.as_deref(),
+            Some("<first@example.com> <second@example.com> <third@example.com>")
+        );
+        assert!(args.attachments.is_empty());
+    }
+
+    #[test]
+    fn build_send_args_defaults_threading_to_none() {
+        let params = EmailSendParams {
+            from_mailbox: "agent".to_string(),
+            to: "alice@example.com".to_string(),
+            subject: "Hello".to_string(),
+            body: "Hi.".to_string(),
+            attachments: None,
+            reply_to: None,
+            references: None,
+        };
+        let args = build_send_args(params, "agent@example.com");
+        assert!(args.reply_to.is_none());
+        assert!(args.references.is_none());
+        assert!(args.attachments.is_empty());
     }
 }
