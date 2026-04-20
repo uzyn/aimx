@@ -79,10 +79,9 @@ pub enum HookOrigin {
 }
 
 impl HookOrigin {
-    /// String form used in the structured log line and any future
-    /// human-facing doctor / diagnostic output. Unused in Sprint 1 (no
-    /// call site emits the field yet); Sprint 2 wires it into the hook
-    /// fire log.
+    /// String form used by `doctor` output and tests. Production log
+    /// lines do not currently surface origin (see PRD §7.3); kept as an
+    /// API so Sprint 3's `hooks list` / doctor summary can format it.
     #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -165,9 +164,9 @@ pub struct Hook {
 
 impl Hook {
     /// True iff this hook references a template (rather than carrying its
-    /// own raw `cmd`). Consumed by [`Hook::resolve_argv`] and by the
-    /// `doctor` summary in a later sprint.
-    #[allow(dead_code)] // Wired into run_and_log in S2-4; kept for doctor in S6.
+    /// own raw `cmd`). Consumed by tests today; wired into `doctor` and
+    /// `hooks list` summary in Sprint 6.
+    #[allow(dead_code)]
     pub fn is_template_bound(&self) -> bool {
         self.template.is_some()
     }
@@ -184,7 +183,6 @@ impl Hook {
     /// template hooks at the [`crate::platform::spawn_sandboxed`] call
     /// site (both produce a `Vec<String>` argv); shell interpretation is
     /// intentional for operator-authored hooks.
-    #[allow(dead_code)] // Wired into run_and_log in S2-4.
     pub fn resolve_argv(
         &self,
         templates: &[HookTemplate],
@@ -218,7 +216,6 @@ impl Hook {
 /// All variants indicate a configuration-level bug that validation should
 /// normally catch at load time. They are kept as distinct variants so the
 /// caller can emit a precise `tracing::warn!` without swallowing context.
-#[allow(dead_code)] // Consumed in S2-4 via run_and_log.
 #[derive(Debug)]
 pub enum ResolveArgvError {
     UnknownTemplate(String),
@@ -665,26 +662,45 @@ fn run_and_log(
 /// Build the stdin payload for a hook fire. For `Email` / `EmailJson`
 /// modes we load the associated `.md` file; if the file doesn't exist
 /// (e.g. TEMP failures on `after_send` where persistence was skipped)
-/// we pipe an empty payload rather than failing the hook.
+/// we pipe an empty payload rather than failing the hook. A real
+/// read error (EACCES etc.) is logged at WARN so operators can tell a
+/// missing-file (intentional empty payload) apart from a permissions
+/// bug (which would otherwise silently present as empty stdin).
 fn build_stdin(mode: HookTemplateStdin, source: Option<&Path>) -> SandboxStdin {
     match mode {
         HookTemplateStdin::None => SandboxStdin::None,
-        HookTemplateStdin::Email => {
-            let bytes = source
-                .and_then(|p| std::fs::read(p).ok())
-                .unwrap_or_default();
-            SandboxStdin::Email(bytes)
-        }
+        HookTemplateStdin::Email => SandboxStdin::Email(read_stdin_source(source)),
         HookTemplateStdin::EmailJson => {
             // Best-effort per PRD §9 out-of-scope: wrap raw `.md` bytes
             // in a JSON object keyed by `raw`. Stabilization is post-v1.
-            let bytes = source
-                .and_then(|p| std::fs::read(p).ok())
-                .unwrap_or_default();
+            let bytes = read_stdin_source(source);
             let escaped = serde_json::to_string(&String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_else(|_| "\"\"".into());
             let json = format!("{{\"raw\":{escaped}}}");
             SandboxStdin::EmailJson(json.into_bytes())
+        }
+    }
+}
+
+/// Read the backing `.md` file for a hook's stdin payload. `None` path
+/// and `NotFound` both yield empty bytes silently (the TEMP-failure
+/// `after_send` case where no file was ever persisted — see PRD §9).
+/// Any other `io::Error` is surfaced as a WARN so an EACCES on a real
+/// file doesn't hide behind the empty-payload code path.
+fn read_stdin_source(source: Option<&Path>) -> Vec<u8> {
+    let Some(p) = source else {
+        return Vec::new();
+    };
+    match std::fs::read(p) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                target: "aimx::hook",
+                "hook stdin: read {path} failed: {e}; piping empty payload",
+                path = p.display(),
+            );
+            Vec::new()
         }
     }
 }
@@ -1621,6 +1637,41 @@ cmd = "echo legacy"
         assert!(rendered.contains("..."), "long stderr must be truncated");
         assert!(rendered.starts_with('"'));
         assert!(rendered.ends_with('"'));
+    }
+
+    /// Regression: the tail-start index inside `format_stderr_tail` is
+    /// a byte offset computed from `tail_n`. With ASCII-only input it
+    /// always lands on a char boundary, but multi-byte UTF-8 scalars
+    /// can straddle the boundary. The implementation walks forward to
+    /// the next `is_char_boundary`; this test locks in that the walk
+    /// doesn't panic on either a 3-byte-BMP or a 4-byte-astral char
+    /// straddling the truncation point, AND that the final output is
+    /// valid UTF-8 (i.e. serde_json can still parse it back).
+    #[test]
+    fn format_stderr_tail_handles_multibyte_boundary() {
+        // Build a payload big enough to force truncation, ending with
+        // a stretch of 3-byte (え = U+3048) + 4-byte (🦀 = U+1F980)
+        // UTF-8 chars so the truncation point is guaranteed to land
+        // inside one of them for at least one of the many byte offsets
+        // between the ASCII filler and the multi-byte tail.
+        let mut payload: Vec<u8> = vec![b'x'; 4096];
+        for _ in 0..256 {
+            payload.extend_from_slice("えあ🦀".as_bytes());
+        }
+        let rendered = format_stderr_tail(&payload);
+        assert!(rendered.starts_with('"'), "got: {rendered}");
+        assert!(rendered.ends_with('"'), "got: {rendered}");
+        assert!(rendered.contains("..."), "long stderr must be truncated");
+        // Must still be valid UTF-8 (the inner slice comes from `str`
+        // via `is_char_boundary`, so this is a lock-in against a future
+        // regression that replaces the walk with raw byte slicing).
+        let as_str = std::str::from_utf8(rendered.as_bytes())
+            .expect("format_stderr_tail must emit valid UTF-8");
+        // And must still round-trip through serde_json so a downstream
+        // structured-log parser doesn't choke on a half-escape.
+        let parsed: serde_json::Value =
+            serde_json::from_str(as_str).expect("rendered value must be valid JSON");
+        assert!(parsed.is_string());
     }
 
     #[test]

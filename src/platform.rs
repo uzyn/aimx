@@ -55,7 +55,6 @@ pub const DEFAULT_MEMORY_MAX: &str = "256M";
 /// Stdin delivery policy per PRD §6.7. The daemon writes the chosen
 /// payload to the child's stdin before starting the timeout clock, then
 /// closes stdin — no hook blocks mid-run on a stdin `read()`.
-#[allow(dead_code)] // EmailJson/None variants consumed by S2-4 wiring.
 pub enum SandboxStdin {
     /// Raw `.md` bytes (TOML frontmatter + body) written to stdin.
     Email(Vec<u8>),
@@ -76,7 +75,6 @@ pub enum SandboxKind {
 }
 
 impl SandboxKind {
-    #[allow(dead_code)] // Wired into the structured log line in S2-3/S2-4.
     pub fn as_str(&self) -> &'static str {
         match self {
             SandboxKind::SystemdRun => "systemd-run",
@@ -86,10 +84,13 @@ impl SandboxKind {
 }
 
 /// Captured subprocess result.
-#[allow(dead_code)] // Fields consumed by run_and_log in S2-4.
 #[derive(Debug)]
 pub struct SandboxOutcome {
     pub exit_code: i32,
+    /// Tail of captured stdout. Not surfaced in the structured hook-fire
+    /// log line today (only `stderr_tail` is); reserved for the `doctor`
+    /// recent-activity view in Sprint 6.
+    #[allow(dead_code)]
     pub stdout_tail: Vec<u8>,
     pub stderr_tail: Vec<u8>,
     pub duration: Duration,
@@ -101,7 +102,6 @@ pub struct SandboxOutcome {
 ///
 /// `UserNotFound` is distinct from `SpawnFailed` so the caller can log a
 /// specific "run `aimx setup` to create aimx-hook" hint.
-#[allow(dead_code)] // Variants matched by run_and_log in S2-4.
 #[derive(Debug)]
 pub enum SandboxError {
     UserNotFound(String),
@@ -136,7 +136,6 @@ impl std::error::Error for SandboxError {}
 /// `--setenv=K=V`; on the fallback path they are merged into the child's
 /// env (which is otherwise cleared — only `PATH` / `HOME` from the
 /// parent are preserved, matching the old `sh -c` executor's contract).
-#[allow(dead_code)] // Wired into hook::run_and_log in S2-4.
 pub fn spawn_sandboxed(
     argv: &[String],
     stdin: SandboxStdin,
@@ -176,6 +175,27 @@ fn spawn_via_systemd_run(
     envs: &HashMap<String, String>,
     started: Instant,
 ) -> Result<SandboxOutcome, SandboxError> {
+    // Mirror the fallback path's preflight: `systemd-run --uid=aimx-hook`
+    // on a host without the user fails with an opaque PolicyKit / "Unknown
+    // user name" message. Catching it here produces the same
+    // `SandboxError::UserNotFound` that the fallback path returns, so
+    // operators get a consistent "run `aimx setup` to create aimx-hook"
+    // signal regardless of init system.
+    #[cfg(unix)]
+    if run_as != "root" {
+        match lookup_user(run_as) {
+            Err(SandboxError::UserNotFound(_)) if !is_root() => {
+                tracing::warn!(
+                    target: "aimx::hook",
+                    "run_as '{run_as}' not found and caller is non-root: running hook as current user via systemd-run"
+                );
+                return spawn_via_fork_setuid(argv, stdin, run_as, timeout, envs, started);
+            }
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+    }
+
     let mut cmd = Command::new("systemd-run");
     cmd.arg("--quiet")
         .arg("--pipe")
@@ -345,6 +365,12 @@ fn run_child_with_timeout(
     started: Instant,
 ) -> Result<SandboxOutcome, SandboxError> {
     let mut child = cmd.spawn().map_err(SandboxError::SpawnFailed)?;
+    // Start the timeout clock from immediately after spawn, not from
+    // `started` (which covers `detect_init_system` + `lookup_user` +
+    // config plumbing). The child gets its full `timeout` budget, and
+    // `started` remains the basis of `duration_ms` for end-to-end
+    // latency observability.
+    let spawned_at = Instant::now();
 
     // Write stdin + close before the timeout clock matters. We do this
     // on a thread so a child that refuses to drain stdin can't wedge the
@@ -384,9 +410,13 @@ fn run_child_with_timeout(
         })
     });
 
+    // Linux `pid_max` defaults to 4_194_304 (2^22) on 64-bit kernels and
+    // is capped at 2^22 by the kernel; well under `i32::MAX`. The cast
+    // below is therefore lossless on every supported target (Unix). We
+    // negate the pid to signal the whole process group via `kill(-pgid)`.
     let pid = child.id() as i32;
 
-    let deadline = started + timeout;
+    let deadline = spawned_at + timeout;
     let mut sigterm_sent = false;
     let mut sigkill_deadline: Option<Instant> = None;
     let mut timed_out = false;

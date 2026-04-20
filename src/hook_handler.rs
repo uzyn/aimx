@@ -187,7 +187,26 @@ pub async fn handle_hook_delete(
 
 fn decode_hook_body(bytes: &[u8]) -> Result<Hook, String> {
     let s = std::str::from_utf8(bytes).map_err(|e| format!("hook body is not valid UTF-8: {e}"))?;
-    toml::from_str::<Hook>(s).map_err(|e| format!("malformed hook TOML: {e}"))
+    let mut hook = toml::from_str::<Hook>(s).map_err(|e| format!("malformed hook TOML: {e}"))?;
+    // Stopgap until Sprint 3 S3-1 lands the template-only JSON body. PRD
+    // §6.7: the UDS `HOOK-CREATE` verb is not allowed to set `run_as` at
+    // all — the field is operator-only and only settable by hand-editing
+    // `config.toml`. Without this check a local user on the world-writable
+    // `aimx.sock` could submit `run_as = "root"` and have the daemon
+    // execute hooks as root on the next inbound email.
+    if hook.run_as.is_some() {
+        return Err(
+            "UDS HOOK-CREATE may not set `run_as`: that field is operator-only \
+             (hand-edit config.toml)"
+                .into(),
+        );
+    }
+    // Stamp origin so downstream validation (`validate_single_hook`)
+    // treats the submission as MCP-origin regardless of whatever the
+    // client serialized. Sprint 3's S3-1 makes this the only path a
+    // non-root caller can create a hook.
+    hook.origin = crate::hook::HookOrigin::Mcp;
+    Ok(hook)
 }
 
 #[cfg(test)]
@@ -418,6 +437,68 @@ mod tests {
             }
             other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
+    }
+
+    /// Stopgap guard until Sprint 3's S3-1 replaces the body schema with
+    /// template-only JSON. A local user on the world-writable UDS must
+    /// not be able to ship a hook that runs as `root` on the next
+    /// inbound email.
+    #[tokio::test]
+    async fn hook_create_rejects_run_as_from_uds() {
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let body = b"name = \"escalate\"\n\
+                     event = \"on_receive\"\n\
+                     cmd = \"echo pwned\"\n\
+                     run_as = \"root\"\n"
+            .to_vec();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            hook_toml: body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert!(
+                    reason.contains("run_as") && reason.contains("operator-only"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
+        }
+        let live = mb_ctx.config_handle.load();
+        assert!(live.mailboxes["alice"].hooks.is_empty());
+    }
+
+    /// `decode_hook_body` stamps `origin = Mcp` regardless of what the
+    /// client serialized. This closes the side door for Sprint 3's
+    /// origin-protected `HOOK-DELETE` guard and for any future guards
+    /// that pivot on origin.
+    #[tokio::test]
+    async fn hook_create_stamps_origin_mcp() {
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        // Submit a hook with no explicit origin; default would deserialize
+        // as Operator.
+        let body = b"name = \"stamped\"\n\
+                     event = \"on_receive\"\n\
+                     cmd = \"echo hi\"\n"
+            .to_vec();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            hook_toml: body,
+        };
+        assert!(matches!(
+            handle_hook_create(&state_ctx, &mb_ctx, &req).await,
+            AckResponse::Ok
+        ));
+        let live = mb_ctx.config_handle.load();
+        assert_eq!(
+            live.mailboxes["alice"].hooks[0].origin,
+            crate::hook::HookOrigin::Mcp
+        );
     }
 
     #[tokio::test]
