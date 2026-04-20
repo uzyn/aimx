@@ -3929,6 +3929,11 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     cmd.env("AIMX_CONFIG_DIR", tmp);
     cmd.env("AIMX_RUNTIME_DIR", &runtime);
     cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
+    // Sprint 3 S3-4 makes `aimx hooks create --cmd` root-only. CI runs
+    // non-root, so tests set this test-only escape hatch to exercise
+    // the direct-write + SIGHUP path on behalf of the fake-root
+    // operator. Production systemd units never pass this env var.
+    cmd.env("AIMX_TEST_SKIP_ROOT_CHECK", "1");
     cmd
 }
 
@@ -4153,13 +4158,12 @@ fn hooks_delete_unknown_name_errors() {
 // S51-3: UDS HOOK-CREATE / HOOK-DELETE end-to-end
 // ---------------------------------------------------------------------
 
-/// S51-3: spin up `aimx serve`, issue `aimx hooks create`, confirm the
-/// daemon hot-swaps its in-memory config by immediately listing the
-/// new hook (which reads on-disk config.toml). Also exercises the
-/// success path: no restart hint is printed when the UDS submission
-/// succeeds.
+/// S3-4: spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm
+/// the CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely
+/// under Sprint 3) and SIGHUP'd the running daemon. The success path
+/// prints a `Reload:` banner and no `Hint:` restart banner.
 #[test]
-fn hooks_create_via_daemon_hot_swaps_config() {
+fn hooks_raw_cmd_sighup_hot_swaps_config() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
     let port = find_free_port();
@@ -4170,6 +4174,7 @@ fn hooks_create_via_daemon_hot_swaps_config() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -4189,13 +4194,22 @@ fn hooks_create_via_daemon_hot_swaps_config() {
         create_out.contains("Hook created"),
         "create output: {create_out}"
     );
-    // No restart hint on the daemon-success path.
+    // Sprint 3 S3-4: raw-cmd hooks write config.toml directly and
+    // SIGHUP the daemon. Positive signal: stdout must carry the
+    // `Reload:` banner (which only prints on SighupOutcome::Sent).
+    // Negative signal: no `Hint:` restart banner (that would indicate
+    // the SIGHUP path fell through to DaemonNotRunning).
+    assert!(
+        create_out.contains("Reload:"),
+        "daemon-success should print Reload: banner: {create_out}"
+    );
     assert!(
         !create_out.contains("Hint:"),
         "daemon-success should not print restart hint: {create_out}"
     );
 
-    // On-disk config.toml should contain the new hook (daemon rewrote it).
+    // On-disk config.toml should contain the new hook (CLI wrote it
+    // directly — raw-cmd never traverses UDS under Sprint 3).
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
         content.contains("echo via-daemon"),
@@ -4221,6 +4235,7 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -4237,7 +4252,9 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .success();
     let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
     assert!(out.contains("Hook created"), "{out}");
-    // No restart hint on the daemon-success path.
+    // Sprint 3 S3-4: when the daemon is up, SIGHUP succeeds and the
+    // CLI prints "Reload:" rather than the socket-missing "Hint:"
+    // restart banner.
     assert!(
         !out.contains("Hint:"),
         "daemon-success should not print restart hint: {out}"

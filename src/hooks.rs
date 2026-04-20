@@ -1,22 +1,39 @@
 //! `aimx hooks list | create | delete` CLI.
 //!
 //! `hook` (singular) is kept as a clap alias on the subcommand for muscle
-//! memory. All three sub-subcommands route UDS-first so the daemon can
-//! hot-swap its in-memory `Arc<Config>`; on socket-missing the CLI falls
-//! back to a direct `config.toml` edit + restart hint. `create` is
-//! flag-based and accepts an optional `--name`; when omitted, the effective
-//! name is derived at runtime from `sha256(event + cmd + dangerous)` and is
-//! NOT written back to `config.toml`. `delete <name>` resolves against
-//! effective names (explicit or derived) and shows the hook's mailbox /
-//! event / cmd with a `[y/N]` prompt unless `--yes`.
+//! memory.
+//!
+//! Create splits two paths by flag:
+//!
+//! * `--template NAME --param KEY=VAL ...` — template-bound hook. Goes
+//!   through the daemon UDS (`HOOK-CREATE` verb) so `Arc<Config>`
+//!   hot-swaps and the new hook fires on the next event. On
+//!   socket-missing we fall back to a direct `config.toml` edit + a
+//!   "restart aimx" hint. CLI-origin template hooks are tagged `origin =
+//!   "operator"` — the operator typed the command, so the operator
+//!   retains delete control (MCP cannot remove operator-origin hooks via
+//!   UDS, see `hook_handler::handle_hook_delete`).
+//!
+//! * `--cmd "..."` — raw-cmd hook. Requires root (`sudo`). Writes
+//!   `config.toml` directly (never UDS) and sends `SIGHUP` to the
+//!   running `aimx serve` so the daemon picks up the change without a
+//!   restart. If no daemon is running, prints a restart hint. Raw-cmd
+//!   hooks are the only way to register an arbitrary shell command —
+//!   which is why the UDS verb refuses them entirely.
+//!
+//! Delete resolves against effective names (explicit or derived) and
+//! shows the hook's mailbox / event / cmd with a `[y/N]` prompt unless
+//! `--yes`. Operator-origin hooks can only be deleted by a CLI caller;
+//! the UDS verb refuses.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::cli::{HookCommand, HookCreateArgs};
 use crate::config::{Config, validate_hooks};
 use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
 use crate::hook_client::{
-    HookCrudFallback, submit_hook_create_via_daemon, submit_hook_delete_via_daemon,
+    HookCrudFallback, submit_hook_delete_via_daemon, submit_hook_template_create_via_daemon,
 };
 use crate::term;
 
@@ -72,23 +89,109 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         return Err(format!("Mailbox '{}' does not exist", args.mailbox).into());
     }
 
-    validate_create_args(&args)?;
+    // `ArgGroup` on `HookCreateArgs` guarantees exactly one of
+    // `--template` / `--cmd` is set; match on that.
+    match (&args.template, &args.cmd) {
+        (Some(template), None) => create_template(config, &args, template.clone()),
+        (None, Some(cmd)) => create_raw_cmd(config, &args, cmd.clone()),
+        _ => Err(
+            "exactly one of --template NAME or --cmd \"...\" must be supplied (not both, not neither)"
+                .into(),
+        ),
+    }
+}
+
+// ---- template path (S3-3) -------------------------------------------
+
+fn create_template(
+    config: &Config,
+    args: &HookCreateArgs,
+    template: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    validate_create_args_common(args)?;
 
     let event = parse_event(&args.event)?;
-    let hook = Hook {
+
+    // Parse --param K=V pairs into a BTreeMap and fail fast on malformed
+    // values so the operator doesn't get a cryptic daemon error.
+    let params = parse_params(&args.params)?;
+
+    // Resolve the template locally for pre-flight friendliness. The
+    // daemon re-validates, but local validation gives better error
+    // messages before the UDS round-trip (and also catches
+    // socket-missing installs that are about to fall back).
+    let tmpl = config
+        .hook_templates
+        .iter()
+        .find(|t| t.name == template)
+        .ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!(
+                "unknown template '{template}': run `aimx hooks templates` to \
+                 list enabled templates, or enable one via `sudo aimx setup`"
+            )
+            .into()
+        })?;
+
+    // Check allowed_events for this template.
+    if !tmpl.allowed_events.contains(&event) {
+        return Err(format!(
+            "template '{template}' does not allow event '{}' (allowed: {})",
+            event.as_str(),
+            tmpl.allowed_events
+                .iter()
+                .map(|e| e.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+        .into());
+    }
+
+    // Check the params set: declared-but-missing and unknown-param.
+    for required in &tmpl.params {
+        if !params.contains_key(required) {
+            return Err(format!(
+                "missing --param {required}=... (template '{template}' declares it)"
+            )
+            .into());
+        }
+    }
+    for k in params.keys() {
+        if !tmpl.params.iter().any(|p| p == k) {
+            return Err(format!(
+                "template '{template}' does not declare parameter '{k}' \
+                 (declared: {})",
+                tmpl.params.join(", ")
+            )
+            .into());
+        }
+    }
+
+    // Submit via UDS. The daemon always stamps `origin = "mcp"` on the
+    // resulting hook, even for CLI callers — a deliberate simplification
+    // so the audit story stays "anything the daemon writes from UDS is
+    // MCP-origin". Operators who want `origin = "operator"` on the hook
+    // can drop the `--template` flag and use `--cmd` (which writes
+    // `config.toml` directly and preserves operator origin).
+    let hook_for_preview = Hook {
         name: args.name.clone(),
         event,
-        r#type: "cmd".to_string(),
-        cmd: args.cmd,
-        dangerously_support_untrusted: args.dangerously_support_untrusted,
-        origin: crate::hook::HookOrigin::Operator,
-        template: None,
-        params: std::collections::BTreeMap::new(),
+        r#type: "cmd".into(),
+        cmd: String::new(),
+        dangerously_support_untrusted: false,
+        origin: crate::hook::HookOrigin::Mcp,
+        template: Some(template.clone()),
+        params: params.clone(),
         run_as: None,
     };
-    let effective = effective_hook_name(&hook);
+    let effective = effective_hook_name(&hook_for_preview);
 
-    match submit_hook_create_via_daemon(&args.mailbox, &hook) {
+    match submit_hook_template_create_via_daemon(
+        &args.mailbox,
+        event,
+        &template,
+        params.clone(),
+        args.name.as_deref(),
+    ) {
         Ok(()) => {
             println!(
                 "{} {}",
@@ -98,7 +201,10 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
             Ok(())
         }
         Err(HookCrudFallback::SocketMissing) => {
-            apply_create_direct(config, &args.mailbox, hook)?;
+            // Fallback: write directly to config.toml with the same
+            // `origin = "mcp"` the daemon would have stamped (keeps the
+            // file identical regardless of whether the daemon was up).
+            apply_create_direct(config, &args.mailbox, hook_for_preview)?;
             println!(
                 "{} {}",
                 term::success("Hook created:"),
@@ -111,22 +217,106 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     }
 }
 
+// ---- raw-cmd path (S3-4) ---------------------------------------------
+
+fn create_raw_cmd(
+    config: &Config,
+    args: &HookCreateArgs,
+    cmd: String,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Test-only escape hatch: CI runs non-root, but integration tests
+    // exercise the raw-cmd path to verify the direct-write + SIGHUP
+    // flow. Production never sets this env var; the daemon's runtime
+    // env is scrubbed by systemd. The same pattern is used by
+    // `platform::spawn_sandboxed` (AIMX_SANDBOX_FORCE_FALLBACK).
+    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    if !skip_root_check && !crate::platform::is_root() {
+        return Err(
+            "--cmd hooks require root: run again with `sudo aimx hooks create --cmd ...`.\n\
+             Raw-cmd hooks are operator-only and never traverse the UDS socket. \
+             To let an agent create a hook, install a `[[hook_template]]` via \
+             `sudo aimx setup` and use `--template` instead."
+                .into(),
+        );
+    }
+
+    validate_create_args_common(args)?;
+    if cmd.trim().is_empty() {
+        return Err("--cmd must not be empty".into());
+    }
+    let event = parse_event(&args.event)?;
+    if matches!(event, HookEvent::AfterSend) && args.dangerously_support_untrusted {
+        return Err("--dangerously-support-untrusted is only valid on --event on_receive".into());
+    }
+
+    let hook = Hook {
+        name: args.name.clone(),
+        event,
+        r#type: "cmd".to_string(),
+        cmd,
+        dangerously_support_untrusted: args.dangerously_support_untrusted,
+        origin: crate::hook::HookOrigin::Operator,
+        template: None,
+        params: BTreeMap::new(),
+        run_as: None,
+    };
+    let effective = effective_hook_name(&hook);
+
+    apply_create_direct(config, &args.mailbox, hook)?;
+    println!(
+        "{} {}",
+        term::success("Hook created:"),
+        term::highlight(&effective)
+    );
+
+    // SIGHUP the running daemon (if any) so the new hook fires on the
+    // next event without a full restart.
+    match crate::serve::sighup_running_daemon() {
+        crate::serve::SighupOutcome::Sent(pid) => {
+            println!(
+                "{} SIGHUP sent to aimx serve (pid {pid}); hook is live.",
+                term::info("Reload:")
+            );
+        }
+        crate::serve::SighupOutcome::DaemonNotRunning => {
+            print_restart_hint();
+        }
+        crate::serve::SighupOutcome::SignalFailed(pid, err) => {
+            eprintln!(
+                "{} failed to SIGHUP aimx serve (pid {pid}): {err}",
+                term::warn("Warning:")
+            );
+            print_restart_hint();
+        }
+    }
+    Ok(())
+}
+
 fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
     let (mailbox, hook) = match find_hook_by_effective_name(config, name) {
         Some(pair) => pair,
         None => return Err(format!("Hook '{name}' not found").into()),
     };
+    let is_operator_origin = hook.origin == crate::hook::HookOrigin::Operator;
 
     if !yes {
         println!("{}", term::warn("About to delete hook:"));
         println!("  {}   {}", term::header("name:   "), term::highlight(name));
         println!("  {}   {}", term::header("mailbox:"), mailbox);
         println!("  {}   {}", term::header("event:  "), hook.event);
-        println!(
-            "  {}   {}",
-            term::header("cmd:    "),
-            truncate_with_ellipsis(&hook.cmd, 60)
-        );
+        if hook.template.is_some() {
+            println!(
+                "  {}   {}",
+                term::header("template:"),
+                hook.template.clone().unwrap_or_default()
+            );
+        } else {
+            println!(
+                "  {}   {}",
+                term::header("cmd:    "),
+                truncate_with_ellipsis(&hook.cmd, 60)
+            );
+        }
         print!("Continue? [y/N] ");
         io::stdout().flush()?;
         let mut input = String::new();
@@ -135,6 +325,37 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
             println!("Cancelled.");
             return Ok(());
         }
+    }
+
+    // Operator-origin hooks are UDS-protected (see
+    // `hook_handler::handle_hook_delete`). Route them through the
+    // direct-write path, which requires root anyway. MCP-origin hooks
+    // try UDS first (fast, hot-swap) and fall back on socket-missing.
+    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    if is_operator_origin {
+        if !skip_root_check && !crate::platform::is_root() {
+            return Err(
+                "hook is operator-origin and requires root to delete: run again with \
+                 `sudo aimx hooks delete`"
+                    .into(),
+            );
+        }
+        apply_delete_direct(config, name)?;
+        println!(
+            "{} {}",
+            term::success("Hook deleted:"),
+            term::highlight(name)
+        );
+        match crate::serve::sighup_running_daemon() {
+            crate::serve::SighupOutcome::Sent(pid) => {
+                println!(
+                    "{} SIGHUP sent to aimx serve (pid {pid}); change is live.",
+                    term::info("Reload:")
+                );
+            }
+            _ => print_restart_hint(),
+        }
+        return Ok(());
     }
 
     match submit_hook_delete_via_daemon(name) {
@@ -160,19 +381,12 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     }
 }
 
-/// Public-for-test helper: validate the `HookCreateArgs` pre-submission.
-pub(crate) fn validate_create_args(
-    args: &HookCreateArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let event = parse_event(&args.event)?;
-    if let HookEvent::AfterSend = event
-        && args.dangerously_support_untrusted
-    {
-        return Err("--dangerously-support-untrusted is only valid on --event on_receive".into());
-    }
-    if args.cmd.trim().is_empty() {
-        return Err("--cmd must not be empty".into());
-    }
+/// Common pre-submission validation shared between the template and
+/// raw-cmd create paths.
+fn validate_create_args_common(args: &HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+    // `--event` value is already restricted by clap's `value_parser`, but
+    // re-parse here so the caller can handle the enum.
+    let _ = parse_event(&args.event)?;
     if let Some(name) = &args.name
         && !is_valid_hook_name(name)
     {
@@ -183,6 +397,22 @@ pub(crate) fn validate_create_args(
         .into());
     }
     Ok(())
+}
+
+fn parse_params(params: &[String]) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    let mut out: BTreeMap<String, String> = BTreeMap::new();
+    for raw in params {
+        let (k, v) = raw
+            .split_once('=')
+            .ok_or_else(|| format!("--param '{raw}' must be KEY=VAL (got no '=' separator)"))?;
+        if k.is_empty() {
+            return Err(format!("--param '{raw}' has empty KEY").into());
+        }
+        if out.insert(k.to_string(), v.to_string()).is_some() {
+            return Err(format!("--param '{k}' specified twice").into());
+        }
+    }
+    Ok(out)
 }
 
 fn parse_event(s: &str) -> Result<HookEvent, Box<dyn std::error::Error>> {
@@ -265,6 +495,13 @@ fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<Row> {
             continue;
         }
         for h in &mb.hooks {
+            // Template-bound hooks render the template name in the CMD
+            // column since `cmd` is empty on those.
+            let cmd = if let Some(t) = &h.template {
+                format!("template: {t}")
+            } else {
+                h.cmd.clone()
+            };
             rows.push(Row {
                 name: effective_hook_name(h),
                 mailbox: name.clone(),
@@ -272,7 +509,7 @@ fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<Row> {
                     HookEvent::OnReceive => "on_receive",
                     HookEvent::AfterSend => "after_send",
                 },
-                cmd: h.cmd.clone(),
+                cmd,
             });
         }
     }
@@ -294,7 +531,7 @@ pub(crate) fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::MailboxConfig;
+    use crate::config::{HookTemplate, HookTemplateStdin, MailboxConfig};
     use std::collections::HashMap;
     use std::path::PathBuf;
 
@@ -324,7 +561,16 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
-            hook_templates: Vec::new(),
+            hook_templates: vec![HookTemplate {
+                name: "invoke-claude".into(),
+                description: "test".into(),
+                cmd: vec!["/usr/local/bin/claude".into(), "{prompt}".into()],
+                params: vec!["prompt".into()],
+                stdin: HookTemplateStdin::Email,
+                run_as: "aimx-hook".into(),
+                timeout_secs: 60,
+                allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
+            }],
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -335,10 +581,33 @@ mod tests {
         HookCreateArgs {
             mailbox: "alice".into(),
             event: event.into(),
-            cmd: "echo hi".into(),
+            cmd: Some("echo hi".into()),
+            template: None,
+            params: vec![],
             name: None,
             dangerously_support_untrusted: false,
         }
+    }
+
+    /// End-to-end validation of the raw-cmd CLI create path: the
+    /// common validator (shared with `--template`) plus the two raw-cmd
+    /// specific invariants (`--cmd` non-empty, `--dangerously-…` only
+    /// on `on_receive`). Inlined here so tests no longer depend on a
+    /// back-compat shim in `src/hooks.rs`.
+    fn validate_raw_cmd_args(args: &HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+        validate_create_args_common(args)?;
+        let event = parse_event(&args.event)?;
+        if let Some(cmd) = &args.cmd {
+            if matches!(event, HookEvent::AfterSend) && args.dangerously_support_untrusted {
+                return Err(
+                    "--dangerously-support-untrusted is only valid on --event on_receive".into(),
+                );
+            }
+            if cmd.trim().is_empty() {
+                return Err("--cmd must not be empty".into());
+            }
+        }
+        Ok(())
     }
 
     #[test]
@@ -347,17 +616,17 @@ mod tests {
             dangerously_support_untrusted: true,
             ..base_args("after_send")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_raw_cmd_args(&args).unwrap_err().to_string();
         assert!(err.contains("--dangerously-support-untrusted"), "{err}");
     }
 
     #[test]
     fn validate_rejects_empty_cmd() {
         let args = HookCreateArgs {
-            cmd: "   ".into(),
+            cmd: Some("   ".into()),
             ..base_args("on_receive")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_raw_cmd_args(&args).unwrap_err().to_string();
         assert!(err.contains("--cmd"), "{err}");
     }
 
@@ -367,7 +636,7 @@ mod tests {
             name: Some("bad name!".into()),
             ..base_args("on_receive")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_create_args_common(&args).unwrap_err().to_string();
         assert!(err.contains("--name"), "{err}");
     }
 
@@ -377,12 +646,125 @@ mod tests {
             name: Some("nightly_summary".into()),
             ..base_args("on_receive")
         };
-        validate_create_args(&args).unwrap();
+        validate_create_args_common(&args).unwrap();
     }
 
     #[test]
     fn validate_accepts_anonymous() {
-        validate_create_args(&base_args("on_receive")).unwrap();
+        validate_create_args_common(&base_args("on_receive")).unwrap();
+    }
+
+    #[test]
+    fn parse_params_happy_path() {
+        let pairs = vec!["prompt=hello world".into(), "foo=bar".into()];
+        let parsed = parse_params(&pairs).unwrap();
+        assert_eq!(
+            parsed.get("prompt").map(String::as_str),
+            Some("hello world")
+        );
+        assert_eq!(parsed.get("foo").map(String::as_str), Some("bar"));
+    }
+
+    #[test]
+    fn parse_params_allows_equals_in_value() {
+        let pairs = vec!["token=a=b=c".into()];
+        let parsed = parse_params(&pairs).unwrap();
+        assert_eq!(parsed.get("token").map(String::as_str), Some("a=b=c"));
+    }
+
+    #[test]
+    fn parse_params_rejects_missing_separator() {
+        let pairs = vec!["no-equals-here".into()];
+        let err = parse_params(&pairs).unwrap_err().to_string();
+        assert!(err.contains("KEY=VAL"), "{err}");
+    }
+
+    #[test]
+    fn parse_params_rejects_empty_key() {
+        let pairs = vec!["=value".into()];
+        let err = parse_params(&pairs).unwrap_err().to_string();
+        assert!(err.contains("empty KEY"), "{err}");
+    }
+
+    #[test]
+    fn parse_params_rejects_duplicate_key() {
+        let pairs = vec!["foo=1".into(), "foo=2".into()];
+        let err = parse_params(&pairs).unwrap_err().to_string();
+        assert!(err.contains("twice"), "{err}");
+    }
+
+    #[test]
+    fn create_template_rejects_missing_param() {
+        let cfg = base_config();
+        let args = HookCreateArgs {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            cmd: None,
+            template: Some("invoke-claude".into()),
+            params: vec![],
+            name: None,
+            dangerously_support_untrusted: false,
+        };
+        let err = create_template(&cfg, &args, "invoke-claude".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing --param"), "{err}");
+        assert!(err.contains("prompt"), "{err}");
+    }
+
+    #[test]
+    fn create_template_rejects_unknown_template() {
+        let cfg = base_config();
+        let args = HookCreateArgs {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            cmd: None,
+            template: Some("nope".into()),
+            params: vec!["prompt=hi".into()],
+            name: None,
+            dangerously_support_untrusted: false,
+        };
+        let err = create_template(&cfg, &args, "nope".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown template"), "{err}");
+    }
+
+    #[test]
+    fn create_template_rejects_unknown_param() {
+        let cfg = base_config();
+        let args = HookCreateArgs {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            cmd: None,
+            template: Some("invoke-claude".into()),
+            params: vec!["prompt=hi".into(), "bogus=1".into()],
+            name: None,
+            dangerously_support_untrusted: false,
+        };
+        let err = create_template(&cfg, &args, "invoke-claude".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not declare parameter 'bogus'"), "{err}");
+    }
+
+    #[test]
+    fn create_template_rejects_event_not_allowed() {
+        let mut cfg = base_config();
+        cfg.hook_templates[0].allowed_events = vec![HookEvent::OnReceive];
+        let args = HookCreateArgs {
+            mailbox: "alice".into(),
+            event: "after_send".into(),
+            cmd: None,
+            template: Some("invoke-claude".into()),
+            params: vec!["prompt=hi".into()],
+            name: None,
+            dangerously_support_untrusted: false,
+        };
+        let err = create_template(&cfg, &args, "invoke-claude".into())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not allow event"), "{err}");
     }
 
     #[test]
@@ -410,7 +792,7 @@ mod tests {
             dangerously_support_untrusted: false,
             origin: crate::hook::HookOrigin::Operator,
             template: None,
-            params: std::collections::BTreeMap::new(),
+            params: BTreeMap::new(),
             run_as: None,
         });
         // Anonymous
@@ -422,7 +804,7 @@ mod tests {
             dangerously_support_untrusted: false,
             origin: crate::hook::HookOrigin::Operator,
             template: None,
-            params: std::collections::BTreeMap::new(),
+            params: BTreeMap::new(),
             run_as: None,
         };
         let anon_derived = effective_hook_name(&anon);
