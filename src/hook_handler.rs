@@ -162,6 +162,8 @@ pub async fn handle_hook_delete(
         mb.hooks.retain(|h| effective_hook_name(h) != req.name);
         if mb.hooks.len() != before {
             removed = true;
+            // Safe to break: `validate_hooks` guarantees effective-name
+            // uniqueness globally, so at most one hook ever matches.
             break;
         }
     }

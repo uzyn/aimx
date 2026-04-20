@@ -127,6 +127,12 @@ pub fn is_valid_hook_name(s: &str) -> bool {
 /// chars (48 bits) are returned — wide enough that collisions across a
 /// realistic config set are vanishingly improbable, and the output
 /// satisfies `is_valid_hook_name`.
+///
+/// The mailbox name is deliberately excluded from the hash. Two mailboxes
+/// with the same `(event, cmd, dangerously_support_untrusted)` will
+/// produce the same derived name and collide under `validate_hooks`,
+/// forcing the operator to set an explicit `name` to disambiguate. The
+/// collision error string in `validate_hooks` points this out.
 pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(event.as_str().as_bytes());
@@ -136,10 +142,11 @@ pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String 
     hasher.update([dangerous as u8]);
     let digest = hasher.finalize();
     let mut out = String::with_capacity(DERIVED_HOOK_NAME_LEN);
+    // DERIVED_HOOK_NAME_LEN is even, so taking ceil(len/2) bytes and
+    // hex-encoding them produces exactly DERIVED_HOOK_NAME_LEN chars.
     for b in digest.iter().take(DERIVED_HOOK_NAME_LEN.div_ceil(2)) {
         out.push_str(&format!("{b:02x}"));
     }
-    out.truncate(DERIVED_HOOK_NAME_LEN);
     out
 }
 
