@@ -174,12 +174,12 @@ No flags. See [MCP Server](mcp.md).
 
 ### `aimx agent-setup [agent]`
 
-Install the AIMX plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. With no positional argument on an interactive terminal, prints a numbered menu including an **MCP (General)** option.
+Install the AIMX plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
 
 | Flag | Description |
 |------|-------------|
-| `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit with `--list` or on an interactive terminal. |
-| `--list` | Print the registry: agent name, destination path, activation hint. |
+| `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit to print the registry. |
+| `--list` | Print the registry: agent name, destination path, activation hint. Equivalent to running with no positional argument. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print the plugin contents to stdout instead of writing to disk. |
 
