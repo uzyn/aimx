@@ -156,6 +156,65 @@ pub trait SystemOps {
         }
         Ok(())
     }
+
+    /// True iff the process's stdin is attached to a real TTY. The
+    /// `aimx setup` hook-template picker refuses to draw a dialoguer
+    /// widget when stdin is piped (CI, scripted installs) and instead
+    /// skips the prompt with an informational warning.
+    ///
+    /// Default impl inspects the real stdin. `MockSystemOps` overrides
+    /// this to a scripted boolean so unit tests can exercise both the
+    /// TTY and non-TTY paths without spawning subprocesses.
+    fn is_stdin_tty(&self) -> bool {
+        use std::io::IsTerminal;
+        io::stdin().is_terminal()
+    }
+
+    /// Render the interactive hook-template checkbox list (PRD §6.3).
+    ///
+    /// `available` is the ordered list of bundled template names;
+    /// `preselected` is the subset currently enabled in `config.toml`
+    /// (empty on fresh installs, populated on re-runs).
+    ///
+    /// Returns the operator's selection. The default impl uses
+    /// `dialoguer::MultiSelect`; tests override with a scripted
+    /// selection so they don't need a real terminal.
+    fn prompt_hook_template_selection(
+        &self,
+        available: &[HookTemplateChoice],
+        preselected: &[String],
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        use dialoguer::MultiSelect;
+        use dialoguer::theme::ColorfulTheme;
+
+        let defaults: Vec<bool> = available
+            .iter()
+            .map(|t| preselected.iter().any(|p| p == &t.name))
+            .collect();
+        let items: Vec<String> = available
+            .iter()
+            .map(|t| format!("{:<18} {}", t.name, t.description))
+            .collect();
+        let chosen = MultiSelect::with_theme(&ColorfulTheme::default())
+            .with_prompt("Which templates should I enable? (space to toggle, enter to confirm)")
+            .items(&items)
+            .defaults(&defaults)
+            .interact()?;
+        Ok(chosen
+            .into_iter()
+            .map(|i| available[i].name.clone())
+            .collect())
+    }
+}
+
+/// Compact descriptor of a bundled hook template, passed to
+/// [`SystemOps::prompt_hook_template_selection`]. Decoupled from
+/// [`crate::config::HookTemplate`] so the trait method doesn't leak the
+/// full schema into the prompt UI.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HookTemplateChoice {
+    pub name: String,
+    pub description: String,
 }
 
 /// Fixed name of the unprivileged Unix user hook subprocesses run as.
@@ -216,6 +275,138 @@ pub(crate) fn chown_datadir_for_hook_user(
         term::highlight(HOOK_SERVICE_USER),
         term::dim(&data_dir.display().to_string()),
     );
+    Ok(())
+}
+
+/// Run the Sprint 4 hook-template checkbox phase (PRD §6.3).
+///
+/// - On a real TTY (and when `non_interactive == false`), prompts the
+///   operator with a multi-select of the eight bundled templates.
+/// - Non-interactive path (explicit `--non-interactive` or piped stdin)
+///   skips the prompt entirely and installs nothing.
+///
+/// On re-runs, templates currently present in `config.toml` are
+/// pre-ticked so deselecting a template uninstalls it. The final
+/// selection is written back to `config.toml` via
+/// [`apply_selected_templates`] — idempotent in both directions.
+///
+/// Returns the final set of enabled template names so callers (tests,
+/// future doctor extensions) can assert on it.
+pub(crate) fn configure_hook_templates(
+    config_path: &Path,
+    non_interactive: bool,
+    sys: &dyn SystemOps,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    println!("\n{}", term::header("[Hook Templates]"));
+    println!(
+        "Hook templates let your agents create their own on_receive / after_send\n\
+         automations via MCP, safely. Each template is a pre-vetted command shape;\n\
+         agents can only fill declared parameters. Hook commands run as the\n\
+         unprivileged '{HOOK_SERVICE_USER}' user, never as root.\n",
+    );
+
+    // Skip the prompt when explicit non-interactive, or stdin is piped.
+    if non_interactive || !sys.is_stdin_tty() {
+        println!(
+            "  {} {}",
+            term::warn("Skipping template selection:"),
+            term::dim(if non_interactive {
+                "--non-interactive was passed"
+            } else {
+                "stdin is not a TTY"
+            }),
+        );
+        println!(
+            "  {} {}",
+            term::info("No templates installed."),
+            term::dim("Re-run `aimx setup` on a real terminal to enable them."),
+        );
+        // Return the current on-disk selection unchanged (re-runs keep
+        // existing templates).
+        return Ok(current_hook_templates(config_path));
+    }
+
+    let bundled = crate::hook_templates_defaults::default_templates();
+    let choices: Vec<HookTemplateChoice> = bundled
+        .iter()
+        .map(|t| HookTemplateChoice {
+            name: t.name.clone(),
+            description: t.description.clone(),
+        })
+        .collect();
+    let preselected = current_hook_templates(config_path);
+
+    let selected = sys.prompt_hook_template_selection(&choices, &preselected)?;
+
+    apply_selected_templates(config_path, &bundled, &selected)?;
+
+    if selected.is_empty() {
+        println!(
+            "  {} {}",
+            term::info("No templates enabled."),
+            term::dim("Re-run `aimx setup` to change this."),
+        );
+    } else {
+        println!(
+            "  {} {}",
+            term::success("Templates enabled:"),
+            term::highlight(&selected.join(", ")),
+        );
+    }
+
+    Ok(selected)
+}
+
+/// Read the current set of enabled template names from `config.toml`.
+/// Returns an empty vec on fresh installs (file missing or config is
+/// malformed) so a new install never treats a bad edit as "already
+/// has templates".
+fn current_hook_templates(config_path: &Path) -> Vec<String> {
+    if !config_path.exists() {
+        return Vec::new();
+    }
+    match Config::load(config_path) {
+        Ok(cfg) => cfg.hook_templates.into_iter().map(|t| t.name).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Merge `selected` template names back into `config.toml`. Any bundled
+/// template whose name is in `selected` is appended (or replaces its
+/// same-name entry); unselected bundled templates are dropped. Non-
+/// bundled `[[hook_template]]` entries (operator-authored, currently
+/// undocumented but schema-accepted) are preserved untouched.
+fn apply_selected_templates(
+    config_path: &Path,
+    bundled: &[crate::config::HookTemplate],
+    selected: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !config_path.exists() {
+        return Err(format!(
+            "config file missing at {}: `configure_hook_templates` must run after `finalize_setup`",
+            config_path.display()
+        )
+        .into());
+    }
+    let mut cfg = Config::load(config_path)?;
+
+    let bundled_names: std::collections::HashSet<&str> =
+        bundled.iter().map(|t| t.name.as_str()).collect();
+
+    // Drop every bundled template from the existing list; keep anything
+    // else (operator-authored custom templates) intact.
+    cfg.hook_templates
+        .retain(|t| !bundled_names.contains(t.name.as_str()));
+
+    // Append the user's current selection, in the bundled order, so
+    // reruns produce deterministic config.toml diffs.
+    for tmpl in bundled {
+        if selected.iter().any(|n| n == &tmpl.name) {
+            cfg.hook_templates.push(tmpl.clone());
+        }
+    }
+
+    install_config_file(&cfg, config_path)?;
     Ok(())
 }
 
@@ -1612,6 +1803,7 @@ pub(crate) fn detect_server_ipv6(enable_ipv6: bool, ipv6: Option<Ipv6Addr>) -> O
 pub fn run_setup(
     domain: Option<&str>,
     data_dir: Option<&Path>,
+    non_interactive: bool,
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1713,6 +1905,13 @@ pub fn run_setup(
     // before the service install so the unit file can reference the user
     // if a future revision chooses to.
     ensure_hook_user(sys, data_dir)?;
+
+    // Step 4c: Interactive hook-template selection (Sprint 4, PRD §6.3).
+    // Sits after user creation (the templates only matter once hooks can
+    // drop privileges) and before the DNS retry loop so the operator
+    // isn't stuck at a DNS prompt before the checkbox UI. Reuses the
+    // `config_path` binding computed at the top of `run_setup`.
+    configure_hook_templates(&config_path, non_interactive, sys)?;
 
     // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
@@ -1958,6 +2157,16 @@ mod tests {
         /// `chown_group_readable`. Lets tests assert the chown fires on
         /// the right paths in the right order.
         chown_calls: RefCell<Vec<(PathBuf, String, String)>>,
+        /// Sprint 4: scripted return from `is_stdin_tty` so tests exercise
+        /// the prompt-shown vs prompt-skipped paths without a real terminal.
+        stdin_is_tty: bool,
+        /// Sprint 4: scripted return from `prompt_hook_template_selection`.
+        /// Tests populate this to simulate the operator's checkbox choices.
+        scripted_template_selection: RefCell<Option<Vec<String>>>,
+        /// Sprint 4: records every
+        /// `(available, preselected)` tuple passed to the prompt so tests
+        /// can assert the UI saw the right set and pre-ticks.
+        template_prompt_calls: RefCell<Vec<(Vec<HookTemplateChoice>, Vec<String>)>>,
     }
 
     impl Default for MockSystemOps {
@@ -1975,6 +2184,9 @@ mod tests {
                 existing_users: RefCell::new(std::collections::HashSet::new()),
                 created_users: RefCell::new(vec![]),
                 chown_calls: RefCell::new(vec![]),
+                stdin_is_tty: true,
+                scripted_template_selection: RefCell::new(None),
+                template_prompt_calls: RefCell::new(vec![]),
             }
         }
     }
@@ -2058,6 +2270,196 @@ mod tests {
             ));
             Ok(())
         }
+        fn is_stdin_tty(&self) -> bool {
+            self.stdin_is_tty
+        }
+        fn prompt_hook_template_selection(
+            &self,
+            available: &[HookTemplateChoice],
+            preselected: &[String],
+        ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            self.template_prompt_calls
+                .borrow_mut()
+                .push((available.to_vec(), preselected.to_vec()));
+            // Default: keep the pre-selected set (mirrors "operator hits
+            // enter without touching anything" on a re-run).
+            let scripted = self
+                .scripted_template_selection
+                .borrow_mut()
+                .take()
+                .unwrap_or_else(|| preselected.to_vec());
+            Ok(scripted)
+        }
+    }
+
+    // ----- Sprint 4 S4-2: hook-template configure phase ------------------
+
+    /// Write a minimal but valid `config.toml` under `AIMX_CONFIG_DIR`
+    /// so `configure_hook_templates` can load/save it. Returns the
+    /// temp dir guard so the caller can use `.path()` and cleanup
+    /// happens on drop.
+    fn scratch_config_dir() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let body = r#"domain = "test.example"
+
+[mailboxes.catchall]
+address = "*@test.example"
+"#;
+        std::fs::write(&cfg_path, body).unwrap();
+        (tmp, cfg_path)
+    }
+
+    #[test]
+    fn configure_hook_templates_skips_when_non_interactive() {
+        let sys = MockSystemOps::default();
+        let (_tmp, cfg_path) = scratch_config_dir();
+
+        let selected =
+            super::configure_hook_templates(&cfg_path, true, &sys).expect("non-interactive path");
+        assert!(
+            selected.is_empty(),
+            "non-interactive setup must install zero templates by default"
+        );
+
+        assert!(
+            sys.template_prompt_calls.borrow().is_empty(),
+            "prompt must not render when --non-interactive is passed"
+        );
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        assert!(
+            cfg.hook_templates.is_empty(),
+            "config.toml should have no hook_templates after non-interactive setup"
+        );
+    }
+
+    #[test]
+    fn configure_hook_templates_skips_when_stdin_not_tty() {
+        let sys = MockSystemOps {
+            stdin_is_tty: false,
+            ..MockSystemOps::default()
+        };
+        let (_tmp, cfg_path) = scratch_config_dir();
+
+        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+        assert!(selected.is_empty());
+        assert!(sys.template_prompt_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn configure_hook_templates_writes_fresh_selection() {
+        let sys = MockSystemOps::default();
+        *sys.scripted_template_selection.borrow_mut() =
+            Some(vec!["invoke-claude".into(), "webhook".into()]);
+        let (_tmp, cfg_path) = scratch_config_dir();
+
+        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+        assert_eq!(selected, vec!["invoke-claude", "webhook"]);
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(names, vec!["invoke-claude", "webhook"]);
+
+        // Prompt was shown with no pre-selection (fresh install).
+        let calls = sys.template_prompt_calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0.len(), 8, "all 8 defaults must be shown");
+        assert!(
+            calls[0].1.is_empty(),
+            "fresh install must render with nothing pre-selected"
+        );
+    }
+
+    #[test]
+    fn configure_hook_templates_is_idempotent_on_rerun() {
+        let sys = MockSystemOps::default();
+        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
+        let (_tmp, cfg_path) = scratch_config_dir();
+
+        // First run: install invoke-claude.
+        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+
+        // Second run: operator hits enter without toggling anything —
+        // scripted_template_selection falls back to the `preselected`
+        // list (the MockSystemOps default behavior).
+        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+        assert_eq!(
+            selected,
+            vec!["invoke-claude"],
+            "re-run must preserve the current selection when the operator doesn't change it"
+        );
+
+        let calls = sys.template_prompt_calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].1,
+            vec!["invoke-claude"],
+            "re-run must pre-tick invoke-claude"
+        );
+    }
+
+    #[test]
+    fn configure_hook_templates_deselection_removes_template() {
+        let sys = MockSystemOps::default();
+        // First selection: enable two.
+        *sys.scripted_template_selection.borrow_mut() =
+            Some(vec!["invoke-claude".into(), "webhook".into()]);
+        let (_tmp, cfg_path) = scratch_config_dir();
+        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+
+        // Second run: user unticks webhook.
+        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
+        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["invoke-claude"],
+            "deselected template must be dropped from config.toml"
+        );
+    }
+
+    #[test]
+    fn configure_hook_templates_preserves_custom_template_entries() {
+        // Simulates an operator who hand-edited config.toml to add a
+        // custom non-bundled template. The bundled-defaults pass must
+        // not clobber it.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        let body = r#"domain = "test.example"
+
+[[hook_template]]
+name = "custom-one"
+description = "Operator's own template."
+cmd = ["/opt/custom/bin", "{url}"]
+params = ["url"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 30
+allowed_events = ["on_receive"]
+
+[mailboxes.catchall]
+address = "*@test.example"
+"#;
+        std::fs::write(&cfg_path, body).unwrap();
+
+        let sys = MockSystemOps::default();
+        *sys.scripted_template_selection.borrow_mut() = Some(vec!["webhook".into()]);
+
+        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
+        assert!(
+            names.contains(&"custom-one".to_string()),
+            "custom template must survive the bundle-write pass; got {names:?}"
+        );
+        assert!(
+            names.contains(&"webhook".to_string()),
+            "selected bundled template must be written; got {names:?}"
+        );
     }
 
     // ----- Sprint 1 S1-4: aimx-hook user + datadir chown ------------------
@@ -2735,7 +3137,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
 
         assert!(
             !*sys.service_file_installed.borrow(),
@@ -2759,7 +3161,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
 
         let err = result.expect_err("preflight failure must bubble up");
         assert!(
@@ -2792,7 +3194,7 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
         let err = result.expect_err("preflight failure must bubble up");
         assert!(
             err.to_string().contains("Port 25 checks failed"),
@@ -2885,7 +3287,7 @@ mod tests {
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
 
         assert!(
             !*sys.service_file_installed.borrow(),
@@ -3081,7 +3483,7 @@ mod tests {
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), None, &sys, &net);
+        let result = run_setup(Some("example.com"), None, true, &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3099,7 +3501,7 @@ mod tests {
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3506,7 +3908,7 @@ mod tests {
             inbound_port25: false,
             ..Default::default()
         };
-        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
         // Should progress past domain prompt and fail on port 25 check
         assert!(result.is_err());
         assert!(

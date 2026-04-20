@@ -42,6 +42,7 @@ pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::E
         HookCommand::List { mailbox } => list(&config, mailbox.as_deref()),
         HookCommand::Create(args) => create(&config, args),
         HookCommand::Delete { name, yes } => delete(&config, &name, yes),
+        HookCommand::Templates => list_templates(&config, &mut io::stdout()),
     }
 }
 
@@ -80,6 +81,60 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
             row.event,
             truncate_with_ellipsis(&row.cmd, 60),
         );
+    }
+    Ok(())
+}
+
+/// `aimx hooks templates` — print a 4-column table of enabled
+/// templates (PRD §9 v1 scope).
+///
+/// Reads the loaded `Config` directly; no UDS round-trip needed for a
+/// read-only query. Empty output prints a one-line hint pointing the
+/// operator at `sudo aimx setup`. Output is sent to `out` so unit tests
+/// can capture it without touching stdout.
+fn list_templates(
+    config: &Config,
+    out: &mut dyn io::Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if config.hook_templates.is_empty() {
+        writeln!(
+            out,
+            "No hook templates enabled. Run `{}` and tick the templates you need.",
+            term::highlight("sudo aimx setup")
+        )?;
+        return Ok(());
+    }
+
+    // Render the header via the 4-column format used by `aimx hooks
+    // list` so the two subcommands sit next to each other visually.
+    writeln!(
+        out,
+        "{} {} {} {}",
+        term::header("NAME                "),
+        term::header("PARAMS                        "),
+        term::header("EVENTS                  "),
+        term::header("DESCRIPTION"),
+    )?;
+
+    let mut rows = config.hook_templates.clone();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    for tmpl in rows {
+        let params = if tmpl.params.is_empty() {
+            "-".to_string()
+        } else {
+            tmpl.params.join(",")
+        };
+        let events: Vec<&'static str> = tmpl.allowed_events.iter().map(|e| e.as_str()).collect();
+        let events = events.join(",");
+        writeln!(
+            out,
+            "{:<20.20} {:<30.30} {:<23.23} {}",
+            term::highlight(&tmpl.name).to_string(),
+            truncate_with_ellipsis(&params, 30),
+            truncate_with_ellipsis(&events, 23),
+            truncate_with_ellipsis(&tmpl.description, 60),
+        )?;
     }
     Ok(())
 }
@@ -765,6 +820,68 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("does not allow event"), "{err}");
+    }
+
+    // ----- Sprint 4 S4-3: `aimx hooks templates` -------------------------
+
+    fn capture_list_templates(config: &Config) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        super::list_templates(config, &mut buf).unwrap();
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn list_templates_empty_prints_setup_hint() {
+        let mut cfg = base_config();
+        cfg.hook_templates.clear();
+        let out = capture_list_templates(&cfg);
+        assert!(out.contains("No hook templates enabled"), "{out}");
+        assert!(out.contains("sudo aimx setup"), "{out}");
+    }
+
+    #[test]
+    fn list_templates_single_template_renders_table() {
+        let cfg = base_config(); // has invoke-claude
+        let out = capture_list_templates(&cfg);
+        assert!(out.contains("NAME"), "header missing: {out}");
+        assert!(out.contains("PARAMS"), "header missing: {out}");
+        assert!(out.contains("EVENTS"), "header missing: {out}");
+        assert!(out.contains("DESCRIPTION"), "header missing: {out}");
+        assert!(out.contains("invoke-claude"), "name missing: {out}");
+        assert!(out.contains("prompt"), "param missing: {out}");
+        assert!(out.contains("on_receive"), "event missing: {out}");
+        assert!(out.contains("after_send"), "event missing: {out}");
+    }
+
+    #[test]
+    fn list_templates_all_eight_defaults_render() {
+        let mut cfg = base_config();
+        cfg.hook_templates = crate::hook_templates_defaults::default_templates();
+        let out = capture_list_templates(&cfg);
+        for name in [
+            "invoke-claude",
+            "invoke-codex",
+            "invoke-opencode",
+            "invoke-gemini",
+            "invoke-goose",
+            "invoke-openclaw",
+            "invoke-hermes",
+            "webhook",
+        ] {
+            assert!(out.contains(name), "missing {name} in output: {out}");
+        }
+    }
+
+    #[test]
+    fn list_templates_truncates_long_description() {
+        let mut cfg = base_config();
+        cfg.hook_templates[0].description = "x".repeat(200);
+        let out = capture_list_templates(&cfg);
+        // The ellipsis character marks truncation.
+        assert!(
+            out.contains('…'),
+            "long description must be truncated: {out}"
+        );
     }
 
     #[test]

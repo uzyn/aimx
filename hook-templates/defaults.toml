@@ -1,0 +1,105 @@
+# Default hook templates shipped with the aimx binary.
+#
+# Embedded via `include_str!` in src/hook_templates_defaults.rs. The
+# `aimx setup` interactive checkbox UI writes the selected subset into
+# `/etc/aimx/config.toml`. Operators may edit or remove templates from
+# their `config.toml` at any time (SIGHUP picks up changes live).
+#
+# PRD §6.2 defines the argv shapes for each of the seven `invoke-*`
+# templates plus the generic `webhook` template. Exact binary paths
+# target a canonical Linux install; operators whose binaries live
+# elsewhere should override the `cmd[0]` path in their `config.toml`.
+#
+# Every template here must validate via `validate_hook_templates` —
+# the startup unit test `default_templates_load_cleanly` enforces
+# this at compile time.
+
+[[hook_template]]
+name = "invoke-claude"
+description = "Pipe email into Claude Code with a custom prompt."
+cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-codex"
+description = "Pipe email into Codex CLI with a custom prompt."
+cmd = ["/usr/local/bin/codex", "-p", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-opencode"
+description = "Pipe email into OpenCode with a custom prompt."
+cmd = ["/usr/local/bin/opencode", "run", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-gemini"
+description = "Pipe email into Gemini CLI with a custom prompt."
+cmd = ["/usr/local/bin/gemini", "-p", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-goose"
+description = "Pipe email into a Goose recipe."
+cmd = ["/usr/local/bin/goose", "run", "--recipe", "{recipe}"]
+params = ["recipe"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-openclaw"
+description = "Pipe email into OpenClaw with a custom prompt."
+cmd = ["/usr/local/bin/openclaw", "run", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "invoke-hermes"
+description = "Pipe email into Hermes with a custom prompt."
+cmd = ["/usr/local/bin/hermes", "run", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "webhook"
+description = "POST the email as JSON to a URL."
+cmd = [
+    "/usr/bin/curl",
+    "-sS",
+    "-X",
+    "POST",
+    "-H",
+    "Content-Type: application/json",
+    "--data-binary",
+    "@-",
+    "{url}",
+]
+params = ["url"]
+stdin = "email_json"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
