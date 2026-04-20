@@ -15,8 +15,6 @@ static AGENTS_DIR: Dir<'_> = include_dir!("$CARGO_MANIFEST_DIR/agents");
 pub struct AgentSpec {
     /// Registry key passed on the CLI (e.g. `claude-code`).
     pub name: &'static str,
-    /// Human-friendly label shown in the guided setup menu (e.g. `Claude Code`).
-    pub display_name: &'static str,
     /// Path inside the `agents/` tree that holds the plugin source.
     pub source_subdir: &'static str,
     /// Destination template, with `$HOME` / `$XDG_CONFIG_HOME` placeholders.
@@ -62,7 +60,6 @@ pub fn registry() -> &'static [AgentSpec] {
     &[
         AgentSpec {
             name: "claude-code",
-            display_name: "Claude Code",
             source_subdir: "claude-code",
             dest_template: "$HOME/.claude/plugins/aimx",
             activation_hint: claude_code_hint,
@@ -70,7 +67,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "codex",
-            display_name: "Codex CLI",
             source_subdir: "codex",
             dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
@@ -78,7 +74,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "opencode",
-            display_name: "OpenCode",
             source_subdir: "opencode",
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
             activation_hint: opencode_hint,
@@ -86,7 +81,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "gemini",
-            display_name: "Gemini CLI",
             source_subdir: "gemini",
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
@@ -94,7 +88,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "goose",
-            display_name: "Goose",
             source_subdir: "goose",
             // Goose discovers recipes by filename stem from
             // ~/.config/goose/recipes/ — we install one file, not a
@@ -105,7 +98,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "openclaw",
-            display_name: "OpenClaw",
             source_subdir: "openclaw",
             // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md — we ship a
             // skill-directory package (no flat SKILL.md at the root).
@@ -115,7 +107,6 @@ pub fn registry() -> &'static [AgentSpec] {
         },
         AgentSpec {
             name: "hermes",
-            display_name: "Hermes",
             source_subdir: "hermes",
             // Hermes Agent (Nous Research) loads skills from
             // ~/.hermes/skills/<name>/SKILL.md with optional `references/`
@@ -455,13 +446,13 @@ pub fn run_with_env_to_writer(
     out: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
     if list {
-        print_registry(env);
+        print_registry_to_writer(env, out)?;
         return Ok(());
     }
 
-    // Enforce the per-user constraint before doing any work so all three
-    // entry paths (positional agent, unknown agent, guided menu) produce the
-    // same root error rather than menus or "unknown agent" first.
+    // Enforce the per-user constraint before any install- or bare-invocation
+    // work so every error-path (positional agent, unknown agent, bare) surfaces
+    // the same root refusal instead of an install attempt or registry dump.
     if env.is_root() {
         return Err("agent-setup is a per-user operation — run without sudo or as root".into());
     }
@@ -472,160 +463,51 @@ pub fn run_with_env_to_writer(
         data_dir,
     };
 
-    let selection = match agent {
-        Some(name) => {
-            let spec = find_agent(&name).ok_or_else(|| {
-                format!(
-                    "unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents"
-                )
-            })?;
-            Selection::Agent(spec)
-        }
+    let spec = match agent {
+        Some(name) => find_agent(&name).ok_or_else(|| {
+            format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
+        })?,
         None => {
-            if !env.is_stdin_tty() {
-                return Err(
-                    "agent-setup requires an agent name, or --list to see supported agents".into(),
-                );
-            }
-            prompt_agent_selection(env, out)?
+            // Bare invocation: print the registry plus a usage-hint footer
+            // and exit cleanly. Same output on TTY and non-TTY; no prompt.
+            print_registry_to_writer(env, out)?;
+            writeln!(
+                out,
+                "Run `aimx agent-setup <agent>` to install one of the agents \
+                 above, or `aimx agent-setup --list` to print this list again."
+            )?;
+            return Ok(());
         }
     };
 
-    match selection {
-        Selection::Agent(spec) => install_to_writer(spec, &opts, env, out),
-        Selection::McpGeneral => print_mcp_general(data_dir, out),
-    }
+    install_to_writer(spec, &opts, env, out)
 }
 
-/// Result of the guided menu prompt. `McpGeneral` is a pseudo-selection that
-/// prints a generic MCP stdio JSON snippet instead of installing any files.
-enum Selection {
-    Agent(&'static AgentSpec),
-    McpGeneral,
-}
-
-/// Display the guided setup menu and read a numeric choice from the user.
-/// Blank input aborts. One invalid input re-prompts; a second invalid input
-/// returns an error.
-fn prompt_agent_selection(
-    env: &dyn AgentEnv,
-    out: &mut dyn Write,
-) -> Result<Selection, Box<dyn std::error::Error>> {
-    let agents = registry();
-    // Slot numbering: 1..=agents.len() are the real agents; the final slot
-    // is "MCP (General)".
-    let mcp_general_slot = agents.len() + 1;
-
-    writeln!(out, "{}", term::header("Select what to configure:"))?;
-    for (idx, spec) in agents.iter().enumerate() {
-        writeln!(out, "  {}) {}", idx + 1, spec.display_name)?;
-    }
-    writeln!(out, "  {mcp_general_slot}) MCP (General)")?;
-    write!(out, "Choice [1-{mcp_general_slot}]: ")?;
-    out.flush()?;
-
-    let parse_choice = |raw: &str| -> Option<Selection> {
-        let n: usize = raw.trim().parse().ok()?;
-        // Slots are 1-indexed; guard against `0` so `n - 1` never underflows
-        // usize when indexing into `agents`.
-        if n == 0 {
-            return None;
-        }
-        if n == mcp_general_slot {
-            return Some(Selection::McpGeneral);
-        }
-        agents.get(n - 1).map(Selection::Agent)
-    };
-
-    let first = env.read_line()?;
-    if first.trim().is_empty() {
-        return Err("aborted by user".into());
-    }
-    if let Some(sel) = parse_choice(&first) {
-        return Ok(sel);
-    }
-
-    writeln!(
-        out,
-        "{} '{}' is not a valid choice.",
-        term::warn("Invalid:"),
-        first.trim()
-    )?;
-    write!(out, "Choice [1-{mcp_general_slot}]: ")?;
-    out.flush()?;
-    let second = env.read_line()?;
-    // A blank retry is the same signal as a blank first input: the user has
-    // given up, so surface the same friendly "aborted by user" message rather
-    // than "invalid choice ''".
-    if second.trim().is_empty() {
-        return Err("aborted by user".into());
-    }
-    if let Some(sel) = parse_choice(&second) {
-        return Ok(sel);
-    }
-
-    Err(format!("invalid choice '{}'; aborting", second.trim()).into())
-}
-
-/// Render the generic MCP stdio JSON snippet for clients that aren't in the
-/// per-agent registry. Honors `--data-dir` the same way per-agent hints do.
-fn print_mcp_general(
-    data_dir: Option<&Path>,
-    out: &mut dyn Write,
-) -> Result<(), Box<dyn std::error::Error>> {
-    writeln!(
-        out,
-        "Generic MCP stdio config for any client that speaks MCP. Paste this \
-         into your client's MCP server config (field names may vary):"
-    )?;
+fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out, "{}", term::header("Supported agents:"))?;
     writeln!(out)?;
-    writeln!(out, "{}", render_mcp_general_snippet(data_dir))?;
-    Ok(())
-}
-
-/// Build the `{ "command": ..., "args": [...] }` JSON snippet. Routed through
-/// `serde_json` so a `--data-dir` path containing `"` or `\` escapes safely.
-fn render_mcp_general_snippet(data_dir: Option<&Path>) -> String {
-    let args: Vec<String> = match data_dir {
-        Some(dd) => vec![
-            "--data-dir".to_string(),
-            dd.to_string_lossy().into_owned(),
-            "mcp".to_string(),
-        ],
-        None => vec!["mcp".to_string()],
-    };
-    let snippet = serde_json::json!({
-        "command": "/usr/local/bin/aimx",
-        "args": args,
-    });
-    serde_json::to_string_pretty(&snippet)
-        .unwrap_or_else(|_| "<failed to render snippet>".to_string())
-}
-
-fn print_registry(env: &dyn AgentEnv) {
-    println!("{}", term::header("Supported agents:"));
-    println!();
     for spec in registry() {
         let dest = resolve_dest(spec.dest_template, env)
             .unwrap_or_else(|_| PathBuf::from(spec.dest_template));
-        println!("  {}", term::highlight(spec.name));
-        println!("    destination: {}", dest.display());
-        println!("    install:     aimx agent-setup {}", spec.name);
+        writeln!(out, "  {}", term::highlight(spec.name))?;
+        writeln!(out, "    destination: {}", dest.display())?;
+        writeln!(out, "    install:     aimx agent-setup {}", spec.name)?;
         let hint = (spec.activation_hint)(None);
         let mut hint_lines = hint.lines();
         if let Some(first) = hint_lines.next() {
-            println!("    activation:  {first}");
+            writeln!(out, "    activation:  {first}")?;
             for line in hint_lines {
-                println!("                 {line}");
+                writeln!(out, "                 {line}")?;
             }
         }
-        println!();
+        writeln!(out)?;
     }
+    Ok(())
 }
 
 /// Writes user-facing output to `out`. Called from `run_with_env_to_writer`
-/// once an `AgentSpec` has been resolved (either from a positional argument
-/// or from the guided menu).
+/// once an `AgentSpec` has been resolved from the positional `<agent>`
+/// argument.
 ///
 /// Handles `--print` (dry run; emits file list + activation hint) and the
 /// normal install path (lays files down under `dest_template`, then prints
@@ -1246,14 +1128,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
         run_with_env(None, true, false, false, None, &env).unwrap();
-    }
-
-    #[test]
-    fn missing_agent_name_errors_when_not_listing() {
-        let tmp = TempDir::new().unwrap();
-        let env = MockEnv::new(tmp.path().to_path_buf());
-        let err = run_with_env(None, false, false, false, None, &env).unwrap_err();
-        assert!(err.to_string().contains("agent name"));
     }
 
     #[test]
@@ -2643,200 +2517,48 @@ mod tests {
         assert_eq!(skill_bytes, &expected);
     }
 
-    // --- Guided menu tests ---
-
-    fn run_menu(
-        tmp: &TempDir,
-        responses: Vec<&str>,
-        data_dir: Option<&Path>,
-    ) -> (Result<(), Box<dyn std::error::Error>>, String, MockEnv) {
-        let mut env = MockEnv::new(tmp.path().to_path_buf());
-        env.tty = true;
-        env.responses = RefCell::new(responses.into_iter().map(String::from).collect());
-        let mut out: Vec<u8> = Vec::new();
-        let res = run_with_env_to_writer(None, false, false, false, data_dir, &env, &mut out);
-        (res, String::from_utf8(out).unwrap(), env)
-    }
+    // --- Bare invocation tests ---
 
     #[test]
-    fn menu_renders_all_agents_and_mcp_general() {
+    fn bare_invocation_prints_registry_and_hint() {
+        // `aimx agent-setup` with no agent and no --list must print the
+        // registry plus a usage-hint footer and exit Ok(()). Works on both
+        // TTY and non-TTY — no interactive prompt.
         let tmp = TempDir::new().unwrap();
-        // Abort immediately; we only care about the rendered menu text.
-        let (_res, out, _env) = run_menu(&tmp, vec!["\n"], None);
+        for tty in [false, true] {
+            let mut env = MockEnv::new(tmp.path().to_path_buf());
+            env.tty = tty;
+            let mut out: Vec<u8> = Vec::new();
+            run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap();
+            let rendered = String::from_utf8(out).unwrap();
 
-        for spec in registry() {
+            for spec in registry() {
+                assert!(
+                    rendered.contains(spec.name),
+                    "registry output missing agent {:?} (tty={tty}): {rendered}",
+                    spec.name
+                );
+            }
             assert!(
-                out.contains(spec.display_name),
-                "menu missing display name {:?}: {out}",
-                spec.display_name
+                rendered.contains("aimx agent-setup <agent>"),
+                "missing usage hint (tty={tty}): {rendered}"
+            );
+            assert!(
+                !tmp.path().join(".claude").exists(),
+                "bare invocation must not install anything (tty={tty})"
             );
         }
-        assert!(
-            out.contains("MCP (General)"),
-            "menu missing MCP (General) row: {out}"
-        );
-        let mcp_slot = registry().len() + 1;
-        assert!(
-            out.contains(&format!("Choice [1-{mcp_slot}]:")),
-            "missing numbered prompt range: {out}"
-        );
     }
 
     #[test]
-    fn menu_selects_claude_code_and_installs() {
-        let tmp = TempDir::new().unwrap();
-        let (res, _out, _env) = run_menu(&tmp, vec!["1\n"], None);
-        res.unwrap();
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        assert!(dest.join(".claude-plugin/plugin.json").exists());
-        assert!(dest.join("skills/aimx/SKILL.md").exists());
-    }
-
-    #[test]
-    fn menu_selects_codex_and_installs() {
-        let tmp = TempDir::new().unwrap();
-        // Codex is slot 2 in the current registry order.
-        let (res, _out, _env) = run_menu(&tmp, vec!["2\n"], None);
-        res.unwrap();
-        let dest = tmp.path().join(".codex/skills/aimx");
-        assert!(dest.join("SKILL.md").exists());
-    }
-
-    #[test]
-    fn menu_selects_mcp_general_prints_generic_snippet() {
-        let tmp = TempDir::new().unwrap();
-        let mcp_slot = registry().len() + 1;
-        let (res, out, _env) = run_menu(&tmp, vec![format!("{mcp_slot}\n").as_str()], None);
-        res.unwrap();
-
-        assert!(
-            out.contains("\"command\": \"/usr/local/bin/aimx\""),
-            "missing command in snippet: {out}"
-        );
-        assert!(out.contains("\"mcp\""), "missing mcp arg in snippet: {out}");
-        assert!(
-            !out.contains("--data-dir"),
-            "unexpected --data-dir when none was set: {out}"
-        );
-        assert!(
-            !tmp.path().join(".claude").exists(),
-            "MCP (General) must not write any agent files"
-        );
-        assert!(!tmp.path().join(".codex").exists());
-    }
-
-    #[test]
-    fn menu_mcp_general_with_data_dir_injects_flag() {
-        let tmp = TempDir::new().unwrap();
-        let mcp_slot = registry().len() + 1;
-        let custom = PathBuf::from("/custom/aimx-data");
-        let (res, out, _env) =
-            run_menu(&tmp, vec![format!("{mcp_slot}\n").as_str()], Some(&custom));
-        res.unwrap();
-        assert!(out.contains("--data-dir"));
-        assert!(out.contains("/custom/aimx-data"));
-    }
-
-    #[test]
-    fn menu_enter_alone_aborts() {
-        let tmp = TempDir::new().unwrap();
-        let (res, _out, _env) = run_menu(&tmp, vec!["\n"], None);
-        let err = res.unwrap_err();
-        assert!(
-            err.to_string().contains("aborted by user"),
-            "unexpected error: {err}"
-        );
-        assert!(!tmp.path().join(".claude").exists());
-    }
-
-    #[test]
-    fn menu_invalid_then_abort() {
-        let tmp = TempDir::new().unwrap();
-        let (res, out, _env) = run_menu(&tmp, vec!["99\n", "abc\n"], None);
-        let err = res.unwrap_err();
-        assert!(
-            err.to_string().contains("invalid choice"),
-            "unexpected error: {err}"
-        );
-        // User saw the "Invalid" reprompt once.
-        assert!(out.contains("Invalid:"), "missing re-prompt banner: {out}");
-        assert!(!tmp.path().join(".claude").exists());
-    }
-
-    #[test]
-    fn non_tty_without_agent_still_errors() {
-        let tmp = TempDir::new().unwrap();
-        let env = MockEnv::new(tmp.path().to_path_buf()); // tty=false by default
-        let mut out: Vec<u8> = Vec::new();
-        let err =
-            run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap_err();
-        assert!(
-            err.to_string().contains("agent name"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn menu_force_flag_passed_through() {
-        let tmp = TempDir::new().unwrap();
-        // First install via positional arg (no overwrite prompt needed).
-        let env_pos = MockEnv::new(tmp.path().to_path_buf());
-        run_with_env(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            None,
-            &env_pos,
-        )
-        .unwrap();
-
-        let plugin_path = tmp
-            .path()
-            .join(".claude/plugins/aimx/.claude-plugin/plugin.json");
-        assert!(
-            plugin_path.exists(),
-            "initial install should write plugin.json"
-        );
-        // Sentinel content to prove --force actually rewrote the file.
-        std::fs::write(&plugin_path, "SENTINEL\n").unwrap();
-
-        // Second install via menu with --force: must not prompt (only one
-        // scripted response is available — any extra read_line would panic
-        // on `remove(0)`), must rewrite the sentinel content back to real
-        // plugin.json, and must leave no unconsumed menu responses.
-        let mut env_menu = MockEnv::new(tmp.path().to_path_buf());
-        env_menu.tty = true;
-        env_menu.responses = RefCell::new(vec!["1\n".to_string()]);
-        let mut out: Vec<u8> = Vec::new();
-        run_with_env_to_writer(None, false, true, false, None, &env_menu, &mut out).unwrap();
-
-        assert!(
-            env_menu.responses.borrow().is_empty(),
-            "menu should have consumed exactly one read_line; leftovers: {:?}",
-            env_menu.responses.borrow()
-        );
-        let rewritten = std::fs::read_to_string(&plugin_path).unwrap();
-        assert_ne!(
-            rewritten, "SENTINEL\n",
-            "--force path must have overwritten the sentinel plugin.json"
-        );
-        assert!(
-            rewritten.contains("\"mcpServers\""),
-            "rewritten plugin.json should contain the real mcpServers block: {rewritten}"
-        );
-    }
-
-    #[test]
-    fn menu_root_still_refused_up_front() {
-        // Root + TTY + no positional agent: the root check must fire before
-        // the menu is rendered, so no read_line is ever called and no files
-        // are installed.
+    fn bare_invocation_root_is_refused() {
+        // Root + no agent must still be refused up front — before any
+        // registry output — so sudo mistakes get the same friendly
+        // "per-user" error as the install paths.
         let tmp = TempDir::new().unwrap();
         let mut env = MockEnv::new(tmp.path().to_path_buf());
         env.root = true;
         env.tty = true;
-        // No responses queued — if the menu is shown, read_line() panics.
         let mut out: Vec<u8> = Vec::new();
         let err =
             run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap_err();
@@ -2846,24 +2568,24 @@ mod tests {
         );
         assert!(
             out.is_empty(),
-            "no menu output expected when root is rejected up front: {}",
+            "no registry output expected when root is rejected up front: {}",
             String::from_utf8_lossy(&out)
         );
         assert!(!tmp.path().join(".claude").exists());
     }
 
     #[test]
-    fn menu_blank_retry_aborts_cleanly() {
-        // Invalid first entry then Enter-alone on the retry should surface
-        // the same "aborted by user" message as a blank first entry, not
-        // "invalid choice ''".
+    fn bare_invocation_non_tty_still_prints_registry() {
+        // Regression guard: earlier behavior errored on non-TTY bare
+        // invocation ("agent-setup requires an agent name ..."). The soft
+        // revert prints the registry + usage hint and returns Ok(()) on
+        // both TTY and non-TTY so piped/non-interactive callers get the
+        // same friendly output.
         let tmp = TempDir::new().unwrap();
-        let (res, _out, _env) = run_menu(&tmp, vec!["abc\n", "\n"], None);
-        let err = res.unwrap_err();
-        assert!(
-            err.to_string().contains("aborted by user"),
-            "expected friendly abort on blank retry, got: {err}"
-        );
-        assert!(!tmp.path().join(".claude").exists());
+        let env = MockEnv::new(tmp.path().to_path_buf()); // tty=false by default
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap();
+        let rendered = String::from_utf8(out).unwrap();
+        assert!(rendered.contains("aimx agent-setup <agent>"));
     }
 }
