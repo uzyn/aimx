@@ -4,7 +4,7 @@
 //! `aimx hooks create` / `hooks delete` route through the daemon over UDS
 //! so the in-memory `Config` is hot-swapped under a `RwLock<Arc<Config>>`
 //! whenever `config.toml` on disk changes. Newly-created hooks fire on
-//! the very next ingest / after-send event — no restart required.
+//! the very next ingest / after-send event. No restart required.
 //!
 //! Correctness model is symmetric to [`crate::mailbox_handler`]:
 //!
@@ -15,7 +15,7 @@
 //!    appending the new hook to the addressed mailbox's `hooks` array
 //!    (CREATE) or removing the hook whose effective name matches (DELETE).
 //! 3. Write atomically via `write_config_atomic` (write-temp-then-rename
-//!    — shared with `mailbox_handler`).
+//!    shared with `mailbox_handler`).
 //! 4. After the rename succeeds, swap the in-memory `Config` via
 //!    `ConfigHandle::store`.
 //!

@@ -1,28 +1,33 @@
-# AIMX – AI Mail Exchange
+# aimx
 
 > You give your agents an entire server. Why borrow someone else's inbox?
 
 **SMTP for agents. No middleman.**
 
+> The internet's oldest protocol, rebuilt for agents.
+> Runs entirely on your box. No third parties.
+> Your mail, your machine, end to end.
+> Human-friendly setup. LLM-friendly everything else.
+
 > [!CAUTION]
-> **Under heavy development.** This is pre-v1 alpha release. Expect breaking changes in v0 releases. Pin to an exact version if you use it on stable systems.
+> **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes in v0 releases. Pin to an exact version if you use it on stable systems.
 
 
-One command gives your AI agents their own email addresses. No Gmail, no OAuth, no SaaS. Fully self-hosted means full sovereignty.
+AIMX (AI Mail Exchange) is a self-hosted mail server for AI agents. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted means full sovereignty.
 
-Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent -- Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
+Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent: Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
 
 
-- **Single binary.** One binary, no other dependencies. 
-- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery -- closer to an API call.
+- **Single binary.** One binary, no other dependencies.
+- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. aimx turns it back into direct server-to-server delivery, closer to an API call.
 - **Push, not poll.** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
 - **Trust modeling.** Signatures verified on ingest, stamped into the frontmatter. Configurable globally or per mailbox.
 - **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
-- **Markdown-first storage.** No `.eml`, no database. Just Markdown with TOML frontmatter -- LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
+- **Markdown-first storage.** No `.eml`, no database. Just Markdown with TOML frontmatter, LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
 - **You own the inbox.** Mail lives on your disk, under your domain. Nothing phones home.
 - **Hot-swappable mailboxes.** Agents (or you) create and manage mailboxes. Changes take effect live.
 - **Built-in MCP server.** Stdio tools: list, read, send, reply, mark read/unread, mailbox CRUD.
-- **One-line agent integration.** `aimx agent-setup` wires AIMX into any supported agent above.
+- **One-line agent integration.** `aimx agent-setup` wires aimx into any supported agent above.
 - **MIT licensed.** No license server, no telemetry, no account.
 
 Check [Frequently Asked Questions](book/faq.md) for more.
@@ -70,7 +75,7 @@ Commands:
   logs         Tail or follow the aimx service log
   serve        Start the embedded SMTP listener daemon
   portcheck    Check port 25 connectivity (outbound, inbound)
-  agent-setup  Install AIMX plugin/skill for an AI agent into the current user's config
+  agent-setup  Install aimx plugin/skill for an AI agent into the current user's config
   dkim-keygen  Generate DKIM keypair for email signing
   help         Print this message or the help of the given subcommand(s)
 
@@ -82,7 +87,7 @@ Options:
 
 ### MCP server (for AI agents)
 
-Install AIMX into your agent with one command:
+Install aimx into your agent with one command:
 
 | Agent | Install command | Activation |
 |-------|-----------------|------------|
@@ -97,39 +102,39 @@ Install AIMX into your agent with one command:
 Run `aimx agent-setup` (no args) or `aimx agent-setup --list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
 
 Available MCP tools:
-- `mailbox_list` -- list all mailboxes with message counts
-- `mailbox_create` -- create a new mailbox
-- `mailbox_delete` -- delete a mailbox
-- `email_list` -- list emails with optional filters (unread, from, since, subject)
-- `email_read` -- read full email content
-- `email_send` -- compose and send an email
-- `email_reply` -- reply to an email with correct threading
-- `email_mark_read` -- mark an email as read
-- `email_mark_unread` -- mark an email as unread
+- `mailbox_list`: list all mailboxes with message counts
+- `mailbox_create`: create a new mailbox
+- `mailbox_delete`: delete a mailbox
+- `email_list`: list emails with optional filters (unread, from, since, subject)
+- `email_read`: read full email content
+- `email_send`: compose and send an email
+- `email_reply`: reply to an email with correct threading
+- `email_mark_read`: mark an email as read
+- `email_mark_unread`: mark an email as unread
 
 
 
 ## Configuration
 
-AIMX reads a single TOML file at `/etc/aimx/config.toml`, written by `aimx setup` with mode `0640 root:root`. Top-level settings cover `domain`, `dkim_selector`, and the defaults for `trust` / `trusted_senders`; per-mailbox tables attach addresses, override those defaults, and declare hooks.
+aimx reads a single TOML file at `/etc/aimx/config.toml`, written by `aimx setup` with mode `0640 root:root`. Top-level settings cover `domain`, `dkim_selector`, and the defaults for `trust` / `trusted_senders`. Per-mailbox tables attach addresses, override those defaults, and declare hooks.
 
 See [`book/configuration.md`](book/configuration.md) for the full field reference.
 
 
 ## Trust policy
 
-Every inbound email is checked for DKIM, SPF, and DMARC, and the results are written into the TOML frontmatter alongside a summary `trusted` field (`none`, `true`, or `false`). Trust only gates `on_receive` hook execution — mail is always stored on disk regardless of the outcome, so agents and humans can still read untrusted messages via MCP or the filesystem.
+Every inbound email is checked for DKIM, SPF, and DMARC, and the results are written into the TOML frontmatter alongside a summary `trusted` field (`none`, `true`, or `false`). Trust only gates `on_receive` hook execution. Mail is always stored on disk regardless of the outcome, so agents and humans can still read untrusted messages via MCP or the filesystem.
 
 See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate logic and [`book/configuration.md`](book/configuration.md#inbound-email-verification) for the per-field semantics.
 
 
 ## Hooks
 
-AIMX fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`. Hooks may carry an optional `name`; when omitted, AIMX derives a stable 12-char hex id from `event + cmd` so `aimx hooks list` / `delete` can still target the hook.
+aimx fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`. Hooks may carry an optional `name`; when omitted, aimx derives a stable 12-char hex id from `event + cmd` so `aimx hooks list` / `delete` can still target the hook.
 
 ```toml
 [[mailboxes.support.hooks]]
-# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
+# name is optional. A stable 12-char hex id is derived from event+cmd if omitted.
 event = "on_receive"
 cmd = 'ntfy pub agent-mail "$AIMX_SUBJECT from $AIMX_FROM"'
 dangerously_support_untrusted = true

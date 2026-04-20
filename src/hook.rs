@@ -173,7 +173,7 @@ pub struct AfterSendContext<'a> {
     pub to: &'a str,
     pub subject: &'a str,
     /// Path to the persisted sent-copy `.md` (empty string when the send
-    /// wasn't persisted — e.g. TEMP failures).
+    /// wasn't persisted, e.g. TEMP failures).
     pub filepath: &'a str,
     /// RFC Message-ID of the outbound message. Always known by the send
     /// handler even when delivery failed before persistence, so the
@@ -213,8 +213,8 @@ pub fn should_fire_on_receive(hook: &Hook, email_trusted: TrustedValue) -> bool 
     email_trusted == TrustedValue::True
 }
 
-/// Substitute aimx-controlled placeholders. Only `{id}` and `{date}` expand —
-/// user-controlled values ride on `AIMX_*` env vars.
+/// Substitute aimx-controlled placeholders. Only `{id}` and `{date}` expand.
+/// User-controlled values ride on `AIMX_*` env vars.
 pub fn substitute_template(command: &str, id: &str, date: &str) -> String {
     command.replace("{id}", id).replace("{date}", date)
 }
@@ -253,8 +253,8 @@ pub fn execute_on_receive(mailbox_config: &MailboxConfig, ctx: &OnReceiveContext
     }
 }
 
-/// Fire every `after_send` hook for `mailbox_config`. Runs synchronously —
-/// the daemon awaits subprocess completion for predictable timing, but exit
+/// Fire every `after_send` hook for `mailbox_config`. Runs synchronously.
+/// The daemon awaits subprocess completion for predictable timing, but exit
 /// codes are discarded (hooks cannot affect delivery).
 pub fn execute_after_send(mailbox_config: &MailboxConfig, ctx: &AfterSendContext) {
     for hook in mailbox_config.after_send_hooks() {
@@ -292,7 +292,7 @@ pub fn execute_after_send(mailbox_config: &MailboxConfig, ctx: &AfterSendContext
 }
 
 enum LogSubject<'a> {
-    /// `(email_id, message_id)` — either may be empty; the logger picks the
+    /// `(email_id, message_id)`. Either may be empty; the logger picks the
     /// first non-empty one per the agreed log format.
     Email(&'a str, &'a str),
 }

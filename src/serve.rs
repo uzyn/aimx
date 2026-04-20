@@ -22,7 +22,7 @@ pub trait DkimTxtResolver {
 }
 
 /// Production implementation backed by `hickory-resolver`. Creates the
-/// resolver inside each call — setup is cheap and the check runs once at
+/// resolver inside each call. Setup is cheap and the check runs once at
 /// startup. Keeps the trait object trivially constructible.
 pub struct HickoryDkimResolver;
 
@@ -53,9 +53,9 @@ impl DkimTxtResolver for HickoryDkimResolver {
         // S47-1 (test-only): `AIMX_TEST_DKIM_RESOLVER_OVERRIDE` lets the
         // integration test spin a real `aimx serve` against a canned
         // resolver result without touching DNS. Format:
-        //   `"ok:<txt1>||<txt2>"`  — resolver returns Ok(vec![...])
-        //   `"err:<message>"`       — resolver returns Err
-        //   `"no-record"`           — resolver returns Ok(vec![]) (empty)
+        //   `"ok:<txt1>||<txt2>"`  -> resolver returns Ok(vec![...])
+        //   `"err:<message>"`       -> resolver returns Err
+        //   `"no-record"`           -> resolver returns Ok(vec![]) (empty)
         // Gated by the env var so production binaries never short-circuit.
         if let Some(override_val) = std::env::var_os("AIMX_TEST_DKIM_RESOLVER_OVERRIDE") {
             let s = override_val.to_string_lossy().into_owned();
@@ -69,7 +69,7 @@ impl DkimTxtResolver for HickoryDkimResolver {
                 let records: Vec<String> = rest.split("||").map(|s| s.to_string()).collect();
                 return Ok(records);
             }
-            // Unrecognized format — let the real resolver run.
+            // Unrecognized format; let the real resolver run.
         }
 
         // Synchronous helper: the startup check runs inside the tokio
@@ -95,7 +95,7 @@ impl DkimTxtResolver for HickoryDkimResolver {
                     let mut records = Vec::new();
                     for txt in lookup.iter() {
                         // A TXT record may be split across multiple strings
-                        // by resolvers — join them so the `p=` value parses
+                        // by resolvers; join them so the `p=` value parses
                         // cleanly after whitespace stripping.
                         let joined: String = txt
                             .iter()
@@ -117,13 +117,13 @@ impl DkimTxtResolver for HickoryDkimResolver {
 pub enum DkimStartupCheck {
     /// DNS `p=` matches the on-disk public key.
     Match,
-    /// DNS `p=` differs from the on-disk key — receivers will see DKIM fail.
+    /// DNS `p=` differs from the on-disk key. Receivers will see DKIM fail.
     Mismatch { dns: String, local: String },
     /// No `<selector>._domainkey.<domain>` TXT record present.
     NoRecord,
     /// TXT record exists but has no `p=` tag.
     NoPTag,
-    /// DNS resolution itself failed (NXDOMAIN, timeout, etc.). Non-fatal —
+    /// DNS resolution itself failed (NXDOMAIN, timeout, etc.). Non-fatal;
     /// may be a transient propagation issue after a fresh setup.
     ResolveError(String),
 }
@@ -157,7 +157,7 @@ pub fn evaluate_dkim_startup(local_spki_b64: &str, txt_records: &[String]) -> Dk
 }
 
 /// Run the startup DKIM DNS sanity check against `resolver`. Never blocks
-/// startup — every outcome is returned to the caller which logs an
+/// startup. Every outcome is returned to the caller which logs an
 /// appropriate message and continues binding listeners.
 ///
 /// This closes finding #10 from the 2026-04-17 manual test run: the on-disk
@@ -189,7 +189,7 @@ pub fn log_dkim_startup_check(outcome: &DkimStartupCheck, domain: &str, selector
     match outcome {
         DkimStartupCheck::Match => {}
         DkimStartupCheck::Mismatch { dns, local } => {
-            // Loud multi-line warning — this silent-fail mode cost a full
+            // Loud multi-line warning. This silent-fail mode cost a full
             // round of manual test time on 2026-04-17.
             eprintln!(
                 "{} DKIM key mismatch between on-disk private key and DNS-published public key",
@@ -206,7 +206,7 @@ pub fn log_dkim_startup_check(outcome: &DkimStartupCheck, domain: &str, selector
         }
         DkimStartupCheck::NoRecord => {
             eprintln!(
-                "{} No DKIM TXT record found at {fqdn} — outbound mail will FAIL DKIM \
+                "{} No DKIM TXT record found at {fqdn}. Outbound mail will FAIL DKIM \
                  verification at receivers. Run `sudo aimx setup {domain}` to publish the record.",
                 term::warn("Warning:")
             );
@@ -318,7 +318,7 @@ async fn run_serve(
         );
     }
 
-    // Load DKIM key once at startup — every accepted UDS send reuses this
+    // Load DKIM key once at startup. Every accepted UDS send reuses this
     // in-memory key. A failure here is fatal: the daemon cannot sign
     // outbound mail without it.
     let dkim_root = crate::config::dkim_dir();
@@ -336,7 +336,7 @@ async fn run_serve(
     };
 
     // S44-2: compare the on-disk public key to the DNS-published `p=` value.
-    // Never fatal — DNS may not have propagated yet after a fresh setup. A
+    // Never fatal. DNS may not have propagated yet after a fresh setup. A
     // mismatch was the silent root cause of finding #10 in the 2026-04-17
     // manual test run.
     let resolver = HickoryDkimResolver;
@@ -349,7 +349,7 @@ async fn run_serve(
     // `AIMX_TEST_MAIL_DROP` (test-only) replaces the real MX transport with
     // a file-drop transport so integration tests can observe the signed
     // outbound message without reaching the network. In production this env
-    // var is never set — if it leaks in, emit a loud warning so the operator
+    // var is never set; if it leaks in, emit a loud warning so the operator
     // notices that outbound mail is being siloed to disk instead of delivered.
     let transport: Arc<dyn MailTransport + Send + Sync> = match std::env::var_os(
         "AIMX_TEST_MAIL_DROP",
@@ -357,7 +357,7 @@ async fn run_serve(
         Some(path) => {
             let drop_path = PathBuf::from(&path);
             eprintln!(
-                "{} AIMX_TEST_MAIL_DROP is set — outbound mail will be written to {} and NOT delivered to recipients. This must only be used in tests; unset the env var on production hosts.",
+                "{} AIMX_TEST_MAIL_DROP is set. Outbound mail will be written to {} and NOT delivered to recipients. This must only be used in tests. Unset the env var on production hosts.",
                 term::warn("Warning:"),
                 drop_path.display()
             );
@@ -417,7 +417,7 @@ async fn run_serve(
         .map_err(|e| format!("Failed to bind to {bind_addr}: {e}"))?;
 
     let actual_addr = listener.local_addr()?;
-    eprintln!("{}", term::header("AIMX SMTP listener"));
+    eprintln!("{}", term::header("aimx SMTP listener"));
     eprintln!("  bind:  {}", term::highlight(&actual_addr.to_string()));
     eprintln!(
         "  tls:   {}",
@@ -459,7 +459,7 @@ async fn run_serve(
     });
 
     // Run the SMTP server and UDS listener concurrently. Both observe the
-    // same shutdown watch — a SIGTERM drains both accept loops.
+    // same shutdown watch: a SIGTERM drains both accept loops.
     let uds_shutdown = shutdown_rx.clone();
     let uds_socket_path = socket_path.clone();
     let uds_handle = tokio::spawn(async move {
@@ -474,7 +474,7 @@ async fn run_serve(
     // Wait for the UDS listener to drain too so we don't leak its task.
     let _ = uds_handle.await;
 
-    eprintln!("{}", term::info("AIMX SMTP listener shut down"));
+    eprintln!("{}", term::info("aimx SMTP listener shut down"));
 
     in_flight_msg
 }
@@ -538,7 +538,7 @@ async fn run_send_listener(
                     }
                     Err(e) => {
                         eprintln!("[send] accept error: {e}");
-                        // Transient — do not kill the listener.
+                        // Transient. Do not kill the listener.
                         continue;
                     }
                 }
@@ -647,7 +647,7 @@ async fn handle_uds_connection_with_timeout(
     // the kernel has queued on our receive side. If we close with unread
     // bytes the kernel issues an abortive close and the client's pending
     // `read` races the teardown and sees `ECONNRESET` instead of the
-    // framed reply we are about to write. Drain here — but only on parse
+    // framed reply we are about to write. Drain here, but only on parse
     // failure, because a well-formed request has already been consumed up
     // through `Content-Length`, and further `read` would block on the
     // peer, deadlocking well-behaved clients that keep the write half
@@ -676,8 +676,8 @@ async fn handle_uds_connection_with_timeout(
 }
 
 /// Peer-credential snapshot for logging. `None` on platforms/errors where
-/// the kernel could not supply credentials — e.g. the client closed before
-/// we asked. Used only for journald diagnostics (FR-18b) — never for
+/// the kernel could not supply credentials, e.g. the client closed before
+/// we asked. Used only for journald diagnostics (FR-18b), never for
 /// authorization.
 struct PeerCred {
     uid: Option<u32>,
@@ -722,11 +722,11 @@ pub mod service {
     pub fn generate_systemd_unit(aimx_path: &str, data_dir: &str) -> String {
         // `RuntimeDirectory=aimx` makes systemd create `/run/aimx/` at
         // service start (default mode 0755, root:root) and tear it down on
-        // stop. The UDS send socket landing inside is world-writable —
+        // stop. The UDS send socket landing inside is world-writable;
         // authorization is out of scope in v0.2.
         format!(
             "[Unit]\n\
-             Description=AIMX SMTP server\n\
+             Description=aimx SMTP server\n\
              After=network-online.target nss-lookup.target\n\
              Wants=network-online.target\n\
              StartLimitBurst=5\n\
@@ -751,13 +751,13 @@ pub mod service {
     }
 
     pub fn generate_openrc_script(aimx_path: &str, data_dir: &str) -> String {
-        // OpenRC has no direct `RuntimeDirectory=` analogue — use
+        // OpenRC has no direct `RuntimeDirectory=` analogue; use
         // `checkpath` in `start_pre` to mint `/run/aimx/` with mode 0755
         // every service start.
         format!(
             "#!/sbin/openrc-run\n\
              \n\
-             description=\"AIMX SMTP server\"\n\
+             description=\"aimx SMTP server\"\n\
              command={aimx_path}\n\
              command_args=\"serve --data-dir {data_dir}\"\n\
              supervisor=supervise-daemon\n\
@@ -865,7 +865,7 @@ pub mod service {
     }
 
     /// Pure dispatch table for the log-follow command. systemd uses
-    /// `journalctl -f -u <unit>`. OpenRC: nothing native — we'd `tail -F`
+    /// `journalctl -f -u <unit>`. OpenRC: nothing native; we'd `tail -F`
     /// `/var/log/messages`, but that requires root + isn't unit-scoped, so
     /// the default impl prints a clear "not supported" error rather than
     /// streaming the wrong file.
@@ -1077,18 +1077,18 @@ mod tests {
         );
         assert!(
             !unit.contains("Group=aimx"),
-            "v0.2 does not use an `aimx` group — the systemd unit must \
+            "v0.2 does not use an `aimx` group; the systemd unit must \
              not declare Group=aimx. The UDS send socket is \
              world-writable; authorization is out of scope in v0.2."
         );
         assert!(
             !unit.contains("RuntimeDirectoryMode="),
-            "no explicit RuntimeDirectoryMode — default (0755, root:root) \
+            "no explicit RuntimeDirectoryMode; default (0755, root:root) \
              is correct for a world-writable UDS socket"
         );
         assert!(
             unit.contains("User=root"),
-            "User=root remains — the daemon still binds port 25"
+            "User=root remains; the daemon still binds port 25"
         );
     }
 
@@ -1367,7 +1367,7 @@ mod tests {
 
     #[test]
     fn evaluate_dkim_startup_matches_second_record_when_first_mismatches() {
-        // Split DKIM (key rotation in flight) — one matches, one does not.
+        // Split DKIM (key rotation in flight): one matches, one does not.
         let local = "GOODKEY";
         let records = vec![
             "v=DKIM1; k=rsa; p=OLDKEY".to_string(),
@@ -1409,7 +1409,7 @@ mod tests {
     #[test]
     fn run_dkim_startup_check_match_against_own_key() {
         // End-to-end: generate a real key, assemble its own DKIM TXT record,
-        // feed that through the fake resolver — the evaluator must say Match.
+        // feed that through the fake resolver; the evaluator must say Match.
         let tmp = tempfile::TempDir::new().unwrap();
         crate::dkim::generate_keypair(tmp.path(), false).unwrap();
         let record = crate::dkim::dns_record_value(tmp.path()).unwrap();
@@ -1475,14 +1475,14 @@ mod tests {
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            // Bind once, drop the listener — the file persists on disk,
+            // Bind once, drop the listener; the file persists on disk,
             // simulating the "daemon crashed with no cleanup" case.
             {
                 let _l = bind_send_socket(&sock).unwrap();
             }
             assert!(sock.exists(), "stale socket should remain");
 
-            // Bind again — must succeed by unlinking + retry.
+            // Bind again: must succeed by unlinking + retry.
             let _l2 = bind_send_socket(&sock).unwrap();
             assert!(sock.exists());
         });
@@ -1583,7 +1583,7 @@ mod tests {
                 .expect("peer_cred should succeed on local UDS");
             assert_eq!(cred.uid(), unsafe { libc::geteuid() });
 
-            // Close without sending anything — server handler should fall
+            // Close without sending anything. Server handler should fall
             // back to the "ClosedBeforeRequest" branch and drop cleanly.
             use tokio::io::AsyncWriteExt;
             let _ = client.shutdown().await;
@@ -1774,7 +1774,7 @@ mod tests {
             let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();
             use tokio::io::AsyncWriteExt;
             client.write_all(b"AIMX/1 SEND\n").await.unwrap();
-            // Don't send Content-Length or body — stall.
+            // Don't send Content-Length or body. Stall.
 
             // The handler should drop the connection within ~1s.
             let result =
@@ -1794,7 +1794,7 @@ mod tests {
 
     /// Crypto-verify a DKIM-signed message against a specific public key by
     /// populating a `mail-auth` TXT cache with a synthetic DKIM1 record and
-    /// running the verifier. Panics on any verification failure — used by
+    /// running the verifier. Panics on any verification failure; used by
     /// the S34-3 integration test.
     async fn verify_dkim_with_pubkey(signed: &[u8], pub_pem: &str, domain: &str, selector: &str) {
         use base64::Engine;
@@ -1840,7 +1840,7 @@ mod tests {
         let dk = DomainKey::parse(txt_record.as_bytes()).expect("parse DKIM1 record");
         let txt_cache: InMemCache<String, Txt> = InMemCache(Mutex::new(HashMap::new()));
         // mail-auth's `IntoFqdn` normalizes to `<selector>._domainkey.<domain>.`
-        // with a trailing dot — match it.
+        // with a trailing dot: match it.
         let key = format!("{selector}._domainkey.{domain}.");
         txt_cache.0.lock().unwrap().insert(
             key,

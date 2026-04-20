@@ -18,7 +18,7 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
     // Manual stdin path: no SMTP session, so received_from_ip is the
     // unspecified sentinel (0.0.0.0) and there is no envelope MAIL FROM.
     let sentinel_ip: IpAddr = "0.0.0.0".parse().unwrap();
-    // The manual stdin caller owns a fresh lock map — it's a short-lived
+    // The manual stdin caller owns a fresh lock map. It's a short-lived
     // process with a single ingest so contention isn't possible. The
     // daemon path shares its map across all writers.
     let locks = Arc::new(MailboxLocks::new());
@@ -32,7 +32,7 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
 /// [`MailboxLocks`]. The critical section below is taken via
 /// `blocking_lock()` because `ingest_email` runs from a synchronous
 /// context (manual stdin path, or the SMTP session's `spawn_blocking`
-/// worker) — `blocking_lock()` is sound on a blocking thread, but never
+/// worker). `blocking_lock()` is sound on a blocking thread, but never
 /// from an async runtime thread (which would panic).
 pub fn ingest_email(
     config: &Config,
@@ -181,7 +181,7 @@ pub fn ingest_email(
     // `ingest_email` runs from a synchronous context (stdin caller, or
     // the SMTP session's `spawn_blocking` worker). The lock covers the
     // full filename-allocation + bundle-creation + attachment-write +
-    // final `.md` write sequence — readers of the mailbox directory
+    // final `.md` write sequence; readers of the mailbox directory
     // observe either the pre-state or the post-state, never a half-
     // written bundle.
     let lock = locks.lock_for(&mailbox);
@@ -327,7 +327,7 @@ fn verify_auth(raw: &[u8], peer_ip: IpAddr, envelope_mail_from: Option<&str>) ->
 /// Decide which IP and MAIL FROM to feed into the SPF check.
 ///
 /// When the SMTP session gives us an authoritative peer IP and envelope
-/// MAIL FROM (reverse_path), we use those — they're what RFC 7208 actually
+/// MAIL FROM (reverse_path), we use those; they're what RFC 7208 actually
 /// requires for SPF. Header parsing is a best-effort fallback triggered
 /// when either value is missing: the manual `aimx ingest` stdin path (no
 /// envelope at all) and RFC 5321 null-sender bounces (`MAIL FROM:<>`),
@@ -486,8 +486,8 @@ fn extract_received_ip(raw: &[u8]) -> Option<IpAddr> {
 
 /// Parse a connecting-client IP from a `Received:` header.
 ///
-/// Trusts **only** the bracketed-form address (`[1.2.3.4]` / `[2001:db8::1]`)
-/// — the RFC 5321 canonical marker for the client IP recorded by the receiving
+/// Trusts **only** the bracketed-form address (`[1.2.3.4]` / `[2001:db8::1]`),
+/// the RFC 5321 canonical marker for the client IP recorded by the receiving
 /// MTA. Any IP embedded in free-text comments, HELO strings, or
 /// `received from hostname` prose is ignored, because those fields are
 /// attacker-controlled: the sender can write anything into the HELO/EHLO
@@ -651,7 +651,7 @@ pub(crate) fn sanitize_attachment_filename(raw: &str, index: usize) -> String {
     // already unescapes headers, so `../../etc/passwd` arrives as a literal
     // string; `Path::file_name` on `"../../etc/passwd"` returns `"passwd"`,
     // which neutralizes naive path-traversal. `\\` on Unix is NOT a path
-    // separator, so Windows-style paths need explicit handling — do it
+    // separator, so Windows-style paths need explicit handling. Do it
     // below after normalization.
     let base = Path::new(raw)
         .file_name()
@@ -704,7 +704,7 @@ pub(crate) fn sanitize_attachment_filename(raw: &str, index: usize) -> String {
 
 /// Characters never allowed in a sanitized attachment filename.
 fn is_filename_unsafe(ch: char) -> bool {
-    // Path separators (defense in depth — `Path::file_name` already strips
+    // Path separators (defense in depth; `Path::file_name` already strips
     // these, but on Unix `\\` is NOT a path separator so we must reject it
     // explicitly to keep a consistent shape across platforms and protect
     // downstream Windows consumers).
@@ -1388,7 +1388,7 @@ mod tests {
             "sanitized name must be ≤{ATTACHMENT_FILENAME_MAX_BYTES} bytes: {}",
             out.len()
         );
-        // UTF-8 boundary — ASCII is trivially aligned; just sanity check.
+        // UTF-8 boundary. ASCII is trivially aligned; just sanity check.
         assert!(out.is_char_boundary(out.len()));
     }
 
@@ -1449,7 +1449,7 @@ mod tests {
         // Multiple unsafe chars in a row must collapse to one `_`, not spray
         // `____` across the filename.
         let out = sanitize_attachment_filename("a////b\\\\c.pdf", 0);
-        // Count runs of `_` — each should be length 1.
+        // Count runs of `_`: each should be length 1.
         let has_long_run = out.split(|c: char| c != '_').any(|s| s.len() > 1);
         assert!(
             !has_long_run,
@@ -1506,11 +1506,11 @@ mod tests {
     #[test]
     fn attachment_malicious_names_sanitized_integration() {
         // S43-7 integration: two attachments with hostile names.
-        // - `../../etc/passwd` — path-traversal attempt.
-        // - `\x00rce.sh` — embedded NUL + potentially flag-looking name.
+        // - `../../etc/passwd`: path-traversal attempt.
+        // - `\x00rce.sh`: embedded NUL + potentially flag-looking name.
         // Both must land INSIDE the bundle directory with names that
         // contain no path separators and no NUL bytes. `tmp/etc/` must
-        // not exist — nothing escaped the bundle.
+        // not exist; nothing escaped the bundle.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
 
@@ -1673,7 +1673,7 @@ mod tests {
     fn parse_ip_from_received_rejects_bare_ip_in_comment() {
         // S43-4: previously the whitespace-split fallback would happily pick
         // up an IP embedded in a HELO or a free-text comment. That fallback
-        // is gone — only the bracketed RFC 5321 form is trusted.
+        // is gone; only the bracketed RFC 5321 form is trusted.
         let line = "Received: from evil.example.com (HELO mail.legit 1.2.3.4 via clever.host)";
         assert_eq!(parse_ip_from_received(line), None);
     }
@@ -1681,7 +1681,7 @@ mod tests {
     #[test]
     fn parse_ip_from_received_rejects_hostname_with_dotted_quad() {
         // A hostname like `host-1.2.3.4.example.com` must NOT be parsed as
-        // an IP — the old fallback was susceptible to this.
+        // an IP; the old fallback was susceptible to this.
         let line = "Received: from host-1.2.3.4.example.com by mx.local";
         assert_eq!(parse_ip_from_received(line), None);
     }
@@ -1989,8 +1989,8 @@ mod tests {
     fn select_spf_inputs_falls_back_to_headers_for_manual_stdin() {
         // `aimx ingest` stdin path has no SMTP session, so peer_ip is the
         // 0.0.0.0 sentinel and envelope_mail_from is None. In that case we
-        // fall back to parsing Received: and From: headers — best-effort,
-        // matching pre-fix behavior.
+        // fall back to parsing Received: and From: headers (best-effort,
+        // matching pre-fix behavior).
         let raw = b"Received: from mail.example.com (mail.example.com [203.0.113.5])\r\n\
             From: Alice <alice@example.com>\r\n\
             To: agent@test.com\r\n\
@@ -2005,8 +2005,8 @@ mod tests {
 
     #[test]
     fn select_spf_inputs_empty_envelope_string_falls_back() {
-        // Defensive: an empty envelope string (should not happen — session
-        // resets reverse_path to "" after RSET — but be explicit) falls back
+        // Defensive: an empty envelope string (should not happen; session
+        // resets reverse_path to "" after RSET, but be explicit) falls back
         // to header parsing rather than producing an empty mail_from.
         let raw = b"From: Alice <alice@example.com>\r\nTo: t@test.com\r\n\r\n";
         let peer_ip: IpAddr = "203.0.113.5".parse().unwrap();

@@ -1,4 +1,4 @@
-//! `aimx send` — thin UDS client for `AIMX/1 SEND`.
+//! `aimx send`: thin UDS client for `AIMX/1 SEND`.
 //!
 //! This module does not sign, load DKIM keys, or talk to MX servers
 //! directly. It composes an unsigned RFC 5322 message, opens
@@ -6,7 +6,7 @@
 //! and maps the daemon's response to a stable CLI exit code + user
 //! message.
 //!
-//! `aimx send` does not read `/etc/aimx/config.toml` at all — the daemon
+//! `aimx send` does not read `/etc/aimx/config.toml` at all. The daemon
 //! parses `From:` out of the submitted message body and resolves the
 //! sender mailbox from its in-memory Config. This lets a non-root
 //! operator run `aimx send` on a default install where `config.toml` is
@@ -43,10 +43,9 @@ fn sanitize_header_value(value: &str) -> String {
 
 fn validate_header_value(name: &str, value: &str) -> Result<(), Box<dyn std::error::Error>> {
     if value.contains('\r') || value.contains('\n') {
-        return Err(format!(
-            "Header '{name}' contains CRLF characters — possible header injection"
-        )
-        .into());
+        return Err(
+            format!("Header '{name}' contains CRLF characters. Possible header injection").into(),
+        );
     }
     Ok(())
 }
@@ -306,7 +305,7 @@ fn current_is_root() -> bool {
 pub fn render_root_refusal<E: io::Write>(stderr: &mut E) -> i32 {
     let _ = writeln!(
         stderr,
-        "{} send is a per-user operation — run without sudo",
+        "{} send is a per-user operation, run without sudo",
         term::error("Error:")
     );
     EXIT_CONNECT
@@ -352,7 +351,7 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
 }
 
 /// Build the `AIMX/1 SEND` request frame from composed CLI args. The
-/// request carries no `From-Mailbox:` header — the daemon parses the
+/// request carries no `From-Mailbox:` header. The daemon parses the
 /// `From:` header out of the body itself and resolves the mailbox
 /// against its in-memory Config.
 pub fn build_request(args: &SendArgs) -> Result<SendRequest, String> {
@@ -402,7 +401,7 @@ fn run_inner(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
 fn handle_connect_error(socket: &Path, err: &io::Error) {
     if err.kind() == io::ErrorKind::NotFound {
         eprintln!(
-            "{} aimx daemon not running — check 'systemctl status aimx'",
+            "{} aimx daemon not running. Check 'systemctl status aimx'",
             term::error("Error:")
         );
     } else {

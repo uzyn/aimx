@@ -73,7 +73,7 @@ fn canonicalize_ip(ip: IpAddr) -> IpAddr {
 /// directly and the peer IP is authoritative. If the peer is loopback, the
 /// request came through a reverse proxy (Caddy) and we require the proxy to
 /// have set `X-AIMX-Client-IP` to the real client IP. We never parse
-/// `X-Forwarded-For` — Caddy strips it, and the app must not re-introduce a
+/// `X-Forwarded-For`. Caddy strips it, and the app must not re-introduce a
 /// vulnerability by trusting it.
 fn resolve_client_ip(peer: &SocketAddr, headers: &HeaderMap) -> Option<IpAddr> {
     let peer_ip = canonicalize_ip(peer.ip());
@@ -162,7 +162,7 @@ struct ReachableOutcome(bool);
 /// Emits exactly one `info!` line per HTTP request, containing the method,
 /// path, resolved caller IP (or `unknown` if the Layer 3 trust check
 /// rejected the request before the handler ran), response status, elapsed
-/// ms, and — for `/probe` — the reachable outcome recorded by the handler
+/// ms, and (for `/probe`) the reachable outcome recorded by the handler
 /// via `ReachableOutcome`.
 async fn log_request(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -385,9 +385,9 @@ async fn spawn_smtp_connection(stream: TcpStream, peer: SocketAddr, _permit: Own
 /// Minimal correct SMTP responder used only as a reachability target.
 ///
 /// Implements enough of RFC 5321 for EHLO-based reachability probes to
-/// complete cleanly: banner → (EHLO|HELO → 250 | QUIT → 221 Bye | other
-/// → 500) loop. Not a real SMTP server — no MAIL FROM / RCPT TO / DATA /
-/// AUTH support.
+/// complete cleanly: banner, then (EHLO|HELO => 250 | QUIT => 221 Bye |
+/// other => 500) loop. Not a real SMTP server. No MAIL FROM / RCPT TO /
+/// DATA / AUTH support.
 async fn handle_smtp_connection(stream: TcpStream) -> std::io::Result<()> {
     tokio::time::timeout(SMTP_CONNECTION_TIMEOUT, smtp_session(stream))
         .await
@@ -617,7 +617,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // is_blocked_target — Layer 4 guard
+    // is_blocked_target: Layer 4 guard
     // -----------------------------------------------------------------
 
     #[test]
@@ -776,7 +776,7 @@ mod tests {
         let resp = read_line(&mut stream).await;
         assert!(resp.starts_with("500"), "Expected 500, got: {resp}");
 
-        // Connection should still be open — send QUIT.
+        // Connection should still be open. Send QUIT.
         stream.write_all(b"QUIT\r\n").await.unwrap();
         let bye = read_line(&mut stream).await;
         assert!(bye.starts_with("221"), "Expected 221 after 500, got: {bye}");
@@ -1030,7 +1030,7 @@ mod tests {
     fn resolve_client_ip_treats_ipv4_mapped_loopback_peer_as_loopback() {
         // Dual-stack bind (`[::]:3025`) makes an IPv4 loopback client show up
         // with `peer.ip() == ::ffff:127.0.0.1`. That must be treated as a
-        // loopback peer — i.e. require a trusted header — not as a "direct"
+        // loopback peer (i.e. require a trusted header), not as a "direct"
         // caller that the handler then probes.
         let peer: SocketAddr = "[::ffff:127.0.0.1]:12345".parse().unwrap();
         assert!(resolve_client_ip(&peer, &empty_headers()).is_none());
@@ -1213,7 +1213,7 @@ mod tests {
             .unwrap();
         });
 
-        // Build a minimal HTTP/1.1 request by hand — avoids pulling in
+        // Build a minimal HTTP/1.1 request by hand. Avoids pulling in
         // reqwest/hyper-client just for tests.
         let mut req = format!("GET {path} HTTP/1.1\r\nHost: test\r\nConnection: close\r\n");
         if let Some(ip) = client_ip_header {
@@ -1227,7 +1227,7 @@ mod tests {
         stream.write_all(req.as_bytes()).await.unwrap();
         stream.flush().await.unwrap();
 
-        // Read until EOF — `Connection: close` ensures the server drops us.
+        // Read until EOF; `Connection: close` ensures the server drops us.
         let mut response = Vec::new();
         let _ = stream.read_to_end(&mut response).await;
         drop(stream);
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_request_logs_health_with_caller_ip() {
-        // /health has no ReachableOutcome — the middleware should still
+        // /health has no ReachableOutcome; the middleware should still
         // emit one info line with method, path, status, elapsed, caller_ip.
         // Peer is loopback + we send a trusted X-AIMX-Client-IP so the
         // resolver returns the public header IP.
@@ -1294,7 +1294,7 @@ mod tests {
 
     #[tokio::test]
     async fn log_request_logs_bad_request_with_unknown_caller_ip() {
-        // /probe with loopback peer and no trusted header — resolver fails,
+        // /probe with loopback peer and no trusted header. Resolver fails,
         // handler returns 400. The middleware should still log one line and
         // record caller_ip=unknown with status=400.
         let logs = run_http_request("/probe", None).await;

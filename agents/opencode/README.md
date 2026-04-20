@@ -1,20 +1,21 @@
-# AIMX skill for OpenCode
+# aimx skill for OpenCode
 
-This directory is the source tree for the OpenCode skill that wires AIMX
-into OpenCode. Contents are bundled into the `aimx` binary at compile time
-(via `include_dir!`) and installed by `aimx agent-setup opencode`.
+AIMX (AI Mail Exchange) skill source tree for OpenCode. This directory
+wires aimx into OpenCode. Contents are bundled into the `aimx` binary at
+compile time (via `include_dir!`) and installed by
+`aimx agent-setup opencode`.
 
 ## What gets installed
 
-- `SKILL.md` — an agent-facing skill dropped into
+- `SKILL.md`: an agent-facing skill dropped into
   `~/.config/opencode/skills/aimx/SKILL.md`. Its body is the canonical
-  AIMX primer (`agents/common/aimx-primer.md`); the installer assembles
+  aimx primer (`agents/common/aimx-primer.md`). The installer assembles
   the final `SKILL.md` from a YAML header plus that primer so there is
   one source of truth.
 
 OpenCode's MCP configuration lives in `opencode.json` / `opencode.jsonc`,
-not alongside the skill. The installer does **not** mutate that file;
-instead it prints the exact JSONC snippet you paste into the `mcp` section
+not alongside the skill. The installer does **not** mutate that file.
+Instead it prints the exact JSONC snippet you paste into the `mcp` section
 of `opencode.json` (see Activation below).
 
 ## Install
@@ -42,7 +43,7 @@ Restart OpenCode (or reload its config) after editing `opencode.json`.
 
 ## Overriding the data directory
 
-If AIMX was set up with a non-default data directory, re-run the installer
+If aimx was set up with a non-default data directory, re-run the installer
 with `--data-dir`:
 
 ```bash
@@ -54,7 +55,7 @@ The printed JSONC snippet will include `--data-dir /custom/path` in the
 
 ## Channel-trigger recipes
 
-To have AIMX invoke `opencode run` automatically when an email arrives,
+To have aimx invoke `opencode run` automatically when an email arrives,
 see the [Hook Recipes](../../book/hook-recipes.md#opencode)
 chapter.
 
@@ -68,11 +69,11 @@ followed by the skill body). MCP servers are configured under the root
 
 ## Design choice: print-the-snippet
 
-AIMX follows the "print the activation command" pattern — the installer
+aimx follows the "print the activation command" pattern. The installer
 writes the skill to disk and prints the exact JSONC block for you to
 paste. We intentionally do NOT mutate `opencode.json` directly because:
 
-1. The file is your config, not ours — we shouldn't silently rewrite it.
+1. The file is your config, not ours. We should not silently rewrite it.
 2. `opencode.json` may already contain other MCP servers or project
    customisations we would risk disturbing.
 3. Making the activation step explicit is self-documenting and audit-safe.

@@ -17,10 +17,10 @@ pub fn version_string() -> &'static str {
 #[command(
     name = "aimx",
     about = "SMTP for agents. No middleman.",
-    long_about = "AIMX - Self-hosted email for AI agents.\n\n\
+    long_about = "aimx (AI Mail Exchange). Self-hosted email for AI agents.\n\n\
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
-                   MCP is built in. Channel rules trigger agent actions on incoming mail.",
+                   MCP is built in. Hooks trigger agent actions on incoming mail.",
     version = version_string()
 )]
 pub struct Cli {
@@ -107,7 +107,7 @@ pub enum Command {
         verify_host: Option<String>,
     },
 
-    /// Install AIMX plugin/skill for an AI agent into the current user's config
+    /// Install aimx plugin/skill for an AI agent into the current user's config
     AgentSetup {
         /// Agent short name (e.g. claude-code). Omit to print the supported-agent registry, or pass --list for the same view.
         agent: Option<String>,
@@ -229,7 +229,7 @@ pub enum HookCommand {
 
 #[derive(clap::Args, Clone)]
 pub struct HookCreateArgs {
-    /// Owning mailbox (local part) — must already exist in config
+    /// Owning mailbox (local part). Must already exist in config
     #[arg(long)]
     pub mailbox: String,
 

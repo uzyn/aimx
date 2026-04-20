@@ -1,6 +1,6 @@
 # Configuration
 
-AIMX uses a single TOML configuration file for all settings.
+aimx uses a single TOML configuration file for all settings.
 
 ## Config file location
 
@@ -8,7 +8,7 @@ The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:
 
 ### Data directory override
 
-The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only — config and DKIM keys are under `/etc/aimx/`. To relocate it:
+The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only. Config and DKIM keys are under `/etc/aimx/`. To relocate it:
 
 ```bash
 # CLI flag (works with any command)
@@ -29,18 +29,18 @@ For tests or non-standard installs, override the config directory with:
 export AIMX_CONFIG_DIR=/custom/etc/path
 ```
 
-This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim/public.key`) are read from. Under normal operation you should **not** set this — `aimx setup` writes to `/etc/aimx/` and every command picks it up from there.
+This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim/public.key`) are read from. Under normal operation you should **not** set this. `aimx setup` writes to `/etc/aimx/` and every command picks it up from there.
 
 ## Environment variables
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `AIMX_DATA_DIR` | `/var/lib/aimx` | Override the mailbox data directory. Equivalent to `--data-dir`; the flag wins when both are set. |
+| `AIMX_DATA_DIR` | `/var/lib/aimx` | Override the mailbox data directory. Equivalent to `--data-dir`. The flag wins when both are set. |
 | `AIMX_CONFIG_DIR` | `/etc/aimx` | Override the config + DKIM directory. For tests and non-standard installs only. |
 | `AIMX_TEST_MAIL_DROP` | *(unset)* | When set to a directory path, `aimx serve` writes every outbound submission to that directory instead of delivering via SMTP. The daemon logs a startup warning so it cannot be left on in production by accident. |
-| `NO_COLOR` | *(unset)* | Standard convention — when set to any value, AIMX CLI output disables ANSI color. |
+| `NO_COLOR` | *(unset)* | Standard convention. When set to any value, aimx CLI output disables ANSI color. |
 
-Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields — see [Hooks & Trust — Hook context](hooks.md#hook-context-env-vars-and-placeholders).
+Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields. See [Hooks & Trust: Hook context](hooks.md#hook-context-env-vars-and-placeholders).
 
 ## Settings reference
 
@@ -57,7 +57,7 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
 
 `aimx setup` asks for the default trust policy interactively on the first
-run; on re-entry the existing top-level values on disk are preserved.
+run. On re-entry the existing top-level values on disk are preserved.
 
 ### Mailbox settings
 
@@ -74,7 +74,7 @@ See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.m
 
 ### Inbound email verification
 
-AIMX verifies three authentication mechanisms on every inbound email and records the results in the email's TOML frontmatter:
+aimx verifies three authentication mechanisms on every inbound email and records the results in the email's TOML frontmatter:
 
 | Field | Values | Description |
 |-------|--------|-------------|
@@ -88,11 +88,11 @@ The `trusted` frontmatter field summarizes the effective trust evaluation for th
 
 | Value | Meaning |
 |-------|---------|
-| `"none"` | Effective `trust` is `none` (default) -- no trust evaluation performed. |
+| `"none"` | Effective `trust` is `none` (default). No trust evaluation performed. |
 | `"true"` | Effective `trust` is `verified`, sender matches the effective `trusted_senders`, AND DKIM passed. |
 | `"false"` | Effective `trust` is `verified`, any other outcome. |
 
-Trust only gates hook execution (`on_receive`) -- all email is stored regardless of the `trusted` result.
+Trust only gates hook execution (`on_receive`). All email is stored regardless of the `trusted` result.
 
 ### Hook settings
 
@@ -153,7 +153,7 @@ If your server has a global IPv6 address and you want outbound mail to use it:
    sudo aimx setup agent.yourdomain.com
    ```
 
-   `aimx setup` is re-entrant — it skips install steps on an existing configuration and jumps straight to DNS guidance + verification. When `enable_ipv6 = true`, it shows the extra AAAA row in the DNS table and includes the `ip6:` mechanism in the generated SPF record, then verifies both.
+   `aimx setup` is re-entrant. It skips install steps on an existing configuration and jumps straight to DNS guidance + verification. When `enable_ipv6 = true`, it shows the extra AAAA row in the DNS table and includes the `ip6:` mechanism in the generated SPF record, then verifies both.
 
 3. Restart the SMTP daemon so the updated config is in effect:
 
@@ -170,7 +170,7 @@ If your server has a global IPv6 address and you want outbound mail to use it:
 
 See the full DNS records table in [Setup](setup.md#dns-configuration) for formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
 
-**When `enable_ipv6` is unset or `false`:** `aimx setup` ignores IPv6 entirely — no AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (their presence is harmless). `aimx portcheck` only probes port 25 connectivity and is unaffected by this flag.
+**When `enable_ipv6` is unset or `false`:** `aimx setup` ignores IPv6 entirely. No AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (their presence is harmless). `aimx portcheck` only probes port 25 connectivity and is unaffected by this flag.
 
 Leave `enable_ipv6` unset (or `false`) if any of these apply:
 - Your server does not have a global IPv6 address
@@ -205,7 +205,7 @@ dkim_selector = "aimx"
 # Mailboxes
 # ----------------------------
 
-# Catchall mailbox -- receives all unmatched addresses
+# Catchall mailbox: receives all unmatched addresses
 [mailboxes.catchall]
 address = "*@agent.yourdomain.com"
 
@@ -222,7 +222,7 @@ dangerously_support_untrusted = true
 [mailboxes.support]
 address = "support@agent.yourdomain.com"
 
-# Per-mailbox overrides (both optional — omit to inherit the top-level defaults).
+# Per-mailbox overrides (both optional. Omit to inherit the top-level defaults).
 # Setting `trusted_senders` here fully replaces the global list (no merging).
 trust = "verified"
 trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]

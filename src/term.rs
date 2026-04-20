@@ -2,14 +2,14 @@
 //!
 //! # Palette
 //!
-//! - [`success`] — green, used for PASS banners and "operation complete" messages
-//! - [`error`]   — red + bold, used for fatal errors and the `Error:` prefix on stderr
-//! - [`warn`]    — yellow, used for non-fatal warnings (DNS pending, TLS self-signed)
-//! - [`info`]    — plain, reserved for informational output (kept uncolored so the
+//! - [`success`]: green, used for PASS banners and "operation complete" messages
+//! - [`error`]:   red + bold, used for fatal errors and the `Error:` prefix on stderr
+//! - [`warn`]:    yellow, used for non-fatal warnings (DNS pending, TLS self-signed)
+//! - [`info`]:    plain, reserved for informational output (kept uncolored so the
 //!   palette stays minimal; wrap if we ever add a cyan accent)
-//! - [`header`]  — bold, used for section headers like `[DNS]`, `[MCP]`, `[Deliverability]`
-//! - [`highlight`] — bold, used to emphasise short inline tokens (keys, commands, mailbox names)
-//! - [`dim`]     — dimmed, used for secondary hint text ("→ Add: ..." under a FAIL line)
+//! - [`header`]:  bold, used for section headers like `[DNS]`, `[MCP]`, `[Deliverability]`
+//! - [`highlight`]: bold, used to emphasise short inline tokens (keys, commands, mailbox names)
+//! - [`dim`]:     dimmed, used for secondary hint text ("→ Add: ..." under a FAIL line)
 //!
 //! # Badges
 //!
@@ -19,14 +19,14 @@
 //! # Convention
 //!
 //! Raw `.green()` / `.red()` / `.yellow()` / `.blue()` / `.bold()` calls outside
-//! this module are discouraged — route every user-facing styled string through a
+//! this module are discouraged. Route every user-facing styled string through a
 //! helper here so the palette stays consistent and can be audited in one place.
 //! A grep for those methods across `src/` should match only this file.
 //!
 //! # Disabling color
 //!
 //! The `colored` crate auto-detects `NO_COLOR`, non-TTY pipes, and dumb terminals,
-//! so no extra handling is required — piping to `cat` or setting `NO_COLOR=1`
+//! so no extra handling is required. Piping to `cat` or setting `NO_COLOR=1`
 //! strips all ANSI escapes automatically.
 
 use colored::{ColoredString, Colorize};
@@ -35,7 +35,7 @@ pub fn success(s: &str) -> ColoredString {
     s.green()
 }
 
-/// Bold + green — reserved for the top-level "Setup complete!" banner.
+/// Bold + green, reserved for the top-level "Setup complete" banner.
 pub fn success_banner(s: &str) -> ColoredString {
     s.green().bold()
 }

@@ -149,7 +149,7 @@ pub const VALID_TRUST_VALUES: &[&str] = &["none", "verified"];
 /// Pre-parse check: reject the legacy `[[mailboxes.<name>.on_receive]]`
 /// schema with a clear migration error before the TOML parser sees it.
 ///
-/// Sprint 50 is pre-launch, so there is no compat shim — users hand-editing
+/// Sprint 50 is pre-launch, so there is no compat shim. Users hand-editing
 /// old configs see a single actionable error naming the offending mailbox.
 fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error>> {
     for line in toml_text.lines() {
@@ -300,7 +300,7 @@ impl Config {
         let content = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
-                    "Config file not found at {} — run 'sudo aimx setup' first",
+                    "Config file not found at {}. Run 'sudo aimx setup' first",
                     path.display()
                 )
                 .into()
@@ -323,7 +323,7 @@ impl Config {
 
     /// Load the config from the canonical path returned by [`config_path`].
     ///
-    /// Replaces the old `load_from_data_dir` — config no longer lives inside
+    /// Replaces the old `load_from_data_dir`. Config no longer lives inside
     /// the storage directory. Override via the `AIMX_CONFIG_DIR` env var
     /// (tests, non-standard installs).
     pub fn load_resolved() -> Result<Self, Box<dyn std::error::Error>> {
@@ -382,7 +382,7 @@ impl Config {
 /// `aimx serve` does not treat `Config` as immutable. The
 /// MAILBOX-CREATE / MAILBOX-DELETE UDS verbs rewrite `config.toml` and
 /// then replace the daemon's in-memory snapshot so inbound mail routes
-/// correctly on the very next SMTP session — no restart required.
+/// correctly on the very next SMTP session. No restart required.
 ///
 /// The concurrency model is deliberately boring: a single
 /// `RwLock<Arc<Config>>`. Readers (ingest, send handler, state handler) take
@@ -410,7 +410,7 @@ impl ConfigHandle {
     }
 
     /// Borrow the current `Config` snapshot. The returned `Arc<Config>` is a
-    /// stable view — a subsequent `store` by another task will not mutate
+    /// stable view: a subsequent `store` by another task will not mutate
     /// the snapshot the caller already holds.
     pub fn load(&self) -> Arc<Config> {
         let guard = self
@@ -421,7 +421,7 @@ impl ConfigHandle {
     }
 
     /// Atomically swap the stored `Config` for `new`. Previous snapshots
-    /// remain valid — callers that already `load`ed continue to see the
+    /// remain valid. Callers that already `load`ed continue to see the
     /// pre-swap view until they call `load` again.
     pub fn store(&self, new: Config) {
         let mut guard = self
@@ -442,7 +442,7 @@ impl std::fmt::Debug for ConfigHandle {
 
 /// Test-only helpers for overriding `AIMX_CONFIG_DIR` safely from multiple
 /// test modules. Process-wide env is not parallel-safe, so every test that
-/// mutates this variable must go through [`ConfigDirOverride`] — it
+/// mutates this variable must go through [`ConfigDirOverride`], which
 /// serializes mutations behind a module-level [`Mutex`] and restores the
 /// previous value on drop.
 #[cfg(test)]

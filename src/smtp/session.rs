@@ -492,7 +492,7 @@ impl SmtpSession {
     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Snapshot the current Config at message-delivery time so each
         // RCPT routes against the freshest mailbox table. The snapshot is
-        // stable for the duration of this message's ingest — within a
+        // stable for the duration of this message's ingest: within a
         // single DATA payload every RCPT uses the same view.
         let config = self.params.config_handle.load();
         // One allocation shared across all recipients via refcount. For large
