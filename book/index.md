@@ -10,7 +10,7 @@ Inbound:
                                              -> hook manager (fires `on_receive` commands)
 
 Outbound:
-  MCP tool call -> aimx send -> UDS (/run/aimx/send.sock) -> aimx serve
+  MCP tool call -> aimx send -> UDS (/run/aimx/aimx.sock) -> aimx serve
                                                           -> DKIM sign
                                                           -> direct SMTP to recipient MX
 ```

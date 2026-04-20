@@ -14,7 +14,7 @@ Docker works if you map port 25 and persist `/etc/aimx`, `/var/lib/aimx`, and `/
 
 ### Can I run two aimx instances on one host?
 
-Only if each binds a different IP on port 25. Two listeners cannot share the same `ip:25`. Point each instance at its own `AIMX_CONFIG_DIR` and `AIMX_DATA_DIR`, run each from its own systemd unit, and give each its own UDS path (the default `/run/aimx/send.sock` is hard-coded today. A second instance needs a source patch).
+Only if each binds a different IP on port 25. Two listeners cannot share the same `ip:25`. Point each instance at its own `AIMX_CONFIG_DIR` and `AIMX_DATA_DIR`, run each from its own systemd unit, and give each its own UDS path (the default `/run/aimx/aimx.sock` is hard-coded today. A second instance needs a source patch).
 
 ### How do I upgrade the binary without losing mail or breaking in-flight SMTP sessions?
 
@@ -77,6 +77,34 @@ Check in this order:
 2. The target email's frontmatter: `trusted = "false"` plus `dangerously_support_untrusted` unset is the most common cause. See the [trust gate](hooks.md#trust-gate-on_receive-only).
 3. If the line is there with a non-zero `exit_code`, it's your shell command. Test the `cmd` string against the saved `.md` manually.
 
+### Why can my agent create hooks but not run arbitrary shell commands?
+
+This is the core of the hook-templates safety model. A naive design would expose a `hook_create` MCP tool that takes a `cmd` string and writes it to `config.toml`. That's a local RCE waiting to happen: any process that speaks MCP (and the `aimx.sock` UDS is world-writable so hooks can be created without root) could talk the daemon into running arbitrary shell every time mail arrives.
+
+Hook templates split the problem. The **operator** installs a small set of pre-vetted command *shapes* once, during `aimx setup`:
+
+```toml
+[[hook_template]]
+name = "invoke-claude"
+cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+params = ["prompt"]
+```
+
+The **agent** can then only bind to those shapes, filling declared `{placeholder}` slots with string values:
+
+```json
+{"template": "invoke-claude", "params": {"prompt": "File this email"}}
+```
+
+Two properties make this safe:
+
+1. **No shell invocation.** The daemon builds the argv vector directly from `cmd` + `params` and calls `execvp`. `/bin/sh -c` is never used for template hooks, so there is no string-to-argv parsing step for an attacker to subvert.
+2. **Values can't escape their slot.** Substitution happens after the argv is already split. A parameter value like `"; rm -rf /"` lands as one complete argv entry passed verbatim to the target binary; it cannot introduce new argv entries, redirections, pipes, or quote escapes. NUL, `\r`, and other control bytes are rejected outright.
+
+Raw `cmd` submission is physically impossible over the UDS: the `HOOK-CREATE` verb rejects any request body containing a `cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, or `stdin` field. Those are template properties — not hook properties — so they can't leak through.
+
+The operator keeps the full-power escape hatch: `sudo aimx hooks create --cmd "..."` writes `config.toml` directly. That requires root, bypasses the UDS, and is intentionally not reachable from MCP.
+
 ### Env var vs. `{id}`/`{date}` placeholder: when do I use which?
 
 Env vars (`$AIMX_FROM`, `$AIMX_SUBJECT`, …) carry sender-controlled header content. Always expand them inside double quotes. Never splice them into the `cmd` string. Placeholders (`{id}`, `{date}`) are aimx-generated (slug and ISO-8601 date) and are substituted into `cmd` directly. Use them when you need the value in a filename or path literal, where a shell variable would not expand.
@@ -105,7 +133,7 @@ When the hook's side effect is safe regardless of sender. A logger, a metric cou
 
 No, and that is intentional. aimx is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
 
-### `send.sock` is mode `0666`, why is that fine?
+### `aimx.sock` is mode `0666`, why is that fine?
 
 Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run aimx on a dedicated host.
 

@@ -545,4 +545,299 @@ mod tests {
             "fuzz loop ran {iters} iters; want >= 10000"
         );
     }
+
+    /// Deterministic xorshift64* PRNG — good enough for property-style
+    /// fuzzing without pulling in `rand` as a dev dep (already transitive,
+    /// but we want the test run to be reproducible bit-for-bit across
+    /// rustc toolchains).
+    ///
+    /// Seed is fixed so CI flake can always be reproduced locally.
+    struct Xorshift(u64);
+
+    impl Xorshift {
+        fn new(seed: u64) -> Self {
+            // Reject zero seed which breaks xorshift.
+            Self(if seed == 0 {
+                0x9E37_79B9_7F4A_7C15
+            } else {
+                seed
+            })
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+
+        fn next_in_range(&mut self, n: usize) -> usize {
+            (self.next_u64() as usize) % n.max(1)
+        }
+
+        fn next_bool(&mut self) -> bool {
+            self.next_u64() & 1 == 1
+        }
+    }
+
+    /// Generate a random parameter value for S6-2 fuzz iterations.
+    ///
+    /// The generator intentionally produces inputs from every class flagged
+    /// in the PRD §10 risk table and sprint S6-2 AC:
+    ///
+    /// * empty strings (edge case: zero-length slot)
+    /// * 8 KiB strings (edge case: MAX_PARAM_BYTES boundary)
+    /// * shell metacharacters (`;`, `$(...)`, backticks, `|`, `&&`, `>`, `<`)
+    /// * ASCII control chars including NUL and `\r`
+    /// * high-bit Unicode scalars (emoji, RTL, combining marks)
+    /// * orphaned surrogate attempts — emitted as lossy bytes to test the
+    ///   UTF-8-safety invariant (the substituter takes `&str`, so true
+    ///   surrogates are unrepresentable; we exercise the byte-level code
+    ///   path by picking a valid `\u{...}` near the surrogate region)
+    /// * long repeated payloads (>8 KiB) that must be rejected deterministically
+    ///
+    /// Each call randomly selects a generator variant so a 10K-iter run
+    /// exercises the full space with high probability.
+    fn random_param_value(rng: &mut Xorshift) -> String {
+        let variant = rng.next_in_range(12);
+        match variant {
+            0 => String::new(),
+            1 => {
+                // Pure shell-metacharacter soup.
+                let glyphs = [
+                    ";", "|", "&", "&&", "||", ">", "<", "$(x)", "`y`", "\\", "\"", "'",
+                ];
+                let n = 1 + rng.next_in_range(16);
+                (0..n)
+                    .map(|_| glyphs[rng.next_in_range(glyphs.len())])
+                    .collect()
+            }
+            2 => {
+                // ASCII control / NUL byte injection. Always lands in the
+                // reject path — deterministic rejection is the invariant.
+                let bad = [0x00u8, 0x01, 0x07, 0x0D, 0x1B, 0x7F];
+                let mut v = String::from("prefix");
+                v.push(bad[rng.next_in_range(bad.len())] as char);
+                v.push_str("suffix");
+                v
+            }
+            3 => {
+                // High-bit Unicode: emoji, RTL, combining marks, math symbols.
+                let scalars = [
+                    '\u{1F980}',  // CRAB
+                    '\u{05D0}',   // HEBREW LETTER ALEF (RTL)
+                    '\u{0301}',   // COMBINING ACUTE ACCENT
+                    '\u{2200}',   // FOR ALL
+                    '\u{E000}',   // Private Use Area
+                    '\u{FDD0}',   // noncharacter
+                    '\u{D7FF}',   // last scalar before surrogate block
+                    '\u{E000}',   // first scalar after surrogate block
+                    '\u{10FFFF}', // max valid scalar
+                ];
+                let n = 1 + rng.next_in_range(32);
+                (0..n)
+                    .map(|_| scalars[rng.next_in_range(scalars.len())])
+                    .collect()
+            }
+            4 => {
+                // 8 KiB string right at the cap — must succeed.
+                "a".repeat(MAX_PARAM_BYTES)
+            }
+            5 => {
+                // One byte over cap — must deterministic-reject with ParamTooLong.
+                "a".repeat(MAX_PARAM_BYTES + 1)
+            }
+            6 => {
+                // Embedded placeholder-looking syntax (checks the non-greedy
+                // brace parser: these must be preserved verbatim inside
+                // param values, since substitution happens before value
+                // interpolation).
+                "prefix{a}middle{b}suffix{nested{x}y}".to_string()
+            }
+            7 => {
+                // Newlines + tabs (allowed) mixed with metacharacters.
+                "line1\nline2\tline3;cmd\n`x`".to_string()
+            }
+            8 => {
+                // Random printable ASCII noise of random length.
+                let n = rng.next_in_range(512);
+                (0..n)
+                    .map(|_| {
+                        let c = 0x20 + (rng.next_u64() as u8 % (0x7E - 0x20 + 1));
+                        c as char
+                    })
+                    .collect()
+            }
+            9 => {
+                // Long random UTF-8 mix with valid multi-byte scalars.
+                let n = rng.next_in_range(256);
+                let chars: Vec<char> = ['a', 'é', '日', '\u{1F600}', '\t', '\n', ' ', 'Z'].into();
+                (0..n)
+                    .map(|_| chars[rng.next_in_range(chars.len())])
+                    .collect()
+            }
+            10 => {
+                // Near-surrogate boundary: the scalars just outside the
+                // U+D800..U+DFFF reserved range. We can't encode true
+                // surrogates in a Rust `&str` (the compiler rejects them),
+                // so we exercise the adjacent boundary instead — this
+                // guards against off-by-one bugs in byte-range substring
+                // code in the substituter.
+                let scalars = ['\u{D7FE}', '\u{D7FF}', '\u{E000}', '\u{E001}'];
+                let n = 4 + rng.next_in_range(64);
+                (0..n)
+                    .map(|_| scalars[rng.next_in_range(scalars.len())])
+                    .collect()
+            }
+            11 => {
+                // Mixed: metacharacters + control + Unicode + trailing digits.
+                let mut s = String::new();
+                for _ in 0..(rng.next_in_range(16) + 1) {
+                    if rng.next_bool() {
+                        s.push_str("; $(x)");
+                    } else {
+                        s.push('\u{1F4A9}');
+                    }
+                    s.push(if rng.next_bool() { '\t' } else { ' ' });
+                }
+                s
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// S6-2: PRD §10 critical-severity risk. 10K random inputs over a
+    /// fixture template; assert either success with the argv count
+    /// unchanged OR deterministic rejection via a typed error variant.
+    /// Panic on any other outcome (e.g. an unexpected argv split).
+    #[test]
+    fn fuzz_substitute_argv_preserves_length_or_rejects_deterministically() {
+        let tmpl: Vec<String> = vec![
+            "/usr/bin/curl".into(),
+            "-H".into(),
+            "X-Prompt: {a}".into(),
+            "--data-binary".into(),
+            "@-".into(),
+            "{url}".into(),
+        ];
+        let mut rng = Xorshift::new(0xDEAD_BEEF_CAFE_F00D);
+        let mut iters = 0usize;
+        let mut ok_count = 0usize;
+        let mut reject_count = 0usize;
+        for _ in 0..10_000 {
+            iters += 1;
+            let a = random_param_value(&mut rng);
+            let url = random_param_value(&mut rng);
+            let b = builtins();
+            let p = params(&[("a", a.as_str()), ("url", url.as_str())]);
+            match substitute_argv(&tmpl, &p, &b) {
+                Ok(argv) => {
+                    assert_eq!(
+                        argv.len(),
+                        tmpl.len(),
+                        "argv count must never change; a.len={} url.len={}",
+                        a.len(),
+                        url.len()
+                    );
+                    assert_eq!(argv[0], tmpl[0], "cmd[0] must be handed back verbatim");
+                    ok_count += 1;
+                }
+                Err(SubstitutionError::ParamContainsNul { .. })
+                | Err(SubstitutionError::ParamContainsControl { .. })
+                | Err(SubstitutionError::ParamTooLong { .. }) => {
+                    reject_count += 1;
+                }
+                Err(SubstitutionError::UnknownPlaceholder { name }) => {
+                    panic!(
+                        "unexpected UnknownPlaceholder({name}): inputs were restricted to declared params"
+                    );
+                }
+                Err(other) => {
+                    panic!("unexpected hard error from pure-substitute path: {other:?}");
+                }
+            }
+        }
+        assert_eq!(iters, 10_000);
+        // Sanity: the generator should produce a non-trivial mix of
+        // accepted and rejected values. If one count drops to zero the
+        // generator has drifted and should be re-tuned.
+        assert!(ok_count > 1000, "ok_count = {ok_count} (too few successes)");
+        assert!(
+            reject_count > 1000,
+            "reject_count = {reject_count} (generator no longer exercises rejection paths)"
+        );
+    }
+
+    /// S6-2: NUL bytes, control chars, and oversize payloads must be
+    /// rejected with the corresponding typed error every single time —
+    /// not "mostly". Directed test to prove the fuzz generator actually
+    /// lands on each path.
+    #[test]
+    fn rejection_paths_are_deterministic_not_probabilistic() {
+        let tmpl = vec!["/bin/x".into(), "{p}".into()];
+
+        // NUL byte.
+        for embed_pos in [0usize, 1, 3, 10] {
+            let mut v = "abcdefghij".to_string();
+            v.insert(embed_pos.min(v.len()), '\0');
+            let err =
+                substitute_argv(&tmpl, &params(&[("p", v.as_str())]), &builtins()).unwrap_err();
+            assert!(matches!(err, SubstitutionError::ParamContainsNul { .. }));
+        }
+
+        // Oversize.
+        let big = "a".repeat(MAX_PARAM_BYTES + 1);
+        assert!(matches!(
+            substitute_argv(&tmpl, &params(&[("p", big.as_str())]), &builtins()).unwrap_err(),
+            SubstitutionError::ParamTooLong { .. }
+        ));
+
+        // Control chars. `\r` (0x0D) is the classic smuggling vector for
+        // log injection — the invariant must hold.
+        for ctrl in [0x01u8, 0x07, 0x0D, 0x1B, 0x7F] {
+            let v = format!("x{}y", ctrl as char);
+            assert!(matches!(
+                substitute_argv(&tmpl, &params(&[("p", v.as_str())]), &builtins()).unwrap_err(),
+                SubstitutionError::ParamContainsControl { .. }
+            ));
+        }
+    }
+
+    /// S6-2: end-to-end check that high-bit Unicode (emoji, RTL,
+    /// combining marks, private-use area, max scalar U+10FFFF) all
+    /// round-trip through the substituter without corruption.
+    #[test]
+    fn unicode_extremes_roundtrip_cleanly() {
+        let tmpl = vec!["/bin/x".into(), "{p}".into()];
+        let samples = [
+            "",
+            "🦀",
+            "עברית",
+            "café\u{0301}",
+            "a\u{D7FF}b\u{E000}c",
+            "\u{10FFFF}",
+            "\u{FDD0}",
+            "mixed 🦀 עברית \u{10FFFF}",
+        ];
+        for s in samples {
+            let out = substitute_argv(&tmpl, &params(&[("p", s)]), &builtins()).unwrap();
+            assert_eq!(out[1], s, "unicode sample mutated: {s:?}");
+        }
+    }
+
+    /// S6-2: substitution against an 8 KiB value exactly at the cap must
+    /// succeed and produce exactly one argv entry carrying the full
+    /// payload. Hand-rolled regression check complementing the fuzz loop.
+    #[test]
+    fn eight_kib_payload_lands_in_single_argv_entry() {
+        let tmpl = vec!["/bin/x".into(), "prefix {p} suffix".into()];
+        let payload = "x".repeat(MAX_PARAM_BYTES);
+        let out = substitute_argv(&tmpl, &params(&[("p", payload.as_str())]), &builtins()).unwrap();
+        assert_eq!(out.len(), 2);
+        assert!(out[1].starts_with("prefix "));
+        assert!(out[1].ends_with(" suffix"));
+        assert_eq!(out[1].len(), "prefix  suffix".len() + MAX_PARAM_BYTES);
+    }
 }

@@ -84,6 +84,33 @@ pub trait SystemOps {
             .is_ok_and(|s| s.success())
     }
 
+    /// Resolve a system user name to its `(uid, gid)` via `getpwnam`.
+    /// Returns `None` when the user does not exist on this host. Wired
+    /// behind `SystemOps` so doctor's hook-templates section can be
+    /// unit-tested without requiring `aimx-hook` to be present in the
+    /// test environment's `/etc/passwd`.
+    fn lookup_user_uid_gid(&self, user: &str) -> Option<(u32, u32)> {
+        #[cfg(unix)]
+        {
+            use std::ffi::CString;
+            let cname = CString::new(user).ok()?;
+            // SAFETY: getpwnam returns a pointer to a static buffer that
+            // is invalidated by the next getpw* call. We only read two
+            // scalar fields synchronously and copy them out.
+            let pw = unsafe { libc::getpwnam(cname.as_ptr()) };
+            if pw.is_null() {
+                return None;
+            }
+            let (uid, gid) = unsafe { ((*pw).pw_uid as u32, (*pw).pw_gid as u32) };
+            Some((uid, gid))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = user;
+            None
+        }
+    }
+
     /// Idempotently create a system user (+ matching primary group) with
     /// no login shell and no home directory. Returns `Ok(true)` when the
     /// user was newly created, `Ok(false)` when the user already existed,
