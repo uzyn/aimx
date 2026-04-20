@@ -1,6 +1,9 @@
 use crate::cli::SendArgs;
-use crate::config::Config;
+use crate::config::{Config, HookTemplate};
 use crate::frontmatter::InboundFrontmatter;
+use crate::hook::{HookEvent, HookOrigin, derive_template_hook_name, effective_hook_name};
+use crate::hook_client::{self, HookCrudFallback};
+use crate::hook_substitute::{BuiltinContext, substitute_argv};
 use crate::mailbox;
 use crate::send;
 use crate::send_protocol::{
@@ -12,6 +15,7 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, schemars, tool, tool_handler, tool_router};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -105,6 +109,52 @@ pub struct EmailReplyParams {
     pub id: String,
     #[schemars(description = "Reply body text")]
     pub body: String,
+}
+
+// ---- Hook-template MCP tool params (Sprint 5) -----------------------------
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookCreateParams {
+    #[schemars(description = "Mailbox to attach the hook to")]
+    pub mailbox: String,
+    #[schemars(description = "Event to fire on: \"on_receive\" or \"after_send\"")]
+    pub event: String,
+    #[schemars(
+        description = "Template name. Call hook_list_templates first to see which \
+                       templates this install has enabled."
+    )]
+    pub template: String,
+    #[schemars(
+        description = "Bound parameter values. Keys must match the template's \
+                       declared params exactly; values are passed verbatim to the \
+                       substituted argv slot (no shell interpretation, no argv \
+                       splitting)."
+    )]
+    pub params: BTreeMap<String, String>,
+    #[schemars(description = "Optional explicit hook name. When omitted, the daemon \
+                       derives a stable 12-hex-char name from (event, template, \
+                       sorted params).")]
+    pub name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookListParams {
+    #[schemars(
+        description = "Optional mailbox filter. When omitted, every mailbox's \
+                       hooks are listed."
+    )]
+    pub mailbox: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookDeleteParams {
+    #[schemars(
+        description = "Effective hook name (explicit name or derived 12-hex-char \
+                       digest). The daemon refuses to delete operator-origin \
+                       hooks with `ERR origin-protected` — those can only be \
+                       removed via `sudo aimx hooks delete` on the host."
+    )]
+    pub name: String,
 }
 
 impl AimxMcpServer {
@@ -387,6 +437,300 @@ impl AimxMcpServer {
         };
 
         submit_via_daemon(&args)
+    }
+
+    // ---- Hook-template MCP tools (Sprint 5) -------------------------------
+
+    #[tool(
+        name = "hook_list_templates",
+        description = "List hook templates enabled on this aimx install. Call \
+                       this first before hook_create — an empty list means the \
+                       operator has not enabled any templates (they must re-run \
+                       `sudo aimx setup` and tick them). Returns a JSON array \
+                       of {name, description, params, allowed_events}. Your \
+                       agent can only wire events to templates that appear in \
+                       this list; arbitrary-shell `cmd` hooks are operator-only."
+    )]
+    fn hook_list_templates(&self) -> Result<String, String> {
+        let config = self.load_config()?;
+        let view: Vec<HookTemplateView> = config
+            .hook_templates
+            .iter()
+            .map(HookTemplateView::from_template)
+            .collect();
+        serde_json::to_string(&view).map_err(|e| format!("Failed to serialize hook templates: {e}"))
+    }
+
+    #[tool(
+        name = "hook_create",
+        description = "Attach a template-bound hook to a mailbox. Your agent \
+                       cannot submit arbitrary shell — every hook must \
+                       reference a template registered on this install via \
+                       `aimx setup`. Bind values for each of the template's \
+                       declared params; the daemon refuses unknown params, \
+                       missing params, and param values containing NUL / \
+                       control characters. The daemon stamps `origin = \"mcp\"` \
+                       on the resulting hook so you can delete it later via \
+                       hook_delete. Returns {effective_name, substituted_argv}."
+    )]
+    fn hook_create(
+        &self,
+        Parameters(params): Parameters<HookCreateParams>,
+    ) -> Result<String, String> {
+        let event = parse_event_param(&params.event)?;
+        let config = self.load_config()?;
+
+        // Pre-flight: mailbox + template lookups. We stop here before
+        // hitting the socket so the agent gets a precise error on obvious
+        // typos. The daemon re-validates under its write lock, so this
+        // check is advisory — a race between two agents cannot produce a
+        // stale success.
+        if !config.mailboxes.contains_key(&params.mailbox) {
+            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
+        }
+        let template = config
+            .hook_templates
+            .iter()
+            .find(|t| t.name == params.template)
+            .ok_or_else(|| {
+                format!(
+                    "Unknown template '{}'. Call hook_list_templates to see \
+                     which templates this install has enabled.",
+                    params.template
+                )
+            })?;
+        if !template.allowed_events.contains(&event) {
+            return Err(format!(
+                "Template '{}' does not permit event '{}' (allowed: {}).",
+                template.name,
+                event.as_str(),
+                template
+                    .allowed_events
+                    .iter()
+                    .map(|e| e.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        // Surface missing/unknown params with the same wording the daemon
+        // uses so the agent's error path is stable whether we catch here
+        // or the daemon rejects. Done before `substitute_argv` so the
+        // error message mentions the param name rather than a confusing
+        // "unknown placeholder" diagnosis.
+        for required in &template.params {
+            if !params.params.contains_key(required) {
+                return Err(format!(
+                    "missing-param: template '{}' requires '{required}'",
+                    template.name
+                ));
+            }
+        }
+        for supplied in params.params.keys() {
+            if !template.params.iter().any(|p| p == supplied) {
+                return Err(format!(
+                    "unknown-param: template '{}' does not declare '{supplied}' \
+                     (declared: {})",
+                    template.name,
+                    template.params.join(", ")
+                ));
+            }
+        }
+
+        // Compute the effective name + substituted argv client-side so we
+        // can echo them in the response. The UDS verb returns bare OK on
+        // success, so the daemon does not hand back these values — but
+        // they are deterministic functions of the submitted inputs that
+        // the daemon validates against the same logic.
+        let effective = match &params.name {
+            Some(n) => n.clone(),
+            None => derive_template_hook_name(event, &template.name, &params.params),
+        };
+
+        // Populate built-ins with the mailbox + event we know at
+        // submission time; other builtins remain empty and are filled in
+        // at fire time by the daemon. This mirrors
+        // `handle_hook_create`'s pre-flight substitution so the MCP
+        // response surfaces a failure before the daemon rejects it.
+        let builtins = BuiltinContext {
+            event: event.as_str().to_string(),
+            mailbox: params.mailbox.clone(),
+            message_id: String::new(),
+            from: String::new(),
+            subject: String::new(),
+        };
+        let substituted = substitute_argv(&template.cmd, &params.params, &builtins)
+            .map_err(|e| format!("Param validation failed: {e}"))?;
+
+        // Submit via UDS. This is the same verb the CLI's `--template`
+        // path uses, so both submission channels stamp `origin = "mcp"`.
+        match hook_client::submit_hook_template_create_via_daemon(
+            &params.mailbox,
+            event,
+            &template.name,
+            params.params,
+            params.name.as_deref(),
+        ) {
+            Ok(()) => {
+                let payload = HookCreateResponse {
+                    effective_name: effective,
+                    substituted_argv: substituted,
+                };
+                serde_json::to_string(&payload)
+                    .map_err(|e| format!("Failed to serialize response: {e}"))
+            }
+            Err(HookCrudFallback::SocketMissing) => Err(
+                "aimx daemon not running. Start with 'sudo systemctl start aimx' \
+                 (template hooks cannot be installed while the daemon is down)."
+                    .to_string(),
+            ),
+            Err(HookCrudFallback::Daemon(msg)) => Err(msg),
+        }
+    }
+
+    #[tool(
+        name = "hook_list",
+        description = "List hooks visible to MCP across all mailboxes (or one \
+                       when `mailbox` is set). Operator-origin hooks are \
+                       returned with only {name, mailbox, event, origin}: \
+                       their `cmd` / `params` are masked so your agent cannot \
+                       inspect operator automations. MCP-origin hooks — ones \
+                       you created via hook_create or ones the operator \
+                       created via `aimx hooks create --template` — return \
+                       full {name, mailbox, event, template, params, origin} \
+                       so you can tell exactly what you wired up."
+    )]
+    fn hook_list(&self, Parameters(params): Parameters<HookListParams>) -> Result<String, String> {
+        let config = self.load_config()?;
+        let rows = collect_hook_rows(&config, params.mailbox.as_deref());
+        serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize hooks: {e}"))
+    }
+
+    #[tool(
+        name = "hook_delete",
+        description = "Delete a hook by effective name. The daemon refuses \
+                       operator-origin hooks with `ERR origin-protected`; the \
+                       error points at `sudo aimx hooks delete` which the \
+                       operator must run on the host. MCP-origin hooks \
+                       (created via hook_create or `aimx hooks create \
+                       --template`) delete successfully."
+    )]
+    fn hook_delete(
+        &self,
+        Parameters(params): Parameters<HookDeleteParams>,
+    ) -> Result<String, String> {
+        match hook_client::submit_hook_delete_via_daemon(&params.name) {
+            Ok(()) => Ok(format!("Hook '{}' deleted.", params.name)),
+            Err(HookCrudFallback::SocketMissing) => Err(
+                "aimx daemon not running. Start with 'sudo systemctl start aimx' \
+                 (hook deletion requires the daemon)."
+                    .to_string(),
+            ),
+            Err(HookCrudFallback::Daemon(msg)) => Err(msg),
+        }
+    }
+}
+
+// ---- Hook-template MCP tool helpers (Sprint 5) ----------------------------
+
+/// JSON shape returned by `hook_list_templates`. Kept as an explicit
+/// view struct (rather than reusing [`HookTemplate`]) so the wire
+/// format stays stable even if `HookTemplate` grows new internal
+/// fields. Only the four values the agent needs to call `hook_create`
+/// are exposed: `name`, `description`, `params`, `allowed_events`.
+#[derive(Serialize)]
+struct HookTemplateView<'a> {
+    name: &'a str,
+    description: &'a str,
+    params: &'a [String],
+    allowed_events: Vec<&'static str>,
+}
+
+impl<'a> HookTemplateView<'a> {
+    fn from_template(t: &'a HookTemplate) -> Self {
+        Self {
+            name: &t.name,
+            description: &t.description,
+            params: &t.params,
+            allowed_events: t.allowed_events.iter().map(|e| e.as_str()).collect(),
+        }
+    }
+}
+
+/// JSON shape returned by `hook_create` on success.
+#[derive(Serialize)]
+struct HookCreateResponse {
+    effective_name: String,
+    substituted_argv: Vec<String>,
+}
+
+/// One row in the `hook_list` JSON output. Operator-origin hooks are
+/// serialized with only the first four fields; MCP-origin hooks include
+/// the `template` and `params` details. See `collect_hook_rows`.
+#[derive(Serialize)]
+struct HookListRow<'a> {
+    name: String,
+    mailbox: &'a str,
+    event: &'static str,
+    origin: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<&'a BTreeMap<String, String>>,
+}
+
+/// Gather hooks across mailboxes applying the origin-masking rule from
+/// PRD §6.6 + §11 Q2. MCP-origin hooks surface full details; operator-
+/// origin hooks expose only name + mailbox + event + origin so the
+/// agent knows a slot is taken without inspecting the operator's
+/// automation.
+fn collect_hook_rows<'a>(config: &'a Config, filter: Option<&str>) -> Vec<HookListRow<'a>> {
+    let mut rows: Vec<HookListRow<'a>> = Vec::new();
+    let mut mailbox_names: Vec<&str> = config
+        .mailboxes
+        .keys()
+        .map(String::as_str)
+        .filter(|n| filter.is_none_or(|f| f == *n))
+        .collect();
+    mailbox_names.sort();
+    for name in mailbox_names {
+        let mb = match config.mailboxes.get(name) {
+            Some(m) => m,
+            None => continue,
+        };
+        for hook in &mb.hooks {
+            let effective = effective_hook_name(hook);
+            let row = match hook.origin {
+                HookOrigin::Mcp => HookListRow {
+                    name: effective,
+                    mailbox: name,
+                    event: hook.event.as_str(),
+                    origin: hook.origin.as_str(),
+                    template: hook.template.as_deref(),
+                    params: Some(&hook.params),
+                },
+                HookOrigin::Operator => HookListRow {
+                    name: effective,
+                    mailbox: name,
+                    event: hook.event.as_str(),
+                    origin: hook.origin.as_str(),
+                    template: None,
+                    params: None,
+                },
+            };
+            rows.push(row);
+        }
+    }
+    rows
+}
+
+fn parse_event_param(s: &str) -> Result<HookEvent, String> {
+    match s {
+        "on_receive" => Ok(HookEvent::OnReceive),
+        "after_send" => Ok(HookEvent::AfterSend),
+        other => Err(format!(
+            "Invalid event '{other}': expected 'on_receive' or 'after_send'."
+        )),
     }
 }
 
@@ -1407,7 +1751,8 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let server = AimxMcpServer::new(Some(tmp.path().to_path_buf()));
         let tools = server.tool_router.list_all();
-        assert_eq!(tools.len(), 9);
+        // 9 mail/mailbox tools + 4 hook tools (Sprint 5).
+        assert_eq!(tools.len(), 13);
     }
 
     #[test]
@@ -1426,6 +1771,12 @@ mod tests {
         assert!(names.contains(&"email_mark_unread"));
         assert!(names.contains(&"email_send"));
         assert!(names.contains(&"email_reply"));
+
+        // Sprint 5 additions.
+        assert!(names.contains(&"hook_list_templates"));
+        assert!(names.contains(&"hook_create"));
+        assert!(names.contains(&"hook_list"));
+        assert!(names.contains(&"hook_delete"));
     }
 
     #[test]
@@ -1638,5 +1989,307 @@ mod tests {
         assert!(args.reply_to.is_none());
         assert!(args.references.is_none());
         assert!(args.attachments.is_empty());
+    }
+
+    // ---- Sprint 5 hook-template tool helpers -----------------------------
+
+    use crate::config::{HookTemplate, HookTemplateStdin};
+    use crate::hook::Hook;
+
+    fn sample_template(name: &str, params: Vec<&str>, events: Vec<HookEvent>) -> HookTemplate {
+        HookTemplate {
+            name: name.to_string(),
+            description: format!("test template {name}"),
+            cmd: {
+                let mut argv = vec!["/usr/bin/true".to_string()];
+                for p in &params {
+                    argv.push(format!("{{{p}}}"));
+                }
+                argv
+            },
+            params: params.into_iter().map(String::from).collect(),
+            stdin: HookTemplateStdin::Email,
+            run_as: "aimx-hook".to_string(),
+            timeout_secs: 60,
+            allowed_events: events,
+        }
+    }
+
+    #[test]
+    fn hook_template_view_serializes_expected_shape() {
+        let tmpl = sample_template(
+            "invoke-claude",
+            vec!["prompt"],
+            vec![HookEvent::OnReceive, HookEvent::AfterSend],
+        );
+        let view = HookTemplateView::from_template(&tmpl);
+        let json = serde_json::to_value(&view).unwrap();
+        assert_eq!(json["name"], "invoke-claude");
+        assert_eq!(json["description"], "test template invoke-claude");
+        assert_eq!(json["params"][0], "prompt");
+        let events: Vec<&str> = json["allowed_events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(events, vec!["on_receive", "after_send"]);
+    }
+
+    #[test]
+    fn hook_template_view_empty_config_serializes_empty_array() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let view: Vec<HookTemplateView> = config
+            .hook_templates
+            .iter()
+            .map(HookTemplateView::from_template)
+            .collect();
+        let json = serde_json::to_string(&view).unwrap();
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn hook_template_view_golden_three_templates() {
+        // Regression guard against accidental shape drift: serialized
+        // JSON must carry exactly the four fields the agent uses to
+        // pick a template — name, description, params, allowed_events.
+        let tmpls = [
+            sample_template("invoke-claude", vec!["prompt"], vec![HookEvent::OnReceive]),
+            sample_template(
+                "webhook",
+                vec!["url"],
+                vec![HookEvent::OnReceive, HookEvent::AfterSend],
+            ),
+            sample_template("notify", vec![], vec![HookEvent::AfterSend]),
+        ];
+        let view: Vec<HookTemplateView> =
+            tmpls.iter().map(HookTemplateView::from_template).collect();
+        let json: serde_json::Value = serde_json::to_value(&view).unwrap();
+        assert_eq!(json.as_array().unwrap().len(), 3);
+        // First entry: single param + one allowed event.
+        assert_eq!(json[0]["name"], "invoke-claude");
+        assert_eq!(json[0]["params"][0], "prompt");
+        assert_eq!(json[0]["allowed_events"][0], "on_receive");
+        // Third entry: empty params array must still serialize as [].
+        assert_eq!(json[2]["name"], "notify");
+        assert_eq!(json[2]["params"].as_array().unwrap().len(), 0);
+        assert_eq!(json[2]["allowed_events"][0], "after_send");
+        // Unexpected fields must not appear.
+        assert!(json[0].get("cmd").is_none());
+        assert!(json[0].get("run_as").is_none());
+        assert!(json[0].get("timeout_secs").is_none());
+        assert!(json[0].get("stdin").is_none());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_hook(
+        config: &mut Config,
+        mailbox: &str,
+        name: Option<&str>,
+        event: HookEvent,
+        origin: HookOrigin,
+        template: Option<&str>,
+        params: &[(&str, &str)],
+        cmd: &str,
+    ) {
+        let hook = Hook {
+            name: name.map(String::from),
+            event,
+            r#type: "cmd".into(),
+            cmd: cmd.to_string(),
+            dangerously_support_untrusted: false,
+            origin,
+            template: template.map(String::from),
+            params: params
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            run_as: None,
+        };
+        config.mailboxes.get_mut(mailbox).unwrap().hooks.push(hook);
+    }
+
+    #[test]
+    fn collect_hook_rows_masks_operator_origin_and_reveals_mcp_origin() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path());
+        // Operator-origin raw-cmd hook: only name/mailbox/event/origin
+        // must survive the mask; `cmd` / `template` / `params` never
+        // leak to the agent.
+        insert_hook(
+            &mut config,
+            "alice",
+            Some("op_hook"),
+            HookEvent::OnReceive,
+            HookOrigin::Operator,
+            None,
+            &[],
+            "curl secret.example.com",
+        );
+        // MCP-origin template hook: template + params surface.
+        insert_hook(
+            &mut config,
+            "alice",
+            Some("agent_hook"),
+            HookEvent::OnReceive,
+            HookOrigin::Mcp,
+            Some("invoke-claude"),
+            &[("prompt", "hello")],
+            "",
+        );
+
+        let rows = collect_hook_rows(&config, None);
+        let json = serde_json::to_value(&rows).unwrap();
+        let rows_arr = json.as_array().unwrap();
+        assert_eq!(rows_arr.len(), 2);
+
+        let op = rows_arr
+            .iter()
+            .find(|r| r["name"] == "op_hook")
+            .expect("operator hook row");
+        assert_eq!(op["origin"], "operator");
+        assert_eq!(op["mailbox"], "alice");
+        assert_eq!(op["event"], "on_receive");
+        assert!(
+            op.get("template").is_none(),
+            "template must be masked: {op}"
+        );
+        assert!(op.get("params").is_none(), "params must be masked: {op}");
+        // And certainly no cmd.
+        assert!(op.get("cmd").is_none());
+
+        let mcp = rows_arr
+            .iter()
+            .find(|r| r["name"] == "agent_hook")
+            .expect("mcp hook row");
+        assert_eq!(mcp["origin"], "mcp");
+        assert_eq!(mcp["template"], "invoke-claude");
+        assert_eq!(mcp["params"]["prompt"], "hello");
+    }
+
+    #[test]
+    fn collect_hook_rows_filter_by_mailbox() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path());
+        insert_hook(
+            &mut config,
+            "alice",
+            Some("alice_hook"),
+            HookEvent::OnReceive,
+            HookOrigin::Mcp,
+            Some("invoke-claude"),
+            &[("prompt", "a")],
+            "",
+        );
+        insert_hook(
+            &mut config,
+            "catchall",
+            Some("catchall_hook"),
+            HookEvent::OnReceive,
+            HookOrigin::Mcp,
+            Some("invoke-claude"),
+            &[("prompt", "b")],
+            "",
+        );
+        let rows = collect_hook_rows(&config, Some("alice"));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "alice_hook");
+    }
+
+    #[test]
+    fn collect_hook_rows_uses_effective_name_when_explicit_absent() {
+        let tmp = TempDir::new().unwrap();
+        let mut config = test_config(tmp.path());
+        let mut params = BTreeMap::new();
+        params.insert("prompt".to_string(), "hi".to_string());
+        insert_hook(
+            &mut config,
+            "alice",
+            None, // anonymous — name is derived
+            HookEvent::OnReceive,
+            HookOrigin::Mcp,
+            Some("invoke-claude"),
+            &[("prompt", "hi")],
+            "",
+        );
+        let rows = collect_hook_rows(&config, None);
+        assert_eq!(rows.len(), 1);
+        let expected = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
+        assert_eq!(rows[0].name, expected);
+    }
+
+    #[test]
+    fn parse_event_param_accepts_valid() {
+        assert_eq!(
+            parse_event_param("on_receive").unwrap(),
+            HookEvent::OnReceive
+        );
+        assert_eq!(
+            parse_event_param("after_send").unwrap(),
+            HookEvent::AfterSend
+        );
+    }
+
+    #[test]
+    fn parse_event_param_rejects_unknown() {
+        let err = parse_event_param("reboot").unwrap_err();
+        assert!(err.contains("Invalid event"));
+        assert!(err.contains("reboot"));
+    }
+
+    #[test]
+    fn hook_create_params_deserialize_minimal() {
+        let json = r#"{
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {"prompt": "hello"}
+        }"#;
+        let p: HookCreateParams = serde_json::from_str(json).unwrap();
+        assert_eq!(p.mailbox, "alice");
+        assert_eq!(p.event, "on_receive");
+        assert_eq!(p.template, "invoke-claude");
+        assert_eq!(p.params.get("prompt").unwrap(), "hello");
+        assert!(p.name.is_none());
+    }
+
+    #[test]
+    fn hook_create_params_deserialize_with_name() {
+        let json = r#"{
+            "mailbox": "alice",
+            "event": "after_send",
+            "template": "webhook",
+            "params": {"url": "https://example.com"},
+            "name": "my_hook"
+        }"#;
+        let p: HookCreateParams = serde_json::from_str(json).unwrap();
+        assert_eq!(p.name.as_deref(), Some("my_hook"));
+    }
+
+    #[test]
+    fn hook_list_params_defaults_to_no_filter() {
+        let json = r#"{}"#;
+        let p: HookListParams = serde_json::from_str(json).unwrap();
+        assert!(p.mailbox.is_none());
+    }
+
+    #[test]
+    fn hook_delete_params_requires_name() {
+        let json = r#"{"name": "foo"}"#;
+        let p: HookDeleteParams = serde_json::from_str(json).unwrap();
+        assert_eq!(p.name, "foo");
+    }
+
+    #[test]
+    fn hook_create_response_serializes_fields() {
+        let resp = HookCreateResponse {
+            effective_name: "abc123".to_string(),
+            substituted_argv: vec!["/bin/echo".to_string(), "hi".to_string()],
+        };
+        let json: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(json["effective_name"], "abc123");
+        assert_eq!(json["substituted_argv"][0], "/bin/echo");
+        assert_eq!(json["substituted_argv"][1], "hi");
     }
 }

@@ -141,3 +141,24 @@ attachment files as siblings:
 
 The `id` for this email is `2026-04-15-153300-invoice-march` (the directory
 name), and `email_read` works with this ID normally.
+
+## Hook-related errors
+
+Full coverage lives in `references/hooks.md`. Quick entry points:
+
+- **`hook_list_templates` returned `[]`.** The operator has not
+  enabled any templates. Ask them to run `sudo aimx setup` on the
+  host and tick the templates they want.
+- **`hook_create` returned `Unknown template`.** Re-call
+  `hook_list_templates`; the operator may have disabled it or your
+  spelling is off.
+- **`hook_create` returned `missing-param` / `unknown-param` /
+  `param-invalid`.** The param map must match the template's `params`
+  list exactly, and values cannot contain ASCII control chars or NUL
+  bytes. Sanitize and retry.
+- **`hook_delete` returned `origin-protected`.** The hook is operator-
+  origin; MCP cannot delete it. Tell the user to run
+  `sudo aimx hooks delete <name>` on the host.
+- **My hook does not fire on inbound mail.** Check the target email's
+  `trusted` field via `email_read`. MCP-origin hooks fire only on
+  trusted mail. See `references/hooks.md` for the full trust checklist.
