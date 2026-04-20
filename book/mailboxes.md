@@ -14,7 +14,7 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 
 ### On-disk layout
 
-```
+```text
 /var/lib/aimx/
 ├── inbox/              # inbound mail lives here
 │   ├── catchall/
@@ -147,7 +147,7 @@ read = false
 Hello, this is the email body in plain text.
 ```
 
-This format is designed to be agent-readable without parsing libraries. An agent can `cat` the file and understand it immediately.
+The format is agent-readable without a MIME parser: an agent can `cat` the file and act on it directly.
 
 ### Frontmatter fields
 
@@ -174,6 +174,20 @@ This format is designed to be agent-readable without parsing libraries. An agent
 | `read` | bool | Read status (`false` on ingest) |
 | `read_at` | datetime | RFC 3339 UTC timestamp set when the email is marked read. Removed on mark-unread. Reflects the most recent read, not the first. Optional, omitted when absent |
 
+### Outbound frontmatter
+
+Emails under `sent/<mailbox>/` carry every inbound field plus an outbound block appended at the end:
+
+| Field | Type | Always written | Description |
+|-------|------|----------------|-------------|
+| `outbound` | bool | yes | Always `true` on sent copies. Distinguishes outbound files from inbound. |
+| `delivery_status` | string | yes | One of `"delivered"`, `"failed"`, `"deferred"`, `"pending"`. |
+| `bcc` | array of strings | no | BCC recipients. Optional, omitted when empty. |
+| `delivered_at` | string | no | RFC 3339 UTC timestamp of the successful MX handoff. Optional, present only when `delivery_status = "delivered"`. |
+| `delivery_details` | string | no | SMTP reason string on permanent failure (e.g. `"550 no such user"`). Optional. |
+
+Deferred (4xx) sends are not persisted — the submitting client is expected to retry. Permanent (5xx) failures are persisted with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. On outbound files the inbound `received_at` and `received_from_ip` fields are omitted when empty.
+
 ### Body extraction
 
 - **Text/plain** is preferred when available
@@ -185,7 +199,7 @@ This format is designed to be agent-readable without parsing libraries. An agent
 When an email carries one or more attachments, AIMX writes a Zola-style
 bundle directory whose name matches the `.md` file's stem:
 
-```
+```text
 /var/lib/aimx/inbox/support/
 ├── 2025-01-15-103000-status-update.md         # flat: no attachments
 └── 2025-01-15-104500-quarterly-report/        # bundle: one or more attachments
@@ -209,7 +223,7 @@ path = "report.pdf"
 | `filename` | Original filename (path components stripped, duplicates suffixed `-1`, `-2`, …) |
 | `content_type` | MIME type |
 | `size` | File size in bytes |
-| `path` | Path relative to the bundle directory (no `attachments/` prefix in v0.2) |
+| `path` | Path relative to the bundle directory |
 
 ## Read/unread tracking
 
@@ -244,7 +258,17 @@ aimx send --from support@agent.yourdomain.com \
           --subject "Re: Hello" \
           --body "Reply body" \
           --reply-to "<original-message-id@example.com>"
+
+# Advanced: supply the full References header for deep threading
+aimx send --from support@agent.yourdomain.com \
+          --to recipient@gmail.com \
+          --subject "Re: Hello" \
+          --body "Reply body" \
+          --reply-to "<parent@example.com>" \
+          --references "<root@example.com> <parent@example.com>"
 ```
+
+`--reply-to` sets the `In-Reply-To` header (single Message-ID). `--references` sets the `References` chain and is only needed for multi-step threads where `In-Reply-To` alone is not enough — most users can omit it. For interactive agent use, prefer the `email_reply` MCP tool; it reads the original message and fills both headers automatically.
 
 ### Via MCP
 
@@ -258,9 +282,9 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 ### Reply threading
 
-When replying to an email, AIMX sets the `In-Reply-To` and `References` headers so the reply is threaded correctly in the recipient's mail client. Use `--reply-to` with the original message's `Message-ID` value.
+Replies set `In-Reply-To` and `References` so the thread lands correctly in the recipient's mail client. Pass `--reply-to` with the original message's `Message-ID` value.
 
-The `email_reply` MCP tool handles threading automatically -- it reads the original email and sets the correct headers.
+The `email_reply` MCP tool handles threading automatically by reading the original email and setting the headers.
 
 ## Email ID format
 

@@ -1,6 +1,6 @@
 # Getting Started
 
-This guide walks you through installing AIMX and setting up your first agent email address.
+Install AIMX and run your first setup.
 
 ## Requirements
 
@@ -74,9 +74,9 @@ The wizard will:
 7. Show **[Deliverability Improvement (Optional)]** tips (Gmail filter / whitelist)
 8. Create a default `catchall` mailbox
 
-If you've already run setup and want to re-verify, just run `sudo aimx setup agent.yourdomain.com` again -- it will skip installation and go straight to verification.
+Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips installation and jumps straight to DNS verification.
 
-Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup -- DNS Configuration](setup.md#dns-configuration) for details on each record.
+Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup — DNS Configuration](setup.md#dns-configuration) for per-record details.
 
 ## Verify
 
@@ -111,30 +111,7 @@ Run `aimx agent-setup --list` to see every supported agent and its
 destination path, and see the [Agent Integration](agent-integration.md)
 chapter for per-agent activation steps.
 
-Your agent can now list, read, send, and reply to email. See the [MCP Server](mcp.md) guide for all available tools.
-
-## Shell completion
-
-`aimx completion <shell>` prints a completion script to stdout. Pipe it
-into the shell-specific location for your distribution:
-
-```bash
-# Bash (system-wide; requires root)
-aimx completion bash | sudo tee /etc/bash_completion.d/aimx > /dev/null
-
-# Zsh (user-local; assumes ~/.zsh/completions is in your fpath)
-mkdir -p ~/.zsh/completions
-aimx completion zsh > ~/.zsh/completions/_aimx
-
-# Fish
-aimx completion fish > ~/.config/fish/completions/aimx.fish
-
-# Elvish
-aimx completion elvish > ~/.config/elvish/lib/aimx-completion.elv
-```
-
-Open a new shell and `aimx <Tab>` will expand subcommands and flags
-(e.g. `aimx ma<Tab>` → `aimx mailboxes`).
+The agent can now list, read, send, and reply to email via MCP. See [MCP Server](mcp.md) for the full tool set.
 
 ## Next steps
 

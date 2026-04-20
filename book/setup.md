@@ -1,8 +1,6 @@
 # Setup
 
-This guide covers every step of setting up AIMX in detail -- from prerequisites through production hardening.
-
-For a shorter walkthrough, see [Getting Started](getting-started.md).
+Prerequisites, build, setup wizard, DNS records, verification, DKIM keys, and production hardening. For a shorter walkthrough, see [Getting Started](getting-started.md).
 
 ## Prerequisites
 
@@ -43,7 +41,7 @@ aimx --version
 
 ## Pre-setup verification
 
-Before running setup, you can verify port 25 connectivity:
+Verify port 25 connectivity before running setup:
 
 ```bash
 sudo aimx portcheck
@@ -91,20 +89,20 @@ After initial setup, the wizard displays three clearly labeled sections:
 
 ### Re-running setup
 
-If you've already completed setup and want to re-verify, simply run `aimx setup` again:
+Re-run `aimx setup` on an existing install to re-verify:
 
 ```bash
 sudo aimx setup agent.yourdomain.com
 ```
 
-When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips the install/configure steps and proceeds directly through the port 25 preflight (run up front), DNS verification, and the output sections. This makes re-runs a quick verification pass.
+When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install/configure and runs the port 25 preflight, DNS verification, and the output sections as a quick verification pass.
 
 ### DNS retry loop
 
-At the DNS verification step, you can:
+At the DNS verification step:
 
-- Press **Enter** to re-check DNS records (useful when you've just updated DNS in another tab)
-- Press **q** to finish and verify later with `sudo aimx setup <domain>`
+- **Enter** re-checks DNS records (useful after updating DNS in another tab).
+- **q** defers verification; re-run `sudo aimx setup <domain>` later.
 
 ### Uninstalling
 
@@ -129,7 +127,7 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | `aimx._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 
-Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx as of v0.2. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
+Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
 
 The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml` — see [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient; any existing AAAA record in DNS is left alone.
 
@@ -181,7 +179,7 @@ sudo aimx portcheck
 
 This tests outbound port 25 connectivity (via EHLO handshake) and inbound SMTP reachability (via EHLO probe). Requires root.
 
-Check server health at any time:
+Check server health:
 
 ```bash
 aimx doctor
@@ -294,7 +292,7 @@ If you prefer not to use the public instance:
    ```
 
    Or override it per-invocation with `--verify-host`:
-   ```
+   ```bash
    sudo aimx portcheck --verify-host https://verify.yourdomain.com
    ```
 
