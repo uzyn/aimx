@@ -99,26 +99,33 @@ email_send(
 
 ## 5. Reply-all
 
-AIMX's `email_reply` sends to the original sender. To reply to all
-recipients, use `email_send` with explicit addresses:
+AIMX's `email_reply` sends to the original sender only. To reply to all
+recipients, use `email_send` with explicit addresses — and pass
+`reply_to` (and optionally `references`) so the outgoing message stays
+in the same thread:
 
 ```
-# Read the original to get all recipients
+# Read the original to get all recipients and the Message-ID
 email_read(mailbox: "agent", id: "<id>")
-# Parse frontmatter: from, to, cc
+# Parse frontmatter: from, to, cc, message_id, references
 
-# Compose with all original recipients
+# Compose with all original recipients, preserving threading
 email_send(
   from_mailbox: "agent",
   to: "<original-from>, <original-to>, <original-cc>",
   subject: "Re: <original-subject>",
-  body: "<reply-body>"
+  body: "<reply-body>",
+  reply_to: "<original-message-id>",
+  references: "<original-references> <original-message-id>"
 )
 ```
 
-Note: when using `email_send` for reply-all, you must manually set the
-subject with `Re:` prefix. Threading headers (`In-Reply-To`, `References`)
-are only set automatically by `email_reply`.
+Notes:
+- `subject` still needs the `Re:` prefix added manually — `email_send`
+  never rewrites the subject.
+- If you only pass `reply_to`, AIMX builds a minimal `References` chain
+  from it automatically. Pass `references` when you need to preserve the
+  full thread history (typical for reply-all on a long thread).
 
 ## 6. Filter by list-id
 
