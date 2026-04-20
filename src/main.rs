@@ -9,6 +9,7 @@ mod hook;
 mod hook_client;
 mod hook_handler;
 mod hook_substitute;
+mod hook_templates_defaults;
 mod hooks;
 mod ingest;
 mod logs;
@@ -49,10 +50,17 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Setup {
             domain,
             verify_host,
+            non_interactive,
         } => {
             let sys = setup::RealSystemOps;
             let net = build_network_ops(verify_host.as_deref())?;
-            setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
+            setup::run_setup(
+                domain.as_deref(),
+                cli.data_dir.as_deref(),
+                non_interactive,
+                &sys,
+                &net,
+            )
         }
         // Uninstall also runs pre-config: config may be missing or unreadable.
         Command::Uninstall { yes } => {

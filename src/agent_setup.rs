@@ -30,6 +30,17 @@ pub struct AgentSpec {
     /// demand. Agents that take a single blob (Goose, Gemini, OpenCode)
     /// receive only the main primer.
     pub progressive_disclosure: bool,
+    /// Bundled hook template that lets this agent create its own hooks
+    /// via MCP (PRD §6.4). Populated for every agent that ships with a
+    /// matching `invoke-<agent>` template; left `None` for the generic
+    /// `webhook` template (no specific agent owner).
+    ///
+    /// When `Some`, `agent-setup` appends a post-install "Hook Templates"
+    /// section pointing the operator at the matching template. The
+    /// printed command mentions `sudo aimx setup` because the dedicated
+    /// `sudo aimx hooks template-enable <name>` CLI is deferred to v2;
+    /// the hint will upgrade to the dedicated command when that lands.
+    pub matching_template: Option<&'static str>,
 }
 
 /// Static registry of supported agents.
@@ -64,6 +75,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.claude/plugins/aimx",
             activation_hint: claude_code_hint,
             progressive_disclosure: true,
+            matching_template: Some("invoke-claude"),
         },
         AgentSpec {
             name: "codex",
@@ -71,6 +83,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
             progressive_disclosure: true,
+            matching_template: Some("invoke-codex"),
         },
         AgentSpec {
             name: "opencode",
@@ -78,6 +91,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
             activation_hint: opencode_hint,
             progressive_disclosure: false,
+            matching_template: Some("invoke-opencode"),
         },
         AgentSpec {
             name: "gemini",
@@ -85,6 +99,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
             progressive_disclosure: false,
+            matching_template: Some("invoke-gemini"),
         },
         AgentSpec {
             name: "goose",
@@ -95,6 +110,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$XDG_CONFIG_HOME/goose/recipes",
             activation_hint: goose_hint,
             progressive_disclosure: false,
+            matching_template: Some("invoke-goose"),
         },
         AgentSpec {
             name: "openclaw",
@@ -104,6 +120,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
             progressive_disclosure: true,
+            matching_template: Some("invoke-openclaw"),
         },
         AgentSpec {
             name: "hermes",
@@ -116,6 +133,7 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.hermes/skills/aimx",
             activation_hint: hermes_hint,
             progressive_disclosure: true,
+            matching_template: Some("invoke-hermes"),
         },
     ]
 }
@@ -542,6 +560,10 @@ fn install_to_writer(
         // (opencode, gemini) expose their MCP JSON block under dry-run.
         writeln!(out, "=== activation ===")?;
         writeln!(out, "{hint}")?;
+        if let Some(tmpl) = spec.matching_template {
+            writeln!(out, "=== hook templates ===")?;
+            writeln!(out, "{}", render_template_hint(spec.name, tmpl))?;
+        }
         return Ok(());
     }
 
@@ -556,7 +578,35 @@ fn install_to_writer(
     )?;
     writeln!(out, "{hint}")?;
 
+    // Post-install hook-template hint (Sprint 4, PRD §6.4).
+    if let Some(tmpl) = spec.matching_template {
+        writeln!(out)?;
+        writeln!(out, "{}", term::header("Hook Templates"))?;
+        writeln!(out, "{}", render_template_hint(spec.name, tmpl))?;
+    }
+
     Ok(())
+}
+
+/// Render the "enable the matching template" hint printed after a
+/// successful `agent-setup <agent>`. Centralised so both the install
+/// path and `--print` path (and the unit tests) produce the same copy.
+///
+/// v1 points operators at `sudo aimx setup` because the dedicated
+/// `sudo aimx hooks template-enable <name>` CLI ships in v2; the hint
+/// updates in the sprint that ships that command.
+fn render_template_hint(agent_name: &str, template: &str) -> String {
+    format!(
+        "To let {agent_name} create its own hooks via MCP, enable the matching\n\
+         template as root:\n\
+         \n\
+         \x20\x20sudo aimx setup\n\
+         \n\
+         and tick `{template}` when the [Hook Templates] prompt appears.\n\
+         (Already enabled if you ticked it during an earlier `aimx setup`.)\n\
+         A dedicated `sudo aimx hooks template-enable {template}` CLI is\n\
+         planned for a future release.",
+    )
 }
 
 /// Walk the embedded plugin source, transform known files (skill header +
@@ -984,6 +1034,121 @@ mod tests {
     fn registry_contains_claude_code() {
         assert!(find_agent("claude-code").is_some());
         assert!(find_agent("not-a-real-agent").is_none());
+    }
+
+    // ----- Sprint 4 S4-4: matching_template hint --------------------------
+
+    /// Every v1 agent ships with a matching `invoke-<agent>` template so
+    /// the post-install hint has something to point at. A new agent that
+    /// forgets this will fail the test loudly (catches accidental `None`
+    /// during registry edits).
+    #[test]
+    fn every_registered_agent_has_matching_template() {
+        for spec in registry() {
+            let tmpl = spec
+                .matching_template
+                .unwrap_or_else(|| panic!("agent '{}' is missing matching_template", spec.name));
+            assert!(
+                tmpl.starts_with("invoke-"),
+                "agent '{}' should map to an invoke- template, got '{}'",
+                spec.name,
+                tmpl,
+            );
+        }
+    }
+
+    #[test]
+    fn matching_templates_exist_in_default_bundle() {
+        let bundled: std::collections::HashSet<String> =
+            crate::hook_templates_defaults::default_templates()
+                .into_iter()
+                .map(|t| t.name)
+                .collect();
+        for spec in registry() {
+            let tmpl = spec.matching_template.expect("matching_template set");
+            assert!(
+                bundled.contains(tmpl),
+                "agent '{}' maps to template '{}' which is not in the default bundle",
+                spec.name,
+                tmpl,
+            );
+        }
+    }
+
+    /// Drive the full install for every registered agent (minus the
+    /// content assertion) and confirm the Sprint 4 hint text appears in
+    /// the captured stdout for each one.
+    #[test]
+    fn install_appends_template_hint_for_each_agent() {
+        for spec in registry() {
+            let tmp = TempDir::new().unwrap();
+            let env = MockEnv::new(tmp.path().to_path_buf());
+            let mut buf: Vec<u8> = Vec::new();
+            run_with_env_to_writer(
+                Some(spec.name.into()),
+                false,
+                false,
+                false,
+                None,
+                &env,
+                &mut buf,
+            )
+            .unwrap_or_else(|e| panic!("install failed for {}: {e}", spec.name));
+            let out = String::from_utf8(buf).unwrap();
+
+            assert!(
+                out.contains("Hook Templates"),
+                "missing 'Hook Templates' header for agent '{}': {out}",
+                spec.name,
+            );
+            assert!(
+                out.contains(spec.matching_template.unwrap()),
+                "missing template name '{}' in hint for agent '{}': {out}",
+                spec.matching_template.unwrap(),
+                spec.name,
+            );
+            assert!(
+                out.contains("sudo aimx setup"),
+                "missing setup hint for agent '{}': {out}",
+                spec.name,
+            );
+        }
+    }
+
+    #[test]
+    fn print_mode_includes_template_hint_section() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        run_with_env_to_writer(
+            Some("claude-code".into()),
+            false,
+            false,
+            true, // --print
+            None,
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("=== hook templates ==="), "{out}");
+        assert!(out.contains("invoke-claude"), "{out}");
+    }
+
+    /// Future-proofing: if a new agent is added with
+    /// `matching_template: None`, the hint section must be omitted.
+    /// Exercised via the internal `render_template_hint` directly — no
+    /// registered agent currently ships with `None`.
+    #[test]
+    fn render_template_hint_shape() {
+        let rendered = render_template_hint("claude-code", "invoke-claude");
+        assert!(rendered.contains("claude-code"));
+        assert!(rendered.contains("invoke-claude"));
+        assert!(rendered.contains("sudo aimx setup"));
+        assert!(
+            rendered.contains("future release"),
+            "must call out the v2 CLI in the hint body: {rendered}"
+        );
     }
 
     #[test]
@@ -1490,9 +1655,13 @@ mod tests {
         let printed = String::from_utf8(buf).unwrap();
 
         // Extract the activation section and confirm it parses as JSON.
+        // Sprint 4 added a `=== hook templates ===` section after the
+        // activation block, so stop at the next `=== ` marker to keep
+        // the JSON body uncontaminated.
         let (_, after) = printed.split_once("=== activation ===\n").unwrap();
         let snippet = after
             .lines()
+            .take_while(|l| !l.starts_with("=== "))
             .skip_while(|l| l.trim().is_empty() || l.starts_with("Skill installed"))
             .collect::<Vec<_>>()
             .join("\n");
