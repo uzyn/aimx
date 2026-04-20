@@ -1,13 +1,23 @@
-//! Client-side UDS helpers for `aimx hooks create` / `aimx hooks delete`.
+//! Client-side UDS helpers for `aimx hooks create --template` and
+//! `aimx hooks delete`.
+//!
+//! Raw-cmd hooks (`aimx hooks create --cmd`) do NOT traverse the UDS —
+//! they write `config.toml` directly and SIGHUP the daemon. Only
+//! template-bound hook creation reaches `aimx.sock`, matching the PRD
+//! §6.5 authorization split: the socket is world-writable, the DKIM
+//! key isolation is the trust boundary, and nothing submittable over
+//! the socket is allowed to pivot into arbitrary argv.
 //!
 //! Mirrors the `mailbox_crud` submission path in [`crate::mcp`]: try the
 //! daemon UDS first so `Arc<Config>` hot-swaps and the new hook fires on
 //! the next event, and surface socket-missing errors distinctly so the
-//! caller can fall back to a direct `config.toml` edit + restart hint.
+//! caller can fall back (or fail explicitly — raw-cmd never falls back).
 
-use crate::hook::Hook;
+use std::collections::BTreeMap;
+
+use crate::hook::HookEvent;
 use crate::mcp::{MarkOutcome, is_socket_missing, parse_ack_response};
-use crate::send_protocol::{self, HookCreateRequest, HookDeleteRequest};
+use crate::send_protocol::{self, HookCreateRequest, HookDeleteRequest, HookTemplateCreateBody};
 
 /// Outcome of a hook CRUD submission that didn't succeed via UDS. Tracks
 /// socket-missing distinctly from daemon-side errors so the CLI can
@@ -21,24 +31,30 @@ pub(crate) enum HookCrudFallback {
     Daemon(String),
 }
 
-/// Submit a `HOOK-CREATE` request over UDS. The hook stanza is serialized
-/// to TOML and shipped as the body; the daemon validates + appends +
+/// Submit a template-bound `HOOK-CREATE` request over UDS. The daemon
+/// validates the template, binds `params`, stamps `origin = "mcp"`, and
 /// hot-swaps the in-memory `Arc<Config>` atomically.
-pub(crate) fn submit_hook_create_via_daemon(
+pub(crate) fn submit_hook_template_create_via_daemon(
     mailbox: &str,
-    hook: &Hook,
+    event: HookEvent,
+    template: &str,
+    params: BTreeMap<String, String>,
+    name: Option<&str>,
 ) -> Result<(), HookCrudFallback> {
-    let hook_toml = match toml::to_string_pretty(hook) {
-        Ok(s) => s.into_bytes(),
+    let body_bytes = match serde_json::to_vec(&HookTemplateCreateBody { params }) {
+        Ok(v) => v,
         Err(e) => {
             return Err(HookCrudFallback::Daemon(format!(
-                "failed to serialize hook: {e}"
+                "failed to serialize HOOK-CREATE body: {e}"
             )));
         }
     };
     let request = HookCreateRequest {
         mailbox: mailbox.to_string(),
-        hook_toml,
+        event: event.as_str().to_string(),
+        template: template.to_string(),
+        name: name.map(str::to_string),
+        body: body_bytes,
     };
     let socket = crate::serve::aimx_socket_path();
 

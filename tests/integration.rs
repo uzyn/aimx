@@ -3929,6 +3929,11 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     cmd.env("AIMX_CONFIG_DIR", tmp);
     cmd.env("AIMX_RUNTIME_DIR", &runtime);
     cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
+    // Sprint 3 S3-4 makes `aimx hooks create --cmd` root-only. CI runs
+    // non-root, so tests set this test-only escape hatch to exercise
+    // the direct-write + SIGHUP path on behalf of the fake-root
+    // operator. Production systemd units never pass this env var.
+    cmd.env("AIMX_TEST_SKIP_ROOT_CHECK", "1");
     cmd
 }
 
@@ -4170,6 +4175,7 @@ fn hooks_create_via_daemon_hot_swaps_config() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -4189,13 +4195,16 @@ fn hooks_create_via_daemon_hot_swaps_config() {
         create_out.contains("Hook created"),
         "create output: {create_out}"
     );
-    // No restart hint on the daemon-success path.
+    // Sprint 3 S3-4: raw-cmd hooks write config.toml directly and
+    // SIGHUP the daemon; a running daemon still prints no "Hint:"
+    // restart banner (which would mean the SIGHUP path fell through).
     assert!(
         !create_out.contains("Hint:"),
         "daemon-success should not print restart hint: {create_out}"
     );
 
-    // On-disk config.toml should contain the new hook (daemon rewrote it).
+    // On-disk config.toml should contain the new hook (CLI wrote it
+    // directly — raw-cmd never traverses UDS under Sprint 3).
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
         content.contains("echo via-daemon"),
@@ -4221,6 +4230,7 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -4237,7 +4247,9 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .success();
     let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
     assert!(out.contains("Hook created"), "{out}");
-    // No restart hint on the daemon-success path.
+    // Sprint 3 S3-4: when the daemon is up, SIGHUP succeeds and the
+    // CLI prints "Reload:" rather than the socket-missing "Hint:"
+    // restart banner.
     assert!(
         !out.contains("Hint:"),
         "daemon-success should not print restart hint: {out}"
