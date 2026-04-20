@@ -5,7 +5,7 @@ use crate::setup::{
 };
 use crate::term;
 use std::net::IpAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub struct StatusInfo {
     pub domain: String,
@@ -20,10 +20,10 @@ pub struct StatusInfo {
     /// Top-level default trust policy from `Config::trust`. Per-mailbox
     /// overrides are surfaced on each `MailboxStatus` row.
     pub default_trust: String,
-    /// Number of entries in the top-level `Config::trusted_senders` list.
-    pub default_trusted_senders_count: usize,
+    /// Entries from the top-level `Config::trusted_senders` list. Rendered
+    /// verbatim on the `Trusted senders:` line below `Global trust:`.
+    pub default_trusted_senders: Vec<String>,
     pub mailboxes: Vec<MailboxStatus>,
-    pub recent_activity: Vec<RecentEmail>,
     pub dns: Option<DnsSection>,
 }
 
@@ -45,14 +45,6 @@ pub struct MailboxStatus {
     pub trusted_senders_count: usize,
     /// Number of hooks on this mailbox (aggregated across all events).
     pub hook_count: usize,
-}
-
-pub struct RecentEmail {
-    pub mailbox: String,
-    pub id: String,
-    pub from: String,
-    pub subject: String,
-    pub date: String,
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
@@ -90,7 +82,6 @@ pub fn gather_status_with_ops<S: SystemOps>(
 
     mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let recent_activity = gather_recent_activity(config);
     let dns = gather_dns_section(config, net);
 
     StatusInfo {
@@ -101,9 +92,8 @@ pub fn gather_status_with_ops<S: SystemOps>(
         dkim_key_present,
         smtp_running,
         default_trust: config.trust.clone(),
-        default_trusted_senders_count: config.trusted_senders.len(),
+        default_trusted_senders: config.trusted_senders.clone(),
         mailboxes,
-        recent_activity,
         dns,
     }
 }
@@ -159,66 +149,6 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
     }
 
     Some(DnsSection { results, records })
-}
-
-fn gather_recent_activity(config: &Config) -> Vec<RecentEmail> {
-    let mut all: Vec<RecentEmail> = Vec::new();
-
-    for name in config.mailboxes.keys() {
-        let dir = config.inbox_dir(name);
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-
-        // Collect both flat `<stem>.md` and bundle `<stem>/<stem>.md`
-        // paths; sort newest-first by stem (UTC timestamp prefix orders
-        // lexicographically).
-        let mut md_paths: Vec<PathBuf> = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
-                    let md = path.join(format!("{stem}.md"));
-                    if md.exists() {
-                        md_paths.push(md);
-                    }
-                }
-            } else if path.extension().is_some_and(|ext| ext == "md") {
-                md_paths.push(path);
-            }
-        }
-        md_paths.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-
-        for path in md_paths.into_iter().take(3) {
-            let content = match std::fs::read_to_string(&path) {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let fm = match extract_frontmatter(&content) {
-                Some(fm) => fm,
-                None => continue,
-            };
-
-            let meta: InboundFrontmatter = match toml::from_str(&fm) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
-
-            all.push(RecentEmail {
-                mailbox: name.clone(),
-                id: meta.id,
-                from: meta.from,
-                subject: meta.subject,
-                date: meta.date,
-            });
-        }
-    }
-
-    all.sort_by(|a, b| b.date.cmp(&a.date));
-    all.truncate(5);
-    all
 }
 
 fn count_messages(dir: &Path) -> (usize, usize) {
@@ -423,10 +353,15 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     ));
     out.push_str(&format!(
-        "Default trust:    {} ({} trusted_senders)\n",
+        "Global trust:     {}\n",
         term::info(&info.default_trust),
-        info.default_trusted_senders_count,
     ));
+    let senders_line = if info.default_trusted_senders.is_empty() {
+        "(none)".to_string()
+    } else {
+        info.default_trusted_senders.join(", ")
+    };
+    out.push_str(&format!("Trusted senders:  {senders_line}\n"));
 
     out.push_str(&format!("\n{}\n", term::header("Service")));
     out.push_str(&format!(
@@ -451,16 +386,6 @@ pub fn format_status(info: &StatusInfo) -> String {
     if !info.mailboxes.is_empty() {
         out.push('\n');
         out.push_str(&render_mailbox_table(&info.mailboxes));
-    }
-
-    if !info.recent_activity.is_empty() {
-        out.push_str(&format!("\n{}\n", term::header("Recent activity:")));
-        for email in &info.recent_activity {
-            out.push_str(&format!(
-                "  [{}] {} {} - {} ({})\n",
-                email.mailbox, email.id, email.from, email.subject, email.date,
-            ));
-        }
     }
 
     out.push_str(&format!("\n{}\n", term::header("DNS")));
@@ -501,6 +426,7 @@ mod tests {
     use std::cell::Cell;
     use std::collections::HashMap;
     use std::net::{Ipv4Addr, Ipv6Addr};
+    use std::path::PathBuf;
 
     /// Test double for DNS resolution + server-IP discovery. Defaults to a
     /// server with IPv4 `1.2.3.4`, no IPv6, and empty DNS tables. Tests
@@ -690,9 +616,8 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -712,7 +637,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: false,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![
                 MailboxStatus {
                     name: "catchall".to_string(),
@@ -733,7 +658,6 @@ mod tests {
                     hook_count: 0,
                 },
             ],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -757,7 +681,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
                 name: "ops".to_string(),
                 address: "ops@ex.com".to_string(),
@@ -767,7 +691,6 @@ mod tests {
                 trusted_senders_count: 0,
                 hook_count: 0,
             }],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -798,7 +721,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
                 name: "ops".to_string(),
                 address: "ops@ex.com".to_string(),
@@ -808,7 +731,6 @@ mod tests {
                 trusted_senders_count: 1,
                 hook_count: 2,
             }],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -834,7 +756,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
                 name: "ops".to_string(),
                 address: "ops@ex.com".to_string(),
@@ -844,7 +766,6 @@ mod tests {
                 trusted_senders_count: 0,
                 hook_count: 0,
             }],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -870,7 +791,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![
                 MailboxStatus {
                     name: "ops".to_string(),
@@ -891,7 +812,6 @@ mod tests {
                     hook_count: 0,
                 },
             ],
-            recent_activity: vec![],
             dns: None,
         };
 
@@ -965,9 +885,8 @@ mod tests {
             dkim_key_present: false,
             smtp_running: false,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -1083,107 +1002,6 @@ mod tests {
         assert!(info.dkim_key_present);
         assert_eq!(info.mailboxes.len(), 1);
         assert_eq!(info.mailboxes[0].name, "catchall");
-    }
-
-    #[test]
-    fn format_status_includes_recent_activity() {
-        let info = StatusInfo {
-            domain: "test.com".to_string(),
-            data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "aimx".to_string(),
-            config_path: "/etc/aimx/config.toml".to_string(),
-            dkim_key_present: true,
-            smtp_running: true,
-            default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
-            mailboxes: vec![],
-            recent_activity: vec![
-                RecentEmail {
-                    mailbox: "catchall".to_string(),
-                    id: "2025-01-15-001".to_string(),
-                    from: "alice@example.com".to_string(),
-                    subject: "Hello".to_string(),
-                    date: "2025-01-15T10:30:00Z".to_string(),
-                },
-                RecentEmail {
-                    mailbox: "support".to_string(),
-                    id: "2025-01-14-001".to_string(),
-                    from: "bob@example.com".to_string(),
-                    subject: "Help needed".to_string(),
-                    date: "2025-01-14T08:00:00Z".to_string(),
-                },
-            ],
-            dns: None,
-        };
-        let output = format_status(&info);
-        assert!(
-            output.contains("Recent activity:"),
-            "Output should contain recent activity section"
-        );
-        assert!(output.contains("alice@example.com"));
-        assert!(output.contains("Hello"));
-        assert!(output.contains("bob@example.com"));
-        assert!(output.contains("Help needed"));
-        assert!(output.contains("[catchall]"));
-        assert!(output.contains("[support]"));
-    }
-
-    #[test]
-    fn format_status_no_recent_activity() {
-        let info = StatusInfo {
-            domain: "test.com".to_string(),
-            data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "aimx".to_string(),
-            config_path: "/etc/aimx/config.toml".to_string(),
-            dkim_key_present: true,
-            smtp_running: true,
-            default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
-            mailboxes: vec![],
-            recent_activity: vec![],
-            dns: None,
-        };
-        let output = format_status(&info);
-        assert!(!output.contains("Recent activity:"));
-    }
-
-    #[test]
-    fn gather_recent_activity_reads_emails() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let data_dir = tmp.path();
-        let catchall = data_dir.join("inbox").join("catchall");
-        std::fs::create_dir_all(&catchall).unwrap();
-
-        let email_content = "+++\nid = \"2025-01-15-001\"\nmessage_id = \"<a@b>\"\nfrom = \"alice@example.com\"\nto = \"c@d\"\nsubject = \"Test email\"\ndate = \"2025-01-15T10:30:00Z\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"catchall\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\nBody here";
-        std::fs::write(catchall.join("2025-01-15-001.md"), email_content).unwrap();
-
-        let mut mailboxes = std::collections::HashMap::new();
-        mailboxes.insert(
-            "catchall".to_string(),
-            crate::config::MailboxConfig {
-                address: "*@test.com".to_string(),
-                hooks: vec![],
-                trust: None,
-                trusted_senders: None,
-            },
-        );
-
-        let config = Config {
-            domain: "test.com".to_string(),
-            data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
-            trust: "none".to_string(),
-            trusted_senders: vec![],
-            mailboxes,
-            verify_host: None,
-            enable_ipv6: false,
-        };
-
-        let activity = gather_recent_activity(&config);
-        assert_eq!(activity.len(), 1);
-        assert_eq!(activity[0].from, "alice@example.com");
-        assert_eq!(activity[0].subject, "Test email");
-        assert_eq!(activity[0].mailbox, "catchall");
     }
 
     #[test]
@@ -1366,9 +1184,8 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: Some(DnsSection { results, records }),
         };
 
@@ -1397,9 +1214,8 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: None,
         };
 
@@ -1442,9 +1258,8 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -1478,9 +1293,11 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "verified".to_string(),
-            default_trusted_senders_count: 2,
+            default_trusted_senders: vec![
+                "alice@example.com".to_string(),
+                "bob@example.com".to_string(),
+            ],
             mailboxes: vec![],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -1493,16 +1310,98 @@ mod tests {
             "config path must render verbatim so operators can copy it: {output}"
         );
         assert!(
-            output.contains("Default trust:"),
-            "Configuration section must include 'Default trust:' label: {output}"
+            output.contains("Global trust:"),
+            "Configuration section must include 'Global trust:' label: {output}"
+        );
+        assert!(
+            !output.contains("Default trust:"),
+            "old 'Default trust:' label must be gone: {output}"
         );
         assert!(
             output.contains("verified"),
-            "default trust value must render: {output}"
+            "global trust value must render: {output}"
         );
         assert!(
-            output.contains("(2 trusted_senders)"),
-            "default trusted_senders count must render: {output}"
+            !output.contains("trusted_senders)"),
+            "old '(N trusted_senders)' suffix must be gone: {output}"
+        );
+    }
+
+    #[test]
+    fn format_status_renders_trusted_senders_list() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "verified".to_string(),
+            default_trusted_senders: vec![
+                "alice@example.com".to_string(),
+                "bob@example.com".to_string(),
+            ],
+            mailboxes: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("Trusted senders:"),
+            "Configuration section must include 'Trusted senders:' label: {output}"
+        );
+        assert!(
+            output.contains("alice@example.com, bob@example.com"),
+            "Trusted senders line must render the configured list, comma-separated: {output}"
+        );
+    }
+
+    #[test]
+    fn format_status_renders_trusted_senders_none_when_empty() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("Trusted senders:  (none)"),
+            "Trusted senders line must render '(none)' when list is empty: {output}"
+        );
+    }
+
+    #[test]
+    fn format_status_never_renders_recent_activity() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![MailboxStatus {
+                name: "catchall".to_string(),
+                address: "*@test.com".to_string(),
+                total: 10,
+                unread: 3,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+            }],
+            dns: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            !output.contains("Recent activity"),
+            "'Recent activity' section must never be rendered: {output}"
         );
     }
 
@@ -1516,7 +1415,7 @@ mod tests {
             dkim_key_present: true,
             smtp_running: true,
             default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
+            default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
                 name: "ops".to_string(),
                 address: "ops@test.com".to_string(),
@@ -1526,7 +1425,6 @@ mod tests {
                 trusted_senders_count: 3,
                 hook_count: 2,
             }],
-            recent_activity: vec![],
             dns: None,
         };
         let output = format_status(&info);
@@ -1630,7 +1528,7 @@ mod tests {
 
         // Top-level snapshot fields surface too.
         assert_eq!(info.default_trust, "none");
-        assert_eq!(info.default_trusted_senders_count, 0);
+        assert!(info.default_trusted_senders.is_empty());
         assert!(
             info.config_path.ends_with("config.toml"),
             "config_path should resolve to a config.toml path under the override: {}",
