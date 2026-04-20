@@ -4194,3 +4194,82 @@ fn hooks_create_via_daemon_hot_swaps_config() {
 
     stop_serve(daemon);
 }
+
+/// Mirror of `hooks_create_anonymous_prints_derived_name` but over the
+/// UDS/daemon path: confirms the CLI prints the derived 12-hex-char name
+/// returned by the daemon in `submit_hook_create_via_daemon`, and that
+/// the daemon did NOT write a `name =` line to `config.toml`.
+#[test]
+fn hooks_create_anonymous_prints_derived_name_via_daemon() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let runtime = tmp.path().join("run");
+    let create = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo daemon-anon",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(out.contains("Hook created"), "{out}");
+    // No restart hint on the daemon-success path.
+    assert!(
+        !out.contains("Hint:"),
+        "daemon-success should not print restart hint: {out}"
+    );
+
+    // Compute the expected derived name (mirrors `derive_hook_name` in
+    // src/hook.rs) and assert it was printed by the CLI.
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"on_receive");
+        hasher.update([0x1F]);
+        hasher.update(b"echo daemon-anon");
+        hasher.update([0x1F]);
+        hasher.update([0u8]); // dangerously_support_untrusted = false
+        let digest = hasher.finalize();
+        let mut s = String::with_capacity(12);
+        for b in digest.iter().take(6) {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    assert_eq!(expected.len(), 12);
+    assert!(
+        out.contains(&expected),
+        "expected derived name '{expected}' in CLI output: {out}"
+    );
+
+    // The daemon-rewritten config must not have a `name =` entry.
+    let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&content).unwrap();
+    let hooks = parsed
+        .get("mailboxes")
+        .and_then(|m| m.get("alice"))
+        .and_then(|a| a.get("hooks"))
+        .and_then(|h| h.as_array())
+        .unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert!(
+        hooks[0].get("name").is_none(),
+        "anonymous hook must not write name = ..., got: {content}"
+    );
+
+    stop_serve(daemon);
+}

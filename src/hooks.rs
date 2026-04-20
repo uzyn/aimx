@@ -214,6 +214,8 @@ fn apply_delete_direct(config: &Config, name: &str) -> Result<(), Box<dyn std::e
         mb.hooks.retain(|h| effective_hook_name(h) != name);
         if mb.hooks.len() != before {
             removed = true;
+            // Safe to break: `validate_hooks` guarantees effective-name
+            // uniqueness globally, so at most one hook ever matches.
             break;
         }
     }

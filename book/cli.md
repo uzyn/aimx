@@ -133,7 +133,7 @@ Alias: `aimx hook` works identically to `aimx hooks`.
 
 ### `aimx hooks list`
 
-List hooks. Prints a table of `ID`, `MAILBOX`, `EVENT`, `CMD`, `FILTERS`.
+List hooks. Prints a table of `NAME`, `MAILBOX`, `EVENT`, `CMD`. Anonymous hooks (those without an explicit `name =`) appear under their derived 12-char hex name.
 
 | Flag | Description |
 |------|-------------|
@@ -141,22 +141,19 @@ List hooks. Prints a table of `ID`, `MAILBOX`, `EVENT`, `CMD`, `FILTERS`.
 
 ### `aimx hooks create`
 
-Create a hook. Auto-generates a 12-char id and prints it on success.
+Create a hook. Pass `--name` to pick an explicit name; omit it to let AIMX derive a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)`. Either way, the final name is printed on success.
 
 | Flag | Description |
 |------|-------------|
 | `--mailbox <name>` | Owning mailbox. Must already exist. |
 | `--event <event>` | `on_receive` or `after_send`. |
 | `--cmd <command>` | Shell command executed via `sh -c` when the hook fires. |
-| `--from <glob>` | Sender-address filter. Only valid on `--event on_receive`. |
-| `--to <glob>` | Recipient-address filter. Only valid on `--event after_send`. |
-| `--subject <text>` | Case-insensitive subject substring filter. Both events. |
-| `--has-attachment` | Require the email to have at least one attachment. Only valid on `--event on_receive`. |
+| `--name <name>` | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. Must be globally unique across all mailboxes. When omitted, a derived name is used. |
 | `--dangerously-support-untrusted` | Fire even when `trusted != "true"`. Only valid on `--event on_receive`. |
 
-### `aimx hooks delete <id>`
+### `aimx hooks delete <name>`
 
-Delete a hook by id.
+Delete a hook by name. Works for both explicit and derived names (as shown in `aimx hooks list`).
 
 | Flag | Description |
 |------|-------------|
