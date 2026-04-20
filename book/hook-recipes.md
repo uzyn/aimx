@@ -6,6 +6,42 @@ This chapter is the canonical cookbook for wiring aimx hooks to every supported 
 
 For the underlying mechanics (names, env vars, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the aimx plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
 
+## Template-first: the easy path
+
+For every agent with a bundled template (`invoke-claude`, `invoke-codex`, `invoke-opencode`, `invoke-gemini`, `invoke-goose`, `invoke-openclaw`, `invoke-hermes`, `webhook`), the recipe reduces to two steps:
+
+1. Operator ticks the template in `aimx setup`. Once per box.
+2. Agent or operator calls `hook_create` (MCP) or `aimx hooks create --template <name> --param <k=v>` (CLI). Per mailbox, per prompt.
+
+Example — wire Claude Code to the `schedule` mailbox:
+
+```bash
+# One-time: enable the template
+sudo aimx setup          # tick invoke-claude in the checkbox UI
+
+# Per mailbox: bind the template
+sudo aimx hooks create \
+  --mailbox schedule \
+  --event on_receive \
+  --template invoke-claude \
+  --param prompt="Handle this scheduling request."
+```
+
+The agent equivalent over MCP looks like:
+
+```json
+{"name": "hook_create", "arguments": {
+  "mailbox": "schedule",
+  "event": "on_receive",
+  "template": "invoke-claude",
+  "params": {"prompt": "Handle this scheduling request."}
+}}
+```
+
+Template hooks run sandboxed as `aimx-hook` and can't be abused by prompt injection — see [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended).
+
+The raw-cmd recipes below are the **power-user path**: use them when you need a shell pipeline, an exit-code check, multiple output sinks, or a flag the template doesn't expose.
+
 ## What counts as a hook recipe?
 
 A hook recipe is a `[[mailboxes.<name>.hooks]]` block whose `cmd` invokes an AI agent non-interactively against an incoming email. The recipe pattern is always:

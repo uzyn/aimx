@@ -4679,3 +4679,314 @@ fn mcp_hook_delete_without_daemon_reports_missing_socket() {
 
     client.shutdown();
 }
+
+// ---------------------------------------------------------------------
+// Sprint 6: S6-1 — End-to-end MCP → hook fire → sandbox verify
+// ---------------------------------------------------------------------
+
+/// Write a tiny mock-curl shell script to `path` that records its argv
+/// (one per line) plus the full stdin to two sibling files:
+///
+/// * `<path>.argv` — one argv entry per line, the first line is `argv[0]`.
+/// * `<path>.stdin` — raw bytes piped on stdin.
+/// * `<path>.uid` — output of `id -u` so the root-gated UID assertion
+///   in S6-1 can verify the daemon actually dropped privileges.
+///
+/// Returns the path to the script. Marked +x by the caller.
+#[cfg(unix)]
+fn write_mock_curl_script(path: &Path) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let argv_log = path.with_extension("argv");
+    let stdin_log = path.with_extension("stdin");
+    let uid_log = path.with_extension("uid");
+    let script = format!(
+        "#!/bin/sh\n\
+         # Mock curl for S6-1 hook-template e2e test. Records argv + stdin.\n\
+         echo \"$0\" > '{argv}'\n\
+         for a in \"$@\"; do echo \"$a\" >> '{argv}'; done\n\
+         cat > '{stdin}'\n\
+         id -u > '{uid}'\n\
+         exit 0\n",
+        argv = argv_log.display(),
+        stdin = stdin_log.display(),
+        uid = uid_log.display(),
+    );
+    std::fs::write(path, script).expect("write mock curl script");
+    let mut perms = std::fs::metadata(path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(path, perms).unwrap();
+    path.to_path_buf()
+}
+
+/// S6-1 (PRD §7 + §9): full MCP → daemon → hook fire round-trip.
+///
+/// Flow:
+/// 1. Spin up `aimx serve` with a `webhook` template whose `cmd[0]` is a
+///    mock-curl shell script in the test's tempdir.
+/// 2. Connect an MCP client and call `hook_list_templates`. Expect the
+///    `webhook` template to appear (validates Sprint 5 surface against
+///    the actual config).
+/// 3. Call `hook_create(mailbox=alice, event=after_send, template=webhook,
+///    params={url=https://example.com/hook})`. Expect success and an
+///    `origin = "mcp"` row in `config.toml`.
+/// 4. Trigger the hook by submitting an outbound message via `aimx send`.
+///    `after_send` fires through the same sandboxed executor as
+///    `on_receive` (PRD §6.7) — and unlike `on_receive` it has no trust
+///    gate, so an MCP-origin hook can fire without `dangerously_*` opt-in.
+///    On-receive trust gating is exercised by separate Sprint 1–3 tests.
+/// 5. Assert the mock-curl recorded the substituted argv (URL ends up at
+///    the right slot, `cmd[0]` is the mock binary verbatim) and the JSON
+///    stdin (the webhook template's `stdin = "email_json"` mode wraps
+///    the persisted `.md` body in a `{ "raw": ... }` envelope).
+#[cfg(unix)]
+#[test]
+fn hook_templates_end_to_end_mcp_to_sandbox() {
+    let tmp = TempDir::new().unwrap();
+
+    // Set up the mock-curl binary in the test tempdir. The webhook
+    // template's `cmd[0]` will point at this script directly.
+    let mock_curl = tmp.path().join("mock_curl.sh");
+    let mock_curl_path = write_mock_curl_script(&mock_curl);
+    let argv_log = mock_curl.with_extension("argv");
+    let stdin_log = mock_curl.with_extension("stdin");
+    let uid_log = mock_curl.with_extension("uid");
+
+    // Build a config carrying the webhook template (cmd[0] points at the
+    // mock) plus an `alice` mailbox. We use the `after_send` event so the
+    // hook fire path is exercised end-to-end without depending on a real
+    // DKIM signature on the inbound side (Sprint 1's `evaluate_trust`
+    // requires DKIM=pass for `trusted = true`, which the test fixtures
+    // can't satisfy — see hook_substitute fuzz tests for substitution
+    // edge cases that complement this end-to-end coverage).
+    let webhook_url = "https://example.com/aimx-hook";
+    let config_content = format!(
+        r#"domain = "agent.example.com"
+data_dir = "{data_dir}"
+
+[[hook_template]]
+name = "webhook"
+description = "POST the email as JSON to a URL"
+cmd = ["{mock}", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "{{url}}"]
+params = ["url"]
+stdin = "email_json"
+run_as = "aimx-hook"
+timeout_secs = 30
+allowed_events = ["on_receive", "after_send"]
+
+[mailboxes.catchall]
+address = "*@agent.example.com"
+
+[mailboxes.alice]
+address = "alice@agent.example.com"
+"#,
+        data_dir = tmp.path().display(),
+        mock = mock_curl_path.display(),
+    );
+    std::fs::create_dir_all(tmp.path().join("inbox").join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("inbox").join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("sent").join("alice")).unwrap();
+    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
+    install_cached_dkim_keys(tmp.path());
+
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (daemon, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    // ----- Step 1: hook_list_templates surfaces the configured template.
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let templates_resp = client.call_tool("hook_list_templates", serde_json::json!({}));
+    let templates_text = get_tool_text(&templates_resp);
+    let templates_json: serde_json::Value =
+        serde_json::from_str(&templates_text).expect(&templates_text);
+    let arr = templates_json
+        .as_array()
+        .expect("hook_list_templates must return array");
+    assert!(
+        arr.iter().any(|t| t["name"] == "webhook"),
+        "webhook template must appear in hook_list_templates: {templates_text}"
+    );
+
+    // ----- Step 2: hook_create through MCP → UDS → daemon stamps origin.
+    let create_resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "after_send",
+            "template": "webhook",
+            "params": {"url": webhook_url},
+            "name": "s61_e2e_hook"
+        }),
+    );
+    assert!(
+        !is_tool_error(&create_resp),
+        "hook_create must succeed: {create_resp}"
+    );
+    let create_text = get_tool_text(&create_resp);
+    let create_json: serde_json::Value = serde_json::from_str(&create_text).expect(&create_text);
+    assert_eq!(create_json["effective_name"], "s61_e2e_hook");
+    let argv_field = create_json["substituted_argv"]
+        .as_array()
+        .expect("substituted_argv must be array");
+    // First entry is the mock-curl path; last entry must be the URL slot.
+    assert_eq!(
+        argv_field[0],
+        serde_json::json!(mock_curl_path.to_string_lossy().to_string())
+    );
+    assert_eq!(
+        argv_field[argv_field.len() - 1],
+        serde_json::json!(webhook_url),
+        "last argv slot must carry the substituted URL: {argv_field:?}"
+    );
+
+    // ----- Step 3: confirm the daemon stamped origin = "mcp" in config.
+    let cfg_after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        cfg_after.contains("origin = \"mcp\""),
+        "daemon must stamp origin = \"mcp\" on UDS-created hook: {cfg_after}"
+    );
+    assert!(
+        cfg_after.contains("template = \"webhook\""),
+        "config.toml must reference the bound template name: {cfg_after}"
+    );
+
+    // ----- Step 4: trigger after_send via `aimx send`. The daemon awaits
+    // hook subprocess completion before replying to the SEND verb, so by
+    // the time `aimx send` returns the mock-curl will have written its
+    // argv + stdin files.
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("S6-1 e2e test")
+        .arg("--body")
+        .arg("Test body for end-to-end hook fire")
+        .output()
+        .expect("aimx send failed to spawn");
+    assert!(
+        output.status.success(),
+        "aimx send must succeed; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    client.shutdown();
+    let daemon_stderr = stop_serve_capture_stderr(daemon);
+
+    // ----- Step 4b: structured hook-fire log line carries run_as = "aimx-hook"
+    // and template = "webhook". The fallback executor logs at info level via
+    // tracing, which `aimx serve` mirrors to stderr by default.
+    let log_plain = strip_ansi(&daemon_stderr);
+    assert!(
+        log_plain.contains("template=webhook"),
+        "daemon stderr must include `template=webhook` log field; got: {log_plain}"
+    );
+    assert!(
+        log_plain.contains("run_as=aimx-hook"),
+        "daemon stderr must include `run_as=aimx-hook` log field even on non-root \
+         (the daemon attempts the drop and records the intent); got: {log_plain}"
+    );
+
+    // ----- Step 5: inspect the captured argv + stdin from mock-curl.
+    assert!(
+        argv_log.exists(),
+        "mock-curl must have written argv log at {}",
+        argv_log.display()
+    );
+    let argv_lines: Vec<String> = std::fs::read_to_string(&argv_log)
+        .unwrap()
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    // First line is `$0` (the script path itself); subsequent lines are
+    // the argv entries the daemon passed in. The webhook template
+    // declares 8 arguments after `cmd[0]` so we expect 9 lines total
+    // (argv[0] + 8 args).
+    assert_eq!(
+        argv_lines.len(),
+        9,
+        "expected 9 argv entries (1 cmd + 8 args); got {argv_lines:?}"
+    );
+    assert_eq!(
+        argv_lines[0],
+        mock_curl_path.to_string_lossy(),
+        "argv[0] must be the mock-curl path verbatim"
+    );
+    // Header argument must land verbatim — proves the daemon did NOT
+    // shell-split substituted values across argv slots.
+    assert!(
+        argv_lines
+            .iter()
+            .any(|a| a == "Content-Type: application/json"),
+        "argv must contain unsplit Content-Type header: {argv_lines:?}"
+    );
+    // Final URL slot must carry the substituted value.
+    assert_eq!(
+        argv_lines.last().unwrap(),
+        webhook_url,
+        "last argv slot must be the substituted URL: {argv_lines:?}"
+    );
+
+    // The stdin file must contain a JSON object (webhook template uses
+    // `stdin = "email_json"`). The daemon wraps the persisted `.md`
+    // payload as `{"raw": "..."}` per Sprint 2's stdin handling.
+    assert!(
+        stdin_log.exists(),
+        "mock-curl must have captured stdin at {}",
+        stdin_log.display()
+    );
+    let stdin_text = std::fs::read_to_string(&stdin_log).unwrap();
+    let stdin_json: serde_json::Value = serde_json::from_str(&stdin_text).unwrap_or_else(|e| {
+        panic!("stdin must be valid JSON for stdin=email_json mode (err {e}): {stdin_text}");
+    });
+    let raw = stdin_json
+        .get("raw")
+        .and_then(|v| v.as_str())
+        .expect("email_json stdin must carry a `raw` key with the email markdown body");
+    assert!(
+        raw.contains("S6-1 e2e test")
+            || raw.contains("Test body for end-to-end hook fire")
+            || raw.contains("alice@agent.example.com"),
+        "stdin payload must reflect the sent email content: {raw}"
+    );
+
+    // ----- Step 6: root-gated UID assertion (skipped on non-root CI).
+    // When the test runs as root, the sandbox actually drops to the
+    // `aimx-hook` UID; the mock-curl `id -u` output proves it. On
+    // non-root CI the executor falls back to the current user (logged
+    // as a WARN by `spawn_sandboxed`), and the assertion is skipped.
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root {
+        let uid_str = std::fs::read_to_string(&uid_log)
+            .expect("mock-curl uid log must exist when running as root");
+        let uid: u32 = uid_str.trim().parse().expect("uid log must be numeric");
+        // We don't hardcode the aimx-hook UID — the test box may have
+        // it provisioned at any system UID. We just assert it's not 0
+        // (root), proving the daemon's setuid drop fired.
+        assert_ne!(
+            uid, 0,
+            "subprocess must NOT run as root when daemon dropped privileges to aimx-hook"
+        );
+    } else {
+        // Non-root path: the UID file should still exist (mock-curl ran),
+        // but its value is the current test user's UID.
+        if uid_log.exists() {
+            let uid_str = std::fs::read_to_string(&uid_log).unwrap();
+            let uid: u32 = uid_str.trim().parse().unwrap_or(0);
+            let current_uid = unsafe { libc::geteuid() };
+            assert_eq!(
+                uid, current_uid,
+                "non-root path: subprocess should run as the current test user"
+            );
+        }
+    }
+}

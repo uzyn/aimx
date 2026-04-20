@@ -78,7 +78,7 @@ Tail or follow the `aimx serve` service log. Wraps `journalctl -u aimx` on syste
 
 ### `aimx send`
 
-Compose an RFC 5322 message and submit it to `aimx serve` via `/run/aimx/send.sock`. Does not require root. The daemon handles DKIM signing and MX delivery.
+Compose an RFC 5322 message and submit it to `aimx serve` via `/run/aimx/aimx.sock`. Does not require root. The daemon handles DKIM signing and MX delivery.
 
 | Flag | Description |
 |------|-------------|
@@ -133,27 +133,56 @@ Alias: `aimx hook` works identically to `aimx hooks`.
 
 ### `aimx hooks list`
 
-List hooks. Prints a table of `NAME`, `MAILBOX`, `EVENT`, `CMD`. Anonymous hooks (those without an explicit `name =`) appear under their derived 12-char hex name.
+List hooks. Prints a table of `NAME`, `MAILBOX`, `EVENT`, `ORIGIN`, `CMD`. Anonymous hooks (those without an explicit `name =`) appear under their derived 12-char hex name. Template-bound hooks show a blank `CMD` column; see `aimx hooks templates` for their argv shape.
 
 | Flag | Description |
 |------|-------------|
 | `--mailbox <name>` | Filter to one mailbox. |
 
+### `aimx hooks templates`
+
+List hook templates enabled on this install. Prints a table of `NAME`, `DESCRIPTION`, `PARAMS`, `EVENTS`. Alias: `aimx hooks template-list`.
+
+Empty output means no templates are enabled — run `sudo aimx setup` and tick the templates you want.
+
 ### `aimx hooks create`
 
-Create a hook. Pass `--name` to pick an explicit name; omit it to let AIMX derive a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)`. Either way, the final name is printed on success.
+Create a hook. Exactly one of `--template` or `--cmd` must be supplied.
+
+**Template path (preferred).** `--template` + `--param` submit the request over the daemon's UDS socket. The daemon validates the template exists, all params are declared, the event is allowed, and stamps `origin = "mcp"` on the resulting hook. No root required when the daemon is running.
+
+**Raw-cmd path (power user).** `--cmd` writes `/etc/aimx/config.toml` directly and SIGHUPs the daemon to hot-reload. Requires `sudo`. Stamps `origin = "operator"`.
 
 | Flag | Description |
 |------|-------------|
 | `--mailbox <name>` | Owning mailbox. Must already exist. |
 | `--event <event>` | `on_receive` or `after_send`. |
-| `--cmd <command>` | Shell command executed via `sh -c` when the hook fires. |
-| `--name <name>` | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. Must be globally unique across all mailboxes. When omitted, a derived name is used. |
-| `--dangerously-support-untrusted` | Fire even when `trusted != "true"`. Only valid on `--event on_receive`. |
+| `--template <name>` | Bind to a `[[hook_template]]`. Mutually exclusive with `--cmd`. |
+| `--param KEY=VAL` | Declared parameter value for the template. Repeatable. |
+| `--cmd <command>` | Raw shell command executed via `sh -c` when the hook fires. Requires `sudo`. Mutually exclusive with `--template`. |
+| `--name <name>` | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. Must be globally unique across all mailboxes. When omitted, a derived 12-char hex name is used. |
+| `--dangerously-support-untrusted` | Fire even when `trusted != "true"`. Only valid on `--event on_receive` + `--cmd`. Rejected with `--template` because MCP-origin hooks cannot opt into untrusted mail. |
+
+Examples:
+
+```bash
+# Template hook (agent-origin, safe over UDS)
+aimx hooks create \
+  --mailbox accounts \
+  --event on_receive \
+  --template invoke-claude \
+  --param prompt="File this and draft a reply."
+
+# Raw-cmd hook (operator-origin, needs sudo)
+sudo aimx hooks create \
+  --mailbox support \
+  --event on_receive \
+  --cmd 'curl -fsS https://hooks.example.com/notify -d "$AIMX_SUBJECT"'
+```
 
 ### `aimx hooks delete <name>`
 
-Delete a hook by name. Works for both explicit and derived names (as shown in `aimx hooks list`).
+Delete a hook by name. Works for both explicit and derived names (as shown in `aimx hooks list`). Operator-origin hooks require `sudo`; MCP-origin hooks go through the UDS socket.
 
 | Flag | Description |
 |------|-------------|

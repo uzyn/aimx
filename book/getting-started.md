@@ -47,7 +47,7 @@ aimx --version
 
 aimx is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: aimx assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
 
-All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS send socket at `/run/aimx/send.sock` is world-writable. Any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
+All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS send socket at `/run/aimx/aimx.sock` is world-writable. Any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
 
 **If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), aimx is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use aimx in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
 

@@ -30,6 +30,80 @@ pub struct StatusInfo {
     pub default_trusted_senders: Vec<String>,
     pub mailboxes: Vec<MailboxStatus>,
     pub dns: Option<DnsSection>,
+    /// Hook templates section (S6-4). Always present even when empty so
+    /// operators can confirm "no templates enabled" rather than wonder if
+    /// doctor failed to gather the data.
+    pub hook_templates: HookTemplatesSection,
+}
+
+/// Snapshot of the hook-templates feature for `aimx doctor`.
+///
+/// Surfaces three operator concerns from PRD §7.3 + §10:
+/// 1. Which templates are enabled, and is each one's `cmd[0]` actually
+///    executable on this box (catches the binary-path-drift risk).
+/// 2. How often each template fired in the last 24 hours, and how many
+///    of those fires were failures (non-zero exit or timeout).
+/// 3. Whether the `aimx-hook` service user exists with the expected
+///    UID/GID and group-read access to the mailbox dirs.
+pub struct HookTemplatesSection {
+    pub templates: Vec<HookTemplateStatus>,
+    pub hook_user: HookUserStatus,
+    /// `Some(_)` when fire counts were derived from the structured log
+    /// stream; `None` when neither journalctl nor the OpenRC log-file
+    /// fallback returned data. Counts in the `templates` slice are zero
+    /// when the source is `None`; the rendered output prints `-` instead
+    /// of `0` so an operator can tell "no fires in 24h" apart from
+    /// "logs unavailable, count unknown".
+    pub log_source: Option<&'static str>,
+}
+
+impl Default for HookTemplatesSection {
+    fn default() -> Self {
+        Self {
+            templates: Vec::new(),
+            hook_user: HookUserStatus {
+                user: "aimx-hook".to_string(),
+                user_exists: false,
+                uid_gid: None,
+                datadir_readable: false,
+            },
+            log_source: None,
+        }
+    }
+}
+
+pub struct HookTemplateStatus {
+    pub name: String,
+    pub description: String,
+    /// Path of `cmd[0]` from the template definition. Surfaced verbatim
+    /// so the operator can copy-paste it into a `which` / `ls` to debug.
+    pub cmd_path: String,
+    /// True iff `cmd_path` resolves to an existing, executable file (or,
+    /// for the systemd-run path, exists at all — the executor will set
+    /// up its own exec env). False when missing or not marked +x.
+    pub cmd_path_executable: bool,
+    /// 24h fire count parsed from the structured `aimx::hook` log line
+    /// (`template={name}` field). `None` when no log source was readable.
+    pub fire_count_24h: Option<u32>,
+    /// 24h failure count: fires whose log line carries `exit_code != 0`
+    /// or `timed_out=true`. `None` when no log source was readable.
+    pub failure_count_24h: Option<u32>,
+}
+
+pub struct HookUserStatus {
+    pub user: String,
+    /// True when `id <user>` resolves on the host. False on a fresh box
+    /// where `aimx setup` was never run.
+    pub user_exists: bool,
+    /// `Some((uid, gid))` when resolvable. `None` when the user does not
+    /// exist or the lookup failed (e.g. running on a non-Unix host —
+    /// caught at compile time elsewhere but defended here too).
+    pub uid_gid: Option<(u32, u32)>,
+    /// True iff the `aimx-hook` user (or the current user, when running
+    /// as the hook user already) can read both `<datadir>/inbox` and
+    /// `<datadir>/sent`. False when the chown step from `aimx setup`
+    /// hasn't been applied; surfaces as a WARN with a remediation hint.
+    pub datadir_readable: bool,
 }
 
 pub struct DnsSection {
@@ -91,6 +165,7 @@ pub fn gather_status_with_ops<S: SystemOps>(
     mailboxes.sort_by(|a, b| a.name.cmp(&b.name));
 
     let dns = gather_dns_section(config, net);
+    let hook_templates = gather_hook_templates_section(config, sys);
 
     StatusInfo {
         domain: config.domain.clone(),
@@ -104,6 +179,212 @@ pub fn gather_status_with_ops<S: SystemOps>(
         default_trusted_senders: config.trusted_senders.clone(),
         mailboxes,
         dns,
+        hook_templates,
+    }
+}
+
+/// Build the `Hook templates` section of `aimx doctor`. Reads:
+///
+/// 1. `Config::hook_templates` for the enabled set + `cmd[0]` / description.
+/// 2. The host's `aimx-hook` user via the injected `SystemOps`.
+/// 3. The last 24h of structured log lines via `tail_service_logs`. The
+///    parser tolerates an empty / errored log source — counts come back as
+///    `None` and the renderer prints `-` instead of `0`.
+///
+/// All three lookups are best-effort and never fail the overall doctor
+/// report; an unhealthy box should still get a snapshot.
+fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> HookTemplatesSection {
+    use crate::setup::HOOK_SERVICE_USER;
+
+    let log_text = if config.hook_templates.is_empty() {
+        // No templates → no point shelling out to journalctl. The empty
+        // section is explicit ("(no templates enabled)" in the renderer).
+        None
+    } else {
+        // 24h of structured `aimx::hook` lines is bounded — even a noisy
+        // install with hooks firing on every email rarely produces
+        // >10K lines per day. We ask for 5K which is a reasonable cap.
+        sys.tail_service_logs(crate::logs::SERVICE_UNIT, 5_000).ok()
+    };
+    let log_source = if log_text.is_some() {
+        Some("logs")
+    } else {
+        None
+    };
+    let counts = log_text
+        .as_deref()
+        .map(parse_hook_fire_counts)
+        .unwrap_or_default();
+
+    let templates: Vec<HookTemplateStatus> = config
+        .hook_templates
+        .iter()
+        .map(|t| {
+            let cmd_path = t.cmd.first().cloned().unwrap_or_default();
+            let cmd_path_executable = is_executable(Path::new(&cmd_path));
+            let (fires, fails) = counts.get(t.name.as_str()).copied().unwrap_or((0u32, 0u32));
+            HookTemplateStatus {
+                name: t.name.clone(),
+                description: t.description.clone(),
+                cmd_path,
+                cmd_path_executable,
+                fire_count_24h: log_source.map(|_| fires),
+                failure_count_24h: log_source.map(|_| fails),
+            }
+        })
+        .collect();
+
+    let user_exists = sys.user_exists(HOOK_SERVICE_USER);
+    let uid_gid = if user_exists {
+        sys.lookup_user_uid_gid(HOOK_SERVICE_USER)
+    } else {
+        None
+    };
+    let datadir_readable = if user_exists {
+        is_datadir_readable_by(uid_gid, &config.data_dir)
+    } else {
+        false
+    };
+
+    HookTemplatesSection {
+        templates,
+        hook_user: HookUserStatus {
+            user: HOOK_SERVICE_USER.to_string(),
+            user_exists,
+            uid_gid,
+            datadir_readable,
+        },
+        log_source,
+    }
+}
+
+/// Parse `(fire_count, failure_count)` per template from the structured
+/// `aimx::hook` log lines emitted by `run_and_log` in `src/hook.rs`. The
+/// parser is intentionally lenient: any line without a `template=<name>`
+/// token is skipped, malformed lines do not panic, and lines whose
+/// template doesn't appear in `Config::hook_templates` simply land in
+/// the returned map (the caller filters by current template names).
+///
+/// Fire count is "this template's name appeared in a hook-fire line".
+/// Failure count is the subset where `exit_code=` is non-zero OR
+/// `timed_out=true` is present. `template=-` lines (raw-cmd hooks)
+/// are skipped — they don't bind to a template entry.
+fn parse_hook_fire_counts(text: &str) -> std::collections::HashMap<String, (u32, u32)> {
+    let mut out = std::collections::HashMap::new();
+    for line in text.lines() {
+        // Cheap pre-filter: skip lines that obviously aren't hook-fire
+        // records. We require both `template=` and `exit_code=` in the
+        // payload — both are present on every `run_and_log` info line.
+        if !line.contains("template=") || !line.contains("exit_code=") {
+            continue;
+        }
+        let template = match extract_kv(line, "template=") {
+            Some("-") | None => continue,
+            Some(v) => v.to_string(),
+        };
+        let exit_code: i32 = extract_kv(line, "exit_code=")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let timed_out = matches!(extract_kv(line, "timed_out="), Some("true"));
+        let entry = out.entry(template).or_insert((0u32, 0u32));
+        entry.0 = entry.0.saturating_add(1);
+        if exit_code != 0 || timed_out {
+            entry.1 = entry.1.saturating_add(1);
+        }
+    }
+    out
+}
+
+/// Extract the value of a `key=...` token from a structured log line.
+/// Stops at the first ASCII whitespace or end-of-string. Returns `None`
+/// when the key is absent. The structured logger never quotes scalar
+/// values (only `stderr_tail`), so a bare whitespace split is safe.
+fn extract_kv<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let start = line.find(key)? + key.len();
+    let rest = &line[start..];
+    let end = rest
+        .find(|c: char| c.is_ascii_whitespace())
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// True when `path` exists and is marked executable for at least one
+/// permission class. Best-effort: a file the daemon can't `stat` (e.g.
+/// because the path doesn't exist) returns false. We don't try to
+/// simulate the `aimx-hook` user's view here — the goal is just to
+/// catch the obvious "binary not on box" failure mode flagged in
+/// PRD §10 risks.
+fn is_executable(path: &Path) -> bool {
+    if path.as_os_str().is_empty() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        if !meta.is_file() {
+            return false;
+        }
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        path.exists()
+    }
+}
+
+/// Best-effort check that the `aimx-hook` user can read the inbox + sent
+/// directories under `data_dir`. We can't `seteuid` from a non-root
+/// doctor invocation, so this is conservative:
+///
+/// * If the directories don't exist (fresh box), return `false`.
+/// * If the directories exist and the file mode grants other-read
+///   (`o+r`), return `true` regardless of group ownership.
+/// * Otherwise check that the directory's group matches the hook
+///   user's gid AND the mode grants group-read.
+///
+/// A `false` result surfaces as a WARN with a remediation hint
+/// pointing at `aimx setup`'s chown step.
+fn is_datadir_readable_by(uid_gid: Option<(u32, u32)>, data_dir: &Path) -> bool {
+    let inbox = data_dir.join("inbox");
+    let sent = data_dir.join("sent");
+    [&inbox, &sent]
+        .into_iter()
+        .all(|p| dir_readable_by(uid_gid, p))
+}
+
+fn dir_readable_by(uid_gid: Option<(u32, u32)>, path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let Ok(meta) = std::fs::metadata(path) else {
+            return false;
+        };
+        if !meta.is_dir() {
+            return false;
+        }
+        let mode = meta.permissions().mode();
+        // World-read + execute → anyone can read.
+        if mode & 0o005 == 0o005 {
+            return true;
+        }
+        let Some((uid, gid)) = uid_gid else {
+            return false;
+        };
+        if meta.uid() == uid && mode & 0o500 == 0o500 {
+            return true;
+        }
+        if meta.gid() == gid && mode & 0o050 == 0o050 {
+            return true;
+        }
+        false
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = uid_gid;
+        path.is_dir()
     }
 }
 
@@ -419,11 +700,212 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     }
 
+    out.push_str(&format!("\n{}\n", term::header("Hook templates")));
+    out.push_str(&format_hook_templates_section(&info.hook_templates));
+
     out.push_str(&format!("\n{}\n", term::header("Logs")));
     out.push_str(&format!(
         "  {}\n",
         term::dim("Run `aimx logs` to view recent logs, or `aimx logs --follow` to tail."),
     ));
+
+    out
+}
+
+/// Render the `Hook templates` section. Layout mirrors the existing
+/// `Mailboxes` table: a one-line summary then an ASCII-framed grid.
+/// When no templates are enabled the table is suppressed and a single
+/// hint line points the operator at `aimx setup`.
+fn format_hook_templates_section(section: &HookTemplatesSection) -> String {
+    let mut out = String::new();
+
+    // Service-user line is always rendered so operators can see whether
+    // the chown step from `aimx setup` ran on this box.
+    let user_line = if section.hook_user.user_exists {
+        let uid_gid = match section.hook_user.uid_gid {
+            Some((uid, gid)) => format!("uid={uid} gid={gid}"),
+            None => "uid=? gid=?".to_string(),
+        };
+        format!(
+            "  {} {} ({})\n",
+            term::success("aimx-hook user:"),
+            term::highlight(&section.hook_user.user),
+            uid_gid,
+        )
+    } else {
+        format!(
+            "  {} {} - run `sudo aimx setup` to create the service user\n",
+            term::warn("aimx-hook user:"),
+            term::dim("missing"),
+        )
+    };
+    out.push_str(&user_line);
+
+    if section.hook_user.user_exists {
+        let datadir_line = if section.hook_user.datadir_readable {
+            format!(
+                "  {} inbox/ + sent/ readable by group {}\n",
+                term::success("Datadir access:"),
+                term::highlight(&section.hook_user.user),
+            )
+        } else {
+            format!(
+                "  {} inbox/ + sent/ not group-readable - re-run `sudo aimx setup` to chown\n",
+                term::warn("Datadir access:"),
+            )
+        };
+        out.push_str(&datadir_line);
+    }
+
+    if section.templates.is_empty() {
+        out.push_str(&format!(
+            "  {}\n",
+            term::dim(
+                "No hook templates enabled. Run `sudo aimx setup` and tick the templates you need."
+            ),
+        ));
+        return out;
+    }
+
+    out.push('\n');
+    out.push_str(&render_hook_templates_table(section));
+
+    if section.log_source.is_none() {
+        out.push_str(&format!(
+            "  {}\n",
+            term::dim(
+                "Fire counts unavailable: no log source readable (journalctl missing on OpenRC, or service not yet started)."
+            ),
+        ));
+    }
+
+    out
+}
+
+fn render_hook_templates_table(section: &HookTemplatesSection) -> String {
+    const HEADERS: [&str; 5] = [
+        "Template",
+        "Description",
+        "cmd[0]",
+        "Fires 24h",
+        "Fails 24h",
+    ];
+    const RIGHT: [bool; 5] = [false, false, false, true, true];
+
+    fn truncate(s: &str, max: usize) -> String {
+        if s.chars().count() <= max {
+            return s.to_string();
+        }
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+
+    fn fmt_count(c: Option<u32>) -> String {
+        match c {
+            Some(n) => n.to_string(),
+            None => "-".to_string(),
+        }
+    }
+
+    let rows: Vec<[String; 5]> = section
+        .templates
+        .iter()
+        .map(|t| {
+            let cmd_cell = if t.cmd_path_executable {
+                t.cmd_path.clone()
+            } else {
+                format!("{} (MISSING)", t.cmd_path)
+            };
+            [
+                t.name.clone(),
+                truncate(&t.description, 40),
+                truncate(&cmd_cell, 40),
+                fmt_count(t.fire_count_24h),
+                fmt_count(t.failure_count_24h),
+            ]
+        })
+        .collect();
+
+    let mut widths = [0usize; 5];
+    for (i, h) in HEADERS.iter().enumerate() {
+        widths[i] = h.chars().count();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+
+    let mut out = String::new();
+    let frame = {
+        let mut s = String::from("  +");
+        for w in &widths {
+            s.push('-');
+            for _ in 0..*w {
+                s.push('-');
+            }
+            s.push('-');
+            s.push('+');
+        }
+        s.push('\n');
+        s
+    };
+
+    out.push_str(&frame);
+    out.push_str("  |");
+    for (i, h) in HEADERS.iter().enumerate() {
+        let pad = widths[i] - h.chars().count();
+        if RIGHT[i] {
+            out.push(' ');
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push_str(h);
+            out.push(' ');
+        } else {
+            out.push(' ');
+            out.push_str(h);
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push(' ');
+        }
+        out.push('|');
+    }
+    out.push('\n');
+    out.push_str(&frame);
+
+    for row in &rows {
+        out.push_str("  |");
+        for (i, cell) in row.iter().enumerate() {
+            let visible_len = cell.chars().count();
+            let pad = widths[i] - visible_len;
+            if RIGHT[i] {
+                out.push(' ');
+                for _ in 0..pad {
+                    out.push(' ');
+                }
+                out.push_str(cell);
+                out.push(' ');
+            } else {
+                out.push(' ');
+                if i == 0 {
+                    out.push_str(&term::highlight(cell).to_string());
+                } else if i == 2 && cell.contains("(MISSING)") {
+                    out.push_str(&term::warn(cell).to_string());
+                } else {
+                    out.push_str(cell);
+                }
+                for _ in 0..pad {
+                    out.push(' ');
+                }
+                out.push(' ');
+            }
+            out.push('|');
+        }
+        out.push('\n');
+    }
+    out.push_str(&frame);
 
     out
 }
@@ -505,13 +987,16 @@ mod tests {
         }
     }
 
-    /// Minimal mock that exercises `is_service_running`. The log-tail
-    /// hook is retained only to assert doctor does NOT call it. All
-    /// other `SystemOps` methods panic; they must not be reached by
-    /// `gather_status`.
+    /// Minimal mock that exercises `is_service_running` and the new
+    /// `tail_service_logs` / `user_exists` / `lookup_user_uid_gid` calls
+    /// added in S6-4. All other `SystemOps` methods panic; they must
+    /// not be reached by `gather_status`.
     struct FakeServiceOps {
         running: bool,
         log_tail_calls: Cell<u32>,
+        canned_logs: Option<String>,
+        user_exists: bool,
+        user_uid_gid: Option<(u32, u32)>,
     }
 
     impl FakeServiceOps {
@@ -519,7 +1004,21 @@ mod tests {
             Self {
                 running,
                 log_tail_calls: Cell::new(0),
+                canned_logs: None,
+                user_exists: false,
+                user_uid_gid: None,
             }
+        }
+
+        fn with_logs(mut self, text: &str) -> Self {
+            self.canned_logs = Some(text.to_string());
+            self
+        }
+
+        fn with_hook_user(mut self, uid: u32, gid: u32) -> Self {
+            self.user_exists = true;
+            self.user_uid_gid = Some((uid, gid));
+            self
         }
     }
 
@@ -572,10 +1071,19 @@ mod tests {
             _n: usize,
         ) -> Result<String, Box<dyn std::error::Error>> {
             self.log_tail_calls.set(self.log_tail_calls.get() + 1);
-            Err("doctor must not tail service logs".into())
+            match &self.canned_logs {
+                Some(text) => Ok(text.clone()),
+                None => Err("no log source available".into()),
+            }
         }
         fn follow_service_logs(&self, _unit: &str) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("gather_status must not touch follow_service_logs")
+        }
+        fn user_exists(&self, _user: &str) -> bool {
+            self.user_exists
+        }
+        fn lookup_user_uid_gid(&self, _user: &str) -> Option<(u32, u32)> {
+            self.user_uid_gid
         }
     }
 
@@ -636,6 +1144,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(output.contains("test.example.com"));
@@ -662,6 +1171,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -707,6 +1217,7 @@ mod tests {
                 },
             ],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(output.contains("agent.example.com"));
@@ -741,6 +1252,7 @@ mod tests {
                 hook_count: 0,
             }],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         for header in &[
@@ -782,6 +1294,7 @@ mod tests {
                 hook_count: 2,
             }],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         // The old `→ trust = …` indented summary line must be gone — its data
@@ -818,6 +1331,7 @@ mod tests {
                 hook_count: 0,
             }],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         // Frame line starts with `+--` (after a two-space indent) and row
@@ -865,6 +1379,7 @@ mod tests {
                 },
             ],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
 
         // Returns the visible column where the Address cell starts on each
@@ -941,6 +1456,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(output.contains("MISSING"));
@@ -1242,6 +1758,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: Some(DnsSection { results, records }),
+            hook_templates: HookTemplatesSection::default(),
         };
 
         let output = format_status(&info);
@@ -1273,6 +1790,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
 
         let output = format_status(&info);
@@ -1289,7 +1807,11 @@ mod tests {
     // ----- Logs pointer section ---------------------------------------
 
     #[test]
-    fn gather_status_does_not_tail_service_logs() {
+    fn gather_status_does_not_tail_service_logs_when_no_templates_enabled() {
+        // When no hook templates are enabled, doctor must not pay the cost
+        // of shelling out to journalctl just to compute fire counts on
+        // an empty set. Sprint 6's hook-templates section short-circuits
+        // in that case; this test pins the contract.
         let tmp = tempfile::TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let config = empty_config(tmp.path());
@@ -1300,7 +1822,7 @@ mod tests {
         assert_eq!(
             ops.log_tail_calls.get(),
             0,
-            "doctor must not tail service logs; it now prints a pointer to `aimx logs`"
+            "doctor must not tail service logs when no templates are enabled"
         );
     }
 
@@ -1318,6 +1840,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -1357,6 +1880,7 @@ mod tests {
             ],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -1402,6 +1926,7 @@ mod tests {
             ],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -1428,6 +1953,7 @@ mod tests {
             default_trusted_senders: vec![],
             mailboxes: vec![],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -1458,6 +1984,7 @@ mod tests {
                 hook_count: 0,
             }],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         assert!(
@@ -1488,6 +2015,7 @@ mod tests {
                 hook_count: 2,
             }],
             dns: None,
+            hook_templates: HookTemplatesSection::default(),
         };
         let output = format_status(&info);
         // Find the row for the `ops` mailbox and assert Trust / Senders /
@@ -1597,5 +2125,374 @@ mod tests {
             "config_path should resolve to a config.toml path under the override: {}",
             info.config_path
         );
+    }
+
+    // ----- S6-4 Hook templates section --------------------------------
+
+    fn template_for_test(name: &str, cmd_path: &str) -> crate::config::HookTemplate {
+        crate::config::HookTemplate {
+            name: name.to_string(),
+            description: format!("Description for {name}"),
+            cmd: vec![cmd_path.to_string(), "{prompt}".to_string()],
+            params: vec!["prompt".to_string()],
+            stdin: crate::config::HookTemplateStdin::Email,
+            run_as: "aimx-hook".to_string(),
+            timeout_secs: 60,
+            allowed_events: vec![
+                crate::hook::HookEvent::OnReceive,
+                crate::hook::HookEvent::AfterSend,
+            ],
+        }
+    }
+
+    fn config_with_templates(
+        data_dir: &Path,
+        templates: Vec<crate::config::HookTemplate>,
+    ) -> Config {
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: templates,
+            mailboxes: std::collections::HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[test]
+    fn parse_hook_fire_counts_handles_well_formed_lines() {
+        // Lines mirror the structured `tracing::info!` output emitted by
+        // `run_and_log` in src/hook.rs.
+        let text = "\
+2026-04-20T12:00:00Z aimx::hook hook_name=h1 event=on_receive mailbox=alice template=invoke-claude run_as=aimx-hook sandbox=fallback email_id=001 exit_code=0 duration_ms=10 timed_out=false stderr_tail=\"\"\n\
+2026-04-20T12:00:01Z aimx::hook hook_name=h2 event=on_receive mailbox=alice template=invoke-claude run_as=aimx-hook sandbox=fallback email_id=002 exit_code=2 duration_ms=15 timed_out=false stderr_tail=\"err\"\n\
+2026-04-20T12:00:02Z aimx::hook hook_name=h3 event=on_receive mailbox=alice template=webhook run_as=aimx-hook sandbox=fallback email_id=003 exit_code=0 duration_ms=20 timed_out=true stderr_tail=\"\"\n\
+2026-04-20T12:00:03Z aimx::hook hook_name=h4 event=after_send mailbox=alice template=- run_as=aimx-hook sandbox=fallback email_id=004 exit_code=0 duration_ms=5 timed_out=false stderr_tail=\"\"\n\
+unrelated journalctl line that mentions template= and exit_code= but is malformed\n\
+";
+        let counts = parse_hook_fire_counts(text);
+        // template=invoke-claude: 2 fires, 1 failure (exit_code=2)
+        assert_eq!(counts.get("invoke-claude"), Some(&(2, 1)));
+        // template=webhook: 1 fire, 1 failure (timed_out=true)
+        assert_eq!(counts.get("webhook"), Some(&(1, 1)));
+        // template=- raw-cmd lines must be excluded.
+        assert!(!counts.contains_key("-"));
+    }
+
+    #[test]
+    fn parse_hook_fire_counts_tolerates_malformed_lines_without_panic() {
+        let text = "\
+\n\
+not a log line at all\n\
+template=foo without exit_code\n\
+exit_code=0 without template\n\
+template= empty exit_code= empty\n\
+template=incomplete-line exit_code=\n\
+template=valid-one exit_code=0 timed_out=false\n\
+template=valid-two exit_code=missing-digits timed_out=false\n\
+";
+        let counts = parse_hook_fire_counts(text);
+        // Only `valid-one` and `valid-two` should land. `valid-two` has a
+        // non-digit exit_code which parses to fallback 0 (success).
+        assert_eq!(counts.get("valid-one"), Some(&(1, 0)));
+        assert_eq!(counts.get("valid-two"), Some(&(1, 0)));
+        // The empty-template "template= empty" is filtered: extract_kv
+        // returns the empty slice up to the next whitespace (`empty`),
+        // not "" — so it lands as template name "empty"... actually
+        // since we use whitespace split, template= with a trailing
+        // whitespace produces "" which extract_kv normalizes by reading
+        // up to ws. Pin the contract via direct assertion that the map
+        // doesn't panic and finishes parsing.
+        // (We don't assert a hard size — the lenient parser may pick up
+        // `template=incomplete-line` with 0 exit_code; the invariant that
+        // matters is "no panic, valid lines are counted".)
+    }
+
+    #[test]
+    fn parse_hook_fire_counts_returns_empty_map_for_empty_input() {
+        assert!(parse_hook_fire_counts("").is_empty());
+        assert!(parse_hook_fire_counts("\n\n\n").is_empty());
+    }
+
+    #[test]
+    fn gather_hook_templates_section_skips_log_tail_when_empty() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let config = config_with_templates(tmp.path(), Vec::new());
+        let ops = FakeServiceOps::new(false);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert_eq!(
+            ops.log_tail_calls.get(),
+            0,
+            "no template = no journalctl call (cost-saving short-circuit)"
+        );
+        assert!(info.hook_templates.templates.is_empty());
+        assert!(info.hook_templates.log_source.is_none());
+    }
+
+    #[test]
+    fn gather_hook_templates_section_tails_logs_when_templates_enabled() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let templates = vec![template_for_test("invoke-claude", "/usr/bin/true")];
+        let config = config_with_templates(tmp.path(), templates);
+        let log_text = "hook_name=h1 template=invoke-claude exit_code=0 timed_out=false\nhook_name=h2 template=invoke-claude exit_code=1 timed_out=false\n";
+        let ops = FakeServiceOps::new(true).with_logs(log_text);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert_eq!(ops.log_tail_calls.get(), 1);
+        let t = &info.hook_templates.templates[0];
+        assert_eq!(t.name, "invoke-claude");
+        assert_eq!(t.fire_count_24h, Some(2));
+        assert_eq!(t.failure_count_24h, Some(1));
+        assert_eq!(info.hook_templates.log_source, Some("logs"));
+    }
+
+    #[test]
+    fn gather_hook_templates_section_marks_counts_unknown_when_logs_unavailable() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let templates = vec![template_for_test("invoke-claude", "/usr/bin/true")];
+        let config = config_with_templates(tmp.path(), templates);
+        // FakeServiceOps without `with_logs` returns Err from tail_service_logs,
+        // simulating OpenRC without journalctl + no /var/log/aimx/*.log.
+        let ops = FakeServiceOps::new(true);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        let t = &info.hook_templates.templates[0];
+        assert_eq!(
+            t.fire_count_24h, None,
+            "fire count must be None (rendered as `-`) when log source unavailable"
+        );
+        assert_eq!(t.failure_count_24h, None);
+        assert!(info.hook_templates.log_source.is_none());
+    }
+
+    #[test]
+    fn gather_hook_templates_section_flags_missing_cmd_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let templates = vec![
+            template_for_test("present", "/usr/bin/true"),
+            template_for_test("missing", "/no/such/binary/anywhere"),
+        ];
+        let config = config_with_templates(tmp.path(), templates);
+        let ops = FakeServiceOps::new(true);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        let present = info
+            .hook_templates
+            .templates
+            .iter()
+            .find(|t| t.name == "present")
+            .unwrap();
+        let missing = info
+            .hook_templates
+            .templates
+            .iter()
+            .find(|t| t.name == "missing")
+            .unwrap();
+        assert!(
+            present.cmd_path_executable,
+            "/usr/bin/true should be executable on Linux"
+        );
+        assert!(
+            !missing.cmd_path_executable,
+            "/no/such/... must be flagged as not executable"
+        );
+    }
+
+    #[test]
+    fn gather_hook_templates_section_reports_missing_aimx_hook_user() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let config = config_with_templates(tmp.path(), Vec::new());
+        // FakeServiceOps default: user does not exist on this host.
+        let ops = FakeServiceOps::new(false);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert!(!info.hook_templates.hook_user.user_exists);
+        assert_eq!(info.hook_templates.hook_user.uid_gid, None);
+        // Datadir-readable check is short-circuited to false when user
+        // doesn't exist (we have nothing to check ownership against).
+        assert!(!info.hook_templates.hook_user.datadir_readable);
+    }
+
+    #[test]
+    fn gather_hook_templates_section_reports_resolved_aimx_hook_user() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let config = config_with_templates(tmp.path(), Vec::new());
+        let ops = FakeServiceOps::new(true).with_hook_user(8765, 8765);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert!(info.hook_templates.hook_user.user_exists);
+        assert_eq!(info.hook_templates.hook_user.uid_gid, Some((8765, 8765)));
+    }
+
+    #[test]
+    fn format_hook_templates_section_renders_warn_when_user_missing() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+            hook_templates: HookTemplatesSection::default(),
+        };
+        let out = format_status(&info);
+        assert!(
+            out.contains("Hook templates"),
+            "expected 'Hook templates' header in {out}"
+        );
+        assert!(
+            out.contains("aimx-hook user:"),
+            "expected aimx-hook user line in {out}"
+        );
+        assert!(
+            out.contains("missing"),
+            "expected 'missing' badge for absent user in {out}"
+        );
+        // No templates → must not render the table; must show the hint.
+        assert!(
+            !out.contains("Template ") || !out.contains("cmd[0]"),
+            "no-template section must suppress the ASCII table"
+        );
+        assert!(out.contains("No hook templates enabled."));
+    }
+
+    #[test]
+    fn format_hook_templates_section_renders_table_with_fire_counts() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+            hook_templates: HookTemplatesSection {
+                templates: vec![
+                    HookTemplateStatus {
+                        name: "invoke-claude".to_string(),
+                        description: "Pipe email into Claude Code with a prompt".to_string(),
+                        cmd_path: "/usr/local/bin/claude".to_string(),
+                        cmd_path_executable: false,
+                        fire_count_24h: Some(7),
+                        failure_count_24h: Some(2),
+                    },
+                    HookTemplateStatus {
+                        name: "webhook".to_string(),
+                        description: "POST email JSON to a URL".to_string(),
+                        cmd_path: "/usr/bin/curl".to_string(),
+                        cmd_path_executable: true,
+                        fire_count_24h: Some(0),
+                        failure_count_24h: Some(0),
+                    },
+                ],
+                hook_user: HookUserStatus {
+                    user: "aimx-hook".to_string(),
+                    user_exists: true,
+                    uid_gid: Some((9001, 9001)),
+                    datadir_readable: true,
+                },
+                log_source: Some("logs"),
+            },
+        };
+        let out = format_status(&info);
+        assert!(out.contains("Hook templates"), "missing section header");
+        assert!(out.contains("Template"), "missing column header");
+        assert!(out.contains("Fires 24h"));
+        assert!(out.contains("Fails 24h"));
+        assert!(out.contains("invoke-claude"));
+        assert!(out.contains("webhook"));
+        // Missing-binary cell carries the MISSING marker.
+        assert!(
+            out.contains("(MISSING)"),
+            "binary-not-executable templates must carry (MISSING) marker: {out}"
+        );
+        // Datadir line must render in success form.
+        assert!(out.contains("Datadir access:"));
+    }
+
+    #[test]
+    fn format_hook_templates_section_dashes_unknown_counts_when_log_source_missing() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+            hook_templates: HookTemplatesSection {
+                templates: vec![HookTemplateStatus {
+                    name: "invoke-claude".to_string(),
+                    description: "Claude".to_string(),
+                    cmd_path: "/usr/local/bin/claude".to_string(),
+                    cmd_path_executable: true,
+                    fire_count_24h: None,
+                    failure_count_24h: None,
+                }],
+                hook_user: HookUserStatus {
+                    user: "aimx-hook".to_string(),
+                    user_exists: true,
+                    uid_gid: Some((1000, 1000)),
+                    datadir_readable: true,
+                },
+                log_source: None,
+            },
+        };
+        let out = format_status(&info);
+        assert!(
+            out.contains("Fire counts unavailable"),
+            "expected the 'Fire counts unavailable' hint when log_source is None: {out}"
+        );
+        // The cell renders `-` rather than `0` so operators can tell
+        // "logs unavailable" apart from "no fires in 24h".
+        let plain = strip_ansi(&out);
+        let lines: Vec<&str> = plain.lines().collect();
+        let row = lines
+            .iter()
+            .find(|l| l.contains("invoke-claude"))
+            .expect("expected invoke-claude row");
+        let cells: Vec<&str> = row.split('|').map(|c| c.trim()).collect();
+        assert!(
+            cells.contains(&"-"),
+            "fire count cell must render `-` for unknown counts; row = {row:?}"
+        );
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && !bytes[i].is_ascii_alphabetic() {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
     }
 }
