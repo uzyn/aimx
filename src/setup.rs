@@ -297,6 +297,12 @@ pub(crate) fn configure_hook_templates(
     non_interactive: bool,
     sys: &dyn SystemOps,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    // Skip the prompt when explicit non-interactive, or stdin is piped.
+    // Suppress the intro block on the skip path so CI logs stay quiet.
+    if non_interactive || !sys.is_stdin_tty() {
+        return Ok(current_hook_templates(config_path));
+    }
+
     println!("\n{}", term::header("[Hook Templates]"));
     println!(
         "Hook templates let your agents create their own on_receive / after_send\n\
@@ -304,27 +310,6 @@ pub(crate) fn configure_hook_templates(
          agents can only fill declared parameters. Hook commands run as the\n\
          unprivileged '{HOOK_SERVICE_USER}' user, never as root.\n",
     );
-
-    // Skip the prompt when explicit non-interactive, or stdin is piped.
-    if non_interactive || !sys.is_stdin_tty() {
-        println!(
-            "  {} {}",
-            term::warn("Skipping template selection:"),
-            term::dim(if non_interactive {
-                "--non-interactive was passed"
-            } else {
-                "stdin is not a TTY"
-            }),
-        );
-        println!(
-            "  {} {}",
-            term::info("No templates installed."),
-            term::dim("Re-run `aimx setup` on a real terminal to enable them."),
-        );
-        // Return the current on-disk selection unchanged (re-runs keep
-        // existing templates).
-        return Ok(current_hook_templates(config_path));
-    }
 
     let bundled = crate::hook_templates_defaults::default_templates();
     let choices: Vec<HookTemplateChoice> = bundled
@@ -334,7 +319,18 @@ pub(crate) fn configure_hook_templates(
             description: t.description.clone(),
         })
         .collect();
-    let preselected = current_hook_templates(config_path);
+
+    // Only pre-tick bundled names on re-runs. Operator-authored custom
+    // templates stored in `config.toml` are preserved by
+    // `apply_selected_templates` regardless of what the prompt returns,
+    // so feeding them to the real `dialoguer::MultiSelect` (which would
+    // silently drop them) would just diverge from the mock's behavior.
+    let bundled_names: std::collections::HashSet<&str> =
+        bundled.iter().map(|t| t.name.as_str()).collect();
+    let preselected: Vec<String> = current_hook_templates(config_path)
+        .into_iter()
+        .filter(|n| bundled_names.contains(n.as_str()))
+        .collect();
 
     let selected = sys.prompt_hook_template_selection(&choices, &preselected)?;
 
@@ -406,7 +402,19 @@ fn apply_selected_templates(
         }
     }
 
-    install_config_file(&cfg, config_path)?;
+    // Route through the shared atomic temp-then-rename helper that the
+    // daemon uses for mailbox + hook CRUD so a crash mid-write can't
+    // leave `config.toml` torn. `install_config_file` only gets the
+    // atomic guarantee on the fresh-file path (`create_new`); the
+    // rewrite branch drops to `Config::save` which is a plain
+    // `std::fs::write`. `apply_selected_templates` runs on the rewrite
+    // path by construction (`finalize_setup` installs `config.toml`
+    // first), so we skip `install_config_file` here and re-apply
+    // `0o640` explicitly when running as root.
+    crate::mailbox_handler::write_config_atomic(config_path, &cfg)?;
+    if is_root() {
+        apply_config_file_mode(config_path)?;
+    }
     Ok(())
 }
 
@@ -2345,6 +2353,44 @@ address = "*@test.example"
         let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
         assert!(selected.is_empty());
         assert!(sys.template_prompt_calls.borrow().is_empty());
+    }
+
+    #[test]
+    fn configure_hook_templates_non_interactive_rerun_preserves_existing() {
+        // Exercises the function doc claim that a `--non-interactive`
+        // re-run preserves whatever templates are already enabled in
+        // `config.toml`. The first run (interactive) installs
+        // invoke-claude; the second run (non-interactive) must leave
+        // it intact and return it as the current selection without
+        // ever invoking the prompt.
+        let sys = MockSystemOps::default();
+        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
+        let (_tmp, cfg_path) = scratch_config_dir();
+
+        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
+        assert_eq!(sys.template_prompt_calls.borrow().len(), 1);
+
+        // Second run: `--non-interactive` — prompt must not render,
+        // and `invoke-claude` must still be on disk afterwards.
+        let selected = super::configure_hook_templates(&cfg_path, true, &sys).unwrap();
+        assert_eq!(
+            selected,
+            vec!["invoke-claude"],
+            "non-interactive re-run must return the current on-disk selection"
+        );
+        assert_eq!(
+            sys.template_prompt_calls.borrow().len(),
+            1,
+            "non-interactive re-run must not invoke the prompt"
+        );
+
+        let cfg = Config::load(&cfg_path).unwrap();
+        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
+        assert_eq!(
+            names,
+            vec!["invoke-claude"],
+            "non-interactive re-run must preserve existing templates on disk"
+        );
     }
 
     #[test]

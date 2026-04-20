@@ -16,7 +16,7 @@
 
 [[hook_template]]
 name = "invoke-claude"
-description = "Pipe email into Claude Code with a custom prompt."
+description = "Pipe email into Claude Code with a prompt"
 cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -26,7 +26,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-codex"
-description = "Pipe email into Codex CLI with a custom prompt."
+description = "Pipe email into Codex CLI with a prompt"
 cmd = ["/usr/local/bin/codex", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -36,7 +36,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-opencode"
-description = "Pipe email into OpenCode with a custom prompt."
+description = "Pipe email into OpenCode with a prompt"
 cmd = ["/usr/local/bin/opencode", "run", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -46,7 +46,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-gemini"
-description = "Pipe email into Gemini CLI with a custom prompt."
+description = "Pipe email into Gemini CLI with a prompt"
 cmd = ["/usr/local/bin/gemini", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -56,7 +56,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-goose"
-description = "Pipe email into a Goose recipe."
+description = "Pipe email into a Goose recipe"
 cmd = ["/usr/local/bin/goose", "run", "--recipe", "{recipe}"]
 params = ["recipe"]
 stdin = "email"
@@ -66,7 +66,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-openclaw"
-description = "Pipe email into OpenClaw with a custom prompt."
+description = "Pipe email into OpenClaw with a prompt"
 cmd = ["/usr/local/bin/openclaw", "run", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -76,7 +76,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "invoke-hermes"
-description = "Pipe email into Hermes with a custom prompt."
+description = "Pipe email into Hermes with a prompt"
 cmd = ["/usr/local/bin/hermes", "run", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
@@ -86,7 +86,7 @@ allowed_events = ["on_receive", "after_send"]
 
 [[hook_template]]
 name = "webhook"
-description = "POST the email as JSON to a URL."
+description = "POST the email as JSON to a URL"
 cmd = [
     "/usr/bin/curl",
     "-sS",

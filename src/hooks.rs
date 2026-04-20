@@ -112,7 +112,7 @@ fn list_templates(
         "{} {} {} {}",
         term::header("NAME                "),
         term::header("PARAMS                        "),
-        term::header("EVENTS                  "),
+        term::header("EVENTS                 "),
         term::header("DESCRIPTION"),
     )?;
 
