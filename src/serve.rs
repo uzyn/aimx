@@ -265,6 +265,119 @@ pub fn aimx_socket_path() -> PathBuf {
     runtime_dir().join(AIMX_SOCKET_NAME)
 }
 
+/// Outcome of a SIGHUP-reload attempt from the CLI to a running daemon.
+///
+/// Used by `aimx hooks create --cmd` (Sprint 3 S3-4) and any other CLI
+/// path that writes `config.toml` directly and wants the daemon to pick
+/// up the change without a full restart.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SighupOutcome {
+    /// Delivered SIGHUP to pid `.0`.
+    Sent(i32),
+    /// Could not find a running `aimx serve` process to signal. Caller
+    /// should print a "restart when convenient" hint.
+    DaemonNotRunning,
+    /// Found a PID but signalling it failed (EPERM, ESRCH). `.0` is the
+    /// PID we attempted; `.1` is the OS error string.
+    SignalFailed(i32, String),
+}
+
+/// Locate the PID of the running `aimx serve` daemon and send it
+/// `SIGHUP`. Returns [`SighupOutcome::DaemonNotRunning`] if no daemon
+/// can be found. On unix-like non-root callers `kill(2)` can still
+/// succeed when the caller is root or owns the daemon process; in
+/// production `aimx serve` always runs as root.
+///
+/// Discovery strategy (Sprint 3 S3-4):
+/// 1. The UDS socket at `<runtime_dir>/aimx.sock` must exist — this
+///    anchors "is a daemon running" to the runtime dir the caller
+///    was configured for, so per-test `AIMX_RUNTIME_DIR` overrides
+///    don't pick up unrelated `aimx serve` processes living at the
+///    default `/run/aimx/aimx.sock`.
+/// 2. Read `<runtime_dir>/aimx.pid` (written by `run_serve`). There is
+///    no `pgrep` fallback: matching by process name can return any
+///    `aimx` binary on the host, including short-lived test
+///    subprocesses, and SIGHUPing the wrong pid terminates it.
+pub fn sighup_running_daemon() -> SighupOutcome {
+    #[cfg(unix)]
+    {
+        // Anchor discovery to the same runtime dir the socket lives
+        // in. Both the socket and the pid file live under
+        // `runtime_dir()`, so per-test `AIMX_RUNTIME_DIR` overrides
+        // stay fully isolated from the default `/run/aimx/` daemon.
+        if !aimx_socket_path().exists() {
+            return SighupOutcome::DaemonNotRunning;
+        }
+        let pid = match find_daemon_pid() {
+            Some(p) => p,
+            None => return SighupOutcome::DaemonNotRunning,
+        };
+        // SAFETY: `kill(2)` with a valid signal number is sound for any
+        // pid; at worst we get EPERM / ESRCH.
+        let rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+        if rc == 0 {
+            SighupOutcome::Sent(pid)
+        } else {
+            let err = std::io::Error::last_os_error();
+            // ESRCH after we located the pid means it exited between
+            // lookup and signal — treat as "no daemon running" so the
+            // CLI prints the restart hint.
+            if err.raw_os_error() == Some(libc::ESRCH) {
+                SighupOutcome::DaemonNotRunning
+            } else {
+                SighupOutcome::SignalFailed(pid, err.to_string())
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        SighupOutcome::DaemonNotRunning
+    }
+}
+
+/// Summary of a successful [`reload_config`] swap.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ReloadSummary {
+    pub mailboxes: usize,
+    pub hooks: usize,
+    pub templates: usize,
+}
+
+/// Re-read `config.toml` at `path`, run the full validation chain, and
+/// swap `handle` atomically on success. On validation failure the
+/// previous config stays in place and the error is returned.
+///
+/// Used by the SIGHUP handler in [`run_serve`] (Sprint 3 S3-5) to hot-
+/// reload operator edits without restarting the daemon.
+pub fn reload_config(
+    path: &Path,
+    handle: &ConfigHandle,
+) -> Result<ReloadSummary, Box<dyn std::error::Error>> {
+    let new_config = Config::load(path)?;
+    let summary = ReloadSummary {
+        mailboxes: new_config.mailboxes.len(),
+        hooks: new_config.mailboxes.values().map(|mb| mb.hooks.len()).sum(),
+        templates: new_config.hook_templates.len(),
+    };
+    handle.store(new_config);
+    Ok(summary)
+}
+
+/// PID lookup for the running `aimx serve` daemon.
+///
+/// Reads `<runtime_dir>/aimx.pid`, which `run_serve` writes at startup
+/// and removes on clean shutdown. Never falls back to `pgrep -x aimx`:
+/// that fallback matched any `aimx` process (including short-lived
+/// test subprocesses) and could deliver SIGHUP to the wrong pid,
+/// terminating unrelated work under parallel tests.
+#[cfg(unix)]
+fn find_daemon_pid() -> Option<i32> {
+    let pid_path = runtime_dir().join("aimx.pid");
+    let s = std::fs::read_to_string(&pid_path).ok()?;
+    let pid: i32 = s.trim().parse().ok()?;
+    if pid > 1 { Some(pid) } else { None }
+}
+
 pub fn run(
     bind: Option<&str>,
     tls_cert: Option<&str>,
@@ -446,19 +559,74 @@ async fn run_serve(
         term::highlight(&socket_path.display().to_string())
     );
 
+    // Write our PID next to the socket so `find_daemon_pid()` can
+    // deliver SIGHUP to the correct daemon even when multiple `aimx`
+    // processes share the host (e.g. parallel integration tests, or
+    // operator-run CLI commands alongside the systemd service). The
+    // file is removed on clean shutdown below.
+    let pid_path = runtime_dir().join("aimx.pid");
+    if let Err(e) = write_pid_file(&pid_path) {
+        eprintln!(
+            "{} Failed to write pid file {}: {e}",
+            term::warn("Warning:"),
+            pid_path.display()
+        );
+    }
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // Clone handles for the signal loop: SIGHUP triggers a config
+    // reload and swaps the shared `ConfigHandle` in place so the
+    // daemon picks up raw-cmd hooks / mailbox / template edits made
+    // via `aimx hooks create --cmd` or direct hand-edits to
+    // `config.toml` without a service restart. Errors during reload
+    // log at WARN and leave the running config untouched — failing
+    // open is safer than crashing on a typo.
+    let sighup_handle = config_handle.clone();
+    let sighup_config_path = mb_ctx.config_path.clone();
 
     tokio::spawn(async move {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
             .expect("failed to install SIGTERM handler");
+        let mut sighup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            .expect("failed to install SIGHUP handler");
         let sigint = tokio::signal::ctrl_c();
 
-        tokio::select! {
-            _ = sigterm.recv() => {},
-            _ = sigint => {},
+        tokio::pin!(sigint);
+        loop {
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                _ = &mut sigint => {
+                    let _ = shutdown_tx.send(true);
+                    return;
+                }
+                _ = sighup.recv() => {
+                    match reload_config(&sighup_config_path, &sighup_handle) {
+                        Ok(summary) => {
+                            eprintln!(
+                                "{} config reloaded from {}: {} mailboxes, {} hooks, {} templates",
+                                term::info("SIGHUP:"),
+                                sighup_config_path.display(),
+                                summary.mailboxes,
+                                summary.hooks,
+                                summary.templates,
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!(
+                                "{} config reload failed for {}: {e}. Keeping previous config.",
+                                term::warn("SIGHUP:"),
+                                sighup_config_path.display(),
+                            );
+                        }
+                    }
+                    // Fall through: loop to wait for the next signal.
+                }
+            }
         }
-
-        let _ = shutdown_tx.send(true);
     });
 
     // Run the SMTP server and UDS listener concurrently. Both observe the
@@ -477,9 +645,28 @@ async fn run_serve(
     // Wait for the UDS listener to drain too so we don't leak its task.
     let _ = uds_handle.await;
 
+    // Best-effort cleanup of the pid file. A stale pid file can cause
+    // the CLI to SIGHUP a pid that was reused by an unrelated process;
+    // production systemd usually restarts us and overwrites it anyway,
+    // but removing on graceful exit narrows the window.
+    let _ = std::fs::remove_file(&pid_path);
+
     eprintln!("{}", term::info("aimx SMTP listener shut down"));
 
     in_flight_msg
+}
+
+/// Write the current process PID to `path`, creating parent
+/// directories if needed. Atomic rename keeps readers from seeing a
+/// truncated file mid-write.
+fn write_pid_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("pid.tmp");
+    std::fs::write(&tmp, format!("{}\n", std::process::id()))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Bind the UDS send socket at `path` with mode `0o666`.
@@ -1053,10 +1240,15 @@ mod tests {
         assert!(unit.contains("[Service]"));
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("WantedBy=multi-user.target"));
-        // Intentionally omitted directives
+        // Intentionally omitted directives. The daemon installs its own
+        // SIGHUP handler inside `run_serve` (Sprint 3 S3-5), so we do
+        // not declare `ExecReload=` in the unit file: `systemctl reload
+        // aimx` works out-of-the-box by delivering SIGHUP to the main
+        // PID (systemd default) without us needing to wire a separate
+        // reload command.
         assert!(
             !unit.contains("ExecReload="),
-            "ExecReload must not be set (no SIGHUP handler)"
+            "ExecReload must not be set (systemd default reload = SIGHUP to MainPID)"
         );
         assert!(
             !unit.contains("StateDirectory="),
@@ -1882,5 +2074,245 @@ mod tests {
                 .map(|o| o.result().clone())
                 .collect::<Vec<_>>()
         );
+    }
+
+    // ---- S3-5: SIGHUP / reload_config -----------------------------
+
+    /// Happy path: a valid `config.toml` edit swaps the in-memory
+    /// handle in place.
+    #[test]
+    fn reload_config_swaps_handle_on_valid_edit() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = build_test_config(tmp.path());
+        cfg.save(&path).unwrap();
+        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        assert_eq!(handle.load().mailboxes.len(), 2);
+
+        // Mutate the file on disk: add a third mailbox stanza.
+        let mut mutated = Config::load(&path).unwrap();
+        mutated.mailboxes.insert(
+            "bob".to_string(),
+            crate::config::MailboxConfig {
+                address: "bob@example.com".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        mutated.save(&path).unwrap();
+
+        let summary = reload_config(&path, &handle).unwrap();
+        assert_eq!(summary.mailboxes, 3);
+        assert_eq!(handle.load().mailboxes.len(), 3);
+        assert!(handle.load().mailboxes.contains_key("bob"));
+    }
+
+    /// Validation failure: `reload_config` returns Err and the handle
+    /// retains the old config.
+    #[test]
+    fn reload_config_keeps_old_on_malformed_toml() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = build_test_config(tmp.path());
+        cfg.save(&path).unwrap();
+        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        let before_domain = handle.load().domain.clone();
+
+        // Corrupt the file — not valid TOML.
+        std::fs::write(&path, b"this is ][ not toml").unwrap();
+
+        let err = reload_config(&path, &handle).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.to_lowercase().contains("toml") || msg.to_lowercase().contains("expected"),
+            "error should mention TOML parse issue: {msg}"
+        );
+        assert_eq!(handle.load().domain, before_domain);
+        assert_eq!(handle.load().mailboxes.len(), 2);
+    }
+
+    /// A reload that fails validation (unknown template referenced by
+    /// a hook) leaves the handle alone.
+    #[test]
+    fn reload_config_keeps_old_on_validation_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = build_test_config(tmp.path());
+        cfg.save(&path).unwrap();
+        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+
+        // Write a config that parses but fails `validate_hooks`:
+        // references an unknown template.
+        let bad = r#"
+domain = "example.com"
+dkim_selector = "aimx"
+
+[mailboxes.catchall]
+address = "*@example.com"
+hooks = []
+
+[mailboxes.alice]
+address = "alice@example.com"
+
+  [[mailboxes.alice.hooks]]
+  event = "on_receive"
+  template = "no-such-template"
+  name = "bad"
+"#;
+        std::fs::write(&path, bad).unwrap();
+
+        let err = reload_config(&path, &handle).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no-such-template"), "{msg}");
+        // Handle still has the original empty hook list.
+        assert_eq!(handle.load().mailboxes["alice"].hooks.len(), 0);
+    }
+
+    /// Exercises the full SIGHUP signal path end-to-end: install the
+    /// tokio hangup handler, send two consecutive SIGHUPs to our own
+    /// PID, and verify `reload_config` is invoked both times and that
+    /// the handle reflects each on-disk edit. This is the load-bearing
+    /// reason the signal loop is a `loop { tokio::select! { ... } }`
+    /// rather than a one-shot await — a non-looping implementation
+    /// would silently miss the second signal.
+    #[cfg(unix)]
+    #[test]
+    fn sighup_signal_loop_handles_two_consecutive_reloads() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = build_test_config(tmp.path());
+        cfg.save(&path).unwrap();
+        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        assert_eq!(handle.load().mailboxes.len(), 2);
+
+        // Replicate just the SIGHUP branch of `run_serve`'s signal
+        // loop. Two reloads are expected; the fourth SIGHUP (if any)
+        // is ignored because the helper exits after two successful
+        // reloads, and `DONE.notified()` races against any further
+        // `sighup.recv()` calls.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let reload_handle = handle.clone();
+            let reload_path = path.clone();
+            let reloads = std::sync::Arc::new(tokio::sync::Notify::new());
+            let reloads_notify = reloads.clone();
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter_task = counter.clone();
+
+            let loop_task = tokio::spawn(async move {
+                let mut sighup =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                        .expect("install SIGHUP handler");
+                loop {
+                    tokio::select! {
+                        _ = sighup.recv() => {
+                            let _ = reload_config(&reload_path, &reload_handle);
+                            let n = counter_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            if n >= 2 {
+                                reloads_notify.notify_one();
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Give tokio time to install the signal handler before we
+            // deliver the first SIGHUP; signal delivery that arrives
+            // before the handler is ready is coalesced into one.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // First reload: add mailbox "bob".
+            let mut cfg1 = Config::load(&path).unwrap();
+            cfg1.mailboxes.insert(
+                "bob".to_string(),
+                crate::config::MailboxConfig {
+                    address: "bob@example.com".to_string(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                },
+            );
+            cfg1.save(&path).unwrap();
+            // SAFETY: delivering SIGHUP to our own process is sound;
+            // tokio's signal handler upgrades it to an async notify.
+            let pid = unsafe { libc::getpid() };
+            let rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+            assert_eq!(rc, 0, "first kill(SIGHUP) failed");
+
+            // Spin until the first reload lands, then stage the second.
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if counter.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                    break;
+                }
+            }
+            assert_eq!(handle.load().mailboxes.len(), 3, "first reload missed");
+
+            // Second reload: add mailbox "carol". If the loop were
+            // one-shot this edit would never become visible.
+            let mut cfg2 = Config::load(&path).unwrap();
+            cfg2.mailboxes.insert(
+                "carol".to_string(),
+                crate::config::MailboxConfig {
+                    address: "carol@example.com".to_string(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                },
+            );
+            cfg2.save(&path).unwrap();
+            let rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+            assert_eq!(rc, 0, "second kill(SIGHUP) failed");
+
+            let timeout = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                reloads.notified(),
+            )
+            .await;
+            assert!(timeout.is_ok(), "second reload never observed");
+
+            let cur = handle.load();
+            assert_eq!(cur.mailboxes.len(), 4, "second reload did not swap handle");
+            assert!(cur.mailboxes.contains_key("bob"));
+            assert!(cur.mailboxes.contains_key("carol"));
+
+            loop_task.abort();
+        });
+    }
+
+    #[test]
+    fn sighup_running_daemon_without_daemon_returns_daemon_not_running() {
+        // Pid-file-only discovery: with AIMX_RUNTIME_DIR pointing at an
+        // empty temp dir, neither `<runtime_dir>/aimx.sock` nor
+        // `<runtime_dir>/aimx.pid` exist, so `find_daemon_pid` returns
+        // `None` and the outcome must be `DaemonNotRunning`. This test
+        // confirms the missing-socket short-circuit produces a
+        // well-formed outcome and never panics.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let key = RUNTIME_DIR_ENV;
+        // SAFETY: single-threaded test guard; the env var is restored on
+        // drop.
+        let prev = std::env::var_os(key);
+        // SAFETY: within a test, sole-thread use of set_var is accepted
+        // by the test harness.
+        unsafe { std::env::set_var(key, tmp.path()) };
+        let outcome = sighup_running_daemon();
+        assert_eq!(
+            outcome,
+            SighupOutcome::DaemonNotRunning,
+            "expected DaemonNotRunning with empty runtime dir"
+        );
+        // SAFETY: see above.
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
     }
 }

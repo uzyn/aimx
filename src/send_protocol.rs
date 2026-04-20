@@ -33,9 +33,12 @@
 //! Client → Server (HOOK-CREATE):
 //!   AIMX/1 HOOK-CREATE\n
 //!   Mailbox: <mailbox-name>\n
+//!   Event: on_receive|after_send\n
+//!   Template: <template-name>\n
+//!   Name: <optional-hook-name>\n
 //!   Content-Length: <n>\n
 //!   \n
-//!   <n bytes of TOML encoding one Hook stanza>
+//!   <n bytes of JSON: { "params": { "KEY": "VAL", ... } }>
 //!
 //! Client → Server (HOOK-DELETE):
 //!   AIMX/1 HOOK-DELETE\n
@@ -71,10 +74,17 @@
 //!   reuse the existing set plus `VALIDATION` (name validation failures)
 //!   and `NONEMPTY` (delete refused because the mailbox still holds files).
 //! - `HOOK-CREATE` / `HOOK-DELETE` follow the same hot-swap pattern for
-//!   hook CRUD. `HOOK-CREATE` carries a TOML-encoded `Hook` stanza plus a
-//!   `Mailbox:` header picking the owning mailbox; `HOOK-DELETE` carries
-//!   a `Hook-Name:` header and empty body (the daemon locates the hook by
-//!   effective name across all mailboxes). Error codes reuse
+//!   hook CRUD. `HOOK-CREATE` is template-only: the verb carries a
+//!   `Mailbox:` header picking the owning mailbox, an `Event:` header
+//!   picking the trigger, a `Template:` header referencing an installed
+//!   `[[hook_template]]`, an optional `Name:` header, and a JSON body
+//!   binding the template's declared `params`. Raw-cmd hooks (with their
+//!   own `cmd = ...` string) are intentionally NOT creatable via UDS —
+//!   they are operator-only and require `sudo aimx hooks create --cmd`,
+//!   which writes `config.toml` directly. `HOOK-DELETE` carries a
+//!   `Hook-Name:` header and empty body (the daemon locates the hook by
+//!   effective name across all mailboxes); the daemon refuses to delete
+//!   operator-origin hooks via this verb. Error codes reuse
 //!   `VALIDATION`, `MAILBOX`, `NOTFOUND`, and `IO`.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -141,17 +151,46 @@ pub struct MailboxCrudRequest {
     pub create: bool,
 }
 
-/// Decoded `AIMX/1 HOOK-CREATE` request. Carries the owning mailbox name
-/// as a header and a TOML-encoded `Hook` stanza as the body. The daemon
-/// decodes the body into a `crate::hook::Hook` and appends it to the
-/// addressed mailbox's `hooks` array.
+/// Decoded `AIMX/1 HOOK-CREATE` request. Template-only (Sprint 3 S3-1):
+/// the verb no longer accepts a raw `cmd`, `run_as`, `timeout_secs`,
+/// `stdin`, or `dangerously_support_untrusted`. Those are properties of
+/// a `[[hook_template]]` block the operator installs via
+/// `aimx setup`, never hook-level overrides.
+///
+/// The owning mailbox, trigger event, template name, and optional hook
+/// name travel as headers. The body is a JSON object whose keys bind
+/// the template's declared `params`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookCreateRequest {
     pub mailbox: String,
-    /// TOML body encoding one [`crate::hook::Hook`] stanza. Kept as raw
-    /// bytes at the codec layer so the codec can stay free of the hook
-    /// struct itself; the daemon handler decodes.
-    pub hook_toml: Vec<u8>,
+    /// Trigger event as on-wire string. Parsed by the daemon into
+    /// [`crate::hook::HookEvent`].
+    pub event: String,
+    /// Template name the hook binds to. Must match an entry in
+    /// `Config::hook_templates` at handle time.
+    pub template: String,
+    /// Optional explicit hook name. When absent the daemon derives one
+    /// via [`crate::hook::effective_hook_name`].
+    pub name: Option<String>,
+    /// JSON body bytes. The daemon parses this into
+    /// [`HookTemplateCreateBody`] and stamps `origin = Mcp` on the
+    /// resulting `Hook`.
+    pub body: Vec<u8>,
+}
+
+/// Typed JSON body shape for `HOOK-CREATE`. Uses `deny_unknown_fields` so
+/// a body containing any template-only property (`cmd`, `run_as`,
+/// `timeout_secs`, `stdin`, `dangerously_support_untrusted`) is rejected
+/// with a precise error at parse time. The daemon handler surfaces the
+/// parse error as `ERR VALIDATION ...`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookTemplateCreateBody {
+    /// Map of template placeholder name → bound value. Must match the
+    /// template's declared `params` exactly (missing or extra keys
+    /// produce `ERR VALIDATION`).
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, String>,
 }
 
 /// Decoded `AIMX/1 HOOK-DELETE` request. Locates the hook by effective
@@ -602,6 +641,9 @@ where
     R: AsyncRead + Unpin,
 {
     let mut mailbox: Option<String> = None;
+    let mut event: Option<String> = None;
+    let mut template: Option<String> = None;
+    let mut name: Option<String> = None;
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -635,6 +677,33 @@ where
                 }
                 mailbox = Some(value);
             }
+            "event" => {
+                if event.is_some() {
+                    return Err(ParseError::Malformed("duplicate Event header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Event value".into()));
+                }
+                event = Some(value);
+            }
+            "template" => {
+                if template.is_some() {
+                    return Err(ParseError::Malformed("duplicate Template header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Template value".into()));
+                }
+                template = Some(value);
+            }
+            "name" => {
+                if name.is_some() {
+                    return Err(ParseError::Malformed("duplicate Name header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Name value".into()));
+                }
+                name = Some(value);
+            }
             "content-length" => {
                 if content_length.is_some() {
                     return Err(ParseError::Malformed(
@@ -659,11 +728,15 @@ where
 
     let mailbox =
         mailbox.ok_or_else(|| ParseError::Malformed("missing required header: Mailbox".into()))?;
+    let event =
+        event.ok_or_else(|| ParseError::Malformed("missing required header: Event".into()))?;
+    let template = template
+        .ok_or_else(|| ParseError::Malformed("missing required header: Template".into()))?;
     let content_length = content_length
         .ok_or_else(|| ParseError::Malformed("missing required header: Content-Length".into()))?;
 
-    let mut hook_toml = vec![0u8; content_length];
-    reader.read_exact(&mut hook_toml).await.map_err(|e| {
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
             ParseError::Malformed(format!("body truncated: expected {content_length} bytes"))
         } else {
@@ -671,7 +744,13 @@ where
         }
     })?;
 
-    Ok(HookCreateRequest { mailbox, hook_toml })
+    Ok(HookCreateRequest {
+        mailbox,
+        event,
+        template,
+        name,
+        body,
+    })
 }
 
 async fn parse_hook_delete_headers<R>(reader: &mut R) -> Result<HookDeleteRequest, ParseError>
@@ -890,8 +969,9 @@ where
     Ok(())
 }
 
-/// Write an `AIMX/1 HOOK-CREATE` request frame. The body is an opaque
-/// blob of TOML bytes; the codec does not parse it.
+/// Write an `AIMX/1 HOOK-CREATE` request frame. Template-only: the body
+/// is a JSON-encoded [`HookTemplateCreateBody`]; the codec does not
+/// parse the body, it simply ships the bytes the caller supplies.
 pub async fn write_hook_create_request<W>(
     writer: &mut W,
     request: &HookCreateRequest,
@@ -899,13 +979,18 @@ pub async fn write_hook_create_request<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let header = format!(
-        "AIMX/1 HOOK-CREATE\nMailbox: {}\nContent-Length: {}\n\n",
+    let mut header = format!(
+        "AIMX/1 HOOK-CREATE\nMailbox: {}\nEvent: {}\nTemplate: {}\n",
         sanitize_inline(&request.mailbox),
-        request.hook_toml.len(),
+        sanitize_inline(&request.event),
+        sanitize_inline(&request.template),
     );
+    if let Some(name) = &request.name {
+        header.push_str(&format!("Name: {}\n", sanitize_inline(name)));
+    }
+    header.push_str(&format!("Content-Length: {}\n\n", request.body.len()));
     writer.write_all(header.as_bytes()).await?;
-    writer.write_all(&request.hook_toml).await?;
+    writer.write_all(&request.body).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -1504,9 +1589,9 @@ mod tests {
 
     #[tokio::test]
     async fn parses_hook_create_request() {
-        let body = b"name = \"my_hook\"\nevent = \"on_receive\"\ncmd = \"echo hi\"\n";
+        let body = br#"{"params":{"prompt":"hi"}}"#;
         let header = format!(
-            "AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: {}\n\n",
+            "AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: on_receive\nTemplate: invoke-claude\nContent-Length: {}\n\n",
             body.len()
         );
         let mut input = header.into_bytes();
@@ -1514,7 +1599,28 @@ mod tests {
         match parse_any_from_bytes(&input).await.unwrap() {
             Request::HookCreate(r) => {
                 assert_eq!(r.mailbox, "alice");
-                assert_eq!(r.hook_toml, body.to_vec());
+                assert_eq!(r.event, "on_receive");
+                assert_eq!(r.template, "invoke-claude");
+                assert!(r.name.is_none());
+                assert_eq!(r.body, body.to_vec());
+            }
+            other => panic!("expected HookCreate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn parses_hook_create_with_explicit_name() {
+        let body = br#"{"params":{}}"#;
+        let header = format!(
+            "AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: after_send\nTemplate: webhook\nName: my_hook\nContent-Length: {}\n\n",
+            body.len()
+        );
+        let mut input = header.into_bytes();
+        input.extend_from_slice(body);
+        match parse_any_from_bytes(&input).await.unwrap() {
+            Request::HookCreate(r) => {
+                assert_eq!(r.name.as_deref(), Some("my_hook"));
+                assert_eq!(r.event, "after_send");
             }
             other => panic!("expected HookCreate, got {other:?}"),
         }
@@ -1522,7 +1628,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_missing_mailbox_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nContent-Length: 0\n\n";
+        let input = b"AIMX/1 HOOK-CREATE\nEvent: on_receive\nTemplate: t\nContent-Length: 2\n\n{}";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("Mailbox"), "{m}"),
@@ -1532,7 +1638,8 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_empty_mailbox_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nMailbox: \nContent-Length: 0\n\n";
+        let input =
+            b"AIMX/1 HOOK-CREATE\nMailbox: \nEvent: on_receive\nTemplate: t\nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("empty Mailbox"), "{m}"),
@@ -1541,8 +1648,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn hook_create_missing_event_is_malformed() {
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nTemplate: t\nContent-Length: 2\n\n{}";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Event"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn hook_create_missing_template_is_malformed() {
+        let input =
+            b"AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: on_receive\nContent-Length: 2\n\n{}";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Template"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn hook_create_missing_content_length_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\n\n";
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: on_receive\nTemplate: t\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("Content-Length"), "{m}"),
@@ -1552,7 +1680,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_truncated_body_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: 10\n\nabc";
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: on_receive\nTemplate: t\nContent-Length: 10\n\nabc";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("truncated"), "{m}"),
@@ -1562,7 +1690,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_oversized_body_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: 999999999999\n\n";
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nEvent: on_receive\nTemplate: t\nContent-Length: 999999999999\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("exceeds cap"), "{m}"),
@@ -1620,9 +1748,9 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_header_names_case_insensitive() {
-        let body = b"event = \"on_receive\"\ncmd = \"echo hi\"\n";
+        let body = br#"{"params":{}}"#;
         let header = format!(
-            "AIMX/1 HOOK-CREATE\nmailbox: alice\ncontent-length: {}\n\n",
+            "AIMX/1 HOOK-CREATE\nmailbox: alice\nevent: on_receive\ntemplate: t\ncontent-length: {}\n\n",
             body.len()
         );
         let mut input = header.into_bytes();
@@ -1635,7 +1763,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_duplicate_mailbox_is_malformed() {
-        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nMailbox: bob\nContent-Length: 0\n\n";
+        let input = b"AIMX/1 HOOK-CREATE\nMailbox: alice\nMailbox: bob\nEvent: on_receive\nTemplate: t\nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("duplicate Mailbox"), "{m}"),
@@ -1647,7 +1775,10 @@ mod tests {
     async fn hook_create_roundtrip() {
         let req = HookCreateRequest {
             mailbox: "alice".to_string(),
-            hook_toml: b"event = \"on_receive\"\ncmd = \"echo hi\"\n".to_vec(),
+            event: "on_receive".into(),
+            template: "invoke-claude".into(),
+            name: Some("my_hook".into()),
+            body: br#"{"params":{"prompt":"hi"}}"#.to_vec(),
         };
         let (mut client, mut server) = duplex(1024);
         let w = {
@@ -1661,10 +1792,70 @@ mod tests {
         match parsed {
             Request::HookCreate(r) => {
                 assert_eq!(r.mailbox, "alice");
-                assert_eq!(r.hook_toml, req.hook_toml);
+                assert_eq!(r.event, "on_receive");
+                assert_eq!(r.template, "invoke-claude");
+                assert_eq!(r.name.as_deref(), Some("my_hook"));
+                assert_eq!(r.body, req.body);
             }
             other => panic!("expected HookCreate, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_deny_unknown_fields() {
+        // A body with a `cmd` (or any template-only property) must be
+        // rejected by the JSON schema at the handler layer. The codec
+        // itself only ships the bytes; the test verifies the
+        // `HookTemplateCreateBody` serde type refuses unknown keys.
+        let json = br#"{"params":{"prompt":"hi"},"cmd":"/usr/bin/evil"}"#;
+        let err = serde_json::from_slice::<HookTemplateCreateBody>(json).unwrap_err();
+        assert!(err.to_string().contains("cmd"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_rejects_run_as() {
+        let json = br#"{"params":{},"run_as":"root"}"#;
+        let err = serde_json::from_slice::<HookTemplateCreateBody>(json).unwrap_err();
+        assert!(err.to_string().contains("run_as"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_rejects_dangerously_flag() {
+        let json = br#"{"params":{},"dangerously_support_untrusted":true}"#;
+        let err = serde_json::from_slice::<HookTemplateCreateBody>(json).unwrap_err();
+        assert!(
+            err.to_string().contains("dangerously_support_untrusted"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_rejects_timeout_secs() {
+        let json = br#"{"params":{},"timeout_secs":30}"#;
+        let err = serde_json::from_slice::<HookTemplateCreateBody>(json).unwrap_err();
+        assert!(err.to_string().contains("timeout_secs"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_rejects_stdin() {
+        let json = br#"{"params":{},"stdin":"email"}"#;
+        let err = serde_json::from_slice::<HookTemplateCreateBody>(json).unwrap_err();
+        assert!(err.to_string().contains("stdin"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_accepts_empty_params() {
+        let json = br#"{"params":{}}"#;
+        let body: HookTemplateCreateBody = serde_json::from_slice(json).unwrap();
+        assert!(body.params.is_empty());
+    }
+
+    #[tokio::test]
+    async fn hook_create_body_accepts_missing_params_field() {
+        // `params` has serde(default), so an empty object is valid.
+        let json = br#"{}"#;
+        let body: HookTemplateCreateBody = serde_json::from_slice(json).unwrap();
+        assert!(body.params.is_empty());
     }
 
     #[tokio::test]
@@ -1689,10 +1880,15 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_binary_safe_body_roundtrip() {
+        // Even though real bodies are JSON, the framing is binary-safe:
+        // arbitrary bytes in the Content-Length region must round-trip.
         let body: Vec<u8> = (0u8..=255).collect();
         let req = HookCreateRequest {
             mailbox: "alice".to_string(),
-            hook_toml: body.clone(),
+            event: "on_receive".into(),
+            template: "t".into(),
+            name: None,
+            body: body.clone(),
         };
         let (mut client, mut server) = duplex(4096);
         let w = {
@@ -1704,7 +1900,7 @@ mod tests {
         let parsed = parse_request(&mut server).await.unwrap();
         w.await.unwrap();
         match parsed {
-            Request::HookCreate(r) => assert_eq!(r.hook_toml, body),
+            Request::HookCreate(r) => assert_eq!(r.body, body),
             other => panic!("expected HookCreate, got {other:?}"),
         }
     }
