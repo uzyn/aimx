@@ -81,14 +81,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // `aimx logs` is a thin wrapper around journalctl; it does not
         // read config.toml.
         Command::Logs { lines, follow } => logs::run(lines, follow),
-        // `aimx completion` prints a shell-completion script generated
-        // from the clap command tree. It needs no config.
-        Command::Completion { shell } => {
-            use clap::CommandFactory;
-            let mut cmd = Cli::command();
-            clap_complete::generate(shell, &mut cmd, "aimx", &mut std::io::stdout());
-            Ok(())
-        }
         // Everything else loads Config once here and takes it by value.
         other => {
             let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
@@ -125,7 +117,6 @@ fn dispatch_with_config(
         | Command::Mcp
         | Command::Send(_)
         | Command::Logs { .. }
-        | Command::Completion { .. }
         | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
     }
 }

@@ -195,13 +195,3 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 |------|---------|-------------|
 | `--selector <name>` | `aimx` | DKIM selector name (controls the DNS record `<selector>._domainkey.<domain>`). |
 | `--force` | — | Overwrite existing keys. |
-
-### `aimx completion <shell>`
-
-Print a shell-completion script to stdout for the given shell. Valid values: `bash`, `zsh`, `fish`, `elvish`, `powershell`.
-
-```bash
-aimx completion bash | sudo tee /etc/bash_completion.d/aimx > /dev/null
-```
-
-See [Getting Started — Shell completion](getting-started.md#shell-completion) for per-shell install locations.

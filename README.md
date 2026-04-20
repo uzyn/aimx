@@ -72,7 +72,6 @@ Commands:
   portcheck    Check port 25 connectivity (outbound, inbound)
   agent-setup  Install AIMX plugin/skill for an AI agent into the current user's config
   dkim-keygen  Generate DKIM keypair for email signing
-  completion   Print a shell-completion script to stdout for the requested shell
   help         Print this message or the help of the given subcommand(s)
 
 Options:
