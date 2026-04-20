@@ -293,3 +293,118 @@ Mark a single email as unread (sets `read = false` in frontmatter).
 email_mark_unread(mailbox: "agent", id: "2026-04-15-143022-meeting-notes")
 → "Marked as unread."
 ```
+
+## Hook tools
+
+Hooks fire shell commands on mail events. Agents create hooks by
+referencing pre-vetted **templates**; the template model makes it
+impossible to submit arbitrary shell over the world-writable UDS. See
+`references/hooks.md` for the full model, worked examples, and
+troubleshooting.
+
+### `hook_list_templates`
+
+List hook templates enabled on this install. Call this first — the
+list is empty until the operator has enabled templates during
+`aimx setup`.
+
+**Parameters:** None.
+
+**Returns:** JSON array. Fields per entry: `name`, `description`,
+`params` (string array of declared parameter names), `allowed_events`
+(subset of `["on_receive", "after_send"]`).
+
+**Example:**
+```
+hook_list_templates()
+→ [{"name":"invoke-claude","description":"Pipe email into Claude with a prompt.",
+    "params":["prompt"],"allowed_events":["on_receive","after_send"]}]
+```
+
+---
+
+### `hook_create`
+
+Attach a template-bound hook to a mailbox. The daemon substitutes the
+supplied params into the template's argv, stamps `origin = "mcp"` on
+the resulting hook, and writes it to `config.toml`.
+
+**Parameters:**
+| Name       | Type              | Required | Description |
+|------------|-------------------|----------|-------------|
+| `mailbox`  | string            | yes      | Mailbox name (must exist) |
+| `event`    | string            | yes      | `"on_receive"` or `"after_send"` |
+| `template` | string            | yes      | Template name from `hook_list_templates` |
+| `params`   | object(str→str)   | yes      | Must match template's declared `params` exactly |
+| `name`     | string            | no       | Optional explicit name; derived from `(event, template, sorted params)` when omitted |
+
+**Returns:** JSON `{effective_name, substituted_argv}`.
+
+**Example:**
+```
+hook_create(
+  mailbox: "agent",
+  event: "on_receive",
+  template: "invoke-claude",
+  params: {"prompt": "You are an assistant."}
+)
+→ {"effective_name":"a1b2c3d4e5f6",
+   "substituted_argv":["/usr/local/bin/claude","-p","You are an assistant."]}
+```
+
+**Errors:**
+- Unknown template.
+- Unknown or missing param.
+- Event not allowed by the template.
+- Mailbox not found.
+- Param validation (NUL / control chars / >8 KiB value).
+- Daemon not running.
+
+---
+
+### `hook_list`
+
+List hooks visible to MCP across all mailboxes (or one when `mailbox`
+is set). Operator-origin hooks are **masked** to `{name, mailbox,
+event, origin}`; MCP-origin hooks include `template` and `params`.
+
+**Parameters:**
+| Name      | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `mailbox` | string | no       | Filter to one mailbox |
+
+**Returns:** JSON array. See `references/hooks.md` for the exact
+shape of each origin variant.
+
+**Example:**
+```
+hook_list()
+→ [{"name":"daily-report","mailbox":"agent","event":"after_send","origin":"operator"},
+   {"name":"mcp_hook","mailbox":"agent","event":"on_receive","origin":"mcp",
+    "template":"invoke-claude","params":{"prompt":"…"}}]
+```
+
+---
+
+### `hook_delete`
+
+Delete a hook by effective name. Only MCP-origin hooks are deletable
+via this tool; operator-origin hooks refuse with `ERR origin-protected`.
+
+**Parameters:**
+| Name   | Type   | Required | Description |
+|--------|--------|----------|-------------|
+| `name` | string | yes      | Effective name from `hook_list` |
+
+**Returns:** Confirmation string.
+
+**Example:**
+```
+hook_delete(name: "mcp_hook")
+→ "Hook 'mcp_hook' deleted."
+
+hook_delete(name: "daily-report")
+→ Error: "[VALIDATION] origin-protected: hook 'daily-report' was
+   created by the operator — remove via `sudo aimx hooks delete`
+   instead"
+```

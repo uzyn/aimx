@@ -2461,8 +2461,84 @@ mod tests {
         assert!(text.contains("references/mcp-tools.md"));
         assert!(text.contains("references/frontmatter.md"));
         assert!(text.contains("references/workflows.md"));
+        assert!(text.contains("references/hooks.md"));
         assert!(text.contains("references/troubleshooting.md"));
         assert!(text.contains("/var/lib/aimx/README.md"));
+    }
+
+    /// S5-5: every bundled agent (progressive_disclosure or not) picks
+    /// up the primer text, so the "Creating hooks" section must be
+    /// visible from the primer alone. A missing section means the
+    /// primer edit got lost or reverted.
+    #[test]
+    fn primer_contains_creating_hooks_section() {
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+        let text = std::str::from_utf8(primer).unwrap();
+        assert!(
+            text.contains("## Creating hooks"),
+            "primer must contain 'Creating hooks' section"
+        );
+        assert!(text.contains("hook_list_templates"), "{text}");
+        assert!(text.contains("hook_create"), "{text}");
+        assert!(text.contains("hook_list"), "{text}");
+        assert!(text.contains("hook_delete"), "{text}");
+        assert!(
+            text.contains("origin = \"mcp\"") || text.contains("origin = \\\"mcp\\\""),
+            "primer must explain the origin tag"
+        );
+    }
+
+    /// S5-5: new reference file must be present in the embedded bundle
+    /// and cover the four new tools end-to-end.
+    #[test]
+    fn hooks_reference_file_bundled_and_comprehensive() {
+        let contents = AGENTS_DIR
+            .get_file("common/references/hooks.md")
+            .expect("references/hooks.md must be embedded")
+            .contents();
+        let text = std::str::from_utf8(contents).unwrap();
+        // Every hook tool documented by name.
+        assert!(text.contains("hook_list_templates"), "{text}");
+        assert!(text.contains("hook_create"), "{text}");
+        assert!(text.contains("hook_list"), "{text}");
+        assert!(text.contains("hook_delete"), "{text}");
+        // Safety / origin model present.
+        assert!(text.contains("template"), "{text}");
+        assert!(text.contains("origin"), "{text}");
+        assert!(
+            text.contains("ERR origin-protected") || text.contains("origin-protected"),
+            "must mention origin-protected"
+        );
+        // Troubleshooting subsection.
+        assert!(text.contains("Troubleshooting"), "{text}");
+    }
+
+    /// S5-5: progressive-disclosure bundles (Claude Code, Codex,
+    /// OpenClaw, Hermes) copy every references/*.md, so the new
+    /// `hooks.md` lands alongside the existing four.
+    #[test]
+    fn progressive_disclosure_bundles_include_hooks_reference() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
+
+        let refs = tmp
+            .path()
+            .join(".claude/plugins/aimx/skills/aimx/references");
+        assert!(
+            refs.join("hooks.md").exists(),
+            "claude-code bundle must include references/hooks.md"
+        );
+        let installed = std::fs::read_to_string(refs.join("hooks.md")).unwrap();
+        let embedded = AGENTS_DIR
+            .get_file("common/references/hooks.md")
+            .unwrap()
+            .contents();
+        assert_eq!(installed.as_bytes(), embedded);
     }
 
     #[test]

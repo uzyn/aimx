@@ -10,6 +10,7 @@ For full reference material, see the files in `references/`:
 - `references/mcp-tools.md`: full MCP tool signatures, types, and examples
 - `references/frontmatter.md`: complete frontmatter schema
 - `references/workflows.md`: worked examples for common tasks
+- `references/hooks.md`: creating hooks via MCP (template model, tools, origin)
 - `references/troubleshooting.md`: error codes and recovery steps
 
 At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
@@ -32,7 +33,7 @@ directly. The daemon owns those paths.
 
 ## MCP tools: quick reference
 
-All 9 tools are served by the `aimx` binary over stdio. They return strings
+All 13 tools are served by the `aimx` binary over stdio. They return strings
 on success and error strings on failure.
 
 ### Mailbox tools
@@ -58,8 +59,30 @@ on success and error strings on failure.
 - `email_mark_read(mailbox, id, folder?)`: mark a single email as read.
 - `email_mark_unread(mailbox, id, folder?)`: mark a single email as unread.
 
-See `references/mcp-tools.md` for full parameter types, return values, and
-worked examples.
+### Hook tools
+
+Hooks are shell commands the daemon fires on mail events (`on_receive`,
+`after_send`). To keep the world-writable UDS socket safe, MCP cannot
+submit arbitrary shell. Every hook you create references a **template**
+the operator installed during `aimx setup` — you only pick a template and
+fill its declared params.
+
+- `hook_list_templates()`: list templates enabled on this install. Call
+  this first. An empty list means the operator has not enabled any
+  templates — ask them to re-run `sudo aimx setup`.
+- `hook_create(mailbox, event, template, params, name?)`: attach a
+  template hook. The daemon substitutes your `params` into the
+  template's argv and stamps `origin = "mcp"` on the resulting hook.
+- `hook_list(mailbox?)`: list all hooks. Your own hooks (created via
+  MCP) show full details; operator-authored hooks appear with only
+  `{name, mailbox, event, origin}` — their `cmd` / `params` are masked.
+- `hook_delete(name)`: delete a hook. Only works on MCP-origin hooks;
+  the daemon returns `ERR origin-protected` for operator-origin hooks
+  and tells the user to run `sudo aimx hooks delete` on the host.
+
+See `references/hooks.md` for worked examples, the full template model,
+and troubleshooting. See `references/mcp-tools.md` for full parameter
+types and return values across every tool.
 
 ## Storage layout
 
@@ -199,6 +222,48 @@ infinite mail loops between bots. The same applies to mailing list mail
 See `references/workflows.md` for 10+ additional worked examples including
 triage, filtering by list, handling attachments, reply-all, and mark-all-read.
 
+## Creating hooks
+
+Hooks are shell commands that fire when mail arrives (`on_receive`) or is
+sent (`after_send`). They are how you go from "the agent reads mail" to
+"the agent acts on mail automatically."
+
+The safety model: you cannot submit raw shell via MCP. Every hook you
+create must reference a **template** the operator pre-vetted during
+`aimx setup`. A template declares an argv shape plus the parameter
+names you are allowed to fill. Your `hook_create` call supplies values
+for those params, and the daemon substitutes them into the template's
+argv slots — no shell interpretation, no argv splitting, no way to
+escape the value slot.
+
+The four tools work together:
+
+1. **Discover**: call `hook_list_templates` to see what is installed.
+   Each entry names the template, its params, and which events it
+   allows (`on_receive`, `after_send`, or both).
+2. **Create**: call `hook_create` with a mailbox, an event, a template
+   name, and param values. The daemon stamps `origin = "mcp"` on the
+   resulting hook, returns the effective name, and echoes the final
+   substituted argv so you can confirm the wiring.
+3. **Inspect**: call `hook_list` to see what is configured. Your hooks
+   show full details; operator hooks are masked to just name + mailbox
+   + event + origin (the operator's automation logic is private).
+4. **Remove**: call `hook_delete(name)` to remove a hook you created.
+   Operator-origin hooks cannot be deleted via MCP — the daemon returns
+   `ERR origin-protected` pointing at `sudo aimx hooks delete` on the
+   host.
+
+If `hook_list_templates` is empty, no amount of calling `hook_create`
+will help — the operator needs to run `sudo aimx setup` and tick the
+templates they want. Tell the user that, with the exact command. Do not
+guess at template names.
+
+Template hooks fire only on **trusted** inbound mail (`trusted == "true"`
+on the email's frontmatter). If your hook does not fire, check the
+email's `trusted` field first. See `references/hooks.md` for the full
+troubleshooting checklist (template enabled? mailbox exists? event
+allowed? `aimx-hook` user readable?) and several worked example prompts.
+
 ## Trust model
 
 aimx verifies DKIM, SPF, and DMARC on every inbound email. Results are
@@ -322,6 +387,8 @@ email's content (e.g. following a link), consult `trusted`, `dkim`, and
   both inbound and outbound emails.
 - `references/workflows.md`: 10+ worked task recipes (triage, thread
   summarization, attachment handling, filter by list-id, mark all read, etc.).
+- `references/hooks.md`: creating hooks via MCP — the template model,
+  worked example prompts, origin split, and troubleshooting.
 - `references/troubleshooting.md`: UDS protocol error codes, common
   misconfigurations, and recovery steps.
 - `/var/lib/aimx/README.md`: runtime guide to the data directory layout,

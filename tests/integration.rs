@@ -630,7 +630,8 @@ fn mcp_list_tools() {
 
     let resp = client.list_tools();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 9);
+    // 9 mail/mailbox tools + 4 hook tools (Sprint 5).
+    assert_eq!(tools.len(), 13);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"mailbox_create"));
@@ -642,6 +643,10 @@ fn mcp_list_tools() {
     assert!(names.contains(&"email_mark_unread"));
     assert!(names.contains(&"email_send"));
     assert!(names.contains(&"email_reply"));
+    assert!(names.contains(&"hook_list_templates"));
+    assert!(names.contains(&"hook_create"));
+    assert!(names.contains(&"hook_list"));
+    assert!(names.contains(&"hook_delete"));
 
     client.shutdown();
 }
@@ -4299,4 +4304,378 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
     );
 
     stop_serve(daemon);
+}
+
+// ---------------------------------------------------------------------
+// Sprint 5: MCP hook tools (hook_list_templates, hook_create, hook_list,
+// hook_delete)
+// ---------------------------------------------------------------------
+
+/// Like `setup_test_env`, but also registers a single `invoke-claude`
+/// template so the Sprint 5 MCP tool tests have something to bind to.
+fn setup_test_env_with_template(tmp: &Path) -> String {
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
+         [[hook_template]]\n\
+         name = \"invoke-claude\"\n\
+         description = \"Test invoke-claude template\"\n\
+         cmd = [\"/usr/bin/true\", \"{{prompt}}\"]\n\
+         params = [\"prompt\"]\n\
+         stdin = \"email\"\n\
+         run_as = \"aimx-hook\"\n\
+         timeout_secs = 60\n\
+         allowed_events = [\"on_receive\", \"after_send\"]\n\n\
+         [mailboxes.catchall]\n\
+         address = \"*@agent.example.com\"\n\n\
+         [mailboxes.alice]\n\
+         address = \"alice@agent.example.com\"\n",
+        tmp.display()
+    );
+    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
+    std::fs::create_dir_all(tmp.join("inbox").join("alice")).unwrap();
+    std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
+    let config_path = tmp.join("config.toml");
+    std::fs::write(&config_path, &config_content).unwrap();
+    install_cached_dkim_keys(tmp);
+    config_path.to_string_lossy().to_string()
+}
+
+/// S5-1: `hook_list_templates` with zero templates returns `[]`.
+#[test]
+fn mcp_hook_list_templates_empty_returns_empty_array() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_list_templates", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert_eq!(text, "[]", "empty config must return []: {text}");
+
+    client.shutdown();
+}
+
+/// S5-1: with one template registered, `hook_list_templates` returns
+/// the PRD-specified shape.
+#[test]
+fn mcp_hook_list_templates_returns_registered_template() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_list_templates", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let arr = json.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["name"], "invoke-claude");
+    assert_eq!(arr[0]["description"], "Test invoke-claude template");
+    assert_eq!(arr[0]["params"][0], "prompt");
+    let events: Vec<&str> = arr[0]["allowed_events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(events.contains(&"on_receive"));
+    assert!(events.contains(&"after_send"));
+    // Internals must not leak.
+    assert!(arr[0].get("cmd").is_none());
+    assert!(arr[0].get("run_as").is_none());
+    assert!(arr[0].get("timeout_secs").is_none());
+
+    client.shutdown();
+}
+
+/// S5-2: `hook_create` without a running daemon returns a precise
+/// socket-missing error rather than panicking.
+#[test]
+fn mcp_hook_create_without_daemon_reports_missing_socket() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {"prompt": "hi"}
+        }),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "expected error when daemon missing: {resp}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("daemon not running"),
+        "expected socket-missing message: {text}"
+    );
+
+    client.shutdown();
+}
+
+/// S5-2: full round-trip against a live daemon. `hook_create` submits
+/// via UDS, the daemon stamps `origin = "mcp"` in `config.toml`, and
+/// the tool response includes the effective name + substituted argv.
+#[test]
+fn mcp_hook_create_end_to_end_against_daemon() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {"prompt": "You are an assistant"},
+            "name": "mcp_test_hook"
+        }),
+    );
+    assert!(!is_tool_error(&resp), "expected success, got {resp}");
+    let text = get_tool_text(&resp);
+    let json: serde_json::Value = serde_json::from_str(&text).expect(&text);
+    assert_eq!(json["effective_name"], "mcp_test_hook");
+    assert_eq!(json["substituted_argv"][0], "/usr/bin/true");
+    assert_eq!(json["substituted_argv"][1], "You are an assistant");
+
+    // config.toml must now carry the hook with origin = "mcp".
+    let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(content.contains("name = \"mcp_test_hook\""), "{content}");
+    assert!(content.contains("origin = \"mcp\""), "{content}");
+    assert!(
+        content.contains("template = \"invoke-claude\""),
+        "{content}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// S5-2: the daemon's `unknown-template` error surfaces verbatim.
+#[test]
+fn mcp_hook_create_unknown_template_returns_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "does-not-exist",
+            "params": {}
+        }),
+    );
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("Unknown template"), "{text}");
+    assert!(text.contains("hook_list_templates"), "{text}");
+
+    client.shutdown();
+}
+
+/// S5-2: missing required params fail at the pre-flight substitution
+/// check on the MCP side (daemon-side re-validates).
+#[test]
+fn mcp_hook_create_missing_param_returns_error() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {}
+        }),
+    );
+    assert!(is_tool_error(&resp), "expected error: {resp}");
+    let text = get_tool_text(&resp);
+    // The daemon returns `missing-param: ...`; MCP surfaces verbatim.
+    assert!(text.contains("missing-param"), "{text}");
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// S5-3: `hook_list` emits an empty array when no hooks are configured.
+#[test]
+fn mcp_hook_list_empty_returns_empty_array() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert_eq!(text, "[]", "{text}");
+
+    client.shutdown();
+}
+
+/// S5-3: origin-masking is enforced end-to-end. Operator-origin hooks
+/// written to `config.toml` expose only name/mailbox/event/origin;
+/// MCP-origin hooks (created via the daemon in this test) expose the
+/// template + params too.
+#[test]
+fn mcp_hook_list_masks_operator_origin() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    // Append an operator-origin hook to the config before spinning up.
+    let config_path = tmp.path().join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap();
+    let extra = "\n[[mailboxes.alice.hooks]]\nname = \"op_hook\"\n\
+                 event = \"on_receive\"\ncmd = \"echo operator-secret\"\n\
+                 origin = \"operator\"\n";
+    std::fs::write(&config_path, format!("{existing}{extra}")).unwrap();
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    // Create an MCP-origin hook alongside the operator one.
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {"prompt": "agent secret"},
+            "name": "mcp_hook"
+        }),
+    );
+    assert!(!is_tool_error(&resp), "{resp}");
+
+    // Now query hook_list.
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    let json: serde_json::Value = serde_json::from_str(&text).expect(&text);
+    let rows = json.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+
+    let op = rows.iter().find(|r| r["name"] == "op_hook").unwrap();
+    assert_eq!(op["origin"], "operator");
+    assert_eq!(op["mailbox"], "alice");
+    // Masking: the operator's cmd / template / params must not appear
+    // in the MCP-facing row.
+    assert!(op.get("template").is_none(), "{op}");
+    assert!(op.get("params").is_none(), "{op}");
+    assert!(op.get("cmd").is_none(), "{op}");
+    // And operator's command text must not appear anywhere in the
+    // serialized payload.
+    assert!(
+        !text.contains("operator-secret"),
+        "operator cmd leaked via hook_list: {text}"
+    );
+
+    let mcp = rows.iter().find(|r| r["name"] == "mcp_hook").unwrap();
+    assert_eq!(mcp["origin"], "mcp");
+    assert_eq!(mcp["template"], "invoke-claude");
+    assert_eq!(mcp["params"]["prompt"], "agent secret");
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// S5-4: `hook_delete` on an MCP-origin hook succeeds; on an operator-
+/// origin hook the daemon's `origin-protected` message surfaces verbatim.
+#[test]
+fn mcp_hook_delete_respects_origin_protection() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    // Plant an operator-origin hook on disk before starting the daemon.
+    let config_path = tmp.path().join("config.toml");
+    let existing = std::fs::read_to_string(&config_path).unwrap();
+    let extra = "\n[[mailboxes.alice.hooks]]\nname = \"op_hook\"\n\
+                 event = \"on_receive\"\ncmd = \"echo operator\"\n\
+                 origin = \"operator\"\n";
+    std::fs::write(&config_path, format!("{existing}{extra}")).unwrap();
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    // Create an MCP-origin hook to delete.
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "template": "invoke-claude",
+            "params": {"prompt": "hi"},
+            "name": "mcp_hook"
+        }),
+    );
+    assert!(!is_tool_error(&resp), "{resp}");
+
+    // Delete MCP-origin hook: success.
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "mcp_hook"}));
+    assert!(!is_tool_error(&resp), "{resp}");
+    let text = get_tool_text(&resp);
+    assert!(text.contains("deleted"), "{text}");
+
+    // Delete operator-origin hook: daemon returns origin-protected.
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "op_hook"}));
+    assert!(is_tool_error(&resp), "{resp}");
+    let text = get_tool_text(&resp);
+    assert!(text.contains("origin-protected"), "{text}");
+    assert!(text.contains("sudo aimx hooks delete"), "{text}");
+
+    // The operator hook must still be present on disk.
+    let content = std::fs::read_to_string(&config_path).unwrap();
+    assert!(
+        content.contains("name = \"op_hook\""),
+        "operator hook must survive protected-delete attempt: {content}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// S5-4: `hook_delete` without a running daemon returns a precise
+/// socket-missing error.
+#[test]
+fn mcp_hook_delete_without_daemon_reports_missing_socket() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env_with_template(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "anything"}));
+    assert!(is_tool_error(&resp));
+    let text = get_tool_text(&resp);
+    assert!(text.contains("daemon not running"), "{text}");
+
+    client.shutdown();
 }
