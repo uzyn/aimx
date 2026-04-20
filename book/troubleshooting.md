@@ -34,7 +34,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all [DNS records](setup.md#dns-configuration), configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or not started | Check status and logs (see below) |
 | Emails not delivered to mailbox | `aimx serve` not running or misconfigured | Check service status with `systemctl status aimx` |
-| Hooks not firing | Trust gate (Sprint 50) | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
+| Hooks not firing | Trust gate | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
 | DKIM verification failing | DNS record mismatch or key regenerated | Ensure DKIM DNS record matches current public key |
 
 ## `aimx serve` diagnostics

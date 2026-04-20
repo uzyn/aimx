@@ -1,14 +1,10 @@
 # AIMX User Guide
 
-> Your server can receive email. Why are you routing through Gmail?
-
-**SMTP for agents. No middleman.**
-
-AIMX is a self-hosted email system for AI agents. One command gives your agents their own email addresses on a domain you control -- no Gmail, no OAuth, no third-party SaaS. Built for Claude Code, OpenClaw, Codex, and any agentic system that needs email as a communication surface.
+AIMX is a self-hosted SMTP server that gives AI agents their own email addresses on a domain you control. Mail is parsed to Markdown with TOML frontmatter and stored on disk; agents read and send via the built-in MCP server, the `aimx` CLI, or directly from the filesystem. `aimx serve` is the SMTP daemon; every other subcommand is a short-lived process.
 
 ## How it works
 
-```
+```text
 Inbound:
   Sender -> port 25 -> aimx serve -> ingest -> .md file
                                              -> hook manager (fires `on_receive` commands)
@@ -19,20 +15,10 @@ Outbound:
                                                           -> direct SMTP to recipient MX
 ```
 
-- **Single binary.** Written in Rust. No runtime dependencies -- everything is built in.
-- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound. All other commands are short-lived.
-- **No IMAP/POP3.** Agents read `.md` files via MCP or the filesystem.
-- **Markdown-first.** Emails are stored as Markdown with TOML frontmatter -- agents can `cat` and understand immediately.
-
-## Key capabilities
-
-- **[Setup wizard](setup.md)** -- interactive setup, service file generation, DKIM key generation, colorized DNS/MCP/deliverability output, re-entrant verification
-- **[Markdown email](mailboxes.md)** -- incoming email parsed to Markdown with TOML frontmatter, attachment extraction, per-mailbox routing
-- **[MCP Server](mcp.md)** -- stdio transport for Claude Code, OpenClaw, Codex, OpenCode, and any MCP-compatible agent: list, read, send, reply, manage mailboxes
-- **[Agent Integration](agent-integration.md)** -- one-command `aimx agent-setup <agent>` installer for per-agent plugin/skill packages
-- **[Hooks](hooks.md)** -- trigger shell commands on `on_receive` and `after_send` events with match filters (from, to, subject, attachments)
-- **[DKIM signing](setup.md#dkim-key-management)** -- native RSA-SHA256 signing for outbound mail
-- **[Inbound trust](hooks.md#trust-gate-on_receive-only)** -- DKIM/SPF verification, per-mailbox trust policies, trusted sender allowlists
+- **Single binary.** Written in Rust. No runtime dependencies.
+- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound mail; every other command is short-lived.
+- **No IMAP / POP3.** Agents read `.md` files via MCP or the filesystem.
+- **Markdown-first.** Mail is stored as Markdown with TOML frontmatter — LLM- and RAG-friendly without a parser.
 
 ## Quick start
 
@@ -49,17 +35,20 @@ sudo aimx setup agent.yourdomain.com
 sudo aimx portcheck
 ```
 
-See the full [Getting Started](getting-started.md) guide for details.
+See [Getting Started](getting-started.md) for the full walkthrough.
 
 ## Guide contents
 
-| Page | Description |
-|------|-------------|
-| [Getting Started](getting-started.md) | Requirements, installation, first setup in 5 minutes |
-| [Setup](setup.md) | Detailed server setup, DNS, verification, DKIM keys, production hardening |
-| [Configuration](configuration.md) | `config.toml` reference, data directory, environment variables |
-| [Mailboxes & Email](mailboxes.md) | Mailbox management, email format, sending, attachments, threading |
-| [Hooks & Trust](hooks.md) | Fire commands on inbound/outbound events, match filters, trust policies |
-| [MCP Server](mcp.md) | Agent integration via Model Context Protocol, all 9 MCP tools |
-| [Agent Integration](agent-integration.md) | `aimx agent-setup <agent>` installer and per-agent plugin packages |
+| Page | What it covers |
+|------|----------------|
+| [Getting Started](getting-started.md) | Requirements, installation, first setup |
+| [Setup](setup.md) | DNS, verification, DKIM key management, production hardening |
+| [Configuration](configuration.md) | `config.toml` field reference, data / config directories, environment variables |
+| [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
+| [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, match filters, trust gate |
+| [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, Aider) |
+| [MCP Server](mcp.md) | The 9 MCP tools — parameters, frontmatter contract, workflow examples |
+| [Agent Integration](agent-integration.md) | `aimx agent-setup` installer, per-agent configuration, manual MCP wiring |
+| [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |
+| [FAQ](faq.md) | Deployment, DNS, storage, MCP, and operations questions |
