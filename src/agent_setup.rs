@@ -1343,7 +1343,7 @@ mod tests {
         // S44-3: Claude Code does NOT auto-activate MCP servers from
         // plugins/installed_plugins.json (confirmed with claude -p against
         // aimx plugin on the 2026-04-17 test VPS). The hint must instruct
-        // the operator to run `claude mcp add --scope user aimx …`, mirroring
+        // the operator to run `claude mcp add --scope user aimx ...`, mirroring
         // Codex's hint shape.
         let spec = find_agent("claude-code").unwrap();
         let hint = (spec.activation_hint)(None);
