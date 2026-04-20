@@ -112,8 +112,12 @@ Compose and send an email with DKIM signing.
 | `subject` | string | yes | Email subject |
 | `body` | string | yes | Email body text |
 | `attachments` | array of strings | no | File paths to attach |
+| `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading — without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
+| `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set** — supplied alone, it is silently ignored |
 
 The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
+
+For replies to a single sender, prefer `email_reply` — it handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
 
 ---
 

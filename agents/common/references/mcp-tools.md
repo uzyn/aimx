@@ -169,6 +169,14 @@ directly to the recipient's MX server.
 | `subject`      | string   | yes      | Email subject |
 | `body`         | string   | yes      | Email body text |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
+| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`; when `references` is omitted, `References` is built automatically from this value. Required to enable threading — without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
+| `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set** — supplied alone, it is silently ignored |
+
+For simple replies to a single sender, prefer `email_reply` — it reads the
+original email and fills in threading headers and the `Re:` subject
+automatically. Use `email_send` with `reply_to` / `references` only when
+you need to override the recipient list (e.g. reply-all) or build a
+custom threading chain.
 
 **Returns:** Confirmation with Message-ID.
 
@@ -191,6 +199,24 @@ email_send(
   subject: "Report",
   body: "Please see attached.",
   attachments: ["/tmp/report.csv", "/tmp/chart.png"]
+)
+```
+
+**Example — threaded reply-all:**
+```
+# First, read the original to get recipients and the Message-ID:
+email_read(mailbox: "agent", id: "2025-06-01-001")
+# Frontmatter yields: message_id = "<abc@example.com>",
+#                     references = "<prev@example.com>",
+#                     from / to / cc.
+
+email_send(
+  from_mailbox: "agent",
+  to: "alice@example.com, bob@example.com, carol@example.com",
+  subject: "Re: Status Update",
+  body: "Looping everyone in.",
+  reply_to: "<abc@example.com>",
+  references: "<prev@example.com> <abc@example.com>"
 )
 ```
 
