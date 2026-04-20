@@ -294,15 +294,17 @@ pub enum SighupOutcome {
 ///    was configured for, so per-test `AIMX_RUNTIME_DIR` overrides
 ///    don't pick up unrelated `aimx serve` processes living at the
 ///    default `/run/aimx/aimx.sock`.
-/// 2. Try `<runtime_dir>/aimx.pid` if it exists and parses as an
-///    integer.
-/// 3. Fall back to `pgrep -x aimx` (first match, excluding self).
+/// 2. Read `<runtime_dir>/aimx.pid` (written by `run_serve`). There is
+///    no `pgrep` fallback: matching by process name can return any
+///    `aimx` binary on the host, including short-lived test
+///    subprocesses, and SIGHUPing the wrong pid terminates it.
 pub fn sighup_running_daemon() -> SighupOutcome {
     #[cfg(unix)]
     {
         // Anchor discovery to the same runtime dir the socket lives
-        // in. Without this, `pgrep -x aimx` picks up unrelated daemons
-        // on the host when tests override AIMX_RUNTIME_DIR.
+        // in. Both the socket and the pid file live under
+        // `runtime_dir()`, so per-test `AIMX_RUNTIME_DIR` overrides
+        // stay fully isolated from the default `/run/aimx/` daemon.
         if !aimx_socket_path().exists() {
             return SighupOutcome::DaemonNotRunning;
         }
@@ -361,42 +363,19 @@ pub fn reload_config(
     Ok(summary)
 }
 
-/// Best-effort PID lookup for the running `aimx serve` daemon.
+/// PID lookup for the running `aimx serve` daemon.
+///
+/// Reads `<runtime_dir>/aimx.pid`, which `run_serve` writes at startup
+/// and removes on clean shutdown. Never falls back to `pgrep -x aimx`:
+/// that fallback matched any `aimx` process (including short-lived
+/// test subprocesses) and could deliver SIGHUP to the wrong pid,
+/// terminating unrelated work under parallel tests.
 #[cfg(unix)]
 fn find_daemon_pid() -> Option<i32> {
-    // 1. Pid-file under the runtime dir.
     let pid_path = runtime_dir().join("aimx.pid");
-    if let Ok(s) = std::fs::read_to_string(&pid_path)
-        && let Ok(pid) = s.trim().parse::<i32>()
-        && pid > 1
-    {
-        return Some(pid);
-    }
-
-    // 2. `pgrep -x aimx` fallback. Match on exact basename so the CLI
-    // doesn't SIGHUP itself (the invoker is typically `aimx hooks ...`
-    // which also matches `pgrep aimx` without `-x`).
-    let output = std::process::Command::new("pgrep")
-        .arg("-x")
-        .arg("aimx")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // pgrep lists every match on its own line; we want the first one
-    // that isn't our own pid (the CLI process is short-lived and shares
-    // the binary name).
-    let self_pid = std::process::id() as i32;
-    for line in stdout.lines() {
-        if let Ok(pid) = line.trim().parse::<i32>()
-            && pid != self_pid
-        {
-            return Some(pid);
-        }
-    }
-    None
+    let s = std::fs::read_to_string(&pid_path).ok()?;
+    let pid: i32 = s.trim().parse().ok()?;
+    if pid > 1 { Some(pid) } else { None }
 }
 
 pub fn run(
@@ -580,6 +559,20 @@ async fn run_serve(
         term::highlight(&socket_path.display().to_string())
     );
 
+    // Write our PID next to the socket so `find_daemon_pid()` can
+    // deliver SIGHUP to the correct daemon even when multiple `aimx`
+    // processes share the host (e.g. parallel integration tests, or
+    // operator-run CLI commands alongside the systemd service). The
+    // file is removed on clean shutdown below.
+    let pid_path = runtime_dir().join("aimx.pid");
+    if let Err(e) = write_pid_file(&pid_path) {
+        eprintln!(
+            "{} Failed to write pid file {}: {e}",
+            term::warn("Warning:"),
+            pid_path.display()
+        );
+    }
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
     // Clone handles for the signal loop: SIGHUP triggers a config
@@ -652,9 +645,28 @@ async fn run_serve(
     // Wait for the UDS listener to drain too so we don't leak its task.
     let _ = uds_handle.await;
 
+    // Best-effort cleanup of the pid file. A stale pid file can cause
+    // the CLI to SIGHUP a pid that was reused by an unrelated process;
+    // production systemd usually restarts us and overwrites it anyway,
+    // but removing on graceful exit narrows the window.
+    let _ = std::fs::remove_file(&pid_path);
+
     eprintln!("{}", term::info("aimx SMTP listener shut down"));
 
     in_flight_msg
+}
+
+/// Write the current process PID to `path`, creating parent
+/// directories if needed. Atomic rename keeps readers from seeing a
+/// truncated file mid-write.
+fn write_pid_file(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("pid.tmp");
+    std::fs::write(&tmp, format!("{}\n", std::process::id()))?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
 }
 
 /// Bind the UDS send socket at `path` with mode `0o666`.
