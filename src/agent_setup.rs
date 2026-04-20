@@ -37,7 +37,7 @@ pub struct AgentSpec {
 /// v1 roster: `claude-code`, `codex`, `opencode`, `gemini`, `goose`,
 /// `openclaw`, `hermes` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
 /// design; `assemble_plugin_files` walks each source tree relative to its
-/// root and handles all three shapes. Do not "normalize" the layout —
+/// root and handles all three shapes. Do not "normalize" the layout;
 /// the destination template determines the depth.
 ///
 /// Source-tree shapes:
@@ -49,7 +49,7 @@ pub struct AgentSpec {
 ///   `SKILL.md.header` at the source root; the destination template
 ///   points directly at the skill directory. No plugin manifest is
 ///   written. Codex CLI specifically does NOT scan a plugins directory
-///   for MCP servers — its MCP wiring lives in `~/.codex/config.toml`
+///   for MCP servers. Its MCP wiring lives in `~/.codex/config.toml`
 ///   (managed via `codex mcp add`), so the activation hint prints the
 ///   canonical `codex mcp add aimx -- ...` command for the user.
 /// - Flat recipe (`goose`): `aimx.yaml.header` at the source root; the
@@ -90,7 +90,7 @@ pub fn registry() -> &'static [AgentSpec] {
             name: "goose",
             source_subdir: "goose",
             // Goose discovers recipes by filename stem from
-            // ~/.config/goose/recipes/ — we install one file, not a
+            // ~/.config/goose/recipes/. We install one file, not a
             // directory. Destination template points at the file itself.
             dest_template: "$XDG_CONFIG_HOME/goose/recipes",
             activation_hint: goose_hint,
@@ -99,7 +99,7 @@ pub fn registry() -> &'static [AgentSpec] {
         AgentSpec {
             name: "openclaw",
             source_subdir: "openclaw",
-            // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md — we ship a
+            // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md. We ship a
             // skill-directory package (no flat SKILL.md at the root).
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
@@ -122,7 +122,7 @@ pub fn registry() -> &'static [AgentSpec] {
 
 fn claude_code_hint(data_dir: Option<&Path>) -> String {
     // Claude Code auto-discovers plugins under ~/.claude/plugins/, but the
-    // MCP server bundled with the plugin is NOT activated automatically —
+    // MCP server bundled with the plugin is NOT activated automatically.
     // in particular `claude -p` (headless, used by channel-trigger recipes)
     // needs an explicit `claude mcp add` to register the server in its
     // MCP registry. Finding #7 from the 2026-04-17 manual test run
@@ -134,7 +134,7 @@ fn claude_code_hint(data_dir: Option<&Path>) -> String {
         None => String::new(),
     };
     format!(
-        "Plugin installed at ~/.claude/plugins/aimx/. Register the AIMX MCP \
+        "Plugin installed at ~/.claude/plugins/aimx/. Register the aimx MCP \
          server with Claude Code by running this command once:\n\
          \n\
          \x20\x20claude mcp add --scope user aimx /usr/local/bin/aimx{extra_args} mcp\n\
@@ -142,7 +142,7 @@ fn claude_code_hint(data_dir: Option<&Path>) -> String {
          Restart Claude Code after registration so the new server is \
          loaded. (Claude Code auto-discovers the plugin under \
          ~/.claude/plugins/, but the MCP server must be registered \
-         explicitly — especially for `claude -p` headless invocations.)"
+         explicitly, especially for `claude -p` headless invocations.)"
     )
 }
 
@@ -157,14 +157,14 @@ fn codex_hint(data_dir: Option<&Path>) -> String {
         None => String::new(),
     };
     format!(
-        "Skill installed at ~/.codex/skills/aimx/. Register the AIMX MCP \
+        "Skill installed at ~/.codex/skills/aimx/. Register the aimx MCP \
          server with Codex CLI by running this command once:\n\
          \n\
          \x20\x20codex mcp add aimx -- /usr/local/bin/aimx{extra_args} mcp\n\
          \n\
          Restart Codex CLI after registration so the new server is \
-         loaded. (Codex CLI reads MCP servers from ~/.codex/config.toml — \
-         this command updates that file for you.)"
+         loaded. (Codex CLI reads MCP servers from ~/.codex/config.toml. \
+         This command updates that file for you.)"
     )
 }
 
@@ -296,7 +296,7 @@ fn hermes_hint(data_dir: Option<&Path>) -> String {
 }
 
 fn openclaw_hint(data_dir: Option<&Path>) -> String {
-    // OpenClaw exposes `openclaw mcp set <name> <json>` — the user can wire
+    // OpenClaw exposes `openclaw mcp set <name> <json>`. The user can wire
     // MCP with one pasted command. Route the JSON through serde_json so
     // paths with `"` or `\` escape correctly. Then POSIX-shell-escape the
     // resulting JSON so a `--data-dir` path containing `'` doesn't terminate
@@ -317,7 +317,7 @@ fn openclaw_hint(data_dir: Option<&Path>) -> String {
         .unwrap_or_else(|_| "<failed to render snippet>".to_string());
     let shell_quoted = posix_single_quote(&snippet_text);
     format!(
-        "Skill installed. Register the AIMX MCP server with OpenClaw:\n\
+        "Skill installed. Register the aimx MCP server with OpenClaw:\n\
          \n\
          \x20\x20openclaw mcp set aimx {shell_quoted}\n\
          \n\
@@ -455,7 +455,7 @@ pub fn run_with_env_to_writer(
     // work so every error-path (positional agent, unknown agent, bare) surfaces
     // the same root refusal instead of an install attempt or registry dump.
     if env.is_root() {
-        return Err("agent-setup is a per-user operation — run without sudo or as root".into());
+        return Err("agent-setup is a per-user operation. Run without sudo or as root".into());
     }
 
     let opts = InstallOptions {
@@ -660,7 +660,7 @@ pub fn assemble_plugin_files_with_disclosure(
             continue;
         }
 
-        // Skip README.md at the top of the plugin source — it is developer-facing,
+        // Skip README.md at the top of the plugin source; it is developer-facing,
         // not an artifact to install.
         //
         // NOTE: this match is deliberately top-level only (`rel.as_os_str()`
@@ -671,7 +671,7 @@ pub fn assemble_plugin_files_with_disclosure(
             continue;
         }
 
-        // Skip .footer files — they are consumed during header+primer assembly
+        // Skip .footer files; they are consumed during header+primer assembly
         // and should not appear as standalone files in the output.
         if rel
             .file_name()
@@ -745,7 +745,7 @@ fn collect_entries(
 /// Implementation parses the JSON into `serde_json::Value`, swaps the `args`
 /// array on each server entry, and re-serializes via `to_string_pretty`. The
 /// output is therefore serde-formatted, not byte-identical to the hand-authored
-/// file — acceptable because `plugin.json` has no comments or meaningful
+/// file. Acceptable because `plugin.json` has no comments or meaningful
 /// whitespace to preserve.
 pub fn rewrite_plugin_args(json_text: &str, data_dir: &Path) -> Result<String, String> {
     let value: serde_json::Value = serde_json::from_str(json_text)
@@ -797,7 +797,7 @@ fn indent_block(text: &str, prefix: &str) -> String {
 
 /// Rewrite the `args:` array on the first stdio extension in a Goose recipe
 /// YAML so the command runs with `--data-dir <path>`. Implemented as a
-/// simple line-oriented transform — we inject `--data-dir` + path entries
+/// simple line-oriented transform. We inject `--data-dir` + path entries
 /// before the existing `- mcp` line under `args:`. This avoids pulling in a
 /// YAML serializer that would rewrite the whole file and risk breaking the
 /// `prompt: |` block scalar.
@@ -829,7 +829,7 @@ pub fn rewrite_recipe_data_dir(yaml_text: &str, data_dir: &Path) -> Result<Strin
                 out.push_str("- --data-dir\n");
                 out.push_str(indent);
                 out.push_str("- ");
-                // Quote the path for YAML — a double-quoted scalar escapes
+                // Quote the path for YAML. A double-quoted scalar escapes
                 // special chars safely via serde_json's string serializer.
                 let quoted = serde_json::to_string(&dd).unwrap_or_else(|_| format!("\"{dd}\""));
                 out.push_str(&quoted);
@@ -837,7 +837,7 @@ pub fn rewrite_recipe_data_dir(yaml_text: &str, data_dir: &Path) -> Result<Strin
                 injected = true;
                 // Fall through to emit the original `- mcp` line.
             } else if !trimmed.trim_start().is_empty() && !trimmed.starts_with(' ') {
-                // Left the args block before seeing a list item — abort injection.
+                // Left the args block before seeing a list item. Abort injection.
                 in_args = false;
             }
         }
@@ -1128,7 +1128,7 @@ mod tests {
     fn list_mode_runs_without_agent_name() {
         // `--list` prints the registry without the trailing
         // `Run \`aimx agent-setup <agent>\`` usage-hint footer. The footer is
-        // reserved for bare invocation — this lock-in prevents the two
+        // reserved for bare invocation; this lock-in prevents the two
         // output shapes from converging.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
@@ -1243,7 +1243,7 @@ mod tests {
         assert!(!dest.join("SKILL.md.header").exists());
         assert!(
             !tmp.path().join(".codex/plugins").exists(),
-            "no plugin dir is written — Codex CLI does not scan ~/.codex/plugins/"
+            "no plugin dir is written; Codex CLI does not scan ~/.codex/plugins/"
         );
 
         let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
@@ -1343,7 +1343,7 @@ mod tests {
         // S44-3: Claude Code does NOT auto-activate MCP servers from
         // plugins/installed_plugins.json (confirmed with claude -p against
         // aimx plugin on the 2026-04-17 test VPS). The hint must instruct
-        // the operator to run `claude mcp add --scope user aimx …`, mirroring
+        // the operator to run `claude mcp add --scope user aimx ...`, mirroring
         // Codex's hint shape.
         let spec = find_agent("claude-code").unwrap();
         let hint = (spec.activation_hint)(None);
@@ -1422,7 +1422,7 @@ mod tests {
         // --print should dump both the file tree and the activation hint so
         // snippet-style agents surface their JSON block under dry-run.
         // Capture via install_to_writer so we can assert on the actual
-        // printed bytes — not just that no files were written.
+        // printed bytes, not just that no files were written.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
 
@@ -1474,7 +1474,7 @@ mod tests {
     #[test]
     fn print_snippet_escapes_data_dir_with_special_chars() {
         // A data-dir path containing a double-quote or backslash must not
-        // produce a broken JSON snippet — serde_json escapes it for us.
+        // produce a broken JSON snippet; serde_json escapes it for us.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
 
@@ -1622,7 +1622,7 @@ mod tests {
         // $HOME/.config/goose/recipes/aimx.yaml.
         let recipe = tmp.path().join(".config/goose/recipes/aimx.yaml");
         assert!(recipe.exists(), "expected recipe at {}", recipe.display());
-        // .header file must be absent — it is a source template, not an artifact.
+        // .header file must be absent; it is a source template, not an artifact.
         assert!(
             !tmp.path()
                 .join(".config/goose/recipes/aimx.yaml.header")
@@ -1632,18 +1632,18 @@ mod tests {
         assert!(!tmp.path().join(".config/goose/recipes/README.md").exists());
 
         let text = std::fs::read_to_string(&recipe).unwrap();
-        assert!(text.contains("title: \"AIMX Email\""), "recipe: {text}");
+        assert!(text.contains("title: \"aimx email\""), "recipe: {text}");
         assert!(text.contains("prompt: |"), "recipe: {text}");
         // Primer content appears indented as part of the prompt block.
         assert!(
-            text.contains("  # AIMX primer for agents"),
+            text.contains("  # aimx primer for agents"),
             "recipe: {text}"
         );
         assert!(
             text.contains("  - `mailbox_create(name)`"),
             "recipe: {text}"
         );
-        // Extensions section references AIMX's stdio MCP server.
+        // Extensions section references the aimx stdio MCP server.
         assert!(text.contains("type: stdio"), "recipe: {text}");
         assert!(text.contains("name: aimx"), "recipe: {text}");
         assert!(text.contains("cmd: /usr/local/bin/aimx"), "recipe: {text}");
@@ -1698,13 +1698,13 @@ mod tests {
     fn goose_activation_hint_mentions_github_repo_variable() {
         // The hint must reference GOOSE_RECIPE_GITHUB_REPO by name so users
         // discover the team-sharing mechanism. The output is now
-        // deterministic — it does not depend on whether the variable is
+        // deterministic. It does not depend on whether the variable is
         // set in the caller's shell (so `aimx agent-setup --list` is stable
         // across developer environments).
         let spec = find_agent("goose").unwrap();
 
         // Set it to one value: hint must not interpolate it.
-        // SAFETY: these calls modify process environment — test is isolated
+        // SAFETY: these calls modify process environment; test is isolated
         // by not asserting on value-dependent output.
         unsafe {
             std::env::set_var("GOOSE_RECIPE_GITHUB_REPO", "myorg/goose-recipes");
@@ -1721,7 +1721,7 @@ mod tests {
         );
         assert!(hint_without.contains("GOOSE_RECIPE_GITHUB_REPO"));
         assert!(hint_without.contains("aimx.yaml"));
-        // Must not leak a concrete repo slug — we only reference the var name.
+        // Must not leak a concrete repo slug; we only reference the var name.
         assert!(!hint_without.contains("myorg/goose-recipes"));
     }
 
@@ -1767,7 +1767,7 @@ mod tests {
     /// string that starts and ends with `'` and may contain `'\''` escape
     /// sequences (close-quote, escaped literal quote, reopen-quote). Any
     /// other escape or multiple unquoted-word concatenation fails with
-    /// `None`. This is not a general-purpose shell parser — it is scoped
+    /// `None`. This is not a general-purpose shell parser; it is scoped
     /// to validating our own `posix_single_quote` output.
     fn shell_unquote_single(s: &str) -> Option<String> {
         let bytes = s.as_bytes();
@@ -1779,7 +1779,7 @@ mod tests {
         let end = bytes.len() - 1;
         while i < end {
             if bytes[i] == b'\'' {
-                // Must be `'\''` — close, literal-quote, reopen.
+                // Must be `'\''`: close, literal-quote, reopen.
                 if i + 3 >= bytes.len() || &bytes[i..i + 4] != b"'\\''" {
                     return None;
                 }
@@ -1920,7 +1920,7 @@ mod tests {
     #[test]
     fn indent_block_handles_multiline_without_trailing_newline() {
         // When the final line is unterminated, the prefix must still be
-        // applied and the absence of the trailing newline preserved — so
+        // applied and the absence of the trailing newline preserved, so
         // callers that append this block to a larger document don't get a
         // spurious blank line.
         let input = "first\nsecond";
@@ -1954,7 +1954,7 @@ mod tests {
 
     #[test]
     fn rewrite_recipe_data_dir_errors_when_no_args_block_present() {
-        // No `args:` key anywhere — function cannot inject and must error.
+        // No `args:` key anywhere; function cannot inject and must error.
         let input = "extensions:\n  - type: stdio\n    name: aimx\nprompt: |\n  body\n";
         let err = rewrite_recipe_data_dir(input, Path::new("/custom/path")).unwrap_err();
         assert!(err.contains("could not find"), "unexpected error: {err}");
@@ -2410,7 +2410,7 @@ mod tests {
             hint.contains("args: [--data-dir, \"/opt/aimx [staging]\", mcp]"),
             "bracketed path must be quoted: {hint}"
         );
-        // Three argv entries separated by commas — not nine.
+        // Three argv entries separated by commas, not nine.
         let args_line = hint
             .lines()
             .find(|l| l.trim_start().starts_with("args:"))
@@ -2444,7 +2444,7 @@ mod tests {
             "hash path must be quoted: {hint}"
         );
 
-        // Case 4: path containing `"` and `\` — must be JSON-escaped inside
+        // Case 4: path containing `"` and `\`, must be JSON-escaped inside
         // the double-quoted scalar so the resulting YAML is still valid.
         let hint = (spec.activation_hint)(Some(Path::new(r#"/opt/a"b\c"#)));
         assert!(
@@ -2534,7 +2534,7 @@ mod tests {
     fn bare_invocation_prints_registry_and_hint() {
         // `aimx agent-setup` with no agent and no --list must print the
         // registry plus a usage-hint footer and exit Ok(()). Works on both
-        // TTY and non-TTY — no interactive prompt.
+        // TTY and non-TTY, no interactive prompt.
         let tmp = TempDir::new().unwrap();
         for tty in [false, true] {
             let mut env = MockEnv::new(tmp.path().to_path_buf());
@@ -2563,8 +2563,8 @@ mod tests {
 
     #[test]
     fn bare_invocation_root_is_refused() {
-        // Root + no agent must still be refused up front — before any
-        // registry output — so sudo mistakes get the same friendly
+        // Root + no agent must still be refused up front (before any
+        // registry output) so sudo mistakes get the same friendly
         // "per-user" error as the install paths.
         let tmp = TempDir::new().unwrap();
         let mut env = MockEnv::new(tmp.path().to_path_buf());

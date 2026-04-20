@@ -72,20 +72,20 @@ When run without a domain argument, setup will prompt you to enter the domain an
 
 ### First-time setup flow
 
-1. **Root check** -- exits if not running as root
-2. **Port 25 preflight** -- checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
-3. **Domain prompt** -- asks for domain if not provided as argument
-4. **TLS certificate** -- generates a self-signed certificate at `/etc/ssl/aimx/`
-5. **DKIM key generation** -- creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
-6. **Config creation** -- writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
-7. **DNS guidance + verification loop** -- shows the records to add and re-verifies on Enter
-8. **Service installation** -- generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
+1. **Root check**: exits if not running as root
+2. **Port 25 preflight**: checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
+3. **Domain prompt**: asks for domain if not provided as argument
+4. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`
+5. **DKIM key generation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
+6. **Config creation**: writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
+7. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
+8. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
 
 After initial setup, the wizard displays three clearly labeled sections:
 
-- **[DNS]** -- the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
-- **[MCP]** -- configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
-- **[Deliverability Improvement (Optional)]** -- Gmail filter/whitelist instructions
+- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
+- **[MCP]**: configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
+- **[Deliverability Improvement (Optional)]**: Gmail filter/whitelist instructions
 
 ### Re-running setup
 
@@ -95,7 +95,7 @@ Re-run `aimx setup` on an existing install to re-verify:
 sudo aimx setup agent.yourdomain.com
 ```
 
-When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install/configure and runs the port 25 preflight, DNS verification, and the output sections as a quick verification pass.
+When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install/configure and runs the port 25 preflight, DNS verification, and the output sections as a quick verification pass.
 
 ### DNS retry loop
 
@@ -127,9 +127,9 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | `aimx._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 
-Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
+Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup`. It is out of scope for aimx. A correct PTR record pointing to your domain does improve deliverability. See the VPS provider's documentation for how to set it.
 
-The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml` — see [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient; any existing AAAA record in DNS is left alone.
+The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml`. See [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient. Any existing AAAA record in DNS is left alone.
 
 The DKIM public key value (`p=...`) is displayed by the setup wizard. To retrieve it again:
 
@@ -230,13 +230,13 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 ### Preventing spam classification
 
 1. Ensure all DNS records are correctly set (especially DKIM, SPF, DMARC, and AAAA if your server has IPv6).
-2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain. This is the operator's responsibility — aimx does not check or manage PTR.
+2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain. This is the operator's responsibility. aimx does not check or manage PTR.
 3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
-4. Alternatively, reply to an email from the domain -- Gmail learns it's not spam.
+4. Alternatively, reply to an email from the domain. Gmail learns it's not spam.
 
 ### Firewall
 
-Only port 25 needs to be open for SMTP. No other ports are required by AIMX.
+Only port 25 needs to be open for SMTP. No other ports are required by aimx.
 
 ### File permissions
 
@@ -253,7 +253,7 @@ Back up both `/etc/aimx/` (config + DKIM keys) and `/var/lib/aimx/` (mailboxes a
 
 ## Verifier service
 
-The verifier service is used during setup to test port 25 reachability. AIMX uses a public instance at `check.aimx.email` by default.
+The verifier service is used during setup to test port 25 reachability. aimx uses a public instance at `check.aimx.email` by default.
 
 ### Self-hosting the verifier service
 
@@ -286,7 +286,7 @@ If you prefer not to use the public instance:
 
 3. Set up a reverse proxy (e.g. Caddy) for HTTPS on the probe endpoint.
 
-4. Point AIMX to your instance in `config.toml`:
+4. Point aimx to your instance in `config.toml`:
    ```toml
    verify_host = "https://verify.yourdomain.com"
    ```
@@ -297,9 +297,9 @@ If you prefer not to use the public instance:
    ```
 
 The verifier service provides:
-- `GET /health` -- health check
-- `GET /probe` -- connects back to caller's IP on port 25, performs EHLO handshake
-- Port 25 listener -- accepts TCP connections for outbound port 25 testing
+- `GET /health`: health check
+- `GET /probe`: connects back to caller's IP on port 25, performs EHLO handshake
+- Port 25 listener: accepts TCP connections for outbound port 25 testing
 
 See the [verifier service README](../services/verifier/README.md) for full details.
 

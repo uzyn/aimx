@@ -58,7 +58,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let sys = setup::RealSystemOps;
             uninstall::run(yes, &sys)
         }
-        // Portcheck does not read config for storage — only `verify_host`.
+        // Portcheck does not read config for storage, only `verify_host`.
         Command::Portcheck { verify_host } => portcheck::run(verify_host.as_deref()),
         // MCP server reloads config on each tool call; pass the override through.
         Command::Mcp => {
@@ -74,7 +74,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             force,
             print,
         } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
-        // `aimx send` is a pure UDS client — it never reads config.toml.
+        // `aimx send` is a pure UDS client. It never reads config.toml.
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.
         Command::Send(args) => send::run(args),

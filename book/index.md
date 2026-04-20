@@ -1,6 +1,6 @@
-# AIMX User Guide
+# aimx user guide
 
-AIMX is a self-hosted SMTP server that gives AI agents their own email addresses on a domain you control. Mail is parsed to Markdown with TOML frontmatter and stored on disk; agents read and send via the built-in MCP server, the `aimx` CLI, or directly from the filesystem. `aimx serve` is the SMTP daemon; every other subcommand is a short-lived process.
+AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their own email addresses on a domain you control. Mail is parsed to Markdown with TOML frontmatter and stored on disk. Agents read and send via the built-in MCP server, the `aimx` CLI, or directly from the filesystem. `aimx serve` is the SMTP daemon. Every other subcommand is a short-lived process.
 
 ## How it works
 
@@ -16,9 +16,9 @@ Outbound:
 ```
 
 - **Single binary.** Written in Rust. No runtime dependencies.
-- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound mail; every other command is short-lived.
+- **`aimx serve` is the daemon.** Embedded SMTP listener for inbound mail. Every other command is short-lived.
 - **No IMAP / POP3.** Agents read `.md` files via MCP or the filesystem.
-- **Markdown-first.** Mail is stored as Markdown with TOML frontmatter — LLM- and RAG-friendly without a parser.
+- **Markdown-first.** Mail is stored as Markdown with TOML frontmatter, LLM- and RAG-friendly without a parser.
 
 ## Quick start
 
@@ -47,7 +47,7 @@ See [Getting Started](getting-started.md) for the full walkthrough.
 | [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
 | [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, match filters, trust gate |
 | [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, Aider) |
-| [MCP Server](mcp.md) | The 9 MCP tools — parameters, frontmatter contract, workflow examples |
+| [MCP Server](mcp.md) | The 9 MCP tools: parameters, frontmatter contract, workflow examples |
 | [Agent Integration](agent-integration.md) | `aimx agent-setup` installer, per-agent configuration, manual MCP wiring |
 | [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |

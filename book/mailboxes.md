@@ -1,16 +1,16 @@
 # Mailboxes & Email
 
-Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email address to a directory on disk.
+Mailboxes are the core organizational unit in aimx. Each mailbox maps an email address to a directory on disk.
 
 > **CLI alias:** Examples below use `aimx mailboxes`. The singular `aimx mailbox` is retained as a clap alias for muscle-memory and works identically.
 
 ## Concepts
 
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
-- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only — no `sent/catchall/` directory is created.
-- **No restart needed — the daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/send.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
-- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files — it returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
-- **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files — continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**; the MCP `mailbox_delete` tool deliberately does not gain a force variant — destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
+- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only. No `sent/catchall/` directory is created.
+- **No restart needed. The daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/send.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
+- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files. It returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
+- **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files, continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**. The MCP `mailbox_delete` tool deliberately does not gain a force variant. Destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
 
 ### On-disk layout
 
@@ -30,7 +30,7 @@ as a sibling file when attachments are present.
 
 ### Routing logic
 
-When an email arrives, AIMX matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
+When an email arrives, aimx matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
 
 For example, with mailboxes `support` and `catchall` configured:
 - `support@agent.yourdomain.com` -> delivered to the `support` mailbox
@@ -64,7 +64,7 @@ Shows all mailboxes with their addresses and message counts (total and unread).
 aimx mailboxes show support
 ```
 
-Prints the mailbox's address, effective trust policy, full `trusted_senders` list, configured hooks grouped by event (`on_receive` / `after_send` — each entry shows the hook id, `cmd` truncated to 60 chars with a `…` suffix when longer, filters in compact form, and the `dangerously_support_untrusted=true` flag where set), and inbox + sent + unread message counts. Example output:
+Prints the mailbox's address, effective trust policy, full `trusted_senders` list, configured hooks grouped by event (`on_receive` / `after_send`. Each entry shows the hook id, `cmd` truncated to 60 chars with a `…` suffix when longer, filters in compact form, and the `dangerously_support_untrusted=true` flag where set), and inbox + sent + unread message counts. Example output:
 
 ```text
 Mailbox: support
@@ -91,9 +91,9 @@ Messages
 aimx mailboxes delete support
 ```
 
-Prompts for confirmation; use `--yes` to skip the prompt. When the daemon is
+Prompts for confirmation. Use `--yes` to skip the prompt. When the daemon is
 running, the request routes through its UDS socket and the daemon refuses
-to delete a mailbox that still contains files (error `NONEMPTY`) — archive
+to delete a mailbox that still contains files (error `NONEMPTY`). Archive
 or remove them first, then retry. When the daemon is stopped, delete goes
 through the direct-edit fallback which removes the directory tree and
 prints a restart-hint banner.
@@ -111,11 +111,11 @@ aimx mailboxes delete --force support
 aimx mailboxes delete --force --yes support
 ```
 
-Without `--force`, a non-empty mailbox cannot be deleted — the command
+Without `--force`, a non-empty mailbox cannot be deleted. The command
 fails with the daemon's `ERR NONEMPTY` error and reports per-directory
 file counts. Use `--force` only when you are sure you want to lose those
-emails. `catchall` is still refused even with `--force`. Force is CLI-only;
-the MCP `mailbox_delete` tool returns a hint pointing at this command on
+emails. `catchall` is still refused even with `--force`. Force is CLI-only.
+The MCP `mailbox_delete` tool returns a hint pointing at this command on
 NONEMPTY rather than gaining its own force variant.
 
 Mailboxes can also be managed via [MCP tools](mcp.md#mailbox-tools) (`mailbox_list`, `mailbox_create`, `mailbox_delete`).
@@ -186,7 +186,7 @@ Emails under `sent/<mailbox>/` carry every inbound field plus an outbound block 
 | `delivered_at` | string | no | RFC 3339 UTC timestamp of the successful MX handoff. Optional, present only when `delivery_status = "delivered"`. |
 | `delivery_details` | string | no | SMTP reason string on permanent failure (e.g. `"550 no such user"`). Optional. |
 
-Deferred (4xx) sends are not persisted — the submitting client is expected to retry. Permanent (5xx) failures are persisted with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. On outbound files the inbound `received_at` and `received_from_ip` fields are omitted when empty.
+Deferred (4xx) sends are not persisted. The submitting client is expected to retry. Permanent (5xx) failures are persisted with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. On outbound files the inbound `received_at` and `received_from_ip` fields are omitted when empty.
 
 ### Body extraction
 
@@ -196,7 +196,7 @@ Deferred (4xx) sends are not persisted — the submitting client is expected to 
 
 ## Attachments
 
-When an email carries one or more attachments, AIMX writes a Zola-style
+When an email carries one or more attachments, aimx writes a Zola-style
 bundle directory whose name matches the `.md` file's stem:
 
 ```text
@@ -268,7 +268,7 @@ aimx send --from support@agent.yourdomain.com \
           --references "<root@example.com> <parent@example.com>"
 ```
 
-`--reply-to` sets the `In-Reply-To` header (single Message-ID). `--references` sets the `References` chain and is only needed for multi-step threads where `In-Reply-To` alone is not enough — most users can omit it. For interactive agent use, prefer the `email_reply` MCP tool; it reads the original message and fills both headers automatically.
+`--reply-to` sets the `In-Reply-To` header (single Message-ID). `--references` sets the `References` chain and is only needed for multi-step threads where `In-Reply-To` alone is not enough. Most users can omit it. For interactive agent use, prefer the `email_reply` MCP tool. It reads the original message and fills both headers automatically.
 
 ### Via MCP
 
@@ -276,9 +276,9 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 ### How sending works
 
-1. `aimx send` composes an RFC 5322 compliant message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. The client does not read `config.toml` — it just composes bytes and writes them to the socket.
+1. `aimx send` composes an RFC 5322 compliant message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. The client does not read `config.toml`. It just composes bytes and writes them to the socket.
 2. `aimx serve` parses the `From:` header from the submitted body, verifies the domain matches the configured primary domain and the local part resolves to an explicitly configured non-wildcard mailbox, DKIM-signs the message (RSA-SHA256) with the domain's private key it loaded at startup, and delivers the signed message directly to the recipient's MX server via SMTP. The catchall (`*@domain`) is inbound-routing only and is never accepted as an outbound sender.
-3. `aimx send` exits as soon as the daemon returns a status — signing, mailbox resolution, and delivery never run inside the client, so it does not need to read `config.toml`, does not need to read the DKIM key, and does not need to run as root.
+3. `aimx send` exits as soon as the daemon returns a status. Signing, mailbox resolution, and delivery never run inside the client, so it does not need to read `config.toml`, does not need to read the DKIM key, and does not need to run as root.
 
 ### Reply threading
 

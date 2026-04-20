@@ -30,7 +30,7 @@ fn wrap_dkim_write_error(dkim_root: &Path, err: std::io::Error) -> Box<dyn std::
 /// Resolve `<dkim_root>/{private,public}.key`.
 ///
 /// `dkim_root` is treated as the directory containing the DKIM keys
-/// themselves — callers pass `config_dir().join("dkim")` in production,
+/// themselves. Callers pass `config_dir().join("dkim")` in production,
 /// and tests may supply arbitrary tempdir roots.
 fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (dkim_root.join("private.key"), dkim_root.join("public.key"))
@@ -40,7 +40,7 @@ fn dkim_paths(dkim_root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
 ///
 /// v0.2 permissions:
 /// - Private key: `0o600` (root-only; `aimx serve` reads it in-process)
-/// - Public key:  `0o644` (world-readable — it's advertised via DNS)
+/// - Public key:  `0o644` (world-readable, advertised via DNS)
 ///
 /// On Unix the files are created atomically with their target mode via
 /// `OpenOptions::mode(...).create_new(true)` to avoid a brief window of
@@ -136,7 +136,7 @@ pub fn dns_record_value(dkim_root: &Path) -> Result<String, Box<dyn std::error::
 }
 
 /// Read the DKIM public key PEM at `<dkim_root>/public.key` and return its
-/// SPKI-DER base64 — i.e. the `p=` value in the DKIM1 TXT record.
+/// SPKI-DER base64, i.e. the `p=` value in the DKIM1 TXT record.
 ///
 /// Used by both the setup-time DNS-record advertiser and the daemon's
 /// startup DNS sanity check (which compares the DNS-published `p=`
@@ -191,7 +191,7 @@ pub fn load_private_key(dkim_root: &Path) -> Result<RsaPrivateKey, Box<dyn std::
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             format!(
                 "DKIM private key is readable only by root. \
-                 This command must be invoked by `aimx serve` (root) — \
+                 This command must be invoked by `aimx serve` (root); \
                  non-root processes must submit mail via `aimx send` instead. \
                  (path: {})",
                 private_path.display()
@@ -341,7 +341,7 @@ mod tests {
     fn generate_keypair_permission_denied_suggests_sudo_or_aimx_config_dir() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Skip when running as root — `chmod 0o500` is bypassed by CAP_DAC_OVERRIDE
+        // Skip when running as root; `chmod 0o500` is bypassed by CAP_DAC_OVERRIDE
         // / euid 0, so we can't force PermissionDenied.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipping: test must run as non-root");
@@ -382,7 +382,7 @@ mod tests {
     #[test]
     fn generate_keypair_non_permission_io_error_passes_through() {
         // A non-permission IO error (here: `dkim_root` is an existing *file*,
-        // not a directory — `create_dir_all` returns NotADirectory /
+        // not a directory, so `create_dir_all` returns NotADirectory /
         // AlreadyExists, not PermissionDenied) must NOT be rewrapped with
         // the sudo guidance.
         let tmp = TempDir::new().unwrap();
@@ -416,7 +416,7 @@ mod tests {
         let b64 = public_key_spki_base64(tmp.path()).unwrap();
         let record = dns_record_value(tmp.path()).unwrap();
         // The SPKI base64 is embedded verbatim in the DNS record's `p=`
-        // value — same bytes, no whitespace.
+        // value: same bytes, no whitespace.
         assert!(record.ends_with(&b64), "record={record}, b64={b64}");
     }
 
@@ -481,7 +481,7 @@ mod tests {
     fn load_private_key_permission_denied_surfaces_root_guidance() {
         use std::os::unix::fs::PermissionsExt;
 
-        // Skip this test when running as root — `chmod 0o000` is bypassed
+        // Skip this test when running as root; `chmod 0o000` is bypassed
         // by CAP_DAC_READ_SEARCH / euid 0, so we can't force PermissionDenied.
         if unsafe { libc::geteuid() } == 0 {
             eprintln!("skipping: test must run as non-root");

@@ -1,8 +1,8 @@
-# AIMX MCP tools — full reference
+# aimx MCP tools: full reference
 
 All tools are served by the `aimx` binary over stdio (MCP transport). They
 return strings on success and error strings on failure. The MCP server is
-launched on-demand by your MCP client — it is not a long-running process.
+launched on-demand by your MCP client. It is not a long-running process.
 
 ## Mailbox tools
 
@@ -51,7 +51,7 @@ mailbox_list()
 
 Delete a mailbox. Removes the `[mailboxes.<name>]` stanza from
 `config.toml` and hot-swaps the daemon's in-memory config. The
-`inbox/<name>/` and `sent/<name>/` directories must be empty first — the
+`inbox/<name>/` and `sent/<name>/` directories must be empty first. The
 daemon refuses the delete otherwise. Empty directories are left on disk
 for the operator to clean up (e.g. `rmdir`).
 
@@ -67,7 +67,7 @@ remain on disk so the operator isn't surprised.
 ```
 mailbox_delete(name: "old-project")
 → "Mailbox 'old-project' deleted. Empty `inbox/old-project/` and
-   `sent/old-project/` directories remain on disk — run `rmdir` to tidy
+   `sent/old-project/` directories remain on disk. Run `rmdir` to tidy
    up if desired."
 ```
 
@@ -76,10 +76,10 @@ mailbox_delete(name: "old-project")
 - Mailbox is non-empty (inbox or sent contains files). The error
   payload spells out the per-directory file counts and points at the
   CLI command that wipes-and-deletes:
-  `Cannot delete mailbox 'foo' — inbox: 5 files, sent: 2 files. MCP
-  `mailbox_delete` does not wipe mail; run `sudo aimx mailboxes delete
+  `Cannot delete mailbox 'foo'. inbox: 5 files, sent: 2 files. MCP
+  `mailbox_delete` does not wipe mail. Run `sudo aimx mailboxes delete
   --force foo` on the host to wipe and remove.`
-  MCP deliberately does **not** expose a force variant — destructive
+  MCP deliberately does **not** expose a force variant. Destructive
   wipes stay on the CLI where the operator sees the prompt and the
   request can't be triggered remotely by an agent.
 - Attempt to delete the `catchall` mailbox.
@@ -104,20 +104,20 @@ List emails in a mailbox with optional filters. All filters AND together.
 
 **Returns:** Formatted list of matching emails.
 
-**Example — list unread inbox:**
+**Example, list unread inbox:**
 ```
 email_list(mailbox: "agent", unread: true)
 → "2026-04-15-143022-meeting-notes | From: alice@company.com | Subject: Meeting Notes | 2026-04-15T14:30:22Z
    2026-04-15-153300-invoice-march | From: billing@vendor.com | Subject: Invoice March | 2026-04-15T15:33:00Z"
 ```
 
-**Example — list sent mail:**
+**Example, list sent mail:**
 ```
 email_list(mailbox: "agent", folder: "sent")
 → "2026-04-15-160145-re-meeting-notes | To: alice@company.com | Subject: Re: Meeting Notes | 2026-04-15T16:01:45Z"
 ```
 
-**Example — filter by sender since a date:**
+**Example, filter by sender since a date:**
 ```
 email_list(mailbox: "agent", from: "alice", since: "2026-04-01T00:00:00Z")
 ```
@@ -132,7 +132,7 @@ Return the full Markdown file (TOML frontmatter + body) for a single email.
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
 | `mailbox` | string | yes      | Mailbox name |
-| `id`      | string | yes      | Email ID — the filename stem (e.g. `2026-04-15-143022-meeting-notes`) |
+| `id`      | string | yes      | Email ID. The filename stem (e.g. `2026-04-15-143022-meeting-notes`) |
 | `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
 **Returns:** Full file content as a string (frontmatter + body).
@@ -169,10 +169,10 @@ directly to the recipient's MX server.
 | `subject`      | string   | yes      | Email subject |
 | `body`         | string   | yes      | Email body text |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
-| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`; when `references` is omitted, `References` is built automatically from this value. Required to enable threading — without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
-| `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set** — supplied alone, it is silently ignored |
+| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`. When `references` is omitted, `References` is built automatically from this value. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
+| `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
-For simple replies to a single sender, prefer `email_reply` — it reads the
+For simple replies to a single sender, prefer `email_reply`. It reads the
 original email and fills in threading headers and the `Re:` subject
 automatically. Use `email_send` with `reply_to` / `references` only when
 you need to override the recipient list (e.g. reply-all) or build a
@@ -180,7 +180,7 @@ custom threading chain.
 
 **Returns:** Confirmation with Message-ID.
 
-**Example — plain text:**
+**Example, plain text:**
 ```
 email_send(
   from_mailbox: "agent",
@@ -191,7 +191,7 @@ email_send(
 → "Sent. Message-ID: <abc123@domain.com>"
 ```
 
-**Example — with attachments:**
+**Example, with attachments:**
 ```
 email_send(
   from_mailbox: "agent",
@@ -202,7 +202,7 @@ email_send(
 )
 ```
 
-**Example — threaded reply-all:**
+**Example, threaded reply-all:**
 ```
 # First, read the original to get recipients and the Message-ID:
 email_read(mailbox: "agent", id: "2025-06-01-001")
@@ -230,7 +230,7 @@ email_send(
 
 ### `email_reply`
 
-Reply to an existing email. AIMX automatically sets `In-Reply-To`,
+Reply to an existing email. aimx automatically sets `In-Reply-To`,
 `References`, and prepends `Re:` to the subject.
 
 **Parameters:**

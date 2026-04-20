@@ -118,7 +118,7 @@ fn inbox(tmp: &Path, name: &str) -> std::path::PathBuf {
 }
 
 /// Search every bundle directory under `mailbox_dir` for an attachment
-/// named `name`. Returns the first match — tests only create one email
+/// named `name`. Returns the first match; tests only create one email
 /// with attachments per setup.
 fn find_attachment(mailbox_dir: &Path, name: &str) -> Option<std::path::PathBuf> {
     let entries = std::fs::read_dir(mailbox_dir).ok()?;
@@ -340,7 +340,7 @@ fn ingest_via_env_var() {
 #[test]
 fn dkim_keygen_end_to_end() {
     let tmp = TempDir::new().unwrap();
-    // Write config.toml but skip DKIM key generation — the `dkim-keygen`
+    // Write config.toml but skip DKIM key generation. The `dkim-keygen`
     // command itself is under test and must start from a clean slate.
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
@@ -428,7 +428,7 @@ fn dkim_keygen_force_overwrite() {
 fn dkim_keygen_permission_denied_error_mentions_path_and_override() {
     use std::os::unix::fs::PermissionsExt;
 
-    // Skip when running as root — chmod 0o500 is bypassed by CAP_DAC_OVERRIDE.
+    // Skip when running as root; chmod 0o500 is bypassed by CAP_DAC_OVERRIDE.
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("skipping: test must run as non-root");
         return;
@@ -875,7 +875,7 @@ fn mcp_email_mark_without_daemon_reports_missing_socket() {
         false,
     );
 
-    // Point AIMX_RUNTIME_DIR at an empty dir — the UDS socket will not exist.
+    // Point AIMX_RUNTIME_DIR at an empty dir; the UDS socket will not exist.
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
 
@@ -1158,7 +1158,7 @@ dangerously_support_untrusted = true
 /// hook gate (Sprint 50) must both reflect the inherited policy.
 #[test]
 fn ingest_inherits_global_trust_when_mailbox_has_no_override() {
-    // S50-3: Sprint 50 inverts the hook gate — it now fires iff the
+    // S50-3: Sprint 50 inverts the hook gate. It now fires iff the
     // evaluated `trusted == "true"` OR the hook opts in explicitly.
     // Unsigned fixture means `trusted == "false"` even with allowlist, so
     // the hook must opt in or it won't fire. We keep the original intent
@@ -2159,7 +2159,7 @@ fn serve_e2e_bcc_recipients() {
     let port = find_free_port();
     let child = start_serve(tmp.path(), port);
 
-    // No BCC header — bob is BCC'd via envelope only
+    // No BCC header; bob is BCC'd via envelope only
     let email_data = concat!(
         "From: sender@example.com\r\n",
         "To: alice@agent.example.com\r\n",
@@ -2289,7 +2289,7 @@ fn serve_e2e_to_cc_bcc_combined() {
 // listener with a raw Unix-socket client. `AIMX_RUNTIME_DIR` is overridden
 // to a tempdir so the socket lives inside the test sandbox; the binary
 // under test creates it with mode `0o666`. We never exercise the real MX
-// delivery path — the `ERR DOMAIN` and `ERR MALFORMED` responses prove the
+// delivery path; the `ERR DOMAIN` and `ERR MALFORMED` responses prove the
 // framing and handler wiring are intact without reaching the network.
 // ---------------------------------------------------------------------------
 
@@ -2353,7 +2353,7 @@ fn uds_send_listener_accepts_and_rejects_domain_mismatch() {
     // rejected with `ERR DOMAIN` before any MX lookup happens, proving
     // both the wire parser and the handler wiring end-to-end.
     //
-    // There is no `From-Mailbox:` header — the daemon parses `From:`
+    // There is no `From-Mailbox:` header; the daemon parses `From:`
     // out of the body and resolves the mailbox itself.
     let body = b"From: alice@not-the-domain.example\r\n\
                  To: user@gmail.com\r\n\
@@ -2401,7 +2401,7 @@ fn uds_send_listener_rejects_malformed_request() {
         "UDS send socket never appeared"
     );
 
-    // Wrong leading line — must be rejected with `ERR MALFORMED`.
+    // Wrong leading line must be rejected with `ERR MALFORMED`.
     let mut client = UnixStream::connect(&sock).expect("connect UDS");
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
@@ -2434,7 +2434,7 @@ fn uds_send_listener_cleaned_up_after_sigterm() {
         "UDS send socket never appeared"
     );
 
-    // Clean shutdown — the listener removes the socket file so the next
+    // Clean shutdown: the listener removes the socket file so the next
     // start does not trip the stale-socket retry path.
     stop_serve(child);
 
@@ -2760,7 +2760,7 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 4 -->"),
+        after.starts_with("<!-- aimx-readme-version: 5 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );
@@ -2780,7 +2780,7 @@ fn send_without_daemon_reports_missing_socket() {
 
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
-    // No `aimx serve` spawned — the UDS will not exist.
+    // No `aimx serve` spawned; the UDS will not exist.
 
     let output = Command::cargo_bin("aimx")
         .unwrap()
@@ -3028,7 +3028,7 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
     );
 
     // The daemon should already see the new mailbox in its in-memory
-    // Config — send a fresh inbound SMTP message addressed to
+    // Config. Send a fresh inbound SMTP message addressed to
     // `eve@agent.example.com` and verify it lands in `inbox/eve/` rather
     // than in catchall.
     let email = concat!(
@@ -3056,7 +3056,7 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
     );
 
     // Catchall must be empty (aside from any pre-existing content from
-    // setup_test_env — which creates the dir but not any messages).
+    // setup_test_env, which creates the dir but not any messages).
     let catchall = inbox(tmp.path(), "catchall");
     let catchall_md = find_md_files(&catchall);
     assert!(
@@ -3081,7 +3081,7 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Point at an empty runtime dir — no socket present, so UDS fails with
+    // Point at an empty runtime dir; no socket present, so UDS fails with
     // NotFound and the CLI falls back to direct on-disk edit.
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
@@ -3157,7 +3157,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(config_text.contains("[mailboxes.qux]"));
 
-    // Remove the file and retry — delete now succeeds, stanza is gone,
+    // Remove the file and retry; delete now succeeds, stanza is gone,
     // subsequent mail addressed to qux@domain falls through to catchall.
     std::fs::remove_file(qux_inbox.join("2025-01-01-120000-held.md")).unwrap();
 
@@ -3207,7 +3207,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
-// S48-5 — `aimx mailboxes delete --force` (CLI-only wipe + delete)
+// S48-5: `aimx mailboxes delete --force` (CLI-only wipe + delete)
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -3289,7 +3289,7 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
     let yon_inbox = inbox(tmp.path(), "yon");
     std::fs::write(yon_inbox.join("2025-04-01-130000-keep.md"), "stay").unwrap();
 
-    // Pipe `n\n` on stdin — the prompt must abort the delete and leave
+    // Pipe `n\n` on stdin; the prompt must abort the delete and leave
     // the file in place.
     let assert = aimx_cmd(tmp.path())
         .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
@@ -3394,7 +3394,7 @@ fn start_serve_with_env(tmp: &Path, port: u16, extra_env: &[(&str, &str)]) -> st
 }
 
 /// Collect the stderr a spawned `aimx serve` has buffered so far. We send
-/// SIGTERM, wait for exit, then drain stderr — the startup-warning log
+/// SIGTERM, wait for exit, then drain stderr; the startup-warning log
 /// lines are well before the shutdown banner, so they are always captured
 /// in full.
 #[cfg(unix)]
@@ -3477,7 +3477,7 @@ fn dkim_startup_check_resolve_error_logs_warning_and_binds_listeners() {
     // `AIMX_TEST_DKIM_RESOLVER_OVERRIDE=err:...` forces the resolver to
     // return an error, simulating NXDOMAIN / timeout / offline DNS. The
     // daemon must log a `warn`-level message but never treat this as
-    // fatal — DNS may not have propagated yet after a fresh setup.
+    // fatal. DNS may not have propagated yet after a fresh setup.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3508,10 +3508,10 @@ fn dkim_startup_check_resolve_error_logs_warning_and_binds_listeners() {
 // ---------------------------------------------------------------------------
 // Unified per-mailbox write lock covering inbound ingest, MARK-*, and
 // MAILBOX-*. These integration tests stress the lock boundary:
-//   1. Concurrent ingest bursts + MARK-READ on the same mailbox — no torn
+//   1. Concurrent ingest bursts + MARK-READ on the same mailbox: no torn
 //      writes, every `.md` file has a clean `+++ ... +++` frontmatter and
 //      parses as TOML.
-//   2. Concurrent MAILBOX-CREATE + ingest addressed to the new mailbox —
+//   2. Concurrent MAILBOX-CREATE + ingest addressed to the new mailbox:
 //      the two locks (outer per-mailbox, inner CONFIG_WRITE_LOCK) must not
 //      deadlock, the config write lands before the ingest routes, and the
 //      inbound message ends up in the new mailbox (or catchall, but never
@@ -3634,7 +3634,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
             md.display(),
             parts.len()
         );
-        // Frontmatter must parse as TOML — a half-written file would
+        // Frontmatter must parse as TOML; a half-written file would
         // almost certainly produce a parse error.
         let _parsed: toml::Value = toml::from_str(parts[1].trim()).unwrap_or_else(|e| {
             panic!(
@@ -3645,7 +3645,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
         });
     }
 
-    // Both seeded files were successfully marked read — MARK-READ did
+    // Both seeded files were successfully marked read; MARK-READ did
     // not get corrupted by a racing ingest.
     for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
         let content = std::fs::read_to_string(alice_dir.join(format!("{id}.md"))).unwrap();
@@ -3665,7 +3665,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     // process-wide CONFIG_WRITE_LOCK (see `crate::mailbox_locks`).
     // Inbound ingest to the same mailbox takes only the outer lock.
     // This test races the two to confirm (a) no deadlock occurs and
-    // (b) the daemon is still responsive afterwards — the message
+    // (b) the daemon is still responsive afterwards; the message
     // lands somewhere consistent (either the new mailbox if the
     // create completed first, or catchall if ingest ran first).
     let tmp = TempDir::new().unwrap();
@@ -3681,7 +3681,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     );
 
     // Kick off the two operations concurrently and cap the total wait
-    // — a deadlock would manifest as a join that never returns.
+    // because a deadlock would manifest as a join that never returns.
     let create_handle = {
         let tmp_path = tmp.path().to_path_buf();
         let runtime = runtime.clone();
@@ -3720,7 +3720,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
 
     // Guard against deadlock: require both threads to finish within a
     // bounded wall-clock budget. We use a watchdog thread to panic if
-    // the sum exceeds 20s — tests normally complete in <1s. The flag
+    // the sum exceeds 20s; tests normally complete in <1s. The flag
     // lets us dismiss the watchdog promptly on success instead of
     // leaving a detached thread sleeping for 20s then panicking in the
     // background.
@@ -3745,7 +3745,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
 
     create_handle.join().unwrap();
     ingest_handle.join().unwrap();
-    // Successful joins reached here — dismiss the watchdog promptly so
+    // Successful joins reached here; dismiss the watchdog promptly so
     // it exits rather than lingering in the background.
     watchdog_cancel.store(true, std::sync::atomic::Ordering::Release);
     watchdog.join().unwrap();
@@ -3758,7 +3758,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     );
 
     // The message went to either newton (if create won) or catchall
-    // (if ingest won) — but never disappeared and never produced a
+    // (if ingest won), but never disappeared and never produced a
     // torn file.
     std::thread::sleep(std::time::Duration::from_millis(500));
     let newton = find_md_files(&inbox(tmp.path(), "newton"));
@@ -3782,7 +3782,7 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
             .unwrap_or_else(|e| panic!("{} failed to parse: {e}", md.display()));
     }
 
-    // Daemon still responsive after the race — send a follow-up
+    // Daemon still responsive after the race. Send a follow-up
     // message and confirm it lands (the deadlock canary).
     let followup = concat!(
         "From: sender@example.com\r\n",
@@ -3807,14 +3807,14 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
                 .map(|c| c.contains("Post-race"))
                 .unwrap_or(false)
         }),
-        "daemon unresponsive after the race — follow-up message never landed"
+        "daemon unresponsive after the race; follow-up message never landed"
     );
 
     stop_serve(daemon);
 }
 
 // ---------------------------------------------------------------------
-// Sprint 51 — `aimx mailboxes show` + `aimx hooks` CLI
+// Sprint 51: `aimx mailboxes show` + `aimx hooks` CLI
 // ---------------------------------------------------------------------
 
 /// S51-1: `aimx mailboxes show <name>` surfaces trust, senders, hooks,
@@ -3925,7 +3925,7 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
 /// S51-2: `aimx hooks create` + `aimx hooks list` roundtrip.
 /// Daemon is not running (AIMX_RUNTIME_DIR points at an empty dir), so
 /// the CLI falls back to direct config.toml edit and prints a restart
-/// hint — that path covers the full flag validation and the on-disk
+/// hint. That path covers the full flag validation and the on-disk
 /// write.
 #[test]
 fn hooks_create_and_list_roundtrip_direct_edit() {
@@ -4140,7 +4140,7 @@ fn hooks_delete_unknown_name_errors() {
 }
 
 // ---------------------------------------------------------------------
-// S51-3 — UDS HOOK-CREATE / HOOK-DELETE end-to-end
+// S51-3: UDS HOOK-CREATE / HOOK-DELETE end-to-end
 // ---------------------------------------------------------------------
 
 /// S51-3: spin up `aimx serve`, issue `aimx hooks create`, confirm the

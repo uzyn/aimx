@@ -1,6 +1,6 @@
 # Getting Started
 
-Install AIMX and run your first setup.
+Install AIMX (AI Mail Exchange) and run your first setup.
 
 ## Requirements
 
@@ -11,7 +11,7 @@ Install AIMX and run your first setup.
 
 ### Compatible VPS providers
 
-AIMX requires direct SMTP access on port 25. Not all cloud providers allow this.
+aimx requires direct SMTP access on port 25. Not all cloud providers allow this.
 
 | Provider | Port 25 | Notes |
 |----------|---------|-------|
@@ -45,11 +45,11 @@ aimx --version
 
 ## Security model
 
-AIMX is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: AIMX assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
+aimx is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: aimx assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
 
-All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI — never write to the data directory directly. The UDS send socket at `/run/aimx/send.sock` is world-writable; any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
+All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS send socket at `/run/aimx/send.sock` is world-writable. Any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
 
-**If you need per-user mailbox isolation** — multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup — AIMX is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use AIMX in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
+**If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), aimx is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use aimx in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
 
 ## Setup
 
@@ -76,7 +76,7 @@ The wizard will:
 
 Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips installation and jumps straight to DNS verification.
 
-Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup — DNS Configuration](setup.md#dns-configuration) for per-record details.
+Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup: DNS Configuration](setup.md#dns-configuration) for per-record details.
 
 ## Verify
 
@@ -101,7 +101,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ## Connect your AI agent
 
-Install AIMX into your agent with one command:
+Install aimx into your agent with one command:
 
 ```bash
 aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw / hermes
@@ -115,8 +115,8 @@ The agent can now list, read, send, and reply to email via MCP. See [MCP Server]
 
 ## Next steps
 
-- **[Setup](setup.md)** -- detailed walkthrough of every setup step, DNS records, DKIM management, and production hardening
-- **[Configuration](configuration.md)** -- full `config.toml` reference for mailboxes, hooks, and trust policies
-- **[Hooks & Trust](hooks.md)** -- fire agent actions automatically on inbound/outbound events
-- **[MCP Server](mcp.md)** -- integrate with Claude Code, OpenClaw, or any MCP client
-- **[Troubleshooting](troubleshooting.md)** -- common issues and diagnostic commands
+- **[Setup](setup.md)**: detailed walkthrough of every setup step, DNS records, DKIM management, and production hardening
+- **[Configuration](configuration.md)**: full `config.toml` reference for mailboxes, hooks, and trust policies
+- **[Hooks & Trust](hooks.md)**: fire agent actions automatically on inbound/outbound events
+- **[MCP Server](mcp.md)**: integrate with Claude Code, OpenClaw, or any MCP client
+- **[Troubleshooting](troubleshooting.md)**: common issues and diagnostic commands

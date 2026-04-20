@@ -2,8 +2,8 @@
 //!
 //! `MARK-READ` and `MARK-UNREAD` rewrite the target email's TOML
 //! frontmatter in place so the `read` field persists across restarts.
-//! Files on disk are owned by `root:root 0644` — writable only by the
-//! daemon, which runs as root — so the MCP server (running as the
+//! Files on disk are owned by `root:root 0644` (writable only by the
+//! daemon, which runs as root), so the MCP server (running as the
 //! invoking non-root user) routes through these verbs instead of
 //! touching the files directly.
 //!
@@ -37,7 +37,7 @@ use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 /// verbs, which share the per-mailbox lock map so their config.toml
 /// rewrite does not race with an in-flight MARK).
 pub struct StateContext {
-    /// Data directory root — `<data_dir>/inbox/<mailbox>/<id>.md` etc.
+    /// Data directory root. `<data_dir>/inbox/<mailbox>/<id>.md` etc.
     ///
     /// Invariant: `data_dir == config_handle.load().data_dir` for the
     /// life of the daemon. `data_dir` is captured once at startup and
@@ -58,7 +58,7 @@ pub struct StateContext {
 }
 
 impl StateContext {
-    /// Fresh lock map — convenient for tests. Production callers share
+    /// Fresh lock map. Convenient for tests. Production callers share
     /// the daemon-wide map via [`StateContext::with_locks`].
     #[cfg(test)]
     pub fn new(data_dir: PathBuf, config_handle: ConfigHandle) -> Self {
@@ -119,7 +119,7 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 /// per-mailbox write lock (see [`crate::mailbox_locks`]) for the full
 /// read → rewrite critical section. The lock is shared with the
 /// inbound-ingest writer so MARK and ingest serialize against each
-/// other — not just against other MARK calls.
+/// other, not just against other MARK calls.
 pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
@@ -190,7 +190,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     meta.read = req.read;
     // FR-13: `read_at` is set when marking read (reflects the most
     // recent read, overwriting any prior timestamp on re-read) and
-    // removed entirely when marking unread — never serialized as null.
+    // removed entirely when marking unread. Never serialized as null.
     meta.read_at = if req.read {
         Some(chrono::Utc::now())
     } else {
@@ -586,7 +586,7 @@ mod tests {
         assert!(fm.read_at.is_none());
 
         // Give the monotonic wall clock room to advance between reads.
-        // Millisecond resolution is plenty — chrono stores nanoseconds.
+        // Millisecond resolution is plenty; chrono stores nanoseconds.
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         // Second MARK-READ writes a fresh, later timestamp.

@@ -1,4 +1,4 @@
-# AIMX troubleshooting — error codes and recovery
+# aimx troubleshooting: error codes and recovery
 
 ## UDS send protocol error codes
 
@@ -16,15 +16,15 @@ AIMX/1 ERR <CODE> <reason>
 | `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` | Create the mailbox first with `mailbox_create` |
 | `DOMAIN`  | Sender domain mismatch | The sender domain does not match the configured primary domain | Use the correct domain; check `/etc/aimx/config.toml` |
 | `SIGN`    | DKIM signing failed | DKIM private key missing or corrupted | Re-run `aimx setup` to regenerate keys |
-| `DELIVERY`| Remote MX rejected mail | Recipient server refused the message (permanent) | Check the reason — invalid recipient, blocked sender, policy rejection |
-| `TEMP`    | Temporary delivery failure | Recipient server unavailable or rate-limiting | Retry later; transient network or server issue |
-| `MALFORMED`| Request parsing failed | Malformed `AIMX/1 SEND` request frame | Internal error — ensure `aimx send` version matches `aimx serve` |
+| `DELIVERY`| Remote MX rejected mail | Recipient server refused the message (permanent) | Check the reason: invalid recipient, blocked sender, policy rejection |
+| `TEMP`    | Temporary delivery failure | Recipient server unavailable or rate-limiting | Retry later. Transient network or server issue |
+| `MALFORMED`| Request parsing failed | Malformed `AIMX/1 SEND` request frame | Internal error. Ensure `aimx send` version matches `aimx serve` |
 
 ### Exit codes for `aimx send`
 
 | Code | Meaning |
 |------|---------|
-| `0`  | OK — message delivered |
+| `0`  | OK, message delivered |
 | `1`  | Daemon returned ERR |
 | `2`  | Socket missing, connect failure, or running as root |
 | `3`  | Malformed response from daemon |
@@ -51,10 +51,10 @@ sudo aimx serve
 The `From:` address domain does not match the primary domain configured in
 `/etc/aimx/config.toml`.
 
-**Cause:** Sending from a domain AIMX is not configured for.
+**Cause:** Sending from a domain aimx is not configured for.
 
-**Recovery:** Verify the `domain` field in `config.toml`. AIMX only allows
-sending from the configured primary domain — any local part is accepted, but
+**Recovery:** Verify the `domain` field in `config.toml`. aimx only allows
+sending from the configured primary domain. Any local part is accepted, but
 the domain must match exactly (case-insensitive).
 
 ### Mailbox not found
@@ -80,7 +80,7 @@ inbound replies shows `"fail"`.
 - Message was modified in transit (rare with direct SMTP delivery).
 
 **Recovery:**
-1. Re-run `aimx setup` — it will display the DKIM DNS record.
+1. Re-run `aimx setup`. It will display the DKIM DNS record.
 2. Update the DNS TXT record to match the public key.
 3. Wait for DNS propagation and test again.
 
@@ -122,14 +122,14 @@ Cannot read `.md` files from the filesystem directly.
 may not have traversal permissions on parent directories.
 
 **Recovery:** Ensure the user running the agent has read access to
-`/var/lib/aimx/`. The data directory is `root:root 755` — any local user
+`/var/lib/aimx/`. The data directory is `root:root 755`. Any local user
 should have read access.
 
 ### Large attachment bundle
 
 An email with attachments produces a directory instead of a flat `.md` file.
 
-**Not an error.** AIMX uses Zola-style bundles: when an email has one or
+**Not an error.** aimx uses Zola-style bundles. When an email has one or
 more attachments, a directory is created containing the `.md` file and
 attachment files as siblings:
 

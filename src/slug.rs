@@ -19,7 +19,7 @@ const SLUG_EMPTY_FALLBACK: &str = "no-subject";
 /// by `mail_parser::Message::subject`, which decodes RFC 2047 encoded words
 /// transparently). The transformation is:
 /// 1. NFC-normalize (so NFC and NFD encodings of the same visible subject
-///    produce identical slugs — see S43-7).
+///    produce identical slugs (see S43-7).
 /// 2. Lowercase (Unicode-aware).
 /// 3. Every non-alphanumeric character becomes `-`.
 /// 4. Runs of `-` collapse to one.

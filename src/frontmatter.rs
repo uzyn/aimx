@@ -58,7 +58,7 @@ pub struct InboundFrontmatter {
     pub read: bool,
     /// RFC 3339 UTC timestamp written by the `MARK-READ` handler when
     /// the email is marked read. Removed entirely on `MARK-UNREAD`.
-    /// Re-marking read overwrites with a new timestamp — "most recent
+    /// Re-marking read overwrites with a new timestamp: "most recent
     /// read", not "first read" (FR-13).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<DateTime<Utc>>,
@@ -238,8 +238,8 @@ pub fn format_outbound_frontmatter(meta: &OutboundFrontmatter, body: &str) -> St
 /// Compute a deterministic thread ID from email threading headers.
 ///
 /// Resolution order:
-/// 1. Walk `In-Reply-To` — use the first Message-ID found.
-/// 2. Walk `References` — use the earliest (leftmost) Message-ID.
+/// 1. Walk `In-Reply-To`. Use the first Message-ID found.
+/// 2. Walk `References`. Use the earliest (leftmost) Message-ID.
 /// 3. Fall back to the message's own `Message-ID`.
 ///
 /// The resolved root Message-ID is SHA-256 hashed and truncated to 16 hex chars.

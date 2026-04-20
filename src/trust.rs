@@ -73,7 +73,7 @@ impl<'de> Deserialize<'de> for TrustedValue {
 ///   `trusted_senders` AND DKIM pass -> `TrustedValue::True`
 /// - effective `trust == "verified"`, any other outcome -> `TrustedValue::False`
 ///
-/// Note: Sprint 50 moves hook gating off this value — an `on_receive`
+/// Note: Sprint 50 moves hook gating off this value. An `on_receive`
 /// hook fires iff `trusted == "true"` OR the hook opts in via
 /// `dangerously_support_untrusted`. See `hook::should_fire_on_receive`.
 pub fn evaluate_trust(
@@ -319,7 +319,7 @@ mod tests {
             hooks: vec![],
         };
 
-        // Global says gmail is trusted; mailbox replaces that list — so an
+        // Global says gmail is trusted; mailbox replaces that list, so an
         // `@gmail.com` sender is no longer in the effective list.
         let t = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(t, TrustedValue::False);
@@ -386,15 +386,15 @@ mod tests {
         // Regression: the pre-hardening `find('<') + find('>')` slice
         // panicked when `>` preceded `<`. After the rfind/tail-find
         // hardening, this must return a well-formed lowercased address
-        // and never panic — even on adversarial sender headers.
+        // and never panic, even on adversarial sender headers.
         let out = extract_email_for_match("foo>bar<baz@example.com>");
         assert_eq!(out, "baz@example.com");
 
-        // No `<` at all — fall through cleanly.
+        // No `<` at all. Fall through cleanly.
         let out = extract_email_for_match("weird> input");
         assert_eq!(out, "weird> input");
 
-        // Multiple `<` — pick the last one (matches send_handler semantics).
+        // Multiple `<`: pick the last one (matches send_handler semantics).
         let out = extract_email_for_match("<spoof@bad> real <user@example.com>");
         assert_eq!(out, "user@example.com");
     }

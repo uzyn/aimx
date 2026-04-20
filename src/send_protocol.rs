@@ -88,7 +88,7 @@ pub const DEFAULT_MAX_BODY_SIZE: usize = 25 * 1024 * 1024;
 /// Keeps the parser's memory footprint bounded even on pathological input.
 const MAX_HEADER_LINE: usize = 8 * 1024;
 
-/// Decoded `AIMX/1 SEND` request. There is no `From-Mailbox:` header —
+/// Decoded `AIMX/1 SEND` request. There is no `From-Mailbox:` header;
 /// the daemon parses `From:` out of `body` and resolves the sender
 /// mailbox itself against its in-memory Config.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,7 +150,7 @@ pub struct HookCreateRequest {
     pub mailbox: String,
     /// TOML body encoding one [`crate::hook::Hook`] stanza. Kept as raw
     /// bytes at the codec layer so the codec can stay free of the hook
-    /// struct itself — the daemon handler decodes.
+    /// struct itself; the daemon handler decodes.
     pub hook_toml: Vec<u8>,
 }
 
@@ -198,7 +198,7 @@ pub enum ErrCode {
     /// etc.).
     Validation,
     /// `MAILBOX-DELETE` refused because the target directory still
-    /// contains files. Operator must archive / remove files first — the
+    /// contains files. Operator must archive / remove files first; the
     /// daemon never silently removes mail on delete.
     NonEmpty,
 }
@@ -511,8 +511,8 @@ where
     let id = id.ok_or_else(|| ParseError::Malformed("missing required header: Id".into()))?;
     let folder =
         folder.ok_or_else(|| ParseError::Malformed("missing required header: Folder".into()))?;
-    // Content-Length is optional for MARK verbs but if present must be 0 —
-    // the `!= 0` branch above already rejects otherwise. Accept the missing
+    // Content-Length is optional for MARK verbs but if present must be 0.
+    // The `!= 0` branch above already rejects otherwise. Accept the missing
     // case as "implicitly 0" to keep clients terse.
     let _ = content_length;
 
@@ -588,7 +588,7 @@ where
     }
 
     let name = name.ok_or_else(|| ParseError::Malformed("missing required header: Name".into()))?;
-    // Content-Length is optional for MAILBOX-CRUD verbs — 0 is implicit.
+    // Content-Length is optional for MAILBOX-CRUD verbs; 0 is implicit.
     let _ = content_length;
 
     Ok(MailboxCrudRequest { name, create })
@@ -783,7 +783,7 @@ where
 }
 
 /// Write a `SendResponse` frame to `writer` and flush. The frame ends with a
-/// single `\n` — no body, no content-length.
+/// single `\n`. No body, no content-length.
 pub async fn write_response<W>(
     writer: &mut W,
     response: &SendResponse,
@@ -891,7 +891,7 @@ where
 }
 
 /// Write an `AIMX/1 HOOK-CREATE` request frame. The body is an opaque
-/// blob of TOML bytes — the codec does not parse it.
+/// blob of TOML bytes; the codec does not parse it.
 pub async fn write_hook_create_request<W>(
     writer: &mut W,
     request: &HookCreateRequest,
@@ -1249,7 +1249,7 @@ mod tests {
 
     #[tokio::test]
     async fn mark_without_content_length_accepted() {
-        // Content-Length is optional for MARK — 0 is implicit.
+        // Content-Length is optional for MARK; 0 is implicit.
         let input = b"AIMX/1 MARK-READ\nMailbox: alice\nId: 2025-06-01-001\nFolder: inbox\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
             Request::Mark(r) => assert_eq!(r.id, "2025-06-01-001"),

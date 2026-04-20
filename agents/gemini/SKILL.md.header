@@ -1,6 +1,6 @@
 ---
 name: aimx
-description: Self-hosted email for AI agents. Send, read, reply to, and manage email via AIMX MCP tools. Invoke when the user asks about sending mail, checking an inbox, replying to a message, or managing mailboxes, or when the conversation references AIMX.
+description: Self-hosted email for AI agents. Send, read, reply to, and manage email via aimx MCP tools. Invoke when the user asks about sending mail, checking an inbox, replying to a message, or managing mailboxes, or when the conversation references aimx.
 author: U-Zyn Chua <chua@uzyn.com>
 ---
 

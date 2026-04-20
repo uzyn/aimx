@@ -1,8 +1,8 @@
 # MCP Server
 
-> To install AIMX into your agent, see [Agent Integration](agent-integration.md).
+> To install aimx into your agent, see [Agent Integration](agent-integration.md).
 
-AIMX includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
+aimx includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
 
 ## Overview
 
@@ -16,7 +16,7 @@ AIMX includes a built-in MCP (Model Context Protocol) server that gives AI agent
 aimx mcp
 ```
 
-The server runs in stdio mode -- it reads from stdin and writes to stdout. It is launched on-demand by MCP clients, not run as a background service.
+The server runs in stdio mode. It reads from stdin and writes to stdout. It is launched on-demand by MCP clients, not run as a background service.
 
 ## Agent integration
 
@@ -24,7 +24,7 @@ See [Agent Integration](agent-integration.md) for one-line `aimx agent-setup <ag
 
 ## MCP tools
 
-AIMX exposes 9 MCP tools organized into mailbox management and email operations.
+aimx exposes 9 MCP tools organized into mailbox management and email operations.
 
 ### Mailbox tools
 
@@ -69,7 +69,7 @@ List emails in a mailbox with optional filters.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name to list emails from |
-| `folder` | string | no | `"inbox"` (default) or `"sent"` — picks which side of the mailbox to list |
+| `folder` | string | no | `"inbox"` (default) or `"sent"`. Picks which side of the mailbox to list |
 | `unread` | bool | no | Filter to only unread emails |
 | `from` | string | no | Filter by sender address (substring match) |
 | `since` | string | no | Filter to emails since this datetime (RFC 3339 format) |
@@ -104,12 +104,12 @@ Compose and send an email with DKIM signing.
 | `subject` | string | yes | Email subject |
 | `body` | string | yes | Email body text |
 | `attachments` | array of strings | no | File paths to attach |
-| `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading — without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
-| `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set** — supplied alone, it is silently ignored |
+| `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
+| `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
 The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/send.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
 
-For replies to a single sender, prefer `email_reply` — it handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
+For replies to a single sender, prefer `email_reply`. It handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
 
 ---
 
@@ -151,11 +151,11 @@ Mark an email as unread.
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
-Updates `read = false` in the email's frontmatter. Same daemon-mediated write path as `email_mark_read` — requires a running `aimx serve`.
+Updates `read = false` in the email's frontmatter. Same daemon-mediated write path as `email_mark_read`. Requires a running `aimx serve`.
 
 ## Frontmatter reference
 
-Every email stored by AIMX carries a TOML frontmatter block between `+++` delimiters. Inbound emails include:
+Every email stored by aimx carries a TOML frontmatter block between `+++` delimiters. Inbound emails include:
 
 | Field | Always written | Description |
 |-------|----------------|-------------|
@@ -171,7 +171,7 @@ Every email stored by AIMX carries a TOML frontmatter block between `+++` delimi
 | `dkim` | yes | `pass`, `fail`, or `none` |
 | `spf` | yes | `pass`, `fail`, or `none` |
 | `dmarc` | yes | `pass`, `fail`, or `none` |
-| `trusted` | yes | `none`, `true`, or `false` -- per-mailbox trust evaluation result (see [Configuration](configuration.md)) |
+| `trusted` | yes | `none`, `true`, or `false`. Per-mailbox trust evaluation result (see [Configuration](configuration.md)) |
 | `mailbox` | yes | Target mailbox name |
 | `read` | yes | Read/unread status |
 | `outbound` | sent only | Always `true` on sent copies |
@@ -180,14 +180,14 @@ Every email stored by AIMX carries a TOML frontmatter block between `+++` delimi
 | `delivered_at` | sent only (optional) | RFC 3339 UTC timestamp of successful MX handoff |
 | `delivery_details` | sent only (optional) | SMTP reason string on permanent failure |
 
-See [Mailboxes — Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the full outbound schema.
+See [Mailboxes: Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the full outbound schema.
 
 ## Agent-facing documentation
 
-Two reference documents help agents understand AIMX:
+Two reference documents help agents understand aimx:
 
-- **`agents/common/aimx-primer.md`** — the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, and common workflows.
-- **`/var/lib/aimx/README.md`** — the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
+- **`agents/common/aimx-primer.md`**: the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, and common workflows.
+- **`/var/lib/aimx/README.md`**: the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
 
 ## Compatible agent frameworks
 
@@ -203,11 +203,11 @@ Two reference documents help agents understand AIMX:
 
 A typical agent email workflow:
 
-1. **Check for new mail** -- call `email_list` with `unread: true`
-2. **Read an email** -- call `email_read` with the mailbox and email ID
-3. **Process the content** -- agent decides how to respond
-4. **Reply** -- call `email_reply` with the response body
-5. **Mark as read** -- call `email_mark_read`
+1. **Check for new mail.** Call `email_list` with `unread: true`
+2. **Read an email.** Call `email_read` with the mailbox and email ID
+3. **Process the content.** Agent decides how to respond
+4. **Reply.** Call `email_reply` with the response body
+5. **Mark as read.** Call `email_mark_read`
 
 For automated processing without MCP, use [hooks](hooks.md) to trigger commands on incoming email.
 

@@ -2,7 +2,7 @@
 name = "aimx-verifier"
 version = "0.1.0"
 edition = "2021"
-description = "Verification service for aimx - port probe and SMTP listener"
+description = "Verification service for aimx. Port probe and SMTP listener."
 license = "MIT"
 
 [dependencies]
