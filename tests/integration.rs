@@ -4158,13 +4158,12 @@ fn hooks_delete_unknown_name_errors() {
 // S51-3: UDS HOOK-CREATE / HOOK-DELETE end-to-end
 // ---------------------------------------------------------------------
 
-/// S51-3: spin up `aimx serve`, issue `aimx hooks create`, confirm the
-/// daemon hot-swaps its in-memory config by immediately listing the
-/// new hook (which reads on-disk config.toml). Also exercises the
-/// success path: no restart hint is printed when the UDS submission
-/// succeeds.
+/// S3-4: spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm
+/// the CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely
+/// under Sprint 3) and SIGHUP'd the running daemon. The success path
+/// prints a `Reload:` banner and no `Hint:` restart banner.
 #[test]
-fn hooks_create_via_daemon_hot_swaps_config() {
+fn hooks_raw_cmd_sighup_hot_swaps_config() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
     let port = find_free_port();
@@ -4196,8 +4195,14 @@ fn hooks_create_via_daemon_hot_swaps_config() {
         "create output: {create_out}"
     );
     // Sprint 3 S3-4: raw-cmd hooks write config.toml directly and
-    // SIGHUP the daemon; a running daemon still prints no "Hint:"
-    // restart banner (which would mean the SIGHUP path fell through).
+    // SIGHUP the daemon. Positive signal: stdout must carry the
+    // `Reload:` banner (which only prints on SighupOutcome::Sent).
+    // Negative signal: no `Hint:` restart banner (that would indicate
+    // the SIGHUP path fell through to DaemonNotRunning).
+    assert!(
+        create_out.contains("Reload:"),
+        "daemon-success should print Reload: banner: {create_out}"
+    );
     assert!(
         !create_out.contains("Hint:"),
         "daemon-success should not print restart hint: {create_out}"

@@ -309,8 +309,20 @@ pub async fn handle_hook_delete(
         mb.hooks.retain(|h| {
             if effective_hook_name(h) == req.name {
                 // Origin check re-asserted under the lock: if the hook
-                // became operator-origin between snapshots (impossible
-                // in current code, but future-proofing), leave it be.
+                // became operator-origin between snapshots, leave it
+                // in place (the earlier snapshot-based check would
+                // have returned origin-protected). This branch is
+                // structurally unreachable in current code: no verb
+                // mutates `origin` on an existing hook — hooks are
+                // created with their origin and only ever deleted.
+                // Kept as defensive coding so a future verb that
+                // rewrites `origin` in place cannot silently bypass
+                // origin protection. If that future verb is added,
+                // this `retain` path would return NotFound for a
+                // hook that exists (the positive break below never
+                // fires), which is a misleading error but still
+                // refuses the destructive operation; update to emit
+                // origin-protected explicitly at that point.
                 h.origin != HookOrigin::Mcp
             } else {
                 true

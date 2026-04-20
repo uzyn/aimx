@@ -2169,12 +2169,130 @@ address = "alice@example.com"
         assert_eq!(handle.load().mailboxes["alice"].hooks.len(), 0);
     }
 
+    /// Exercises the full SIGHUP signal path end-to-end: install the
+    /// tokio hangup handler, send two consecutive SIGHUPs to our own
+    /// PID, and verify `reload_config` is invoked both times and that
+    /// the handle reflects each on-disk edit. This is the load-bearing
+    /// reason the signal loop is a `loop { tokio::select! { ... } }`
+    /// rather than a one-shot await — a non-looping implementation
+    /// would silently miss the second signal.
+    #[cfg(unix)]
+    #[test]
+    fn sighup_signal_loop_handles_two_consecutive_reloads() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = build_test_config(tmp.path());
+        cfg.save(&path).unwrap();
+        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        assert_eq!(handle.load().mailboxes.len(), 2);
+
+        // Replicate just the SIGHUP branch of `run_serve`'s signal
+        // loop. Two reloads are expected; the fourth SIGHUP (if any)
+        // is ignored because the helper exits after two successful
+        // reloads, and `DONE.notified()` races against any further
+        // `sighup.recv()` calls.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let reload_handle = handle.clone();
+            let reload_path = path.clone();
+            let reloads = std::sync::Arc::new(tokio::sync::Notify::new());
+            let reloads_notify = reloads.clone();
+            let counter = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let counter_task = counter.clone();
+
+            let loop_task = tokio::spawn(async move {
+                let mut sighup =
+                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+                        .expect("install SIGHUP handler");
+                loop {
+                    tokio::select! {
+                        _ = sighup.recv() => {
+                            let _ = reload_config(&reload_path, &reload_handle);
+                            let n = counter_task.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                            if n >= 2 {
+                                reloads_notify.notify_one();
+                                return;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Give tokio time to install the signal handler before we
+            // deliver the first SIGHUP; signal delivery that arrives
+            // before the handler is ready is coalesced into one.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // First reload: add mailbox "bob".
+            let mut cfg1 = Config::load(&path).unwrap();
+            cfg1.mailboxes.insert(
+                "bob".to_string(),
+                crate::config::MailboxConfig {
+                    address: "bob@example.com".to_string(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                },
+            );
+            cfg1.save(&path).unwrap();
+            // SAFETY: delivering SIGHUP to our own process is sound;
+            // tokio's signal handler upgrades it to an async notify.
+            let pid = unsafe { libc::getpid() };
+            let rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+            assert_eq!(rc, 0, "first kill(SIGHUP) failed");
+
+            // Spin until the first reload lands, then stage the second.
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if counter.load(std::sync::atomic::Ordering::SeqCst) >= 1 {
+                    break;
+                }
+            }
+            assert_eq!(handle.load().mailboxes.len(), 3, "first reload missed");
+
+            // Second reload: add mailbox "carol". If the loop were
+            // one-shot this edit would never become visible.
+            let mut cfg2 = Config::load(&path).unwrap();
+            cfg2.mailboxes.insert(
+                "carol".to_string(),
+                crate::config::MailboxConfig {
+                    address: "carol@example.com".to_string(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                },
+            );
+            cfg2.save(&path).unwrap();
+            let rc = unsafe { libc::kill(pid, libc::SIGHUP) };
+            assert_eq!(rc, 0, "second kill(SIGHUP) failed");
+
+            let timeout = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                reloads.notified(),
+            )
+            .await;
+            assert!(timeout.is_ok(), "second reload never observed");
+
+            let cur = handle.load();
+            assert_eq!(cur.mailboxes.len(), 4, "second reload did not swap handle");
+            assert!(cur.mailboxes.contains_key("bob"));
+            assert!(cur.mailboxes.contains_key("carol"));
+
+            loop_task.abort();
+        });
+    }
+
     #[test]
     fn sighup_running_daemon_without_daemon_returns_daemon_not_running() {
-        // The pid file under AIMX_RUNTIME_DIR doesn't exist here and
-        // pgrep either fails or returns pids that we filter out. This
-        // test just confirms we never panic and always produce a
-        // well-formed outcome.
+        // Pid-file-only discovery: with AIMX_RUNTIME_DIR pointing at an
+        // empty temp dir, neither `<runtime_dir>/aimx.sock` nor
+        // `<runtime_dir>/aimx.pid` exist, so `find_daemon_pid` returns
+        // `None` and the outcome must be `DaemonNotRunning`. This test
+        // confirms the missing-socket short-circuit produces a
+        // well-formed outcome and never panics.
         let tmp = tempfile::TempDir::new().unwrap();
         let key = RUNTIME_DIR_ENV;
         // SAFETY: single-threaded test guard; the env var is restored on
@@ -2184,14 +2302,11 @@ address = "alice@example.com"
         // by the test harness.
         unsafe { std::env::set_var(key, tmp.path()) };
         let outcome = sighup_running_daemon();
-        // pgrep may return the test runner's PID (e.g. `cargo-test`) or
-        // nothing at all. The outcome must be one of the three
-        // documented variants.
-        match outcome {
-            SighupOutcome::Sent(_)
-            | SighupOutcome::DaemonNotRunning
-            | SighupOutcome::SignalFailed(_, _) => {}
-        }
+        assert_eq!(
+            outcome,
+            SighupOutcome::DaemonNotRunning,
+            "expected DaemonNotRunning with empty runtime dir"
+        );
         // SAFETY: see above.
         unsafe {
             match prev {

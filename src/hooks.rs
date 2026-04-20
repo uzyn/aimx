@@ -204,7 +204,7 @@ fn create_template(
             // Fallback: write directly to config.toml with the same
             // `origin = "mcp"` the daemon would have stamped (keeps the
             // file identical regardless of whether the daemon was up).
-            apply_template_create_direct(config, &args.mailbox, hook_for_preview)?;
+            apply_create_direct(config, &args.mailbox, hook_for_preview)?;
             println!(
                 "{} {}",
                 term::success("Hook created:"),
@@ -399,29 +399,6 @@ fn validate_create_args_common(args: &HookCreateArgs) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-/// Back-compat shim: tests referenced `validate_create_args(args)`
-/// directly. Dispatch to the common validator plus any raw-cmd-specific
-/// checks the old signature implied.
-#[cfg(test)]
-pub(crate) fn validate_create_args(
-    args: &HookCreateArgs,
-) -> Result<(), Box<dyn std::error::Error>> {
-    validate_create_args_common(args)?;
-    let event = parse_event(&args.event)?;
-    // Raw-cmd specific checks (old tests assumed raw-cmd path).
-    if let Some(cmd) = &args.cmd {
-        if matches!(event, HookEvent::AfterSend) && args.dangerously_support_untrusted {
-            return Err(
-                "--dangerously-support-untrusted is only valid on --event on_receive".into(),
-            );
-        }
-        if cmd.trim().is_empty() {
-            return Err("--cmd must not be empty".into());
-        }
-    }
-    Ok(())
-}
-
 fn parse_params(params: &[String]) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
     let mut out: BTreeMap<String, String> = BTreeMap::new();
     for raw in params {
@@ -461,18 +438,6 @@ fn apply_create_direct(
     validate_hooks(&new_config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     new_config.save(&crate::config::config_path())?;
     Ok(())
-}
-
-fn apply_template_create_direct(
-    config: &Config,
-    mailbox: &str,
-    hook: Hook,
-) -> Result<(), Box<dyn std::error::Error>> {
-    // Identical shape to `apply_create_direct`; kept as a distinct name
-    // so future direct-path divergence (e.g. origin=Operator for the
-    // template CLI path) has a clean spot to live. Right now the two
-    // paths share the validator / save invariants.
-    apply_create_direct(config, mailbox, hook)
 }
 
 fn apply_delete_direct(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -624,13 +589,34 @@ mod tests {
         }
     }
 
+    /// End-to-end validation of the raw-cmd CLI create path: the
+    /// common validator (shared with `--template`) plus the two raw-cmd
+    /// specific invariants (`--cmd` non-empty, `--dangerously-…` only
+    /// on `on_receive`). Inlined here so tests no longer depend on a
+    /// back-compat shim in `src/hooks.rs`.
+    fn validate_raw_cmd_args(args: &HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
+        validate_create_args_common(args)?;
+        let event = parse_event(&args.event)?;
+        if let Some(cmd) = &args.cmd {
+            if matches!(event, HookEvent::AfterSend) && args.dangerously_support_untrusted {
+                return Err(
+                    "--dangerously-support-untrusted is only valid on --event on_receive".into(),
+                );
+            }
+            if cmd.trim().is_empty() {
+                return Err("--cmd must not be empty".into());
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn validate_rejects_dangerous_on_after_send() {
         let args = HookCreateArgs {
             dangerously_support_untrusted: true,
             ..base_args("after_send")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_raw_cmd_args(&args).unwrap_err().to_string();
         assert!(err.contains("--dangerously-support-untrusted"), "{err}");
     }
 
@@ -640,7 +626,7 @@ mod tests {
             cmd: Some("   ".into()),
             ..base_args("on_receive")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_raw_cmd_args(&args).unwrap_err().to_string();
         assert!(err.contains("--cmd"), "{err}");
     }
 
@@ -650,7 +636,7 @@ mod tests {
             name: Some("bad name!".into()),
             ..base_args("on_receive")
         };
-        let err = validate_create_args(&args).unwrap_err().to_string();
+        let err = validate_create_args_common(&args).unwrap_err().to_string();
         assert!(err.contains("--name"), "{err}");
     }
 
@@ -660,12 +646,12 @@ mod tests {
             name: Some("nightly_summary".into()),
             ..base_args("on_receive")
         };
-        validate_create_args(&args).unwrap();
+        validate_create_args_common(&args).unwrap();
     }
 
     #[test]
     fn validate_accepts_anonymous() {
-        validate_create_args(&base_args("on_receive")).unwrap();
+        validate_create_args_common(&base_args("on_receive")).unwrap();
     }
 
     #[test]
