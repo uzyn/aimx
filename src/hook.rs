@@ -1,30 +1,41 @@
-//! Hook manager (formerly "channels"): rule evaluation, trust gating, and
+//! Hook manager (formerly "channels"): event dispatch, trust gating, and
 //! synchronous shell execution for `on_receive` and `after_send` events.
 //!
-//! One `Hook` entry in `config.toml` carries a globally-unique 12-char `id`,
-//! an `event` (`on_receive` | `after_send`), a `cmd`, optional match filters,
-//! and an opt-in `dangerously_support_untrusted` flag that lets `on_receive`
-//! hooks fire on non-trusted email.
+//! One `Hook` entry in `config.toml` carries an `event`
+//! (`on_receive` | `after_send`), a `cmd`, an opt-in
+//! `dangerously_support_untrusted` flag that lets `on_receive` hooks fire on
+//! non-trusted email, and an optional `name`. Hooks fire on every event of
+//! their configured type; the only gate is the `on_receive` trust check.
 //!
-//! The trust gate (Sprint 50 inversion of FR-35/36/37):
+//! `name` is optional. When omitted, the effective name is derived
+//! deterministically from `sha256(event || cmd ||
+//! dangerously_support_untrusted)` — stable across restarts without writing
+//! anything back to `config.toml`.
+//!
+//! The trust gate:
 //! `on_receive` hooks fire iff `email.trusted == "true"` OR
 //! `hook.dangerously_support_untrusted == true`. Mailbox `trust` + the
-//! `trusted_senders` allowlist are still the knobs that determine the
-//! email's `trusted` frontmatter value (see `trust.rs`); the hook gate
-//! reads the resolved value, not the policy.
+//! `trusted_senders` allowlist are the knobs that determine the email's
+//! `trusted` frontmatter value (see `trust.rs`); the hook gate reads the
+//! resolved value, not the policy.
 
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use rand::Rng;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::MailboxConfig;
 use crate::frontmatter::InboundFrontmatter;
 use crate::trust::TrustedValue;
 
-pub const HOOK_ID_LEN: usize = 12;
+/// Max length for a hook `name`. Names match
+/// `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$` — Docker-tag-like.
+pub const HOOK_NAME_MAX_LEN: usize = 128;
+
+/// Length of a derived name: first 12 hex chars of the sha256 digest.
+pub const DERIVED_HOOK_NAME_LEN: usize = 12;
 
 /// Supported hook events. `on_receive` fires during inbound ingest after the
 /// email is saved to disk. `after_send` fires on outbound delivery after the
@@ -51,15 +62,17 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
-/// One configured hook. Filter fields are flat on the hook table (no nested
-/// `[match]` sub-block); `on_receive` uses `from`, `after_send` uses `to`,
-/// and both accept `subject` + `has_attachment`.
+/// One configured hook. `deny_unknown_fields` makes stale filter fields or
+/// typos fail loudly at config load.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct Hook {
-    /// Globally-unique 12-char `[a-z0-9]` identifier. Generated via OsRng by
-    /// `aimx hooks create`; operators can hand-edit their own IDs as long as
-    /// the format validates.
-    pub id: String,
+    /// Optional hook name. When `None`, the effective name is derived
+    /// from `sha256(event || cmd || dangerously_support_untrusted)`.
+    /// Kept as `Option<String>` so the raw round-trip distinguishes
+    /// "omitted" from "present".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 
     pub event: HookEvent,
 
@@ -71,22 +84,6 @@ pub struct Hook {
 
     /// Shell command executed under `sh -c` with `AIMX_*` env vars set.
     pub cmd: String,
-
-    /// `on_receive` only: glob over the sender address.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<String>,
-
-    /// `after_send` only: glob over the recipient address.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<String>,
-
-    /// Substring match against the email subject (case-insensitive).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subject: Option<String>,
-
-    /// Require the email to have (`true`) or not have (`false`) attachments.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub has_attachment: Option<bool>,
 
     /// `on_receive` only: when `true`, the hook fires even if the email's
     /// `trusted` value is not `"true"`. Deliberately verbose name so
@@ -107,27 +104,51 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-/// Return true iff `s` is exactly 12 characters of `[a-z0-9]`.
-pub fn is_valid_hook_id(s: &str) -> bool {
-    s.len() == HOOK_ID_LEN
-        && s.chars()
-            .all(|c| c.is_ascii_digit() || (c.is_ascii_alphabetic() && c.is_ascii_lowercase()))
+/// Return true iff `s` matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`.
+pub fn is_valid_hook_name(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.is_empty() || bytes.len() > HOOK_NAME_MAX_LEN {
+        return false;
+    }
+    let first = bytes[0];
+    let first_ok = first.is_ascii_alphanumeric() || first == b'_';
+    if !first_ok {
+        return false;
+    }
+    bytes[1..]
+        .iter()
+        .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
 }
 
-/// Generate a fresh 12-char `[a-z0-9]` hook id backed by `OsRng`.
+/// Derive a stable 12-hex-char name from `(event, cmd, dangerous)`.
 ///
-/// Consumed by Sprint 51's `aimx hooks create` command; exercised from tests
-/// today so the function is alive even before that CLI lands.
-#[allow(dead_code)]
-pub fn generate_hook_id() -> String {
-    const CHARS: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
-    let mut rng = rand::rng();
-    (0..HOOK_ID_LEN)
-        .map(|_| {
-            let i = rng.random_range(0..CHARS.len());
-            CHARS[i] as char
-        })
-        .collect()
+/// Uses sha256 over the three inputs joined by the 0x1F unit-separator
+/// byte, which can never appear in the TOML payload. The first 12 hex
+/// chars (48 bits) are returned — wide enough that collisions across a
+/// realistic config set are vanishingly improbable, and the output
+/// satisfies `is_valid_hook_name`.
+pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(event.as_str().as_bytes());
+    hasher.update([0x1F]);
+    hasher.update(cmd.as_bytes());
+    hasher.update([0x1F]);
+    hasher.update([dangerous as u8]);
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(DERIVED_HOOK_NAME_LEN);
+    for b in digest.iter().take(DERIVED_HOOK_NAME_LEN.div_ceil(2)) {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out.truncate(DERIVED_HOOK_NAME_LEN);
+    out
+}
+
+/// Resolve the effective name: explicit `name` if present, else derived.
+pub fn effective_hook_name(hook: &Hook) -> String {
+    match &hook.name {
+        Some(n) => n.clone(),
+        None => derive_hook_name(hook.event, &hook.cmd, hook.dangerously_support_untrusted),
+    }
 }
 
 /// Context for an `on_receive` dispatch: the written `.md` file and parsed
@@ -144,7 +165,6 @@ pub struct AfterSendContext<'a> {
     pub from: &'a str,
     pub to: &'a str,
     pub subject: &'a str,
-    pub has_attachment: bool,
     /// Path to the persisted sent-copy `.md` (empty string when the send
     /// wasn't persisted — e.g. TEMP failures).
     pub filepath: &'a str,
@@ -175,80 +195,15 @@ impl SendStatus {
     }
 }
 
-/// Trust gate for `on_receive` hooks (Sprint 50 inversion).
+/// Trust gate for `on_receive` hooks.
 ///
 /// Fires iff `email_trusted == TrustedValue::True` OR
 /// `hook.dangerously_support_untrusted == true`.
-///
-/// This is a deliberate behavioral change vs FR-35: mailboxes with
-/// `trust = "none"` no longer fire hooks by default. Operators must either
-/// set `trust = "verified"` + an allowlist or flag each hook explicitly.
 pub fn should_fire_on_receive(hook: &Hook, email_trusted: TrustedValue) -> bool {
     if hook.dangerously_support_untrusted {
         return true;
     }
     email_trusted == TrustedValue::True
-}
-
-fn extract_email_for_match(addr: &str) -> String {
-    // Match RFC 5322 display-name form `"Name" <addr>` by taking the LAST
-    // `<` and the first `>` after it. Mirrors `send_handler::extract_bare_address`
-    // and avoids slice-panics on pathological input like `"foo>bar<baz>"`
-    // where a stray `>` precedes the opening `<`.
-    if let Some(start) = addr.rfind('<') {
-        let tail = &addr[start + 1..];
-        if let Some(end) = tail.find('>') {
-            return tail[..end].to_lowercase();
-        }
-    }
-    addr.to_lowercase()
-}
-
-fn subject_matches(pattern: &str, subject: &str) -> bool {
-    subject.to_lowercase().contains(&pattern.to_lowercase())
-}
-
-/// Evaluate filter predicates for an `on_receive` hook.
-pub fn on_receive_filter_matches(hook: &Hook, metadata: &InboundFrontmatter) -> bool {
-    if let Some(pattern) = hook.from.as_deref() {
-        let from_addr = extract_email_for_match(&metadata.from);
-        if !glob_match::glob_match(pattern, &from_addr) {
-            return false;
-        }
-    }
-    if let Some(pattern) = hook.subject.as_deref()
-        && !subject_matches(pattern, &metadata.subject)
-    {
-        return false;
-    }
-    if let Some(expect) = hook.has_attachment {
-        let has = !metadata.attachments.is_empty();
-        if expect != has {
-            return false;
-        }
-    }
-    true
-}
-
-/// Evaluate filter predicates for an `after_send` hook.
-pub fn after_send_filter_matches(hook: &Hook, ctx: &AfterSendContext) -> bool {
-    if let Some(pattern) = hook.to.as_deref() {
-        let to_addr = extract_email_for_match(ctx.to);
-        if !glob_match::glob_match(pattern, &to_addr) {
-            return false;
-        }
-    }
-    if let Some(pattern) = hook.subject.as_deref()
-        && !subject_matches(pattern, ctx.subject)
-    {
-        return false;
-    }
-    if let Some(expect) = hook.has_attachment
-        && expect != ctx.has_attachment
-    {
-        return false;
-    }
-    true
 }
 
 /// Substitute aimx-controlled placeholders. Only `{id}` and `{date}` expand —
@@ -257,9 +212,9 @@ pub fn substitute_template(command: &str, id: &str, date: &str) -> String {
     command.replace("{id}", id).replace("{date}", date)
 }
 
-/// Fire every matching `on_receive` hook for `mailbox_config` under the
-/// resolved trust gate. Failures are logged at `warn` via `tracing` but
-/// never propagate.
+/// Fire every `on_receive` hook for `mailbox_config` under the resolved
+/// trust gate. Failures are logged at `warn` via `tracing` but never
+/// propagate.
 pub fn execute_on_receive(mailbox_config: &MailboxConfig, ctx: &OnReceiveContext) {
     let email_trusted = parse_trusted(&ctx.metadata.trusted);
 
@@ -267,13 +222,11 @@ pub fn execute_on_receive(mailbox_config: &MailboxConfig, ctx: &OnReceiveContext
         if !should_fire_on_receive(hook, email_trusted) {
             continue;
         }
-        if !on_receive_filter_matches(hook, ctx.metadata) {
-            continue;
-        }
 
+        let hook_name = effective_hook_name(hook);
         let filepath = ctx.filepath.to_string_lossy().into_owned();
         let env: Vec<(&str, &str)> = vec![
-            ("AIMX_HOOK_ID", hook.id.as_str()),
+            ("AIMX_HOOK_NAME", hook_name.as_str()),
             ("AIMX_FROM", ctx.metadata.from.as_str()),
             ("AIMX_SUBJECT", ctx.metadata.subject.as_str()),
             ("AIMX_TO", ctx.metadata.to.as_str()),
@@ -284,6 +237,7 @@ pub fn execute_on_receive(mailbox_config: &MailboxConfig, ctx: &OnReceiveContext
         let expanded = substitute_template(&hook.cmd, &ctx.metadata.id, &ctx.metadata.date);
         run_and_log(
             hook,
+            &hook_name,
             &expanded,
             &env,
             &ctx.metadata.mailbox,
@@ -292,18 +246,15 @@ pub fn execute_on_receive(mailbox_config: &MailboxConfig, ctx: &OnReceiveContext
     }
 }
 
-/// Fire every matching `after_send` hook for `mailbox_config`. Runs
-/// synchronously — the daemon awaits subprocess completion for predictable
-/// timing, but exit codes are discarded (hooks cannot affect delivery).
+/// Fire every `after_send` hook for `mailbox_config`. Runs synchronously —
+/// the daemon awaits subprocess completion for predictable timing, but exit
+/// codes are discarded (hooks cannot affect delivery).
 pub fn execute_after_send(mailbox_config: &MailboxConfig, ctx: &AfterSendContext) {
     for hook in mailbox_config.after_send_hooks() {
-        if !after_send_filter_matches(hook, ctx) {
-            continue;
-        }
-
+        let hook_name = effective_hook_name(hook);
         let send_status = ctx.send_status.as_str();
         let env: Vec<(&str, &str)> = vec![
-            ("AIMX_HOOK_ID", hook.id.as_str()),
+            ("AIMX_HOOK_NAME", hook_name.as_str()),
             ("AIMX_FROM", ctx.from),
             ("AIMX_TO", ctx.to),
             ("AIMX_SUBJECT", ctx.subject),
@@ -324,6 +275,7 @@ pub fn execute_after_send(mailbox_config: &MailboxConfig, ctx: &AfterSendContext
         let expanded = substitute_template(&hook.cmd, &id_for_template, &now);
         run_and_log(
             hook,
+            &hook_name,
             &expanded,
             &env,
             ctx.mailbox,
@@ -340,6 +292,7 @@ enum LogSubject<'a> {
 
 fn run_and_log(
     hook: &Hook,
+    hook_name: &str,
     expanded: &str,
     env: &[(&str, &str)],
     mailbox: &str,
@@ -380,11 +333,10 @@ fn run_and_log(
         "email_id=".to_string()
     };
 
-    // Stable single-line format (FR-32b / S50-5).
     tracing::info!(
         target: "aimx::hook",
-        "hook_id={hook_id} event={event} mailbox={mailbox} {id_tag} exit_code={exit_code} duration_ms={duration_ms}",
-        hook_id = hook.id,
+        "hook_name={hook_name} event={event} mailbox={mailbox} {id_tag} exit_code={exit_code} duration_ms={duration_ms}",
+        hook_name = hook_name,
         event = hook.event.as_str(),
         mailbox = mailbox,
     );
@@ -392,14 +344,14 @@ fn run_and_log(
     if let Some(msg) = exec_err {
         tracing::warn!(
             target: "aimx::hook",
-            "hook_id={hook_id} exec error: {msg}",
-            hook_id = hook.id,
+            "hook_name={hook_name} exec error: {msg}",
+            hook_name = hook_name,
         );
     } else if exit_code != 0 {
         tracing::warn!(
             target: "aimx::hook",
-            "hook_id={hook_id} exited with code {exit_code}: {stderr}",
-            hook_id = hook.id,
+            "hook_name={hook_name} exited with code {exit_code}: {stderr}",
+            hook_name = hook_name,
             stderr = stderr_msg.trim(),
         );
     }
@@ -407,8 +359,8 @@ fn run_and_log(
     if duration_ms > 5_000 {
         tracing::warn!(
             target: "aimx::hook",
-            "hook_id={hook_id} slow: duration_ms={duration_ms} (>5s)",
-            hook_id = hook.id,
+            "hook_name={hook_name} slow: duration_ms={duration_ms} (>5s)",
+            hook_name = hook_name,
         );
     }
 }
@@ -425,7 +377,7 @@ fn parse_trusted(s: &str) -> TrustedValue {
 mod tests {
     use super::*;
     use crate::config::{Config, MailboxConfig};
-    use crate::frontmatter::{AttachmentMeta, InboundFrontmatter};
+    use crate::frontmatter::InboundFrontmatter;
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
 
@@ -473,187 +425,104 @@ mod tests {
         }
     }
 
-    fn basic_hook(id: &str) -> Hook {
+    fn basic_hook(name: &str) -> Hook {
         Hook {
-            id: id.to_string(),
+            name: Some(name.to_string()),
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
-            from: None,
-            to: None,
-            subject: None,
-            has_attachment: None,
             dangerously_support_untrusted: false,
         }
     }
 
     #[test]
-    fn generate_hook_id_produces_12_chars_alphanumeric() {
-        for _ in 0..50 {
-            let id = generate_hook_id();
-            assert_eq!(id.len(), HOOK_ID_LEN, "id should be 12 chars: {id}");
-            assert!(
-                is_valid_hook_id(&id),
-                "id should validate as [a-z0-9]{{12}}: {id}"
-            );
-        }
+    fn is_valid_hook_name_boundaries() {
+        assert!(is_valid_hook_name("a"));
+        assert!(is_valid_hook_name("_"));
+        assert!(is_valid_hook_name("9"));
+        assert!(is_valid_hook_name("abc-123_def.ghi"));
+        assert!(is_valid_hook_name(&"a".repeat(HOOK_NAME_MAX_LEN)));
+        assert!(!is_valid_hook_name(&"a".repeat(HOOK_NAME_MAX_LEN + 1)));
+        assert!(!is_valid_hook_name(""));
+        assert!(!is_valid_hook_name(".leading-dot"));
+        assert!(!is_valid_hook_name("-leading-dash"));
+        assert!(!is_valid_hook_name("has space"));
+        assert!(!is_valid_hook_name("bang!"));
+        assert!(!is_valid_hook_name("über"));
     }
 
     #[test]
-    fn generate_hook_id_is_not_trivially_deterministic() {
-        let a = generate_hook_id();
-        let b = generate_hook_id();
-        let c = generate_hook_id();
-        // OsRng collisions on three 12-char alphanumeric draws are
-        // astronomically unlikely; asserting "not all equal" is enough.
-        assert!(!(a == b && b == c), "three consecutive ids collided: {a}");
+    fn derive_hook_name_deterministic() {
+        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        let b = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), DERIVED_HOOK_NAME_LEN);
+        assert!(is_valid_hook_name(&a));
     }
 
     #[test]
-    fn is_valid_hook_id_boundaries() {
-        assert!(is_valid_hook_id("abcdefghijkl"));
-        assert!(is_valid_hook_id("0123456789ab"));
-        assert!(!is_valid_hook_id("short"));
-        assert!(!is_valid_hook_id("abcdefghijklm")); // 13 chars
-        assert!(!is_valid_hook_id("abcdefghijk")); // 11 chars
-        assert!(!is_valid_hook_id("ABCDEFGHIJKL")); // uppercase
-        assert!(!is_valid_hook_id("abc-def-ghij")); // hyphens
-        assert!(!is_valid_hook_id("abcdefghijk!")); // punctuation
-        assert!(!is_valid_hook_id("")); // empty
+    fn derive_hook_name_differs_by_event() {
+        let r = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        let s = derive_hook_name(HookEvent::AfterSend, "echo hi", false);
+        assert_ne!(r, s);
+    }
+
+    #[test]
+    fn derive_hook_name_differs_by_cmd() {
+        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        let b = derive_hook_name(HookEvent::OnReceive, "echo hj", false);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn derive_hook_name_differs_by_dangerous_flag() {
+        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        let b = derive_hook_name(HookEvent::OnReceive, "echo hi", true);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn effective_hook_name_prefers_explicit() {
+        let mut hook = basic_hook("explicit_name");
+        assert_eq!(effective_hook_name(&hook), "explicit_name");
+        hook.name = None;
+        let derived = effective_hook_name(&hook);
+        assert_eq!(
+            derived,
+            derive_hook_name(HookEvent::OnReceive, "true", false)
+        );
     }
 
     #[test]
     fn should_fire_on_receive_trusted_true_fires() {
-        let hook = basic_hook("aaaabbbbcccc");
+        let hook = basic_hook("h1");
         assert!(should_fire_on_receive(&hook, TrustedValue::True));
     }
 
     #[test]
     fn should_fire_on_receive_trusted_false_does_not_fire() {
-        let hook = basic_hook("aaaabbbbcccc");
+        let hook = basic_hook("h1");
         assert!(!should_fire_on_receive(&hook, TrustedValue::False));
     }
 
     #[test]
     fn should_fire_on_receive_trusted_none_does_not_fire_by_default() {
-        // Behavioral inversion vs FR-35: trust=none no longer fires hooks.
-        let hook = basic_hook("aaaabbbbcccc");
+        let hook = basic_hook("h1");
         assert!(!should_fire_on_receive(&hook, TrustedValue::None));
     }
 
     #[test]
     fn should_fire_on_receive_dangerously_opt_in_fires_for_none() {
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         assert!(should_fire_on_receive(&hook, TrustedValue::None));
     }
 
     #[test]
     fn should_fire_on_receive_dangerously_opt_in_fires_for_false() {
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         assert!(should_fire_on_receive(&hook, TrustedValue::False));
-    }
-
-    #[test]
-    fn filter_from_glob_matches() {
-        let mut hook = basic_hook("aaaabbbbcccc");
-        hook.from = Some("*@gmail.com".to_string());
-        let meta = sample_metadata();
-        assert!(on_receive_filter_matches(&hook, &meta));
-    }
-
-    #[test]
-    fn filter_from_glob_mismatch() {
-        let mut hook = basic_hook("aaaabbbbcccc");
-        hook.from = Some("*@yahoo.com".to_string());
-        let meta = sample_metadata();
-        assert!(!on_receive_filter_matches(&hook, &meta));
-    }
-
-    #[test]
-    fn filter_subject_case_insensitive() {
-        let mut hook = basic_hook("aaaabbbbcccc");
-        hook.subject = Some("HELLO".to_string());
-        let meta = sample_metadata();
-        assert!(on_receive_filter_matches(&hook, &meta));
-    }
-
-    #[test]
-    fn filter_has_attachment_true_with_attachments_matches() {
-        let mut hook = basic_hook("aaaabbbbcccc");
-        hook.has_attachment = Some(true);
-        let mut meta = sample_metadata();
-        meta.attachments = vec![AttachmentMeta {
-            filename: "file.txt".to_string(),
-            content_type: "text/plain".to_string(),
-            size: 100,
-            path: "attachments/file.txt".to_string(),
-        }];
-        assert!(on_receive_filter_matches(&hook, &meta));
-    }
-
-    #[test]
-    fn filter_has_attachment_false_with_no_attachments_matches() {
-        let mut hook = basic_hook("aaaabbbbcccc");
-        hook.has_attachment = Some(false);
-        let meta = sample_metadata();
-        assert!(on_receive_filter_matches(&hook, &meta));
-    }
-
-    #[test]
-    fn extract_email_for_match_handles_inverted_angle_brackets() {
-        // Regression: the old implementation used `find('<')` + `find('>')`
-        // and panicked on pathological input where `>` preceded `<`
-        // (e.g. `"foo>bar<baz>"` — `start+1 > end` when the naive slice
-        // `addr[start+1..end]` was formed). Confirm the hardened form
-        // returns a non-panicking, useful result.
-        let out = extract_email_for_match("foo>bar<baz@example.com>");
-        assert_eq!(out, "baz@example.com");
-    }
-
-    #[test]
-    fn extract_email_for_match_no_panic_on_leading_close_bracket() {
-        // Even without a trailing `>`, the function must not panic.
-        let out = extract_email_for_match("weird> input");
-        // No `<` at all → falls through to lowercase of the whole string.
-        assert_eq!(out, "weird> input");
-    }
-
-    #[test]
-    fn extract_email_for_match_takes_last_open_bracket() {
-        // Display name may itself contain `<`; we pick the LAST one.
-        let out = extract_email_for_match("<spoofed@attacker.com> real <user@example.com>");
-        assert_eq!(out, "user@example.com");
-    }
-
-    #[test]
-    fn after_send_filter_to_does_not_panic_on_pathological_input() {
-        // Ensures the `after_send` filter path itself does not slice-panic.
-        let hook = Hook {
-            id: "panicguard01".to_string(),
-            event: HookEvent::AfterSend,
-            r#type: "cmd".to_string(),
-            cmd: "true".to_string(),
-            from: None,
-            to: Some("*@example.com".to_string()),
-            subject: None,
-            has_attachment: None,
-            dangerously_support_untrusted: false,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "foo>bar<malformed",
-            subject: "x",
-            has_attachment: false,
-            filepath: "",
-            message_id: "<x@test.com>",
-            send_status: SendStatus::Failed,
-        };
-        // Does not panic; returns false because the `to` glob doesn't match
-        // the lowercased fallback.
-        assert!(!after_send_filter_matches(&hook, &ctx));
     }
 
     #[test]
@@ -694,7 +563,7 @@ mod tests {
     fn execute_on_receive_fires_when_trusted_true() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.cmd = format!("touch {}", marker.display());
         let (_m, _p) = execute_single(hook, TrustedValue::True);
         assert!(marker.exists(), "hook should fire when trusted=true");
@@ -704,7 +573,7 @@ mod tests {
     fn execute_on_receive_does_not_fire_when_trusted_none() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.cmd = format!("touch {}", marker.display());
         let (_m, _p) = execute_single(hook, TrustedValue::None);
         assert!(
@@ -717,7 +586,7 @@ mod tests {
     fn execute_on_receive_fires_with_dangerously_opt_in() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         hook.cmd = format!("touch {}", marker.display());
         let (_m, _p) = execute_single(hook, TrustedValue::None);
@@ -728,14 +597,14 @@ mod tests {
     }
 
     #[test]
-    fn execute_on_receive_sets_all_env_vars_including_hook_id() {
+    fn execute_on_receive_sets_all_env_vars_including_hook_name() {
         let tmp = tempfile::TempDir::new().unwrap();
         let out = tmp.path().join("env.out");
-        let mut hook = basic_hook("hook00000001");
+        let mut hook = basic_hook("hook_explicit");
         hook.dangerously_support_untrusted = true;
         hook.cmd = format!(
             "printf 'HOOK=%s FROM=%s TO=%s SUBJECT=%s MAILBOX=%s FILEPATH=%s\\n' \
-             \"$AIMX_HOOK_ID\" \"$AIMX_FROM\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \
+             \"$AIMX_HOOK_NAME\" \"$AIMX_FROM\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \
              \"$AIMX_MAILBOX\" \"$AIMX_FILEPATH\" > {}",
             out.display()
         );
@@ -754,15 +623,49 @@ mod tests {
         execute_on_receive(&mailbox, &ctx);
 
         let content = std::fs::read_to_string(&out).unwrap();
-        assert!(content.contains("HOOK=hook00000001"), "got: {content}");
+        assert!(content.contains("HOOK=hook_explicit"), "got: {content}");
         assert!(content.contains("FROM=alice@gmail.com"), "got: {content}");
         assert!(content.contains("SUBJECT=Hello World"), "got: {content}");
         assert!(content.contains("MAILBOX=catchall"), "got: {content}");
     }
 
     #[test]
+    fn execute_on_receive_uses_derived_name_when_name_omitted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("env.out");
+        let hook = Hook {
+            name: None,
+            event: HookEvent::OnReceive,
+            r#type: "cmd".to_string(),
+            cmd: format!(
+                "printf 'HOOK=%s\\n' \"$AIMX_HOOK_NAME\" > {}",
+                out.display()
+            ),
+            dangerously_support_untrusted: true,
+        };
+        let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+        };
+        let meta = sample_metadata();
+        let filepath = tmp.path().join("test.md");
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&mailbox, &ctx);
+        let content = std::fs::read_to_string(&out).unwrap();
+        assert!(
+            content.contains(&format!("HOOK={derived}")),
+            "got: {content}, expected derived: {derived}"
+        );
+    }
+
+    #[test]
     fn execute_on_receive_env_clear_prevents_parent_leak() {
-        // Set a sentinel in the parent; the subprocess must not see it.
         let tmp = tempfile::TempDir::new().unwrap();
         let out = tmp.path().join("env.out");
 
@@ -777,7 +680,7 @@ mod tests {
         }
         let _guard = EnvGuard("AIMX_LEAK_SENTINEL_HOOK");
 
-        let mut hook = basic_hook("hook00000002");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         hook.cmd = format!(
             "printf 'leak=[%s]\\n' \"$AIMX_LEAK_SENTINEL_HOOK\" > {}",
@@ -809,19 +712,15 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let out = tmp.path().join("after.out");
         let hook = Hook {
-            id: "aftersend001".to_string(),
+            name: Some("after_explicit".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
             cmd: format!(
                 "printf 'STATUS=%s HOOK=%s TO=%s FROM=%s FILEPATH=%s\\n' \
-                 \"$AIMX_SEND_STATUS\" \"$AIMX_HOOK_ID\" \"$AIMX_TO\" \"$AIMX_FROM\" \
+                 \"$AIMX_SEND_STATUS\" \"$AIMX_HOOK_NAME\" \"$AIMX_TO\" \"$AIMX_FROM\" \
                  \"$AIMX_FILEPATH\" > {}",
                 out.display()
             ),
-            from: None,
-            to: None,
-            subject: None,
-            has_attachment: None,
             dangerously_support_untrusted: false,
         };
         let mailbox = MailboxConfig {
@@ -835,7 +734,6 @@ mod tests {
             from: "alice@test.com",
             to: "bob@example.com",
             subject: "Hi",
-            has_attachment: false,
             filepath: "/tmp/sent/alice/2025.md",
             message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Delivered,
@@ -844,7 +742,7 @@ mod tests {
 
         let content = std::fs::read_to_string(&out).unwrap();
         assert!(content.contains("STATUS=delivered"), "got: {content}");
-        assert!(content.contains("HOOK=aftersend001"), "got: {content}");
+        assert!(content.contains("HOOK=after_explicit"), "got: {content}");
         assert!(content.contains("TO=bob@example.com"), "got: {content}");
         assert!(content.contains("FROM=alice@test.com"), "got: {content}");
     }
@@ -861,86 +759,12 @@ mod tests {
     }
 
     #[test]
-    fn execute_after_send_filter_to_glob_match() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("fired");
-        let hook = Hook {
-            id: "tofilter0001".to_string(),
-            event: HookEvent::AfterSend,
-            r#type: "cmd".to_string(),
-            cmd: format!("touch {}", marker.display()),
-            from: None,
-            to: Some("*@example.com".to_string()),
-            subject: None,
-            has_attachment: None,
-            dangerously_support_untrusted: false,
-        };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "bob@example.com",
-            subject: "Hi",
-            has_attachment: false,
-            filepath: "/tmp/sent/alice/x.md",
-            message_id: "<outbound-test@test.com>",
-            send_status: SendStatus::Delivered,
-        };
-        execute_after_send(&mailbox, &ctx);
-        assert!(marker.exists());
-    }
-
-    #[test]
-    fn execute_after_send_filter_mismatch_silent_skip() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("should_not_fire");
-        let hook = Hook {
-            id: "tofilter0002".to_string(),
-            event: HookEvent::AfterSend,
-            r#type: "cmd".to_string(),
-            cmd: format!("touch {}", marker.display()),
-            from: None,
-            to: Some("*@other.net".to_string()),
-            subject: None,
-            has_attachment: None,
-            dangerously_support_untrusted: false,
-        };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "bob@example.com",
-            subject: "Hi",
-            has_attachment: false,
-            filepath: "/tmp/sent/alice/x.md",
-            message_id: "<outbound-test@test.com>",
-            send_status: SendStatus::Delivered,
-        };
-        execute_after_send(&mailbox, &ctx);
-        assert!(!marker.exists(), "filter-mismatched hook should not fire");
-    }
-
-    #[test]
     fn execute_after_send_nonzero_exit_does_not_panic() {
         let hook = Hook {
-            id: "failhookxxxx".to_string(),
+            name: Some("failhook".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
             cmd: "false".to_string(),
-            from: None,
-            to: None,
-            subject: None,
-            has_attachment: None,
             dangerously_support_untrusted: false,
         };
         let mailbox = MailboxConfig {
@@ -954,7 +778,6 @@ mod tests {
             from: "alice@test.com",
             to: "bob@example.com",
             subject: "Hi",
-            has_attachment: false,
             filepath: "/tmp/sent/alice/x.md",
             message_id: "<outbound-test@test.com>",
             send_status: SendStatus::Failed,
@@ -966,7 +789,7 @@ mod tests {
     #[tracing_test::traced_test]
     fn hook_fire_emits_structured_log_line() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut hook = basic_hook("logid0000001");
+        let mut hook = basic_hook("log_explicit");
         hook.dangerously_support_untrusted = true;
         hook.cmd = "true".to_string();
         let mailbox = MailboxConfig {
@@ -985,8 +808,8 @@ mod tests {
         execute_on_receive(&mailbox, &ctx);
 
         assert!(
-            logs_contain("hook_id=logid0000001"),
-            "log line should carry hook_id=..."
+            logs_contain("hook_name=log_explicit"),
+            "log line should carry hook_name=..."
         );
         assert!(
             logs_contain("event=on_receive"),
@@ -1014,7 +837,7 @@ mod tests {
     #[tracing_test::traced_test]
     fn hook_fire_emits_log_for_nonzero_exit() {
         let tmp = tempfile::TempDir::new().unwrap();
-        let mut hook = basic_hook("logid0000002");
+        let mut hook = basic_hook("log_failed");
         hook.dangerously_support_untrusted = true;
         hook.cmd = "false".to_string();
         let mailbox = MailboxConfig {
@@ -1032,7 +855,7 @@ mod tests {
         };
         execute_on_receive(&mailbox, &ctx);
 
-        assert!(logs_contain("hook_id=logid0000002"));
+        assert!(logs_contain("hook_name=log_failed"));
         assert!(logs_contain("exit_code=1"));
     }
 
@@ -1044,14 +867,10 @@ mod tests {
         // be empty too. The structured log line must still surface the
         // RFC Message-ID so operators can grep by a stable identifier.
         let hook = Hook {
-            id: "tempfailid01".to_string(),
+            name: Some("tempfail".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
-            from: None,
-            to: None,
-            subject: None,
-            has_attachment: None,
             dangerously_support_untrusted: false,
         };
         let mailbox = MailboxConfig {
@@ -1065,16 +884,15 @@ mod tests {
             from: "alice@test.com",
             to: "bob@example.com",
             subject: "Hi",
-            has_attachment: false,
-            filepath: "", // TEMP failure: nothing persisted
+            filepath: "",
             message_id: "<deferred-uuid@test.com>",
             send_status: SendStatus::Deferred,
         };
         execute_after_send(&mailbox, &ctx);
 
         assert!(
-            logs_contain("hook_id=tempfailid01"),
-            "log line should carry hook_id=..."
+            logs_contain("hook_name=tempfail"),
+            "log line should carry hook_name=..."
         );
         assert!(
             logs_contain("message_id=<deferred-uuid@test.com>"),
@@ -1082,13 +900,11 @@ mod tests {
         );
     }
 
-    // --- Tests preserved from the old channel.rs that remain relevant ---
-
     #[test]
     fn env_var_preserves_backtick_injection() {
         let tmp = tempfile::TempDir::new().unwrap();
         let out = tmp.path().join("out.log");
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         hook.cmd = format!("printf 'FROM=%s\\n' \"$AIMX_FROM\" > {}", out.display());
         let mailbox = MailboxConfig {
@@ -1116,7 +932,7 @@ mod tests {
     fn env_var_preserves_dollar_paren_injection() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("pwned");
-        let mut hook = basic_hook("aaaabbbbcccc");
+        let mut hook = basic_hook("h1");
         hook.dangerously_support_untrusted = true;
         hook.cmd = "echo \"$AIMX_SUBJECT\" > /dev/null".to_string();
         let mailbox = MailboxConfig {
@@ -1141,12 +957,10 @@ mod tests {
 
     #[test]
     fn config_sample_config_is_valid() {
-        // Catch any drift in the shared test helper.
         let cfg = sample_config();
         assert_eq!(cfg.trust, "none");
     }
 
-    // Ensure `Path` import survives if tests shrink.
     #[test]
     fn placeholder_path_import() {
         let _p: &Path = Path::new("/tmp");

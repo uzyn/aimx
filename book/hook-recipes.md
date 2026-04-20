@@ -4,7 +4,7 @@
 
 This chapter is the canonical cookbook for wiring AIMX hooks to every supported AI agent. Each section shows a copy-paste `config.toml` snippet, the agent-specific CLI flags that matter for non-interactive invocation, and notes on exit codes, logs, and gotchas.
 
-For the underlying mechanics (match filters, template variables, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the AIMX plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
+For the underlying mechanics (names, env vars, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the AIMX plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
 
 ## What counts as a hook recipe?
 
@@ -12,7 +12,7 @@ A hook recipe is a `[[mailboxes.<name>.hooks]]` block whose `cmd` invokes an AI 
 
 1. Email lands in the mailbox, AIMX writes the `.md` file to disk.
 2. AIMX evaluates the trust gate. A hook fires iff `trusted == "true"` on the email OR the hook sets `dangerously_support_untrusted = true`.
-3. AIMX fires the shell `cmd`. User-controlled header values are delivered as env vars (`AIMX_HOOK_ID`, `AIMX_FROM`, `AIMX_SUBJECT`, `AIMX_TO`, `AIMX_MAILBOX`, `AIMX_FILEPATH`); the two aimx-controlled placeholders `{id}` and `{date}` are substituted into the command string.
+3. AIMX fires the shell `cmd`. User-controlled header values are delivered as env vars (`AIMX_HOOK_NAME`, `AIMX_FROM`, `AIMX_SUBJECT`, `AIMX_TO`, `AIMX_MAILBOX`, `AIMX_FILEPATH`); the two aimx-controlled placeholders `{id}` and `{date}` are substituted into the command string.
 4. The agent reads the email body (typically by `cat`-ing `"$AIMX_FILEPATH"`) and takes action — replying, filing a ticket, updating a calendar, whatever.
 5. Exit code is logged (one structured line per fire) but does not block delivery.
 
@@ -53,7 +53,7 @@ trust = "verified"
 trusted_senders = ["*@yourcompany.com"]
 
 [[mailboxes.inbox.hooks]]
-id = "claudeinbox1"
+name = "claudeinbox1"
 event = "on_receive"
 cmd = '''
 claude -p "You received a new email. Read it and file a summary ticket.
@@ -87,7 +87,7 @@ address = "triage@agent.yourdomain.com"
 trust = "verified"
 
 [[mailboxes.triage.hooks]]
-id = "codextriage1"
+name = "codextriage1"
 event = "on_receive"
 cmd = '''
 codex exec "Triage this email and update the issue tracker.
@@ -116,7 +116,7 @@ address = "research@agent.yourdomain.com"
 trust = "verified"
 
 [[mailboxes.research.hooks]]
-id = "ocresearch01"
+name = "ocresearch01"
 event = "on_receive"
 cmd = '''
 opencode run "A new research email arrived. Read \"$AIMX_FILEPATH\" and append a digest entry to docs/digest.md.
@@ -141,7 +141,7 @@ address = "notes@agent.yourdomain.com"
 trust = "verified"
 
 [[mailboxes.notes.hooks]]
-id = "geminines01"
+name = "geminines01"
 event = "on_receive"
 cmd = '''
 gemini -p "A new note arrived by email. Read \"$AIMX_FILEPATH\" and file it into my notes." \
@@ -163,7 +163,7 @@ address = "ops@agent.yourdomain.com"
 trust = "verified"
 
 [[mailboxes.ops.hooks]]
-id = "gooseops001"
+name = "gooseops001"
 event = "on_receive"
 cmd = '''
 goose run -t "Ops email arrived. Read \"$AIMX_FILEPATH\", check if action is required, and page on-call if so.
@@ -189,7 +189,7 @@ trust = "verified"
 trusted_senders = ["*@yourcompany.com"]
 
 [[mailboxes.inbox.hooks]]
-id = "openclaw0001"
+name = "openclaw0001"
 event = "on_receive"
 cmd = '''
 openclaw agent \
@@ -217,7 +217,7 @@ address = "hermes@agent.yourdomain.com"
 trust = "verified"
 
 [[mailboxes.hermes.hooks]]
-id = "hermesnotify"
+# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
 event = "on_receive"
 cmd = 'ntfy pub hermes-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
 dangerously_support_untrusted = true
@@ -240,7 +240,7 @@ trust = "verified"
 trusted_senders = ["*@yourcompany.com"]
 
 [[mailboxes.bugs.hooks]]
-id = "aiderbugs01"
+name = "aiderbugs01"
 event = "on_receive"
 cmd = '''
 cd /srv/repos/myapp && \
@@ -258,16 +258,16 @@ Send-side hooks run after AIMX resolves the MX delivery attempt. They cannot aff
 
 ```toml
 [[mailboxes.alice.hooks]]
-id = "auditlog0001"
+name = "auditlog0001"
 event = "after_send"
-cmd = 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$AIMX_HOOK_ID" >> /var/log/aimx/alice-sent.log'
+cmd = 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$AIMX_HOOK_NAME" >> /var/log/aimx/alice-sent.log'
 ```
 
 ### Page on failed sends
 
 ```toml
 [[mailboxes.alerts.hooks]]
-id = "failedpage01"
+name = "failedpage01"
 event = "after_send"
 cmd = '''
 if [ "$AIMX_SEND_STATUS" != "delivered" ]; then
@@ -276,14 +276,22 @@ fi
 '''
 ```
 
-### Notify on delivered marketing mail only
+### Notify only on matching recipients (shell guard)
+
+Filter fields on hooks have been removed — do recipient/subject matching in the `cmd` itself with a shell guard.
 
 ```toml
 [[mailboxes.marketing.hooks]]
-id = "marknotify01"
+name = "marknotify01"
 event = "after_send"
-cmd = 'curl -fsS -X POST https://hooks.internal/marketing-sent -d "to=$AIMX_TO&status=$AIMX_SEND_STATUS"'
-to = "*@customer-co.com"
+cmd = '''
+case "$AIMX_TO" in
+  *@customer-co.com)
+    curl -fsS -X POST https://hooks.internal/marketing-sent \
+         -d "to=$AIMX_TO&status=$AIMX_SEND_STATUS"
+    ;;
+esac
+'''
 ```
 
 ## Operational tips
@@ -293,10 +301,10 @@ to = "*@customer-co.com"
 Every recipe above redirects stdout and stderr to a log file because `aimx serve` runs detached. Without the redirect, the agent's output is lost. AIMX itself emits one structured log line per hook fire to journald:
 
 ```text
-hook_id=<id> event=<on_receive|after_send> mailbox=<m> (email_id=<id>|message_id=<id>) exit_code=<n> duration_ms=<n>
+hook_name=<name> event=<on_receive|after_send> mailbox=<m> (email_id=<id>|message_id=<id>) exit_code=<n> duration_ms=<n>
 ```
 
-Grep by `hook_id=<id>` (`journalctl -u aimx | grep hook_id=claudeinbox1`) to trace every fire of a specific hook.
+Grep by `hook_name=<name>` (`journalctl -u aimx | grep hook_name=claudeinbox1`) to trace every fire of a specific hook.
 
 ### Exit codes
 
