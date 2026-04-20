@@ -188,7 +188,7 @@ If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx
 | Command | Purpose |
 |---------|---------|
 | `sudo aimx portcheck` | Check port 25 connectivity (requires root) |
-| `aimx doctor` | Show config, mailboxes, message counts, DNS record verification, and recent log lines |
+| `aimx doctor` | Show config, mailboxes, message counts, DNS record verification, and a pointer to `aimx logs` |
 | `aimx logs [--lines N] [--follow]` | Tail or follow the aimx service log |
 | `aimx mailboxes list` | List all mailboxes |
 | `aimx dkim-keygen` | Generate DKIM keypair |
