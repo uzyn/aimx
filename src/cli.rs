@@ -213,13 +213,13 @@ pub enum HookCommand {
         mailbox: Option<String>,
     },
 
-    /// Create a new hook on a mailbox (auto-generates the hook id)
+    /// Create a new hook on a mailbox
     Create(HookCreateArgs),
 
-    /// Delete a hook by id
+    /// Delete a hook by name
     Delete {
-        /// 12-char alphanumeric hook id
-        id: String,
+        /// Hook name (explicit or derived)
+        name: String,
 
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
@@ -241,22 +241,10 @@ pub struct HookCreateArgs {
     #[arg(long)]
     pub cmd: String,
 
-    /// Sender-address glob filter (only valid on `on_receive`)
+    /// Optional hook name. When omitted, a stable 12-char hex name is
+    /// derived from `sha256(event + cmd + dangerously_support_untrusted)`.
     #[arg(long)]
-    pub from: Option<String>,
-
-    /// Recipient-address glob filter (only valid on `after_send`)
-    #[arg(long)]
-    pub to: Option<String>,
-
-    /// Subject substring filter (case-insensitive, both events)
-    #[arg(long)]
-    pub subject: Option<String>,
-
-    /// Require the email to have at least one attachment (only valid on
-    /// `on_receive`). Outbound submissions via UDS are text-only in v0.2.
-    #[arg(long)]
-    pub has_attachment: bool,
+    pub name: Option<String>,
 
     /// Opt into firing this hook on non-trusted inbound email. Deliberately
     /// verbose so operators think twice. Only valid on `on_receive`.

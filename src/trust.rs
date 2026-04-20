@@ -349,14 +349,10 @@ mod tests {
         let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
 
         let default_hook = Hook {
-            id: "aaaabbbbcccc".to_string(),
+            name: Some("parity".to_string()),
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
-            from: None,
-            to: None,
-            subject: None,
-            has_attachment: None,
             dangerously_support_untrusted: false,
         };
 

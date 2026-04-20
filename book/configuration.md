@@ -100,17 +100,13 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays:
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `id` | string | Required globally-unique 12-char `[a-z0-9]` identifier |
+| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, AIMX derives a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
 | `cmd` | string | Shell command to execute |
-| `from` | glob | `on_receive` only: sender filter |
-| `to` | glob | `after_send` only: recipient filter |
-| `subject` | string | Case-insensitive substring filter |
-| `has_attachment` | bool | `on_receive` only: attachment-presence filter (rejected on `after_send`, which is text-only) |
 | `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"` |
 
-See [Hooks & Trust](hooks.md) for full details on events, match filters, and trust policies.
+Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
 
 ## Storage layout
 
@@ -215,7 +211,7 @@ address = "*@agent.yourdomain.com"
 
 # Notify on any incoming email (opts in to fire on untrusted mail)
 [[mailboxes.catchall.hooks]]
-id = "notifyall001"
+# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
 event = "on_receive"
 cmd = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
 dangerously_support_untrusted = true
@@ -233,17 +229,15 @@ trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 
 # Log all incoming emails (default gate: only fires when trusted == "true")
 [[mailboxes.support.hooks]]
-id = "supportlog01"
+name = "support_log"
 event = "on_receive"
 cmd = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log'
 
-# Trigger agent on emails from Gmail with attachments
+# Trigger agent on every trusted incoming email
 [[mailboxes.support.hooks]]
-id = "supportgmai"
+name = "support_agent"
 event = "on_receive"
 cmd = 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"'
-from = "*@gmail.com"
-has_attachment = true
 
 # ----------------------------
 # Another mailbox

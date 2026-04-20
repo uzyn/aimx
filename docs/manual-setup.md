@@ -392,16 +392,15 @@ trust = "verified"
 trusted_senders = ["*@yourcompany.com"]
 
 [[mailboxes.support.hooks]]
-id = "supporturg01"
+# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
+name = "support_notify"
 event = "on_receive"
 cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
-from = "*@gmail.com"
-subject = "urgent"
 ```
 
-Available template placeholders in commands: `{id}` and `{date}` (aimx-controlled, substituted literally). User-controlled fields are passed as environment variables: `$AIMX_HOOK_ID`, `$AIMX_FROM`, `$AIMX_TO`, `$AIMX_SUBJECT`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`. `after_send` hooks additionally receive `$AIMX_SEND_STATUS` (`delivered`/`failed`/`deferred`). Quote env-var expansions (`"$AIMX_SUBJECT"`) to stay safe against shell metacharacters in sender-supplied values.
+Available template placeholders in commands: `{id}` and `{date}` (aimx-controlled, substituted literally). User-controlled fields are passed as environment variables: `$AIMX_HOOK_NAME`, `$AIMX_FROM`, `$AIMX_TO`, `$AIMX_SUBJECT`, `$AIMX_MAILBOX`, `$AIMX_FILEPATH`. `after_send` hooks additionally receive `$AIMX_SEND_STATUS` (`delivered`/`failed`/`deferred`). Quote env-var expansions (`"$AIMX_SUBJECT"`) to stay safe against shell metacharacters in sender-supplied values.
 
-Trust policies (Sprint 50):
+Trust policies:
 - `trust = "none"` (default) — no trust evaluation performed. Default hooks do NOT fire. Set `dangerously_support_untrusted = true` on a hook to opt in.
 - `trust = "verified"` — emails with an allowlisted sender AND a DKIM pass get `trusted = "true"`, which fires default hooks. Everything else gets `trusted = "false"` and fires no default hooks.
 - `trusted_senders` — glob patterns that bypass DKIM verification

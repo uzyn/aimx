@@ -336,17 +336,17 @@ fn push_event_group(lines: &mut Vec<String>, event: &str, hooks: &[&crate::hook:
     lines.push(format!("  {}", term::header(event)));
     for h in hooks {
         let cmd = crate::hooks::truncate_with_ellipsis(&h.cmd, 60);
-        let filters = crate::hooks::compact_filters(h);
-        let filter_suffix = if filters.is_empty() {
-            String::new()
+        let name = crate::hook::effective_hook_name(h);
+        let suffix = if h.dangerously_support_untrusted {
+            "   [dangerously_support_untrusted=true]"
         } else {
-            format!("   [{filters}]")
+            ""
         };
         lines.push(format!(
             "    - {}  cmd: {}{}",
-            term::highlight(&h.id),
+            term::highlight(&name),
             cmd,
-            filter_suffix
+            suffix
         ));
     }
 }
@@ -1008,25 +1008,17 @@ mod tests {
                 address: "support@test.com".to_string(),
                 hooks: vec![
                     crate::hook::Hook {
-                        id: "aaaabbbbcccc".into(),
+                        name: Some("inbound_urgent".into()),
                         event: crate::hook::HookEvent::OnReceive,
                         r#type: "cmd".into(),
                         cmd: "echo $AIMX_FROM >> /tmp/log".into(),
-                        from: Some("*@gmail.com".into()),
-                        to: None,
-                        subject: Some("urgent".into()),
-                        has_attachment: None,
                         dangerously_support_untrusted: true,
                     },
                     crate::hook::Hook {
-                        id: "ddddeeeeffff".into(),
+                        name: Some("outbound_notify".into()),
                         event: crate::hook::HookEvent::AfterSend,
                         r#type: "cmd".into(),
                         cmd: "curl https://webhook.example.com/notify".into(),
-                        from: None,
-                        to: Some("*@client.com".into()),
-                        subject: None,
-                        has_attachment: None,
                         dangerously_support_untrusted: false,
                     },
                 ],
@@ -1096,16 +1088,13 @@ mod tests {
         // Both trusted-sender entries appear verbatim.
         assert!(joined.contains("*@company.com"), "{joined}");
         assert!(joined.contains("boss@example.com"), "{joined}");
-        // Both hook ids appear.
-        assert!(joined.contains("aaaabbbbcccc"), "{joined}");
-        assert!(joined.contains("ddddeeeeffff"), "{joined}");
+        // Both hook names appear.
+        assert!(joined.contains("inbound_urgent"), "{joined}");
+        assert!(joined.contains("outbound_notify"), "{joined}");
         // Each event has its section header.
         assert!(joined.contains("on_receive"), "{joined}");
         assert!(joined.contains("after_send"), "{joined}");
-        // Filters are surfaced compactly.
-        assert!(joined.contains("from=*@gmail.com"), "{joined}");
-        assert!(joined.contains("to=*@client.com"), "{joined}");
-        assert!(joined.contains("subject=urgent"), "{joined}");
+        // The dangerous opt-in is surfaced.
         assert!(
             joined.contains("dangerously_support_untrusted=true"),
             "{joined}"
@@ -1143,14 +1132,10 @@ mod tests {
             .unwrap()
             .hooks
             .push(crate::hook::Hook {
-                id: "bbbbccccdddd".into(),
+                name: Some("long_cmd".into()),
                 event: crate::hook::HookEvent::OnReceive,
                 r#type: "cmd".into(),
                 cmd: long_cmd.clone(),
-                from: None,
-                to: None,
-                subject: None,
-                has_attachment: None,
                 dangerously_support_untrusted: false,
             });
         let lines = super::build_show_lines(&config, "support").unwrap();

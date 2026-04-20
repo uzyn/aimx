@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::hook::{Hook, HookEvent, is_valid_hook_id};
+use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
@@ -161,7 +161,7 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
             return Err(format!(
                 "mailbox '{name}' uses the legacy `on_receive` schema; \
                  migrate to `[[mailboxes.{name}.hooks]]` with \
-                 `event = \"on_receive\"` and auto-generated 12-char `id =`"
+                 `event = \"on_receive\"`"
             )
             .into());
         }
@@ -173,8 +173,7 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
             return Err(format!(
                 "mailbox '{name}' uses the legacy `on_receive.match` schema; \
                  migrate to `[[mailboxes.{name}.hooks]]` with \
-                 `event = \"on_receive\"` and auto-generated 12-char `id =` \
-                 (filter fields are now flat on the hook table)"
+                 `event = \"on_receive\"`"
             )
             .into());
         }
@@ -183,76 +182,96 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
 }
 
 pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
-    // Globally-unique ID map: id -> owning mailbox.
-    let mut seen: HashMap<String, String> = HashMap::new();
+    // Effective-name map: name -> (mailbox, is_explicit).
+    let mut seen: HashMap<String, (String, bool)> = HashMap::new();
 
     for (mailbox_name, mb) in &config.mailboxes {
         for hook in &mb.hooks {
-            if !is_valid_hook_id(&hook.id) {
+            let label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+            if let Some(name) = &hook.name
+                && !is_valid_hook_name(name)
+            {
                 return Err(format!(
-                    "invalid hook id '{id}' on mailbox '{mailbox_name}': \
-                     must be 12 chars, [a-z0-9] only",
-                    id = hook.id,
+                    "invalid hook name '{name}' on mailbox '{mailbox_name}': \
+                     must match [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
                 ));
             }
             if hook.cmd.trim().is_empty() {
                 return Err(format!(
-                    "hook '{}' on mailbox '{mailbox_name}' has empty `cmd`",
-                    hook.id
+                    "hook '{label}' on mailbox '{mailbox_name}' has empty `cmd`"
                 ));
             }
             if hook.r#type != "cmd" {
                 return Err(format!(
-                    "hook '{}' on mailbox '{mailbox_name}' has unsupported type '{}': \
+                    "hook '{label}' on mailbox '{mailbox_name}' has unsupported type '{}': \
                      only `cmd` is supported",
-                    hook.id, hook.r#type
+                    hook.r#type
                 ));
             }
             if hook.dangerously_support_untrusted && hook.event != HookEvent::OnReceive {
                 return Err(format!(
-                    "hook '{}' on mailbox '{mailbox_name}' sets \
+                    "hook '{label}' on mailbox '{mailbox_name}' sets \
                      `dangerously_support_untrusted = true` on event \
-                     '{:?}': this flag only applies to `on_receive` hooks",
-                    hook.id, hook.event
+                     '{}': this flag only applies to `on_receive` hooks",
+                    hook.event.as_str()
                 ));
             }
-            // Event-specific filter validation (FR-31).
-            match hook.event {
-                HookEvent::OnReceive => {
-                    if hook.to.is_some() {
-                        return Err(format!(
-                            "hook '{}' on mailbox '{mailbox_name}': `to` filter \
-                             is only valid on `after_send` hooks",
-                            hook.id
-                        ));
-                    }
-                }
-                HookEvent::AfterSend => {
-                    if hook.from.is_some() {
-                        return Err(format!(
-                            "hook '{}' on mailbox '{mailbox_name}': `from` filter \
-                             is only valid on `on_receive` hooks",
-                            hook.id
-                        ));
-                    }
-                    if hook.has_attachment.is_some() {
-                        return Err(format!(
-                            "hook '{}' on mailbox '{mailbox_name}': `has_attachment` \
-                             filter is only valid on `on_receive` hooks \
-                             (outbound submissions via UDS are text-only in v0.2)",
-                            hook.id
-                        ));
-                    }
-                }
-            }
-            if let Some(prior) = seen.insert(hook.id.clone(), mailbox_name.clone()) {
-                return Err(format!(
-                    "duplicate hook id '{}' used by both mailbox '{prior}' \
-                     and mailbox '{mailbox_name}': hook ids must be globally unique",
-                    hook.id
-                ));
+
+            let effective = effective_hook_name(hook);
+            let is_explicit = hook.name.is_some();
+            if let Some((prior_mb, prior_explicit)) =
+                seen.insert(effective.clone(), (mailbox_name.clone(), is_explicit))
+            {
+                return Err(match (prior_explicit, is_explicit) {
+                    (true, true) => format!(
+                        "duplicate hook name '{effective}' on mailboxes \
+                         '{prior_mb}' and '{mailbox_name}': hook names must \
+                         be globally unique"
+                    ),
+                    (false, false) => format!(
+                        "anonymous hooks on mailboxes '{prior_mb}' and \
+                         '{mailbox_name}' have identical event/cmd and \
+                         derive the same name '{effective}': set an explicit \
+                         `name` on at least one to disambiguate"
+                    ),
+                    _ => format!(
+                        "explicit hook name '{effective}' on one mailbox \
+                         collides with the derived name of an anonymous hook \
+                         on another (mailboxes '{prior_mb}' and \
+                         '{mailbox_name}'): rename the explicit hook or set \
+                         an explicit `name` on the anonymous one"
+                    ),
+                });
             }
         }
+    }
+    Ok(())
+}
+
+/// Expose for the daemon handler, which needs to pre-validate a single
+/// submitted hook stanza before it ever lands in `Config`.
+pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
+    if let Some(name) = &hook.name
+        && !is_valid_hook_name(name)
+    {
+        return Err(format!(
+            "invalid hook name '{name}': must match \
+             [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
+        ));
+    }
+    if hook.cmd.trim().is_empty() {
+        return Err("hook has empty `cmd`".into());
+    }
+    if hook.r#type != "cmd" {
+        return Err(format!(
+            "hook has unsupported type '{}': only `cmd` is supported",
+            hook.r#type
+        ));
+    }
+    if hook.dangerously_support_untrusted && hook.event != HookEvent::OnReceive {
+        return Err(
+            "`dangerously_support_untrusted = true` only applies to `on_receive` hooks".into(),
+        );
     }
     Ok(())
 }
@@ -485,13 +504,10 @@ address = "*@agent.example.com"
 address = "support@agent.example.com"
 
 [[mailboxes.support.hooks]]
-id = "abc123def456"
+name = "support_inbound"
 event = "on_receive"
 type = "cmd"
 cmd = 'echo "$AIMX_FROM" >> /tmp/log'
-from = "*@gmail.com"
-subject = "urgent"
-has_attachment = true
 "#
     }
 
@@ -588,13 +604,10 @@ trust = "none"
         let support = &config.mailboxes["support"];
         assert_eq!(support.hooks.len(), 1);
         let hook = &support.hooks[0];
-        assert_eq!(hook.id, "abc123def456");
+        assert_eq!(hook.name.as_deref(), Some("support_inbound"));
         assert_eq!(hook.event, HookEvent::OnReceive);
         assert_eq!(hook.r#type, "cmd");
         assert_eq!(hook.cmd, "echo \"$AIMX_FROM\" >> /tmp/log");
-        assert_eq!(hook.from.as_deref(), Some("*@gmail.com"));
-        assert_eq!(hook.subject.as_deref(), Some("urgent"));
-        assert_eq!(hook.has_attachment, Some(true));
     }
 
     #[test]
@@ -610,7 +623,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "support_env"
 event = "on_receive"
 cmd = '''
 printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
@@ -620,6 +633,157 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
         .unwrap();
         let cfg = Config::load(&path).unwrap();
         assert_eq!(cfg.mailboxes["support"].hooks.len(), 1);
+    }
+
+    #[test]
+    fn load_accepts_hook_without_name_and_derives_it() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = "echo derive-me"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let hooks = &cfg.mailboxes["support"].hooks;
+        assert_eq!(hooks.len(), 1);
+        assert!(
+            hooks[0].name.is_none(),
+            "raw name must stay None when omitted"
+        );
+        // Derived name must validate.
+        let derived = crate::hook::effective_hook_name(&hooks[0]);
+        assert!(crate::hook::is_valid_hook_name(&derived));
+    }
+
+    #[test]
+    fn load_rejects_unknown_hook_fields() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = "echo hi"
+from = "*@gmail.com"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("from") || err.contains("unknown field"),
+            "error should flag unknown `from` field: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_typo_hook_field() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = "echo hi"
+subjct = "oops"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("subjct") || err.contains("unknown field"),
+            "error should flag typo'd field: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_two_anonymous_hooks_with_same_identity() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.one]
+address = "one@test.com"
+
+[[mailboxes.one.hooks]]
+event = "on_receive"
+cmd = "echo same"
+
+[mailboxes.two]
+address = "two@test.com"
+
+[[mailboxes.two.hooks]]
+event = "on_receive"
+cmd = "echo same"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("anonymous") || err.contains("set an explicit"),
+            "expected disambiguation hint: {err}"
+        );
+        assert!(err.contains("one") && err.contains("two"), "{err}");
+    }
+
+    #[test]
+    fn load_rejects_explicit_vs_derived_name_collision() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // First compute the derived name for the anonymous hook, then
+        // assign the same name explicitly on another mailbox.
+        let derived =
+            crate::hook::derive_hook_name(crate::hook::HookEvent::OnReceive, "echo collide", false);
+        let content = format!(
+            r#"
+domain = "test.com"
+
+[mailboxes.one]
+address = "one@test.com"
+
+[[mailboxes.one.hooks]]
+event = "on_receive"
+cmd = "echo collide"
+
+[mailboxes.two]
+address = "two@test.com"
+
+[[mailboxes.two.hooks]]
+name = "{derived}"
+event = "on_receive"
+cmd = "echo something_else"
+"#
+        );
+        std::fs::write(&path, content).unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("explicit") || err.contains("derived"),
+            "expected collision-class hint: {err}"
+        );
     }
 
     #[test]
@@ -672,7 +836,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "support_legacy"
 event = "on_receive"
 cmd = "echo hi"
 
@@ -701,7 +865,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "h1"
 cmd = "echo hi"
 "#,
         )
@@ -726,7 +890,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "h1"
 event = "before_send"
 cmd = "echo hi"
 "#,
@@ -741,7 +905,7 @@ cmd = "echo hi"
     }
 
     #[test]
-    fn load_rejects_missing_hook_id() {
+    fn load_rejects_malformed_hook_name() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -753,6 +917,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
+name = "bad name!"
 event = "on_receive"
 cmd = "echo hi"
 "#,
@@ -760,106 +925,13 @@ cmd = "echo hi"
         .unwrap();
         let err = Config::load(&path).unwrap_err().to_string();
         assert!(
-            err.to_ascii_lowercase().contains("id"),
-            "error should complain about missing id: {err}"
+            err.to_ascii_lowercase().contains("invalid hook name"),
+            "error should reject invalid name: {err}"
         );
     }
 
     #[test]
-    fn load_rejects_malformed_hook_id() {
-        // Too short
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-
-[[mailboxes.support.hooks]]
-id = "short"
-event = "on_receive"
-cmd = "echo hi"
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.to_ascii_lowercase().contains("invalid hook id"),
-            "error should flag malformed id: {err}"
-        );
-
-        // Uppercase
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-
-[[mailboxes.support.hooks]]
-id = "ABC123DEF456"
-event = "on_receive"
-cmd = "echo hi"
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.to_ascii_lowercase().contains("invalid hook id"),
-            "error should reject uppercase: {err}"
-        );
-
-        // Too long
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-
-[[mailboxes.support.hooks]]
-id = "abc123def456789"
-event = "on_receive"
-cmd = "echo hi"
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.to_ascii_lowercase().contains("invalid hook id"),
-            "error should reject over-length id: {err}"
-        );
-
-        // Non-alphanumeric
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-
-[[mailboxes.support.hooks]]
-id = "abc-123-def!"
-event = "on_receive"
-cmd = "echo hi"
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.to_ascii_lowercase().contains("invalid hook id"),
-            "error should reject non-alphanumeric: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_duplicate_hook_ids_across_mailboxes() {
+    fn load_rejects_duplicate_explicit_hook_names_across_mailboxes() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -871,7 +943,7 @@ domain = "test.com"
 address = "one@test.com"
 
 [[mailboxes.one.hooks]]
-id = "dupedupedupe"
+name = "same_name"
 event = "on_receive"
 cmd = "echo one"
 
@@ -879,7 +951,7 @@ cmd = "echo one"
 address = "two@test.com"
 
 [[mailboxes.two.hooks]]
-id = "dupedupedupe"
+name = "same_name"
 event = "on_receive"
 cmd = "echo two"
 "#,
@@ -887,47 +959,12 @@ cmd = "echo two"
         .unwrap();
         let err = Config::load(&path).unwrap_err().to_string();
         assert!(
-            err.contains("duplicate hook id"),
+            err.contains("duplicate hook name"),
             "error should flag duplicate: {err}"
         );
         assert!(
             err.contains("one") && err.contains("two"),
             "error should name both mailboxes: {err}"
-        );
-    }
-
-    #[test]
-    fn load_rejects_has_attachment_on_after_send() {
-        // `has_attachment` on `after_send` is rejected because v0.2
-        // UDS submissions are text-only, so the filter can never
-        // meaningfully match. Better to fail loudly at load than to
-        // silently ignore the predicate.
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.alice]
-address = "alice@test.com"
-
-[[mailboxes.alice.hooks]]
-id = "aaaabbbbcccc"
-event = "after_send"
-cmd = "echo hi"
-has_attachment = true
-"#,
-        )
-        .unwrap();
-        let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.contains("has_attachment"),
-            "error should name the filter: {err}"
-        );
-        assert!(
-            err.contains("on_receive"),
-            "error should mention on_receive: {err}"
         );
     }
 
@@ -944,7 +981,7 @@ domain = "test.com"
 address = "support@test.com"
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "h1"
 event = "after_send"
 cmd = "echo hi"
 dangerously_support_untrusted = true
