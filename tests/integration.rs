@@ -1556,12 +1556,10 @@ fn logs_subcommand_is_advertised_in_top_level_help() {
 }
 
 #[test]
-fn doctor_renders_recent_logs_section_header() {
-    // S48-4: doctor always appends a "Recent logs" section. On a fresh
-    // test host journalctl will most likely return either an empty
-    // result or an error — either way, the header must render and the
-    // "no logs available" fallback must be present, and doctor must exit
-    // 0 (it never errors out on a missing journal).
+fn doctor_renders_logs_pointer_section() {
+    // doctor no longer tails the journal (too noisy in practice).
+    // It now prints a `Logs` section with a one-line hint telling the
+    // operator how to view logs via `aimx logs`.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -1573,8 +1571,16 @@ fn doctor_renders_recent_logs_section_header() {
         .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
-        stdout.contains("Recent logs"),
-        "doctor output must contain a 'Recent logs' header, got:\n{stdout}"
+        stdout.contains("Logs"),
+        "doctor output must contain a 'Logs' header, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("aimx logs"),
+        "doctor output must point the operator at `aimx logs`, got:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("Recent logs"),
+        "doctor must NOT render the old 'Recent logs' tail section, got:\n{stdout}"
     );
 }
 

@@ -25,14 +25,7 @@ pub struct StatusInfo {
     pub mailboxes: Vec<MailboxStatus>,
     pub recent_activity: Vec<RecentEmail>,
     pub dns: Option<DnsSection>,
-    /// Up to N (default 10) most-recent log lines for the `aimx` unit, or
-    /// `None` when the log source could not be reached. Rendered as a
-    /// "Recent logs" section at the bottom of `format_status`.
-    pub recent_logs: Option<String>,
 }
-
-/// Number of log lines `aimx doctor` appends to its output.
-pub const DOCTOR_LOG_LINES: usize = 10;
 
 pub struct DnsSection {
     pub results: Vec<(String, DnsVerifyResult)>,
@@ -68,9 +61,7 @@ pub fn gather_status(config: &Config) -> StatusInfo {
 
 /// Injectable seam for testing: takes `SystemOps` + `NetworkOps` implementations
 /// so tests can mock service-state probes and DNS resolution without touching
-/// the real system or network. Also fetches the last `DOCTOR_LOG_LINES`
-/// of service logs via `SystemOps::tail_service_logs`; failures fall through
-/// to `recent_logs = None` so doctor never errors out on a missing journal.
+/// the real system or network.
 pub fn gather_status_with_ops<S: SystemOps>(
     config: &Config,
     sys: &S,
@@ -101,7 +92,6 @@ pub fn gather_status_with_ops<S: SystemOps>(
 
     let recent_activity = gather_recent_activity(config);
     let dns = gather_dns_section(config, net);
-    let recent_logs = sys.tail_service_logs("aimx", DOCTOR_LOG_LINES).ok();
 
     StatusInfo {
         domain: config.domain.clone(),
@@ -115,7 +105,6 @@ pub fn gather_status_with_ops<S: SystemOps>(
         mailboxes,
         recent_activity,
         dns,
-        recent_logs,
     }
 }
 
@@ -394,20 +383,11 @@ pub fn format_status(info: &StatusInfo) -> String {
         }
     }
 
+    out.push_str(&format!("\n{}\n", term::header("Logs")));
     out.push_str(&format!(
-        "\n{}\n",
-        term::header(&format!("Recent logs (last {DOCTOR_LOG_LINES} lines)"))
+        "  {}\n",
+        term::dim("Run `aimx logs` to view recent logs, or `aimx logs --follow` to tail."),
     ));
-    match &info.recent_logs {
-        Some(logs) if !logs.trim().is_empty() => {
-            for line in logs.lines() {
-                out.push_str(&format!("  {line}\n"));
-            }
-        }
-        Some(_) | None => {
-            out.push_str(&format!("  {}\n", term::dim("no logs available")));
-        }
-    }
 
     out
 }
@@ -488,31 +468,20 @@ mod tests {
         }
     }
 
-    /// Minimal mock that exercises `is_service_running` and the log-tail
-    /// hook (with optional canned output). All other `SystemOps` methods
-    /// panic — they must not be reached by `gather_status`.
+    /// Minimal mock that exercises `is_service_running`. The log-tail
+    /// hook is retained only to assert doctor does NOT call it. All
+    /// other `SystemOps` methods panic — they must not be reached by
+    /// `gather_status`.
     struct FakeServiceOps {
         running: bool,
-        canned_logs: Option<String>,
         log_tail_calls: Cell<u32>,
-        last_tail_n: Cell<usize>,
     }
 
     impl FakeServiceOps {
         fn new(running: bool) -> Self {
             Self {
                 running,
-                canned_logs: None,
                 log_tail_calls: Cell::new(0),
-                last_tail_n: Cell::new(0),
-            }
-        }
-        fn with_logs(running: bool, logs: &str) -> Self {
-            Self {
-                running,
-                canned_logs: Some(logs.to_string()),
-                log_tail_calls: Cell::new(0),
-                last_tail_n: Cell::new(0),
             }
         }
     }
@@ -562,16 +531,11 @@ mod tests {
         }
         fn tail_service_logs(
             &self,
-            unit: &str,
-            n: usize,
+            _unit: &str,
+            _n: usize,
         ) -> Result<String, Box<dyn std::error::Error>> {
-            assert_eq!(unit, "aimx", "doctor must request the aimx unit");
             self.log_tail_calls.set(self.log_tail_calls.get() + 1);
-            self.last_tail_n.set(n);
-            match &self.canned_logs {
-                Some(logs) => Ok(logs.clone()),
-                None => Err("mock: no logs available".into()),
-            }
+            Err("doctor must not tail service logs".into())
         }
         fn follow_service_logs(&self, _unit: &str) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("gather_status must not touch follow_service_logs")
@@ -634,7 +598,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(output.contains("test.example.com"));
@@ -676,7 +639,6 @@ mod tests {
             ],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(output.contains("agent.example.com"));
@@ -722,7 +684,6 @@ mod tests {
             ],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
 
         // Returns the visible column where the ADDRESS field starts on each
@@ -793,7 +754,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(output.contains("MISSING"));
@@ -939,7 +899,6 @@ mod tests {
                 },
             ],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(
@@ -968,7 +927,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(!output.contains("Recent activity:"));
@@ -1197,7 +1155,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: Some(DnsSection { results, records }),
-            recent_logs: None,
         };
 
         let output = format_status(&info);
@@ -1229,7 +1186,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
 
         let output = format_status(&info);
@@ -1243,45 +1199,26 @@ mod tests {
         );
     }
 
-    // ----- S48-4 recent logs section ----------------------------------
+    // ----- Logs pointer section ---------------------------------------
 
     #[test]
-    fn gather_status_calls_tail_service_logs_with_doctor_log_lines() {
+    fn gather_status_does_not_tail_service_logs() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         let config = empty_config(tmp.path());
         let net = MockNetworkOps::default();
-        let ops = FakeServiceOps::with_logs(true, "warm log line\n");
+        let ops = FakeServiceOps::new(true);
 
-        let info = gather_status_with_ops(&config, &ops, &net);
+        let _info = gather_status_with_ops(&config, &ops, &net);
         assert_eq!(
             ops.log_tail_calls.get(),
-            1,
-            "doctor must request the log tail exactly once per gather_status"
-        );
-        assert_eq!(ops.last_tail_n.get(), DOCTOR_LOG_LINES);
-        assert_eq!(info.recent_logs.as_deref(), Some("warm log line\n"));
-    }
-
-    #[test]
-    fn gather_status_handles_log_tail_error_gracefully() {
-        // S48-4: when the journal is unavailable (mock returns Err), doctor
-        // must not bubble an error — it falls through to recent_logs = None.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
-        let config = empty_config(tmp.path());
-        let net = MockNetworkOps::default();
-        let ops = FakeServiceOps::new(false); // canned_logs = None → Err
-
-        let info = gather_status_with_ops(&config, &ops, &net);
-        assert!(
-            info.recent_logs.is_none(),
-            "log-tail failure must yield recent_logs = None, not panic"
+            0,
+            "doctor must not tail service logs — it now prints a pointer to `aimx logs`"
         );
     }
 
     #[test]
-    fn format_status_renders_recent_logs_header_with_canned_lines() {
+    fn format_status_renders_logs_pointer_section() {
         let info = StatusInfo {
             domain: "test.com".to_string(),
             data_dir: "/var/lib/aimx".to_string(),
@@ -1294,73 +1231,24 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: Some(
-                "Apr 19 12:00:00 host aimx[1]: started\nApr 19 12:00:01 host aimx[1]: bound :25\n"
-                    .to_string(),
-            ),
         };
         let output = format_status(&info);
         assert!(
-            output.contains("Recent logs"),
-            "format_status must include a 'Recent logs' header, got:\n{output}"
+            output.contains("Logs"),
+            "format_status must include a 'Logs' header, got:\n{output}"
         );
         assert!(
-            output.contains("started"),
-            "format_status must include the canned log content, got:\n{output}"
-        );
-        assert!(output.contains("bound :25"));
-    }
-
-    #[test]
-    fn format_status_recent_logs_falls_back_to_no_logs_message() {
-        // S48-4: when the journal is missing, doctor still prints the
-        // "Recent logs" header followed by a single informative line so
-        // the layout stays predictable across hosts.
-        let info = StatusInfo {
-            domain: "test.com".to_string(),
-            data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "aimx".to_string(),
-            config_path: "/etc/aimx/config.toml".to_string(),
-            dkim_key_present: true,
-            smtp_running: false,
-            default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
-            mailboxes: vec![],
-            recent_activity: vec![],
-            dns: None,
-            recent_logs: None,
-        };
-        let output = format_status(&info);
-        assert!(
-            output.contains("Recent logs"),
-            "header must always render, even when no logs are available"
+            output.contains("aimx logs"),
+            "format_status must point the operator at `aimx logs`, got:\n{output}"
         );
         assert!(
-            output.contains("no logs available"),
-            "fallback message must appear when recent_logs is None: {output}"
+            output.contains("aimx logs --follow"),
+            "hint must also mention `aimx logs --follow` for tailing, got:\n{output}"
         );
-    }
-
-    #[test]
-    fn format_status_recent_logs_falls_back_when_canned_string_empty() {
-        // Empty/whitespace-only log strings count as "no logs" for the
-        // fallback rendering.
-        let info = StatusInfo {
-            domain: "test.com".to_string(),
-            data_dir: "/var/lib/aimx".to_string(),
-            dkim_selector: "aimx".to_string(),
-            config_path: "/etc/aimx/config.toml".to_string(),
-            dkim_key_present: true,
-            smtp_running: true,
-            default_trust: "none".to_string(),
-            default_trusted_senders_count: 0,
-            mailboxes: vec![],
-            recent_activity: vec![],
-            dns: None,
-            recent_logs: Some("   \n".to_string()),
-        };
-        let output = format_status(&info);
-        assert!(output.contains("no logs available"));
+        assert!(
+            !output.contains("Recent logs"),
+            "old 'Recent logs' header must be gone, got:\n{output}"
+        );
     }
 
     // ----- S48-2 config path + per-mailbox trust + hooks summary -----
@@ -1379,7 +1267,6 @@ mod tests {
             mailboxes: vec![],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(
@@ -1426,7 +1313,6 @@ mod tests {
             }],
             recent_activity: vec![],
             dns: None,
-            recent_logs: None,
         };
         let output = format_status(&info);
         assert!(
