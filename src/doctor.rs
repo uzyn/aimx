@@ -286,6 +286,126 @@ fn extract_frontmatter(content: &str) -> Option<String> {
     Some(after_first[..end].to_string())
 }
 
+/// Render the per-mailbox ASCII table for the `Mailboxes` section of
+/// `aimx doctor`. Columns: Mailbox, Address, Total, Unread, Trust, Senders,
+/// Hooks. Numeric columns right-align; text columns left-align. Column
+/// widths auto-size to the widest visible cell (header or row value).
+///
+/// The mailbox name cell is rendered with `term::highlight`, but padding
+/// is computed against the plain (ANSI-stripped) cell length so alignment
+/// is preserved when color is enabled.
+fn render_mailbox_table(mailboxes: &[MailboxStatus]) -> String {
+    const HEADERS: [&str; 7] = [
+        "Mailbox", "Address", "Total", "Unread", "Trust", "Senders", "Hooks",
+    ];
+    // right-align mask: Total, Unread, Senders, Hooks
+    const RIGHT: [bool; 7] = [false, false, true, true, false, true, true];
+
+    // Plain-text cells (no ANSI) used for width computation and for every
+    // column except the mailbox name. The name is rendered with
+    // `term::highlight` when emitted below, but we pad against the plain
+    // length so alignment survives ANSI escapes.
+    let rows: Vec<[String; 7]> = mailboxes
+        .iter()
+        .map(|mb| {
+            [
+                mb.name.clone(),
+                mb.address.clone(),
+                mb.total.to_string(),
+                mb.unread.to_string(),
+                mb.trust.clone(),
+                mb.trusted_senders_count.to_string(),
+                mb.hook_count.to_string(),
+            ]
+        })
+        .collect();
+
+    let mut widths = [0usize; 7];
+    for (i, h) in HEADERS.iter().enumerate() {
+        widths[i] = h.chars().count();
+    }
+    for row in &rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.chars().count());
+        }
+    }
+
+    let mut out = String::new();
+    let frame = {
+        let mut s = String::from("  +");
+        for w in &widths {
+            s.push('-');
+            for _ in 0..*w {
+                s.push('-');
+            }
+            s.push('-');
+            s.push('+');
+        }
+        s.push('\n');
+        s
+    };
+
+    // Header row.
+    out.push_str(&frame);
+    out.push_str("  |");
+    for (i, h) in HEADERS.iter().enumerate() {
+        let pad = widths[i] - h.chars().count();
+        if RIGHT[i] {
+            out.push(' ');
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push_str(h);
+            out.push(' ');
+        } else {
+            out.push(' ');
+            out.push_str(h);
+            for _ in 0..pad {
+                out.push(' ');
+            }
+            out.push(' ');
+        }
+        out.push('|');
+    }
+    out.push('\n');
+    out.push_str(&frame);
+
+    // Data rows. The Mailbox cell is colored via `term::highlight`; all
+    // other cells render plain.
+    for row in &rows {
+        out.push_str("  |");
+        for (i, cell) in row.iter().enumerate() {
+            let visible_len = cell.chars().count();
+            let pad = widths[i] - visible_len;
+            if RIGHT[i] {
+                out.push(' ');
+                for _ in 0..pad {
+                    out.push(' ');
+                }
+                out.push_str(cell);
+                out.push(' ');
+            } else {
+                out.push(' ');
+                if i == 0 {
+                    // Mailbox name: emit with highlight, pad against plain length.
+                    out.push_str(&term::highlight(cell).to_string());
+                } else {
+                    out.push_str(cell);
+                }
+                for _ in 0..pad {
+                    out.push(' ');
+                }
+                out.push(' ');
+            }
+            out.push('|');
+        }
+        out.push('\n');
+    }
+    out.push_str(&frame);
+
+    out
+}
+
 pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
@@ -330,31 +450,7 @@ pub fn format_status(info: &StatusInfo) -> String {
 
     if !info.mailboxes.is_empty() {
         out.push('\n');
-        out.push_str(&format!(
-            "  {:<20} {:<30} {:>8} {:>8}\n",
-            "MAILBOX", "ADDRESS", "TOTAL", "UNREAD"
-        ));
-        for mb in &info.mailboxes {
-            let name_pad = 20usize.saturating_sub(mb.name.chars().count());
-            out.push_str(&format!(
-                "  {}{:pad$} {:<30} {:>8} {:>8}\n",
-                term::highlight(&mb.name),
-                "",
-                mb.address,
-                mb.total,
-                mb.unread,
-                pad = name_pad,
-            ));
-            // S48-2 / S50-1: per-mailbox trust + hooks summary line.
-            // Indented under the row so the table itself stays narrow.
-            out.push_str(&format!(
-                "    {} trust = {:?}, trusted_senders: {} entries, hooks: {}\n",
-                term::dim("→"),
-                mb.trust,
-                mb.trusted_senders_count,
-                mb.hook_count,
-            ));
-        }
+        out.push_str(&render_mailbox_table(&info.mailboxes));
     }
 
     if !info.recent_activity.is_empty() {
@@ -646,9 +742,122 @@ mod tests {
         assert!(output.contains("2 (15 messages, 4 unread)"));
         assert!(output.contains("catchall"));
         assert!(output.contains("support"));
-        assert!(output.contains("MAILBOX"));
-        assert!(output.contains("TOTAL"));
-        assert!(output.contains("UNREAD"));
+        assert!(output.contains("Mailbox"));
+        assert!(output.contains("Total"));
+        assert!(output.contains("Unread"));
+    }
+
+    #[test]
+    fn format_status_mailbox_table_has_title_case_headers() {
+        let info = StatusInfo {
+            domain: "ex.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
+            mailboxes: vec![MailboxStatus {
+                name: "ops".to_string(),
+                address: "ops@ex.com".to_string(),
+                total: 0,
+                unread: 0,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+            }],
+            recent_activity: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        for header in &[
+            "Mailbox", "Address", "Total", "Unread", "Trust", "Senders", "Hooks",
+        ] {
+            assert!(
+                output.contains(header),
+                "Mailboxes table must contain title-case header {header:?}, got:\n{output}"
+            );
+        }
+        // The old all-caps header row must be gone.
+        for token in &["MAILBOX", "ADDRESS", "TOTAL", "UNREAD"] {
+            assert!(
+                !output.contains(token),
+                "Mailboxes table must NOT contain old all-caps header {token:?}, got:\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn format_status_mailbox_table_drops_trailing_trust_line() {
+        let info = StatusInfo {
+            domain: "ex.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
+            mailboxes: vec![MailboxStatus {
+                name: "ops".to_string(),
+                address: "ops@ex.com".to_string(),
+                total: 0,
+                unread: 0,
+                trust: "verified".to_string(),
+                trusted_senders_count: 1,
+                hook_count: 2,
+            }],
+            recent_activity: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        // The old `→ trust = …` indented summary line must be gone — its data
+        // is now in the Trust / Senders / Hooks columns of the table.
+        assert!(
+            !output.contains("→ trust ="),
+            "old trailing trust summary line must be dropped, got:\n{output}"
+        );
+        assert!(
+            !output.contains("trusted_senders: 1 entries"),
+            "old trusted_senders summary phrasing must be dropped, got:\n{output}"
+        );
+    }
+
+    #[test]
+    fn format_status_mailbox_table_renders_ascii_frame() {
+        let info = StatusInfo {
+            domain: "ex.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders_count: 0,
+            mailboxes: vec![MailboxStatus {
+                name: "ops".to_string(),
+                address: "ops@ex.com".to_string(),
+                total: 0,
+                unread: 0,
+                trust: "none".to_string(),
+                trusted_senders_count: 0,
+                hook_count: 0,
+            }],
+            recent_activity: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        // Frame line starts with `+--` (after a two-space indent) and row
+        // separators use `|`. These are load-bearing for the visible grid.
+        assert!(
+            output.lines().any(|l| l.trim_start().starts_with("+--")),
+            "table must include an ASCII frame line starting with '+--', got:\n{output}"
+        );
+        assert!(
+            output.contains('|'),
+            "table rows must include '|' column separators, got:\n{output}"
+        );
     }
 
     #[test]
@@ -686,18 +895,24 @@ mod tests {
             dns: None,
         };
 
-        // Returns the visible column where the ADDRESS field starts on each
-        // mailbox data row (the second non-whitespace token after the two-space indent).
+        // Returns the visible column where the Address cell starts on each
+        // mailbox data row. In the ASCII table format each row is
+        // `  | <name> | <address> | …`, so the Address column begins right
+        // after the second `| ` separator (the one that follows the mailbox
+        // name cell). The bug this guards: ANSI escapes in the name cell
+        // must not push the second separator out of alignment.
         fn address_column(output: &str) -> Vec<usize> {
             let ansi = regex_like_strip(output);
             ansi.lines()
                 .filter(|l| l.contains("@ex.com"))
-                .map(|l| {
-                    let trimmed = l.trim_start();
-                    let name_end = trimmed.find(char::is_whitespace).unwrap_or(0);
-                    let rest = &trimmed[name_end..];
-                    let addr_start_in_rest = rest.len() - rest.trim_start().len();
-                    (l.len() - trimmed.len()) + name_end + addr_start_in_rest
+                .filter_map(|l| {
+                    // Find the `|` starting the Mailbox cell, then the `|`
+                    // starting the Address cell. The Address content starts
+                    // one character after the second `|` (the `| ` padding).
+                    let first_pipe = l.find('|')?;
+                    let second_pipe = l[first_pipe + 1..].find('|')? + first_pipe + 1;
+                    // Skip the single space padding after the `|`.
+                    Some(second_pipe + 2)
                 })
                 .collect()
         }
@@ -1315,17 +1530,28 @@ mod tests {
             dns: None,
         };
         let output = format_status(&info);
+        // Find the row for the `ops` mailbox and assert Trust / Senders /
+        // Hooks cells are populated. The row is a single `|`-delimited line
+        // containing the mailbox name, address, and the three numeric / text
+        // columns under test.
+        let plain = regex_like_strip(&output);
+        let row = plain
+            .lines()
+            .find(|l| l.contains("| ops ") || l.contains("| ops  "))
+            .unwrap_or_else(|| panic!("expected a row for the ops mailbox, got:\n{plain}"));
+        let cells: Vec<&str> = row.split('|').map(|s| s.trim()).collect();
+        // Expected cells: ["", "ops", "ops@test.com", "4", "1", "verified", "3", "2", ""]
         assert!(
-            output.contains("trust = \"verified\""),
-            "per-mailbox trust must render in TOML-like form: {output}"
+            cells.contains(&"verified"),
+            "Trust cell must render the bare trust string: row = {row:?}"
         );
         assert!(
-            output.contains("trusted_senders: 3 entries"),
-            "per-mailbox trusted_senders count must render: {output}"
+            cells.contains(&"3"),
+            "Senders cell must render the trusted_senders count (3): row = {row:?}"
         );
         assert!(
-            output.contains("hooks: 2"),
-            "per-mailbox hook count must render: {output}"
+            cells.contains(&"2"),
+            "Hooks cell must render the hook_count (2): row = {row:?}"
         );
     }
 

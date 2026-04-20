@@ -59,7 +59,7 @@ See [Setup — End-to-end verification](setup.md#end-to-end-verification).
 
 ### `aimx doctor`
 
-Print server health: configuration path, mailbox counts and unread counts, per-mailbox trust and hooks, DKIM key presence, SMTP service state, and the last 10 service log lines.
+Print server health: configuration path, mailbox counts and unread counts, a per-mailbox table (Mailbox, Address, Total, Unread, Trust, Senders, Hooks), DKIM key presence, SMTP service state, DNS record verification, and a pointer to `aimx logs` for recent service logs.
 
 No flags.
 
