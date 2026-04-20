@@ -1,24 +1,24 @@
-# AIMX recipe for Goose
+# aimx recipe for Goose
 
-This directory is the source tree for the Goose recipe that wires AIMX
-into [Goose](https://goose-docs.ai/). Contents are bundled into the
+AIMX (AI Mail Exchange) recipe source tree for Goose. This directory wires
+aimx into [Goose](https://goose-docs.ai/). Contents are bundled into the
 `aimx` binary at compile time (via `include_dir!`) and installed by
 `aimx agent-setup goose`.
 
 ## What gets installed
 
-- `aimx.yaml` — a Goose recipe dropped into `~/.config/goose/recipes/aimx.yaml`.
+- `aimx.yaml`: a Goose recipe dropped into `~/.config/goose/recipes/aimx.yaml`.
   The recipe bundles:
-  - `title` + `description` — recipe metadata Goose surfaces in `goose
+  - `title` + `description`: recipe metadata Goose surfaces in `goose
     recipe list`.
-  - `extensions` — a stdio entry for `aimx mcp` so running the recipe
-    automatically launches AIMX's MCP server.
-  - `prompt` — the canonical AIMX primer (`agents/common/aimx-primer.md`)
+  - `extensions`: a stdio entry for `aimx mcp` so running the recipe
+    automatically launches the aimx MCP server.
+  - `prompt`: the canonical aimx primer (`agents/common/aimx-primer.md`)
     indented as a YAML block scalar so there is one source of truth for
     agent-facing instructions.
 
 The installer assembles `aimx.yaml` from a YAML header plus the primer at
-install time; the raw `.header` file is not shipped.
+install time. The raw `.header` file is not shipped.
 
 ## Install
 
@@ -51,7 +51,7 @@ into your team repo so every user can invoke it.
 
 ## Overriding the data directory
 
-If AIMX was set up with a non-default data directory, re-run the
+If aimx was set up with a non-default data directory, re-run the
 installer with `--data-dir`:
 
 ```bash
@@ -63,7 +63,7 @@ before `mcp`.
 
 ## Channel-trigger recipes
 
-To have AIMX invoke `goose run` automatically when an email arrives,
+To have aimx invoke `goose run` automatically when an email arrives,
 see the [Hook Recipes](../../book/hook-recipes.md#goose) chapter.
 
 ## Schema reference
@@ -71,7 +71,7 @@ see the [Hook Recipes](../../book/hook-recipes.md#goose) chapter.
 Goose recipe schema is documented at
 <https://goose-docs.ai/docs/guides/recipes>. The recipe format requires
 `title` and `description` plus at least one of `instructions` or
-`prompt`; extensions follow the `type: stdio` shape with `name`, `cmd`,
+`prompt`. Extensions follow the `type: stdio` shape with `name`, `cmd`,
 and `args`.
 
 ## Design choice: recipe-based integration
@@ -79,6 +79,6 @@ and `args`.
 Goose's native integration shape is different from the skills-based
 agents (Claude Code, Codex, OpenCode, Gemini). A recipe bundles both the
 MCP extension config AND the agent-facing instructions in one YAML
-file, so there is no separate "paste this JSON snippet" step — running
-the recipe starts AIMX's MCP server automatically. This matches FR-49:
+file, so there is no separate "paste this JSON snippet" step. Running
+the recipe starts the aimx MCP server automatically. This matches FR-49:
 the installer writes one file and prints one activation command.

@@ -17,7 +17,7 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
 /// unsafe as a file-system path component *or* as the local-part of the
 /// resulting email address (`<name>@<domain>`).
 ///
-/// A valid mailbox name is non-empty, matches `[a-z0-9._-]+` (case-folded —
+/// A valid mailbox name is non-empty, matches `[a-z0-9._-]+` (case-folded,
 /// no uppercase), and contains no leading/trailing `.` or consecutive `..`.
 /// This is stricter than RFC 5322 allows but matches what modern MTAs
 /// actually accept without quoting, which is what we care about in
@@ -55,7 +55,7 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     }
 
     // A mailbox lives in both `inbox/<name>/` and `sent/<name>/`. Create
-    // them atomically — if the second one fails, clean up the first so we
+    // them atomically: if the second one fails, clean up the first so we
     // never leave half a mailbox on disk.
     let inbox = config.inbox_dir(name);
     std::fs::create_dir_all(&inbox)?;
@@ -203,7 +203,7 @@ fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>>
     // Try the UDS path first so the daemon hot-swaps its in-memory
     // Config. On socket-missing (daemon stopped, fresh install), fall
     // back to direct on-disk edit + the restart-hint banner. When UDS
-    // succeeds we suppress the hint — the daemon already picked up the
+    // succeeds we suppress the hint; the daemon already picked up the
     // change.
     match crate::mcp::submit_mailbox_crud_via_daemon(name, true) {
         Ok(()) => {
@@ -257,7 +257,7 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Build the formatted lines emitted by `aimx mailboxes show <name>`.
-/// Pure function — no stdout access — so tests can assert on exact
+/// Pure function with no stdout access, so tests can assert on exact
 /// content without capturing process output. The terminal-color helpers
 /// already strip ANSI when `NO_COLOR` is set or stdout is not a TTY.
 pub(crate) fn build_show_lines(
@@ -487,7 +487,7 @@ fn delete(
 
 /// Recursively remove every entry inside `dir` while leaving `dir` itself
 /// in place. This matches the daemon's NONEMPTY check (which is a top-level
-/// `read_dir` count) — once the directory is empty, the daemon-side
+/// `read_dir` count). Once the directory is empty, the daemon-side
 /// MAILBOX-DELETE succeeds. Missing directory is treated as already-empty
 /// (no error). Each entry is removed via `remove_dir_all` (for bundle
 /// directories) or `remove_file` (for flat .md files); errors propagate
@@ -516,8 +516,8 @@ fn wipe_mailbox_contents(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// threading the full init-system check through more modules.
 ///
 /// Every `InitSystem` variant is matched explicitly so adding a new one
-/// (e.g. `Runit`, `S6`) fails to compile until the new arm is supplied —
-/// no silent fall-through via `_`.
+/// (e.g. `Runit`, `S6`) fails to compile until the new arm is supplied.
+/// No silent fall-through via `_`.
 pub(crate) fn restart_hint_command(init: &crate::serve::service::InitSystem) -> &'static str {
     use crate::serve::service::InitSystem;
     match init {
@@ -547,7 +547,7 @@ pub(crate) fn restart_hint_lines(init: &crate::serve::service::InitSystem) -> Ve
 /// `aimx serve` keeps a swappable `Config` handle: the daemon UDS path
 /// (the preferred path) hot-swaps `Config` so the running daemon picks
 /// up the new mailbox without a restart. This direct-edit path runs only
-/// when the daemon is unreachable (stopped, fresh install) — in that
+/// when the daemon is unreachable (stopped, fresh install). In that
 /// case the on-disk `[mailboxes.<name>]` entry is in place but the
 /// daemon will not see it until it starts (or restarts), so we print
 /// this hint to prevent inbound mail from silently routing to
@@ -615,7 +615,7 @@ mod tests {
         assert!(validate_mailbox_name("foo/bar").is_err());
         assert!(validate_mailbox_name("foo\\bar").is_err());
         assert!(validate_mailbox_name("foo\0bar").is_err());
-        // Uppercase rejected — the class is case-folded.
+        // Uppercase rejected; the class is case-folded.
         assert!(validate_mailbox_name("Alice").is_err());
         // RFC-5322 would allow `+` in the local part (Gmail plus-addressing
         // etc.) but we keep the class tight to prevent surprises further
@@ -652,7 +652,7 @@ mod tests {
     fn create_mailbox_is_idempotent_for_dirs_when_config_race_prevented() {
         // If the config-registration side-steps the duplicate check, the
         // create_dir_all calls are idempotent. This is an internal contract
-        // test — callers should rely on `create_mailbox` itself to fail
+        // test; callers should rely on `create_mailbox` itself to fail
         // duplicate registrations via the HashMap check.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
@@ -660,7 +660,7 @@ mod tests {
 
         create_mailbox(&config, "alice").unwrap();
         // Re-creating via a fresh Config (as if registration rolled back)
-        // must not error — dir creation is idempotent.
+        // must not error; dir creation is idempotent.
         let fresh = test_config(tmp.path());
         create_mailbox(&fresh, "alice").unwrap();
         assert!(tmp.path().join("inbox").join("alice").is_dir());
@@ -711,7 +711,7 @@ mod tests {
         let inbox_alice = tmp.path().join("inbox").join("alice");
         std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
 
-        // Stray dir created out-of-band — no config entry.
+        // Stray dir created out-of-band; no config entry.
         let stray = tmp.path().join("inbox").join("stray");
         std::fs::create_dir_all(&stray).unwrap();
         std::fs::write(stray.join("2025-01-01-120000-z.md"), "x").unwrap();
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn restart_hint_command_unknown_falls_back_to_systemd() {
-        // Better to print systemd wording than to say nothing — operators on
+        // Better to print systemd wording than to say nothing; operators on
         // niche init systems can translate once.
         assert_eq!(
             restart_hint_command(&crate::serve::service::InitSystem::Unknown),
@@ -914,12 +914,12 @@ mod tests {
         // test destructures every current variant so adding a new variant
         // without touching this function would fail the exhaustive pattern
         // check below at compile time. If you're here because this stopped
-        // compiling, you probably just added a new `InitSystem` variant — add
+        // compiling, you probably just added a new `InitSystem` variant; add
         // its arm to `restart_hint_command` (and extend the assertions below).
         use crate::serve::service::InitSystem;
         let all = [InitSystem::Systemd, InitSystem::OpenRC, InitSystem::Unknown];
         for variant in &all {
-            // Force an explicit destructure — the `_` catch-all is forbidden.
+            // Force an explicit destructure; the `_` catch-all is forbidden.
             let expected: &'static str = match variant {
                 InitSystem::Systemd => "sudo systemctl restart aimx",
                 InitSystem::OpenRC => "sudo rc-service aimx restart",

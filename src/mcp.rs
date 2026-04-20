@@ -92,7 +92,7 @@ pub struct EmailSendParams {
     pub reply_to: Option<String>,
     #[schemars(
         description = "Full References header chain (space-separated Message-IDs) for threading. \
-                       Only applied when reply_to is also set — supplied alone, it is silently ignored."
+                       Only applied when reply_to is also set. Supplied alone, it is silently ignored."
     )]
     pub references: Option<String>,
 }
@@ -128,7 +128,7 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<MailboxCreateParams>,
     ) -> Result<String, String> {
-        // Prefer the daemon UDS path — the daemon atomically rewrites
+        // Prefer the daemon UDS path. The daemon atomically rewrites
         // config.toml and hot-swaps its in-memory Config so a following
         // inbound mail routes correctly with no restart. Fall back to
         // direct on-disk edit only when the socket isn't reachable
@@ -139,7 +139,7 @@ impl AimxMcpServer {
                 let config = self.load_config()?;
                 mailbox::create_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
                 Ok(format!(
-                    "Mailbox '{}' created successfully (daemon not running — restart aimx to apply the change).",
+                    "Mailbox '{}' created successfully (daemon not running. Restart aimx to apply the change).",
                     params.name
                 ))
             }
@@ -179,7 +179,7 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         // Daemon-side delete refuses when the inbox/sent directories
         // still contain files (returns ERR NONEMPTY). MCP deliberately
-        // does NOT gain a force variant — destructive wipes stay on the
+        // does NOT gain a force variant. Destructive wipes stay on the
         // CLI where operators see prompts and can't be triggered
         // remotely by an agent. On NONEMPTY we rewrite the daemon's
         // error into a structured hint that names the exact CLI command
@@ -188,14 +188,14 @@ impl AimxMcpServer {
         match submit_mailbox_crud_via_daemon(&params.name, false) {
             Ok(()) => Ok(format!(
                 "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
-                 directories remain on disk — run `rmdir` to tidy up if desired.",
+                 directories remain on disk. Run `rmdir` to tidy up if desired.",
                 params.name
             )),
             Err(MailboxCrudFallback::SocketMissing) => {
                 let config = self.load_config()?;
                 mailbox::delete_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
                 Ok(format!(
-                    "Mailbox '{}' deleted (daemon not running — restart aimx to apply the change).",
+                    "Mailbox '{}' deleted (daemon not running. Restart aimx to apply the change).",
                     params.name
                 ))
             }
@@ -279,7 +279,7 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
         let folder = resolve_folder(params.folder.as_deref())?;
-        // Route through the daemon — mailbox files are root-owned and
+        // Route through the daemon; mailbox files are root-owned and
         // the MCP process runs as the invoking user.
         submit_mark_via_daemon(&params.mailbox, &params.id, folder, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
@@ -408,7 +408,7 @@ fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
 
 /// Compose `args` into an `AIMX/1 SEND` request and submit it to
 /// `aimx serve` over the UDS. MCP, like `aimx send`, does not sign or
-/// deliver mail directly — everything goes through the daemon. The
+/// deliver mail directly. Everything goes through the daemon. The
 /// request frame carries no `From-Mailbox:` header; the daemon parses
 /// `From:` out of the composed body itself and resolves the sender
 /// mailbox against its in-memory Config.
@@ -435,7 +435,7 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
 
     let outcome = outcome.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            "aimx daemon not running — start with 'sudo systemctl start aimx'".to_string()
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
         } else {
             format!(
                 "Failed to connect to aimx daemon at {}: {e}",
@@ -494,7 +494,7 @@ fn submit_mark_via_daemon(
 
     let outcome = outcome.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            "aimx daemon not running — start with 'sudo systemctl start aimx'".to_string()
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
         } else {
             format!(
                 "Failed to connect to aimx daemon at {}: {e}",
@@ -642,7 +642,7 @@ pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
         Some(r) => r,
         None => return MarkOutcome::Malformed(format!("unexpected response: {line:?}")),
     };
-    // MARK verbs use a bare `AIMX/1 OK` ack — any trailing payload is a
+    // MARK verbs use a bare `AIMX/1 OK` ack. Any trailing payload is a
     // protocol violation. Reject it as Malformed rather than silently
     // succeeding so the client notices if the daemon ever drifts.
     if rest == "OK" {
@@ -684,7 +684,7 @@ pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
 impl ServerHandler for AimxMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("AIMX email server - manage mailboxes and emails for AI agents")
+            .with_instructions("aimx email server. Manage mailboxes and emails for AI agents")
     }
 }
 
@@ -702,7 +702,7 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
 }
 
 /// Return `(name, total, unread, sent_count, registered)` for every mailbox
-/// the daemon knows about — both registered ones in `config.mailboxes` and
+/// the daemon knows about: both registered ones in `config.mailboxes` and
 /// stray `inbox/<name>/` directories left by backup restores or
 /// out-of-band tooling. Sorted by name.
 fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, usize, bool)> {
@@ -862,7 +862,7 @@ pub fn filter_emails(
 }
 
 /// Direct-on-disk frontmatter rewrite. Not called by the MCP tool
-/// handlers themselves — they route through the daemon via UDS so the
+/// handlers themselves. They route through the daemon via UDS so the
 /// non-root MCP process doesn't need write access to root-owned mailbox
 /// files. Retained for unit-test coverage of the frontmatter
 /// read/rewrite flow; exercised at the protocol level by
@@ -935,7 +935,7 @@ fn extract_email_address(addr: &str) -> &str {
 
 /// Rewrite the daemon's `[NONEMPTY]` error into an MCP-friendly hint
 /// that names the exact CLI command. The MCP `mailbox_delete` tool
-/// deliberately does not gain a force variant — destructive wipes stay
+/// deliberately does not gain a force variant. Destructive wipes stay
 /// on the CLI where the operator sees prompts and the request can't be
 /// triggered remotely. Non-NONEMPTY daemon errors pass through verbatim.
 pub(crate) fn rewrite_nonempty_error_for_mcp(name: &str, msg: &str) -> String {
@@ -944,14 +944,14 @@ pub(crate) fn rewrite_nonempty_error_for_mcp(name: &str, msg: &str) -> String {
     }
     let (inbox_files, sent_files) = parse_nonempty_counts(msg);
     format!(
-        "Cannot delete mailbox '{name}' — inbox: {inbox_files} files, sent: {sent_files} files. \
-         MCP `mailbox_delete` does not wipe mail; run `sudo aimx mailboxes delete --force {name}` \
+        "Cannot delete mailbox '{name}'. inbox: {inbox_files} files, sent: {sent_files} files. \
+         MCP `mailbox_delete` does not wipe mail. Run `sudo aimx mailboxes delete --force {name}` \
          on the host to wipe and remove."
     )
 }
 
 /// Parse `(N in inbox, M in sent)` out of the daemon's NONEMPTY reason
-/// string. Returns `(0, 0)` when the format doesn't match — the caller
+/// string. Returns `(0, 0)` when the format doesn't match; the caller
 /// still gets the hint with zeroed counts, which is better than 500ing.
 fn parse_nonempty_counts(msg: &str) -> (usize, usize) {
     let mut inbox = 0usize;
@@ -1529,7 +1529,7 @@ mod tests {
     #[test]
     fn rewrite_nonempty_error_falls_back_to_zero_counts_when_format_unexpected() {
         // If the daemon ever changes its phrasing, the MCP hint must
-        // still render rather than 500 — counts default to 0.
+        // still render rather than 500; counts default to 0.
         let weird = "[NONEMPTY] mailbox has files";
         let hint = rewrite_nonempty_error_for_mcp("orders", weird);
         assert!(hint.contains("inbox: 0 files"), "{hint}");
@@ -1545,7 +1545,7 @@ mod tests {
     #[test]
     fn email_send_params_deserialize_without_threading_fields() {
         // Existing callers that omit reply_to/references still parse and
-        // default both to None — backward compatibility guarantee.
+        // default both to None: backward compatibility guarantee.
         let json = r#"{
             "from_mailbox": "agent",
             "to": "alice@example.com",

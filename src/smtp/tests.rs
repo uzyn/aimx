@@ -1065,7 +1065,7 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
     assert!(resp.starts_with("250"), "Expected 250: {resp}");
     client.send_and_read("QUIT").await;
 
-    // Verify text attachment — both should be inside the same bundle dir.
+    // Verify text attachment. Both should be inside the same bundle dir.
     let alice_dir = inbox(tmp.path(), "alice");
     let text_att_path =
         find_attachment(&alice_dir, "README.md").expect("README attachment missing");

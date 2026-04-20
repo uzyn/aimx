@@ -31,8 +31,8 @@ pub(crate) fn run_portcheck(
 /// Bind a minimal SMTP listener on `0.0.0.0:25` for the duration of `f`,
 /// then tear it down. Used by the preflight probe during `aimx setup`
 /// (before aimx.service is installed) and by `aimx portcheck` (when nothing
-/// is holding the port). The listener speaks just enough SMTP — 220 banner,
-/// EHLO/HELO, QUIT — for the remote `/probe` endpoint to confirm the port
+/// is holding the port). The listener speaks just enough SMTP (220 banner,
+/// EHLO/HELO, QUIT) for the remote `/probe` endpoint to confirm the port
 /// is reachable.
 pub(crate) fn with_temp_smtp_listener<F, R>(f: F) -> Result<R, Box<dyn std::error::Error>>
 where
@@ -151,7 +151,7 @@ pub fn run_with_net(
 ) -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "{}\n",
-        term::header("AIMX portcheck - Port 25 connectivity check")
+        term::header("aimx portcheck - Port 25 connectivity check")
     );
 
     let mut all_pass = true;
@@ -186,7 +186,7 @@ pub fn run_with_net(
                 println!(
                     "{}",
                     term::success(
-                        "All checks passed. Port 25 is reachable. Your system is good for AIMX setup."
+                        "All checks passed. Port 25 is reachable. Your system is good for aimx setup."
                     )
                 );
                 println!("Run `sudo aimx setup` to begin.");

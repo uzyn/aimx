@@ -1,10 +1,10 @@
 # Agent Integration
 
-`aimx agent-setup <agent>` installs AIMX's plugin/skill package into the agent's per-user config directory so the agent discovers AIMX as both an MCP server and an agent-facing primer. For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
+`aimx agent-setup <agent>` installs aimx's plugin/skill package into the agent's per-user config directory so the agent discovers aimx as both an MCP server and an agent-facing primer. For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
 ## Discovering supported agents
 
-`aimx agent-setup` with no argument prints the supported-agent registry — one row per agent with its install command, destination path, and activation hint — and exits without installing anything. `aimx agent-setup --list` prints the same view. To install, pass the agent name positionally: `aimx agent-setup <agent>`.
+`aimx agent-setup` with no argument prints the supported-agent registry (one row per agent with its install command, destination path, and activation hint) and exits without installing anything. `aimx agent-setup --list` prints the same view. To install, pass the agent name positionally: `aimx agent-setup <agent>`.
 
 ## What `aimx agent-setup` does
 
@@ -14,7 +14,7 @@
 2. Expands `$HOME` / `$XDG_CONFIG_HOME` to compute the destination.
 3. Writes the plugin tree embedded in the `aimx` binary to that destination
    with file mode `0o644` and directory mode `0o755`.
-4. Prints an activation hint — usually "restart the agent" when the agent
+4. Prints an activation hint. Usually "restart the agent" when the agent
    auto-discovers plugins from a known directory, or the exact install
    command when the agent needs an explicit step.
 
@@ -26,7 +26,7 @@ Key properties:
 - **Never edits the agent's primary config file.** If the agent needs
   additional wiring (e.g. a `mcp add` call), the installer prints the
   command and the user runs it.
-- **Offline.** The plugin tree is embedded at compile time; no network
+- **Offline.** The plugin tree is embedded at compile time. No network
   access is required at install time.
 
 ## Flags
@@ -36,7 +36,7 @@ Key properties:
 | `--list` | Print the registry (agent name, destination, activation hint). |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. |
-| `--data-dir <path>` | Global flag. If AIMX was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
+| `--data-dir <path>` | Global flag. If aimx was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
 
 ## Supported agents
 
@@ -44,27 +44,27 @@ Key properties:
 |-------|-----------------|-------------|------------|------------------------|
 | Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Run the printed `claude mcp add --scope user aimx …` command, then restart Claude Code. | Primer as skill + `references/` directory copied as siblings |
 | Codex CLI | `aimx agent-setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. | Primer as skill + `references/` directory copied as siblings |
-| OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. | Single skill file (primer body); references inlined |
-| Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body); references inlined |
-| Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar); references inlined |
+| OpenCode | `aimx agent-setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. | Single skill file (primer body). References inlined |
+| Gemini CLI | `aimx agent-setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body). References inlined |
+| Goose | `aimx agent-setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar). References inlined |
 | OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. | Primer as skill + `references/` directory copied as siblings |
 | Hermes | `aimx agent-setup hermes` | `~/.hermes/skills/aimx/` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. | Primer as skill + `references/` directory copied as siblings |
 
-> **Progressive disclosure.** Every agent receives the same canonical AIMX primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline; the `references/` content remains available in the AIMX source tree and at `/var/lib/aimx/README.md`.
+> **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
 
 ### Claude Code
 
 Claude Code discovers plugins by scanning `~/.claude/plugins/`, but the MCP
 server bundled inside a plugin is **not** auto-activated for every
-invocation — in particular `claude -p` (headless mode, used by hook
+invocation. In particular `claude -p` (headless mode, used by hook
 recipes) needs an explicit `claude mcp add` so the server is registered in
-its MCP registry. The AIMX plugin ships two pieces:
+its MCP registry. The aimx plugin ships two pieces:
 
-- `.claude-plugin/plugin.json` — manifest declaring the plugin and the
+- `.claude-plugin/plugin.json`: manifest declaring the plugin and the
   `mcpServers.aimx` entry. The plugin itself auto-activates for interactive
   `claude` sessions.
-- `skills/aimx/SKILL.md` — a skill Claude Code loads when the conversation
-  touches email, inboxes, or AIMX. The skill body is the canonical AIMX
+- `skills/aimx/SKILL.md`: a skill Claude Code loads when the conversation
+  touches email, inboxes, or aimx. The skill body is the canonical aimx
   primer: MCP tool names and parameters, the on-disk storage layout, the
   frontmatter format, read/unread semantics, and the DKIM/SPF trust model.
 
@@ -97,12 +97,12 @@ the same `--data-dir` override.
 
 ### Codex CLI
 
-Codex CLI discovers plugins by scanning `~/.codex/plugins/`. The AIMX
+Codex CLI discovers plugins by scanning `~/.codex/plugins/`. The aimx
 plugin ships two pieces:
 
-- `.codex-plugin/plugin.json` — manifest declaring the plugin and
+- `.codex-plugin/plugin.json`: manifest declaring the plugin and
   registering `aimx mcp` as an MCP server.
-- `skills/aimx/SKILL.md` — the agent-facing skill (body = canonical AIMX
+- `skills/aimx/SKILL.md`: the agent-facing skill (body = canonical aimx
   primer).
 
 Install:
@@ -121,7 +121,7 @@ Like Claude Code, the installer rewrites `mcpServers.aimx.args` in
 `plugin.json` to include `--data-dir /custom/path`.
 
 Verify the plugin format and destination path against the current Codex
-CLI documentation before relying on this in production — agent plugin
+CLI documentation before relying on this in production. Agent plugin
 formats drift between releases. See the per-agent
 [README](https://github.com/uzyn/aimx/tree/main/agents/codex) for the
 documentation link.
@@ -129,8 +129,8 @@ documentation link.
 ### OpenCode
 
 OpenCode discovers skills from `~/.config/opencode/skills/<name>/` (user)
-or `<repo>/.opencode/skills/<name>/` (project). The AIMX package is
-skill-only — MCP servers in OpenCode are configured in `opencode.json`,
+or `<repo>/.opencode/skills/<name>/` (project). The aimx package is
+skill-only. MCP servers in OpenCode are configured in `opencode.json`,
 not alongside the skill.
 
 Install:
@@ -170,8 +170,8 @@ for the schema reference.
 ### Gemini CLI
 
 Gemini CLI picks up skills from `~/.gemini/skills/<name>/` and configures
-MCP servers in `~/.gemini/settings.json`. AIMX does not mutate
-`settings.json` directly (FR-49); instead the installer prints the exact
+MCP servers in `~/.gemini/settings.json`. aimx does not mutate
+`settings.json` directly (FR-49). Instead the installer prints the exact
 JSON block to merge.
 
 Install:
@@ -213,8 +213,8 @@ for the schema reference.
 
 [Goose](https://goose-docs.ai/) uses YAML "recipes" rather than plugins or
 skills. A recipe bundles a goal, an agent-facing `prompt`, and the MCP
-`extensions` that run alongside the agent — so one file carries both the
-MCP wiring AND the AIMX primer. No separate config-file edit is needed.
+`extensions` that run alongside the agent. One file carries both the
+MCP wiring AND the aimx primer. No separate config-file edit is needed.
 
 Install:
 
@@ -256,7 +256,7 @@ for the schema reference.
 [OpenClaw](https://docs.openclaw.ai/) uses skill directories (similar
 to Claude Code) for agent-facing instructions and a separate JSON5
 config file for MCP servers at `~/.openclaw/openclaw.json`. Rather than
-having you hand-edit the JSON5 file, AIMX uses OpenClaw's first-class
+having you hand-edit the JSON5 file, aimx uses OpenClaw's first-class
 `openclaw mcp set` CLI to register the MCP server non-interactively.
 
 Install:
@@ -272,7 +272,7 @@ command like:
 openclaw mcp set aimx '{"command":"/usr/local/bin/aimx","args":["mcp"]}'
 ```
 
-Run that command — it edits `~/.openclaw/openclaw.json` for you — then
+Run that command (it edits `~/.openclaw/openclaw.json` for you), then
 restart the OpenClaw gateway so the new MCP server is loaded.
 
 For a custom data directory:
@@ -294,8 +294,8 @@ loads skills from `~/.hermes/skills/<name>/SKILL.md` (with optional
 `references/` siblings) and reads MCP server definitions from
 `~/.hermes/config.yaml` under the top-level `mcp_servers:` key. There is
 no shell-side CLI for registering external MCP servers in Hermes today
-(`hermes mcp serve` runs Hermes as an MCP server — the opposite
-direction), so AIMX prints a YAML snippet for you to paste into the
+(`hermes mcp serve` runs Hermes as an MCP server, the opposite
+direction), so aimx prints a YAML snippet for you to paste into the
 config file, mirroring the Gemini CLI / OpenCode flow.
 
 Install:
@@ -334,7 +334,7 @@ for the schema reference.
 
 ## Manual MCP wiring
 
-If your agent is not yet supported, wire AIMX in manually as a plain MCP
+If your agent is not yet supported, wire aimx in manually as a plain MCP
 stdio server. Most MCP-compatible agents accept a JSON snippet of this
 form:
 
@@ -355,20 +355,20 @@ For a custom data directory, extend `args`:
 "args": ["--data-dir", "/custom/path", "mcp"]
 ```
 
-The location that JSON goes in is agent-specific — check your agent's MCP
-documentation. AIMX's [MCP Server](mcp.md) chapter documents the available
+The location that JSON goes in is agent-specific. Check your agent's MCP
+documentation. The [MCP Server](mcp.md) chapter documents the available
 tools.
 
 ## Troubleshooting
 
-### The agent does not see AIMX after `agent-setup` runs
+### The agent does not see aimx after `agent-setup` runs
 
 - Confirm the destination was written: `aimx agent-setup --list` shows the
   destination path; check that it exists and contains the expected files.
 - Restart the agent. Most agents only scan their plugin directory at
   startup.
 - If the agent requires an explicit install step, re-read the installer
-  output — the activation hint tells you exactly which command to run.
+  output. The activation hint tells you exactly which command to run.
 
 ### "destination files already exist" error
 
@@ -384,8 +384,8 @@ configuring.
 
 ### MCP tools appear but calls fail with "Failed to load config"
 
-The plugin's MCP command defaults to `/var/lib/aimx/` for AIMX's data
-directory. If you set up AIMX with a different path, re-run with
+The plugin's MCP command defaults to `/var/lib/aimx/` for the aimx data
+directory. If you set up aimx with a different path, re-run with
 `aimx --data-dir <path> agent-setup <agent> --force`.
 
 ### OpenCode: skill loads but MCP tools do not appear
@@ -413,8 +413,8 @@ ls ~/.config/goose/recipes/aimx.yaml
 ```
 
 If it is missing, re-run `aimx agent-setup goose`. If `XDG_CONFIG_HOME`
-is set to a non-default value, Goose and AIMX will both honour it —
-check under `$XDG_CONFIG_HOME/goose/recipes/` instead.
+is set to a non-default value, Goose and aimx will both honour it.
+Check under `$XDG_CONFIG_HOME/goose/recipes/` instead.
 
 ### OpenClaw: `openclaw mcp set` says "command not found"
 
@@ -430,10 +430,10 @@ Alternatively, hand-edit `~/.openclaw/openclaw.json` and add the
 printed object under `mcpServers.aimx`. The JSON5 format accepts
 comments and trailing commas but vanilla JSON works too.
 
-### Hermes: AIMX tools missing after editing config.yaml
+### Hermes: aimx tools missing after editing config.yaml
 
 Hermes does not auto-reload MCP servers when `~/.hermes/config.yaml`
-changes — you must run the in-app `/reload-mcp` slash command (or
+changes. You must run the in-app `/reload-mcp` slash command (or
 restart Hermes) after pasting the snippet. Confirm the snippet sits
 under the top-level `mcp_servers:` key (not nested inside another
 section) and that YAML indentation uses spaces, not tabs. If you have

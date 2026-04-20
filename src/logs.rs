@@ -1,4 +1,4 @@
-//! `aimx logs` — tail or follow the aimx service log.
+//! `aimx logs`: tail or follow the aimx service log.
 //!
 //! Wraps `journalctl -u aimx -n <N>` on systemd and a best-effort
 //! `/var/log/aimx/*.log` / `/var/log/messages` read on OpenRC. The
@@ -49,7 +49,7 @@ pub fn run_with_ops<S: SystemOps>(
         Err(e) => {
             // Print the follow-up hint on its own line and let `main`
             // render the error itself via its standard `Error: <e>`
-            // path — we deliberately do NOT print the error twice.
+            // path. We deliberately do NOT print the error twice.
             eprintln!(
                 "  {}",
                 term::dim(
@@ -70,7 +70,7 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     /// Minimal `SystemOps` mock that only services the log methods. Every
-    /// other method panics — the logs command must not touch unrelated
+    /// other method panics; the logs command must not touch unrelated
     /// SystemOps behaviour.
     struct FakeLogsOps {
         canned: String,
@@ -199,7 +199,7 @@ mod tests {
         );
     }
 
-    /// An empty tail from `tail_service_logs` must still succeed — the
+    /// An empty tail from `tail_service_logs` must still succeed. The
     /// code used to `println!()` an unconditional trailing newline, which
     /// produced a stray blank line. The fix guards on `!out.is_empty()`;
     /// this test pins the Ok-on-empty contract so the guard can't

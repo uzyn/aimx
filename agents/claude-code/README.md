@@ -1,18 +1,19 @@
-# AIMX plugin for Claude Code
+# aimx plugin for Claude Code
 
-This directory is the source tree for the Claude Code plugin that wires AIMX
-into Claude Code. Contents are bundled into the `aimx` binary at compile
-time (via `include_dir!`) and installed by `aimx agent-setup claude-code`.
+AIMX (AI Mail Exchange) plugin source tree for Claude Code. This directory
+wires aimx into Claude Code. Contents are bundled into the `aimx` binary
+at compile time (via `include_dir!`) and installed by
+`aimx agent-setup claude-code`.
 
 ## What gets installed
 
-- `.claude-plugin/plugin.json` — Claude Code plugin manifest, including an
+- `.claude-plugin/plugin.json`: Claude Code plugin manifest, including an
   `mcpServers.aimx` entry pointing at `/usr/local/bin/aimx mcp`.
-- `skills/aimx/SKILL.md` — an agent-facing skill. Its body is the canonical
-  AIMX primer (`agents/common/aimx-primer.md`); the installer assembles the
+- `skills/aimx/SKILL.md`: an agent-facing skill. Its body is the canonical
+  aimx primer (`agents/common/aimx-primer.md`). The installer assembles the
   final `SKILL.md` from a YAML header plus that primer so there is one
   source of truth.
-- `skills/aimx/references/` — detailed reference docs (MCP tool signatures,
+- `skills/aimx/references/`: detailed reference docs (MCP tool signatures,
   frontmatter schema, workflows, troubleshooting) copied from
   `agents/common/references/`. Progressive disclosure: Claude Code loads the
   primer first and reads references on demand.
@@ -32,7 +33,7 @@ Restart Claude Code after both commands complete.
 
 ## Overriding the data directory
 
-If AIMX was set up with a non-default data directory, re-run the installer
+If aimx was set up with a non-default data directory, re-run the installer
 and the MCP registration with `--data-dir`:
 
 ```bash
@@ -47,9 +48,9 @@ MCP registry.
 
 ## Channel-trigger recipes
 
-Installing the plugin gives Claude Code MCP access to AIMX. To wire it
-the other way — have AIMX invoke `claude -p` automatically on inbound
-email — see the
+Installing the plugin gives Claude Code MCP access to aimx. To wire it
+the other way, have aimx invoke `claude -p` automatically on inbound
+email. See the
 [Hook Recipes](../../book/hook-recipes.md#claude-code) chapter,
 which has a copy-paste `config.toml` snippet and flag references.
 

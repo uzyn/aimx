@@ -1,10 +1,10 @@
 # author: U-Zyn Chua <chua@uzyn.com>
 # (Goose recipe schema does not support an author field)
 version: "1.0.0"
-title: "AIMX Email"
+title: "aimx email"
 description: >
   Self-hosted email for AI agents. Send, read, reply to, and manage email
-  via AIMX MCP tools stored as Markdown files on the local filesystem.
+  via aimx MCP tools stored as Markdown files on the local filesystem.
 extensions:
   - type: stdio
     name: aimx
@@ -13,5 +13,5 @@ extensions:
       - mcp
     timeout: 300
     description: >
-      AIMX MCP server — nine tools for mailbox and email operations.
+      aimx MCP server. Nine tools for mailbox and email operations.
 prompt: |

@@ -3,7 +3,7 @@
 //! This module contains the per-connection business logic that runs inside
 //! `aimx serve` after a request frame has been decoded: domain validation,
 //! DKIM signing, delivery, and sent-items persistence. Framing is the
-//! [`send_protocol`] module's responsibility — this one deals only in parsed
+//! [`send_protocol`] module's responsibility; this one deals only in parsed
 //! `SendRequest`s.
 //!
 //! The handler is deliberately testable: real MX delivery is abstracted
@@ -30,13 +30,13 @@ use crate::transport::{MailTransport, TransportError};
 /// Process-scoped lock guarding the outbound critical section: filename
 /// allocation + file/directory creation. The daemon is the single writer
 /// to `<data_dir>/sent/`, so a process Mutex is sufficient. The lock is
-/// held only for the metadata check + `fs::File::create` — the actual
+/// held only for the metadata check + `fs::File::create`. The actual
 /// file write happens outside the lock. Symmetric to `INGEST_WRITE_LOCK`
 /// in `ingest.rs`.
 static SENT_WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// A single mailbox entry as seen by the send handler. The daemon only
-/// needs the configured address (to check for concrete-mailbox match) — it
+/// needs the configured address (to check for concrete-mailbox match); it
 /// never executes triggers or reads `trusted_senders` on the outbound path.
 #[derive(Debug, Clone)]
 pub struct RegisteredMailbox {
@@ -45,7 +45,7 @@ pub struct RegisteredMailbox {
 
 /// Context shared across every per-connection send.
 ///
-/// Heap-allocated once at daemon startup and cloned (cheap — `Arc` clones)
+/// Heap-allocated once at daemon startup and cloned (cheap; `Arc` clones)
 /// into each task. Holding the DKIM key in an `Arc` here is what lets us
 /// load it exactly once despite accepting concurrent sends.
 ///
@@ -90,7 +90,7 @@ where
     F: FnOnce(&[u8], &RsaPrivateKey, &str, &str) -> Result<Vec<u8>, Box<dyn std::error::Error>>,
 {
     // Snapshot the live config at the start of the request. Any
-    // MAILBOX-CREATE/DELETE that lands after this point still runs — the
+    // MAILBOX-CREATE/DELETE that lands after this point still runs; the
     // swap just doesn't affect the decision for *this* particular send.
     let config = ctx.config_handle.load();
     let primary_domain = config.domain.as_str();
@@ -128,7 +128,7 @@ where
     };
 
     // The daemon resolves the sender mailbox from the submitted `From:`
-    // itself — the client does not send `From-Mailbox:` and does not read
+    // itself. The client does not send `From-Mailbox:` and does not read
     // `/etc/aimx/config.toml`.
     //
     // FR-18d: the sender domain must equal the configured primary domain
@@ -193,8 +193,8 @@ where
     // <user@host>`), a bare addr (`user@host`), or even angle-only
     // (`<user@host>`). `lettre::Address::FromStr` only parses the bare form,
     // so normalize to `user@host` before handing it to the transport. Any
-    // failure to extract a bare recipient is MALFORMED — not a delivery
-    // error — because nothing has been attempted over the wire.
+    // failure to extract a bare recipient is MALFORMED, not a delivery
+    // error, because nothing has been attempted over the wire.
     let recipient_bare = match extract_bare_address(&to_header) {
         Some(addr) => addr,
         None => {
@@ -301,8 +301,8 @@ where
     };
 
     // Sprint 50 / S50-4: fire `after_send` hooks for the from-mailbox.
-    // Synchronous — daemon awaits subprocess completion for predictable
-    // timing — but exit code is discarded. Failures cannot affect the
+    // Synchronous: daemon awaits subprocess completion for predictable
+    // timing, but exit code is discarded. Failures cannot affect the
     // outbound result the client already expects.
     fire_after_send_hooks(
         &config,
@@ -358,7 +358,7 @@ fn has_any_after_send(mailbox: &MailboxConfig) -> bool {
 /// Tries (in order): exact `address` match → mailbox name equal to the
 /// local part (for the common case where name == local). Returns `None`
 /// when nothing concrete matches. There is no catchall (`*@domain`)
-/// fallback — catchall is inbound-only per FR-18d.
+/// fallback. Catchall is inbound-only per FR-18d.
 fn resolve_concrete_mailbox(
     mailboxes: &HashMap<String, RegisteredMailbox>,
     bare_from: &str,
@@ -466,7 +466,7 @@ fn extract_domain(from: &str) -> Option<String> {
 
 /// Extract the bare `local@host` form from a header value, accepting
 /// `"Name" <local@host>`, `local@host`, and angle-only `<local@host>`. For
-/// comma-separated header values only the first recipient is returned —
+/// comma-separated header values only the first recipient is returned;
 /// v0.2 submissions are single-recipient and the daemon's envelope already
 /// only takes one address.
 fn extract_bare_address(value: &str) -> Option<String> {
@@ -739,7 +739,7 @@ mod tests {
 
     #[tokio::test]
     async fn bogus_local_part_under_config_domain_returns_mailbox_error() {
-        // S45-2: wildcard fallback is gone — sending as a local part that
+        // S45-2: wildcard fallback is gone. Sending as a local part that
         // doesn't match a concrete registered mailbox must be rejected
         // with ERR MAILBOX even when the domain matches the configured one.
         let mock = Arc::new(MockTransport {
@@ -1008,7 +1008,7 @@ mod tests {
         });
         let ctx = test_ctx(mock.clone());
         // `To:` carries a display name. The handler must normalize to the
-        // bare addr before calling the transport — otherwise the lettre
+        // bare addr before calling the transport; otherwise the lettre
         // `Address::FromStr` parse at the transport layer would fail and
         // we would have mapped an RFC 5322-valid header into `ERR DELIVERY`.
         let body = b"From: alice@example.com\r\n\
