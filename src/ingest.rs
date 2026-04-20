@@ -259,7 +259,7 @@ pub fn ingest_email(
             filepath: &md_path,
             metadata: &meta,
         };
-        hook::execute_on_receive(mailbox_config, &ctx);
+        hook::execute_on_receive(config, mailbox_config, &ctx);
     }
 
     Ok(())
