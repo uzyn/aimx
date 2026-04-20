@@ -169,8 +169,8 @@ directly to the recipient's MX server.
 | `subject`      | string   | yes      | Email subject |
 | `body`         | string   | yes      | Email body text |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
-| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`; when `references` is omitted, `References` is built automatically from this value |
-| `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). Use alongside `reply_to` for reply-all or manually-threaded sends |
+| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`; when `references` is omitted, `References` is built automatically from this value. Required to enable threading — without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
+| `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set** — supplied alone, it is silently ignored |
 
 For simple replies to a single sender, prefer `email_reply` — it reads the
 original email and fills in threading headers and the `Re:` subject
