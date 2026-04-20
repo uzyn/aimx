@@ -127,7 +127,7 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | `aimx._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 
-Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx as of v0.2. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
+Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup` — it is out of scope for aimx. A correct PTR record pointing to your domain does improve deliverability; see the VPS provider's documentation for how to set it.
 
 The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml` — see [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient; any existing AAAA record in DNS is left alone.
 

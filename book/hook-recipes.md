@@ -30,6 +30,7 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 | Gemini CLI | Yes (`aimx agent-setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
 | Goose | Yes (`aimx agent-setup goose`) | `goose run -t "<prompt>"` | `--no-session` (optional; sessions default on) | `-t/--text` takes an inline prompt; `-i/--instructions` reads from a file. |
 | OpenClaw | Yes (`aimx agent-setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw; `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
+| Hermes | Yes (`aimx agent-setup hermes`) | *(no headless CLI)* | — | Hermes has no shell-side invocation for dispatching a one-shot prompt; integrate via MCP instead. See [Hermes](#hermes) for the recommended pattern. |
 | Aider | No (no MCP server) | `aider --message "<prompt>"` | `--yes-always` | Aider is a code-editing agent; recipes below pattern it as "take email, apply patch, commit." |
 
 Every agent with an `aimx agent-setup <agent>` installer can ALSO be wired as a hook — MCP support and hook support are orthogonal. MCP gives the agent a way to read/send mail on demand; a hook is AIMX pushing an email into the agent when it arrives.
@@ -198,6 +199,31 @@ openclaw agent \
     >> /var/log/aimx/openclaw.log 2>&1
 '''
 ```
+
+## Hermes
+
+- Docs: <https://hermes-agent.nousresearch.com/>
+- Shell-side invocation: Hermes does not currently expose a headless CLI for dispatching a one-shot prompt (the `hermes mcp serve` subcommand runs Hermes *as* an MCP server — the opposite direction). Hook-driven agent dispatch therefore uses MCP on the inbound side.
+
+### Recommended pattern
+
+Register AIMX as an MCP server inside Hermes (`aimx agent-setup hermes` plus the YAML snippet it prints — see [Agent Integration — Hermes](agent-integration.md#hermes)). Inside Hermes, use the AIMX skill's `email_list` / `email_read` tools to inspect the inbox on demand.
+
+For shell-side notifications on new mail (so Hermes operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
+
+```toml
+[mailboxes.hermes]
+address = "hermes@agent.yourdomain.com"
+trust = "verified"
+
+[[mailboxes.hermes.hooks]]
+id = "hermesnotify"
+event = "on_receive"
+cmd = 'ntfy pub hermes-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
+dangerously_support_untrusted = true
+```
+
+When Hermes grows a headless `--message` / `exec`-style CLI, add it here mirroring the Claude Code or Codex recipe.
 
 ## Aider
 

@@ -170,9 +170,13 @@ Every email stored by AIMX carries a TOML frontmatter block between `+++` delimi
 | `trusted` | yes | `none`, `true`, or `false` -- per-mailbox trust evaluation result (see [Configuration](configuration.md)) |
 | `mailbox` | yes | Target mailbox name |
 | `read` | yes | Read/unread status |
+| `outbound` | sent only | Always `true` on sent copies |
 | `delivery_status` | sent only | `delivered`, `failed`, `deferred`, or `pending` |
+| `bcc` | sent only (optional) | Array of BCC recipient addresses |
+| `delivered_at` | sent only (optional) | RFC 3339 UTC timestamp of successful MX handoff |
+| `delivery_details` | sent only (optional) | SMTP reason string on permanent failure |
 
-Outbound (sent) emails additionally carry `outbound = true`, `delivery_status`, and optionally `delivered_at` and `delivery_details`.
+See [Mailboxes — Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the full outbound schema.
 
 ## Agent-facing documentation
 

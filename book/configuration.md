@@ -4,13 +4,11 @@ AIMX uses a single TOML configuration file for all settings.
 
 ## Config file location
 
-The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`.
-
-> **Note:** Since v0.2, config and DKIM secrets live under `/etc/aimx/` separate from the data directory (`/var/lib/aimx/`) so they stay root-owned and unreadable by non-root processes.
+The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`. Config and DKIM secrets live under `/etc/aimx/` (root-owned, unreadable by non-root processes), separate from mailbox data under `/var/lib/aimx/`.
 
 ### Data directory override
 
-The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only in v0.2 — config and DKIM keys are under `/etc/aimx/`. To relocate it:
+The **data directory** (`/var/lib/aimx/` by default) holds mailboxes only — config and DKIM keys are under `/etc/aimx/`. To relocate it:
 
 ```bash
 # CLI flag (works with any command)
@@ -32,6 +30,17 @@ export AIMX_CONFIG_DIR=/custom/etc/path
 ```
 
 This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim/public.key`) are read from. Under normal operation you should **not** set this — `aimx setup` writes to `/etc/aimx/` and every command picks it up from there.
+
+## Environment variables
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `AIMX_DATA_DIR` | `/var/lib/aimx` | Override the mailbox data directory. Equivalent to `--data-dir`; the flag wins when both are set. |
+| `AIMX_CONFIG_DIR` | `/etc/aimx` | Override the config + DKIM directory. For tests and non-standard installs only. |
+| `AIMX_TEST_MAIL_DROP` | *(unset)* | When set to a directory path, `aimx serve` writes every outbound submission to that directory instead of delivering via SMTP. The daemon logs a startup warning so it cannot be left on in production by accident. |
+| `NO_COLOR` | *(unset)* | Standard convention — when set to any value, AIMX CLI output disables ANSI color. |
+
+Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields — see [Hooks & Trust — Hook context](hooks.md#hook-context-env-vars-and-placeholders).
 
 ## Settings reference
 
@@ -62,8 +71,6 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 | `hooks` | array | `[]` | Hooks fired on `on_receive` (inbound) and `after_send` (outbound) events |
 
 See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.md) for hook configuration.
-
-> **Migration note.** If you edited `config.toml` before the global-default fields existed and set `trust = "none"` or `trusted_senders = []` on every mailbox, those per-mailbox values still shadow any top-level default you add later (`Option::Some(...)` at the mailbox level always wins). When tightening policy globally, delete the redundant per-mailbox lines on mailboxes you want to inherit the new default. `aimx setup` writes new mailboxes without those lines from the start.
 
 ### Inbound email verification
 
@@ -100,7 +107,7 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays:
 | `from` | glob | `on_receive` only: sender filter |
 | `to` | glob | `after_send` only: recipient filter |
 | `subject` | string | Case-insensitive substring filter |
-| `has_attachment` | bool | `on_receive` only: attachment-presence filter (rejected on `after_send`, which is text-only in v0.2) |
+| `has_attachment` | bool | `on_receive` only: attachment-presence filter (rejected on `after_send`, which is text-only) |
 | `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"` |
 
 See [Hooks & Trust](hooks.md) for full details on events, match filters, and trust policies.
