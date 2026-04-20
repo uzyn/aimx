@@ -351,13 +351,11 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                     hook.event.as_str()
                 ));
             }
-            if hook.is_template_bound()
-                && hook.origin == HookOrigin::Mcp
-                && hook.dangerously_support_untrusted
-            {
+            if hook.origin == HookOrigin::Mcp && hook.dangerously_support_untrusted {
                 // PRD §6.8: MCP-origin hooks always fire only on trusted
-                // mail. `dangerously_support_untrusted` is an operator-only
-                // knob that `validate_single_hook` (UDS path) also rejects.
+                // mail, regardless of whether they are template-bound or
+                // raw-cmd. `dangerously_support_untrusted` is an
+                // operator-only knob.
                 return Err(format!(
                     "hook '{label}' on mailbox '{mailbox_name}' is MCP-origin and sets \
                      `dangerously_support_untrusted = true`: that flag is operator-only"
@@ -438,6 +436,13 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
     if hook.dangerously_support_untrusted && hook.event != HookEvent::OnReceive {
         return Err(
             "`dangerously_support_untrusted = true` only applies to `on_receive` hooks".into(),
+        );
+    }
+    if hook.origin == HookOrigin::Mcp && hook.dangerously_support_untrusted {
+        // PRD §6.8: MCP-origin hooks always fire only on trusted mail,
+        // regardless of whether they are template-bound or raw-cmd.
+        return Err(
+            "MCP-origin hooks may not set `dangerously_support_untrusted = true`: that flag is operator-only".into(),
         );
     }
     Ok(())
@@ -527,6 +532,27 @@ pub(crate) fn validate_hook_templates(templates: &[HookTemplate]) -> Result<(), 
             ));
         }
 
+        // Declared param names must match the placeholder charset
+        // (`[a-z0-9_]+`). Otherwise the placeholder extractor silently
+        // skips references like `{FOO}` and the operator gets the less
+        // helpful "unused param" error downstream.
+        for declared in &tmpl.params {
+            if !is_valid_placeholder_name(declared) {
+                return Err(format!(
+                    "hook template '{}' declares invalid param name '{}': param names must match [a-z0-9_]+",
+                    tmpl.name, declared
+                ));
+            }
+            if HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.contains(&declared.as_str()) {
+                return Err(format!(
+                    "hook template '{}' declares param '{}' that collides with a built-in placeholder ({})",
+                    tmpl.name,
+                    declared,
+                    HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.join(", ")
+                ));
+            }
+        }
+
         // `cmd[0]` is the binary path and never admits placeholders.
         let binary = &tmpl.cmd[0];
         if iter_placeholders(binary).next().is_some() {
@@ -576,6 +602,16 @@ fn is_valid_template_name(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Charset predicate for `[[hook_template]].params` entries and the
+/// placeholder names surfaced by [`iter_placeholders`]. Kept in lockstep
+/// with the parser so operators get a precise "invalid param name" error
+/// at load time rather than a misleading "unused param".
+fn is_valid_placeholder_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 fn validate_trust_values(config: &Config) -> Result<(), String> {
@@ -1967,6 +2003,68 @@ allowed_events = []
     }
 
     #[test]
+    fn load_rejects_param_name_with_uppercase_letters() {
+        // Params must match the placeholder charset `[a-z0-9_]+`. An
+        // uppercase param name like `FOO` can never be referenced by the
+        // placeholder extractor, so we reject it at load time with a
+        // precise error rather than letting it surface as "unused param".
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-param"
+description = "uppercase param"
+cmd = ["/bin/echo", "{FOO}"]
+params = ["FOO"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid param name"),
+            "expected invalid-param-name rejection: {err}"
+        );
+        assert!(
+            err.contains("FOO"),
+            "error should name the offending param: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_param_name_with_dash() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-param"
+description = "dashed param"
+cmd = ["/bin/echo", "placeholder"]
+params = ["foo-bar"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid param name"),
+            "expected invalid-param-name rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_param_name_colliding_with_builtin() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "clash"
+description = "param collides with built-in"
+cmd = ["/bin/echo", "{event}"]
+params = ["event"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("built-in placeholder"),
+            "expected built-in collision rejection: {err}"
+        );
+    }
+
+    #[test]
     fn hook_templates_fixture_round_trips() {
         let fixture = std::fs::read_to_string("tests/fixtures/hook_templates_valid.toml")
             .expect("fixture present");
@@ -2111,5 +2209,60 @@ prompt = "Draft a reply"
             Some("Draft a reply")
         );
         assert!(hooks[0].cmd.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_mcp_origin_raw_cmd_with_dangerously_flag() {
+        // PRD §6.8: MCP-origin hooks may not set
+        // `dangerously_support_untrusted`, regardless of whether they are
+        // template-bound or raw-cmd. The guard in `validate_hooks` drops
+        // the `is_template_bound()` qualifier so it catches this shape
+        // even though the UDS body-schema tightening lands in Sprint 3.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.accounts]
+address = "accounts@test.com"
+
+[[mailboxes.accounts.hooks]]
+name = "mcp_raw_danger"
+event = "on_receive"
+origin = "mcp"
+cmd = "echo hi"
+dangerously_support_untrusted = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("MCP-origin") && err.contains("operator-only"),
+            "expected mcp-origin dangerously rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_single_hook_rejects_mcp_origin_raw_cmd_with_dangerously_flag() {
+        // The UDS `HOOK-CREATE` path calls `validate_single_hook` on the
+        // submitted stanza before it ever reaches `Config`. The MCP-origin
+        // guard must fire there too, for the same reason as above.
+        let hook = Hook {
+            name: Some("raw_danger".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo hi".into(),
+            dangerously_support_untrusted: true,
+            origin: HookOrigin::Mcp,
+            template: None,
+            params: std::collections::BTreeMap::new(),
+        };
+        let err = validate_single_hook(&hook).unwrap_err();
+        assert!(
+            err.contains("MCP-origin") && err.contains("operator-only"),
+            "expected mcp-origin dangerously rejection: {err}"
+        );
     }
 }

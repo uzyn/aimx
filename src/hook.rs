@@ -155,7 +155,10 @@ pub struct Hook {
 
 impl Hook {
     /// True iff this hook references a template (rather than carrying its
-    /// own raw `cmd`).
+    /// own raw `cmd`). Consumed by Sprint 2's `resolve_argv` dispatch and
+    /// by the `doctor` summary in a later sprint — not wired into a call
+    /// site yet, but load-bearing for the downstream branches.
+    #[allow(dead_code)]
     pub fn is_template_bound(&self) -> bool {
         self.template.is_some()
     }

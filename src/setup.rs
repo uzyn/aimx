@@ -92,9 +92,13 @@ pub trait SystemOps {
         if self.user_exists(user) {
             return Ok(false);
         }
-        // Try `useradd` first (Debian/Ubuntu/RHEL). Fall back to `adduser`
-        // with the busybox/OpenRC flag shape when useradd isn't on PATH.
-        let status = std::process::Command::new("useradd")
+        // Try `useradd` first (Debian/Ubuntu/RHEL). Only fall back to
+        // `adduser` when `useradd` isn't on PATH (`ErrorKind::NotFound`).
+        // Any other failure (useradd ran and exited non-zero, permission
+        // denied spawning it, etc.) is propagated as-is so the operator
+        // sees the real cause rather than a confusing "adduser failed"
+        // downstream.
+        match std::process::Command::new("useradd")
             .args([
                 "--system",
                 "--no-create-home",
@@ -105,10 +109,13 @@ pub trait SystemOps {
             ])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
-            .status();
-        match status {
+            .status()
+        {
             Ok(s) if s.success() => Ok(true),
-            _ => {
+            Ok(s) => {
+                Err(format!("`useradd` exited with {s} while creating system user '{user}'").into())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Fall back to the Alpine / BusyBox `adduser` flags.
                 let s = std::process::Command::new("adduser")
                     .args(["-S", "-H", "-s", "/sbin/nologin", user])
@@ -120,6 +127,7 @@ pub trait SystemOps {
                 }
                 Ok(true)
             }
+            Err(e) => Err(format!("failed to spawn `useradd` for user '{user}': {e}").into()),
         }
     }
 
