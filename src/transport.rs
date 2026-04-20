@@ -1,7 +1,7 @@
 //! Daemon-side outbound SMTP transport.
 //!
 //! `aimx send` does not sign or deliver mail itself. It opens
-//! `/run/aimx/send.sock` and hands a composed RFC 5322 message to `aimx serve`.
+//! `/run/aimx/aimx.sock` and hands a composed RFC 5322 message to `aimx serve`.
 //! Signing and direct-SMTP delivery live here, behind the [`MailTransport`]
 //! trait so the send handler (`src/send_handler.rs`) can be unit-tested
 //! without touching the network.

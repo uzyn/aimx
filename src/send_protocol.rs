@@ -2,7 +2,7 @@
 //!
 //! Length-prefixed, binary-safe framing used by `aimx send` and the MCP
 //! server to submit mail + state-mutation requests to `aimx serve` over
-//! `/run/aimx/send.sock`. The codec is pure: it speaks only
+//! `/run/aimx/aimx.sock`. The codec is pure: it speaks only
 //! `AsyncRead`/`AsyncWrite`, so it can be exercised with in-memory async
 //! streams (e.g. `tokio_test::io::Builder`) without touching the filesystem
 //! or a real socket.

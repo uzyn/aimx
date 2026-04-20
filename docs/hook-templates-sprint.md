@@ -10,7 +10,7 @@
 
 ---
 
-## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [NOT STARTED]
+## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [IN PROGRESS]
 
 **Goal:** Land all low-risk mechanical changes (socket rename, config schema additions, service user creation) so every downstream sprint builds on a clean base.
 

@@ -40,7 +40,7 @@ pub(crate) fn submit_hook_create_via_daemon(
         mailbox: mailbox.to_string(),
         hook_toml,
     };
-    let socket = crate::serve::send_socket_path();
+    let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
     let io_result: Result<MarkOutcome, std::io::Error> = match rt {
@@ -66,7 +66,7 @@ pub(crate) fn submit_hook_delete_via_daemon(name: &str) -> Result<(), HookCrudFa
     let request = HookDeleteRequest {
         name: name.to_string(),
     };
-    let socket = crate::serve::send_socket_path();
+    let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
     let io_result: Result<MarkOutcome, std::io::Error> = match rt {

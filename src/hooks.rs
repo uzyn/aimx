@@ -81,6 +81,9 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         r#type: "cmd".to_string(),
         cmd: args.cmd,
         dangerously_support_untrusted: args.dangerously_support_untrusted,
+        origin: crate::hook::HookOrigin::Operator,
+        template: None,
+        params: std::collections::BTreeMap::new(),
     };
     let effective = effective_hook_name(&hook);
 
@@ -320,6 +323,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -403,6 +407,9 @@ mod tests {
             r#type: "cmd".into(),
             cmd: "echo one".into(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         });
         // Anonymous
         let anon = Hook {
@@ -411,6 +418,9 @@ mod tests {
             r#type: "cmd".into(),
             cmd: "echo anon".into(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let anon_derived = effective_hook_name(&anon);
         cfg.mailboxes.get_mut("catchall").unwrap().hooks.push(anon);
