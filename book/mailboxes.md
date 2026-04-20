@@ -174,6 +174,20 @@ The format is agent-readable without a MIME parser: an agent can `cat` the file 
 | `read` | bool | Read status (`false` on ingest) |
 | `read_at` | datetime | RFC 3339 UTC timestamp set when the email is marked read. Removed on mark-unread. Reflects the most recent read, not the first. Optional, omitted when absent |
 
+### Outbound frontmatter
+
+Emails under `sent/<mailbox>/` carry every inbound field plus an outbound block appended at the end:
+
+| Field | Type | Always written | Description |
+|-------|------|----------------|-------------|
+| `outbound` | bool | yes | Always `true` on sent copies. Distinguishes outbound files from inbound. |
+| `delivery_status` | string | yes | One of `"delivered"`, `"failed"`, `"deferred"`, `"pending"`. |
+| `bcc` | array of strings | no | BCC recipients. Optional, omitted when empty. |
+| `delivered_at` | string | no | RFC 3339 UTC timestamp of the successful MX handoff. Optional, present only when `delivery_status = "delivered"`. |
+| `delivery_details` | string | no | SMTP reason string on permanent failure (e.g. `"550 no such user"`). Optional. |
+
+Deferred (4xx) sends are not persisted — the submitting client is expected to retry. Permanent (5xx) failures are persisted with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. On outbound files the inbound `received_at` and `received_from_ip` fields are omitted when empty.
+
 ### Body extraction
 
 - **Text/plain** is preferred when available
@@ -209,7 +223,7 @@ path = "report.pdf"
 | `filename` | Original filename (path components stripped, duplicates suffixed `-1`, `-2`, …) |
 | `content_type` | MIME type |
 | `size` | File size in bytes |
-| `path` | Path relative to the bundle directory (no `attachments/` prefix in v0.2) |
+| `path` | Path relative to the bundle directory |
 
 ## Read/unread tracking
 
@@ -244,7 +258,17 @@ aimx send --from support@agent.yourdomain.com \
           --subject "Re: Hello" \
           --body "Reply body" \
           --reply-to "<original-message-id@example.com>"
+
+# Advanced: supply the full References header for deep threading
+aimx send --from support@agent.yourdomain.com \
+          --to recipient@gmail.com \
+          --subject "Re: Hello" \
+          --body "Reply body" \
+          --reply-to "<parent@example.com>" \
+          --references "<root@example.com> <parent@example.com>"
 ```
+
+`--reply-to` sets the `In-Reply-To` header (single Message-ID). `--references` sets the `References` chain and is only needed for multi-step threads where `In-Reply-To` alone is not enough — most users can omit it. For interactive agent use, prefer the `email_reply` MCP tool; it reads the original message and fills both headers automatically.
 
 ### Via MCP
 

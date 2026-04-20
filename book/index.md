@@ -49,5 +49,6 @@ See [Getting Started](getting-started.md) for the full walkthrough.
 | [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Aider) |
 | [MCP Server](mcp.md) | The 9 MCP tools — parameters, frontmatter contract, workflow examples |
 | [Agent Integration](agent-integration.md) | `aimx agent-setup` installer, per-agent configuration, manual MCP wiring |
+| [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |
 | [FAQ](faq.md) | Deployment, DNS, storage, MCP, and operations questions |

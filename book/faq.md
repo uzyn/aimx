@@ -144,7 +144,7 @@ OpenRC does not have journald. AIMX writes nothing of its own — `aimx logs` ta
 
 ### How do I run a dry-run send without touching real MX servers?
 
-Set `AIMX_TEST_MAIL_DROP=/path/to/dir` before starting `aimx serve`. Every outbound submission is written to that directory instead of being delivered; lettre is not invoked. The daemon logs a startup warning so you cannot leave this on in production by accident. Unset the env var and restart to go live.
+Set `AIMX_TEST_MAIL_DROP=/path/to/dir` before starting `aimx serve`; every outbound submission is written to that directory instead of delivered. See [Configuration — Environment variables](configuration.md#environment-variables) for the full set.
 
 ## Verifier service
 

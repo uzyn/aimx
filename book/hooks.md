@@ -47,7 +47,7 @@ cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
 | `from` | glob | no | `on_receive` only: match the sender. |
 | `to` | glob | no | `after_send` only: match the recipient. |
 | `subject` | string | no | Case-insensitive substring match against the email subject. |
-| `has_attachment` | bool | no | `on_receive` only: `true` requires attachments, `false` requires none. Rejected on `after_send` — outbound submissions over UDS are text-only in v0.2. |
+| `has_attachment` | bool | no | `on_receive` only: `true` requires attachments, `false` requires none. Rejected on `after_send` — outbound submissions over UDS are text-only. |
 | `dangerously_support_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. |
 
 Multiple hooks can be defined per mailbox; each is evaluated independently.
@@ -99,7 +99,7 @@ Flag validation matches the on-load validator:
 |------|------------------|
 | `--from <glob>` | only valid on `--event on_receive` |
 | `--to <glob>` | only valid on `--event after_send` |
-| `--has-attachment` | only valid on `--event on_receive` (outbound submissions via UDS are text-only in v0.2) |
+| `--has-attachment` | only valid on `--event on_receive` (outbound submissions via UDS are text-only) |
 | `--dangerously-support-untrusted` | only valid on `--event on_receive` |
 | `--subject <sub>` | both events |
 
@@ -184,8 +184,6 @@ The recommended configuration is:
 2. Leave per-hook `dangerously_support_untrusted` off.
 
 For hooks that should still fire on untrusted mail (e.g. a generic notifier that does not invoke an agent), set `dangerously_support_untrusted = true` on that hook explicitly. The flag name is deliberately verbose to make the security tradeoff visible in review. It is rejected at config load on any event other than `on_receive`.
-
-> **Migration note.** Before the current gate, a mailbox with `trust = "none"` fired hooks for every inbound email. Under the current gate, the same mailbox fires **no** hooks unless each hook opts in with `dangerously_support_untrusted = true`. Switch to `trust = "verified"` with an explicit `trusted_senders` allowlist, and remove per-hook overrides that are no longer needed.
 
 ### `trust` modes
 
