@@ -14,7 +14,7 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 
 ### On-disk layout
 
-```
+```text
 /var/lib/aimx/
 ├── inbox/              # inbound mail lives here
 │   ├── catchall/
@@ -147,7 +147,7 @@ read = false
 Hello, this is the email body in plain text.
 ```
 
-This format is designed to be agent-readable without parsing libraries. An agent can `cat` the file and understand it immediately.
+The format is agent-readable without a MIME parser: an agent can `cat` the file and act on it directly.
 
 ### Frontmatter fields
 
@@ -185,7 +185,7 @@ This format is designed to be agent-readable without parsing libraries. An agent
 When an email carries one or more attachments, AIMX writes a Zola-style
 bundle directory whose name matches the `.md` file's stem:
 
-```
+```text
 /var/lib/aimx/inbox/support/
 ├── 2025-01-15-103000-status-update.md         # flat: no attachments
 └── 2025-01-15-104500-quarterly-report/        # bundle: one or more attachments
@@ -258,9 +258,9 @@ Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP S
 
 ### Reply threading
 
-When replying to an email, AIMX sets the `In-Reply-To` and `References` headers so the reply is threaded correctly in the recipient's mail client. Use `--reply-to` with the original message's `Message-ID` value.
+Replies set `In-Reply-To` and `References` so the thread lands correctly in the recipient's mail client. Pass `--reply-to` with the original message's `Message-ID` value.
 
-The `email_reply` MCP tool handles threading automatically -- it reads the original email and sets the correct headers.
+The `email_reply` MCP tool handles threading automatically by reading the original email and setting the headers.
 
 ## Email ID format
 

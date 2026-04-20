@@ -1,28 +1,10 @@
 # Agent Integration
 
-AIMX ships plugin/skill packages for popular AI agents and a one-command
-installer, `aimx agent-setup <agent>`, that drops the right files into the
-right per-user directory. After install, the agent discovers AIMX as both an
-MCP server (so tool calls work) and an agent-facing primer (so the agent
-knows when and how to use those tools).
-
-This page covers what the installer does, the list of supported agents, and
-how to wire AIMX in manually if your agent is not yet in the registry.
-
-Once your agent is installed, see [Hook Recipes](hook-recipes.md)
-for email-triggered workflows — side-by-side non-interactive CLI
-invocations for every supported agent.
+`aimx agent-setup <agent>` installs AIMX's plugin/skill package into the agent's per-user config directory so the agent discovers AIMX as both an MCP server and an agent-facing primer. For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
 ## Guided setup
 
-Running `aimx agent-setup` with no argument on an interactive terminal
-prints a numbered menu listing every supported agent plus an **MCP
-(General)** option. Pick an agent to install it; pick **MCP (General)** to
-print a generic MCP stdio JSON snippet you can paste into any MCP-capable
-client that is not yet in the registry. The menu respects `--data-dir`, so
-the printed snippet includes the override when one is set. Non-interactive
-callers (scripts, CI) must still pass the positional `<agent>` argument or
-`--list`.
+`aimx agent-setup` with no argument on an interactive terminal prints a numbered menu of every supported agent plus an **MCP (General)** option that outputs a generic MCP stdio JSON snippet for clients not yet in the registry. The menu respects `--data-dir`, so the printed snippet includes any override. Non-interactive callers (scripts, CI) must pass the positional `<agent>` argument or `--list`.
 
 ## What `aimx agent-setup` does
 
@@ -58,9 +40,6 @@ Key properties:
 
 ## Supported agents
 
-The matrix below tracks what is available in the current `aimx` binary. It
-grows as more agents are added.
-
 | Agent | Install command | Destination | Activation | Progressive disclosure |
 |-------|-----------------|-------------|------------|------------------------|
 | Claude Code | `aimx agent-setup claude-code` | `~/.claude/plugins/aimx/` | Run the printed `claude mcp add --scope user aimx …` command, then restart Claude Code. | Primer as skill + `references/` directory copied as siblings |
@@ -71,17 +50,7 @@ grows as more agents are added.
 | OpenClaw | `aimx agent-setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. | Primer as skill + `references/` directory copied as siblings |
 | Hermes | `aimx agent-setup hermes` | `~/.hermes/skills/aimx/` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. | Primer as skill + `references/` directory copied as siblings |
 
-### Progressive disclosure
-
-Every agent receives the same canonical AIMX primer (`agents/common/aimx-primer.md`).
-For agents that support multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes),
-the installer also copies `agents/common/references/` alongside the skill so the agent
-can load detailed reference material on demand without bloating the initial context.
-
-For agents that use a single file format (OpenCode, Gemini CLI, Goose), the full primer
-is embedded directly in the skill or recipe file. The `references/` content is available
-in the AIMX source tree and at `/var/lib/aimx/README.md` (the auto-generated datadir
-layout guide).
+> **Progressive disclosure.** Every agent receives the same canonical AIMX primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline; the `references/` content remains available in the AIMX source tree and at `/var/lib/aimx/README.md`.
 
 ### Claude Code
 

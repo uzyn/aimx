@@ -6,7 +6,7 @@ AIMX uses a single TOML configuration file for all settings.
 
 The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`.
 
-Starting with v0.2, the config lives under `/etc/aimx/` (separate from the data directory) so that DKIM secrets and config are owned by root and inaccessible to non-root processes.
+> **Note:** Since v0.2, config and DKIM secrets live under `/etc/aimx/` separate from the data directory (`/var/lib/aimx/`) so they stay root-owned and unreadable by non-root processes.
 
 ### Data directory override
 
@@ -63,11 +63,7 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 
 See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.md) for hook configuration.
 
-#### Upgrading an older config to use the global defaults
-
-If you edited `config.toml` before the global-default fields existed and explicitly set `trust = "none"` or `trusted_senders = []` on every mailbox, those per-mailbox values now **shadow** any top-level default you add later — an `Option::Some(...)` at the mailbox level always wins.
-
-This is the defined "replace" semantic, but it's an easy foot-gun when tightening policy globally. When you switch the top-level to `trust = "verified"`, also delete the redundant per-mailbox `trust = "none"` / `trusted_senders = []` lines from mailboxes you actually want to inherit the new default. `aimx setup` writes new mailboxes without those lines from the start, so only hand-edited or pre-upgrade configs need the cleanup.
+> **Migration note.** If you edited `config.toml` before the global-default fields existed and set `trust = "none"` or `trusted_senders = []` on every mailbox, those per-mailbox values still shadow any top-level default you add later (`Option::Some(...)` at the mailbox level always wins). When tightening policy globally, delete the redundant per-mailbox lines on mailboxes you want to inherit the new default. `aimx setup` writes new mailboxes without those lines from the start.
 
 ### Inbound email verification
 
@@ -111,7 +107,7 @@ See [Hooks & Trust](hooks.md) for full details on events, match filters, and tru
 
 ## Storage layout
 
-```
+```text
 /etc/aimx/                   # Config + secrets (root-owned, mode 0755)
 ├── config.toml              # Configuration file (mode 0640, root:root)
 └── dkim/

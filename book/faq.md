@@ -106,7 +106,7 @@ When the hook's side effect is safe regardless of sender — a logger, a metric 
 
 No — and that is intentional. AIMX is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
 
-### send.sock` is mode `0666` — why is that fine?
+### `send.sock` is mode `0666` — why is that fine?
 
 Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run AIMX on a dedicated host.
 
