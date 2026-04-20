@@ -62,8 +62,10 @@ pub(crate) fn submit_hook_create_via_daemon(
 }
 
 /// Submit a `HOOK-DELETE` request over UDS.
-pub(crate) fn submit_hook_delete_via_daemon(id: &str) -> Result<(), HookCrudFallback> {
-    let request = HookDeleteRequest { id: id.to_string() };
+pub(crate) fn submit_hook_delete_via_daemon(name: &str) -> Result<(), HookCrudFallback> {
+    let request = HookDeleteRequest {
+        name: name.to_string(),
+    };
     let socket = crate::serve::send_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();

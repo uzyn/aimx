@@ -125,7 +125,15 @@ See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate log
 
 ## Hooks
 
-AIMX fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and can be filtered by `from`, `to`, `subject`, or `has_attachment`; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`.
+AIMX fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`. Hooks may carry an optional `name`; when omitted, AIMX derives a stable 12-char hex id from `event + cmd` so `aimx hooks list` / `delete` can still target the hook.
+
+```toml
+[[mailboxes.support.hooks]]
+# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
+event = "on_receive"
+cmd = 'ntfy pub agent-mail "$AIMX_SUBJECT from $AIMX_FROM"'
+dangerously_support_untrusted = true
+```
 
 See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider).
 
