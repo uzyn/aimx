@@ -4,9 +4,7 @@ Short answers to questions that come up often. See the linked pages for depth.
 
 ## Deployment
 
-### My VPS blocks port 25 — which providers don't?
-
-See the [compatible provider table](getting-started.md#compatible-vps-providers). Hetzner, OVH, Vultr, BuyVM, and Linode all permit port 25 (some after a support ticket). DigitalOcean, AWS EC2, Azure VMs, and GCP block it permanently.
+### Why do we need port 25 open for both inbound and outbound? 
 
 ### Can I run AIMX in Docker or behind NAT?
 
@@ -26,13 +24,9 @@ Same domain, new server: `rsync -a /etc/aimx/ /var/lib/aimx/` to the new host, i
 
 ## DNS and deliverability
 
-### Do I actually need a PTR record?
+### What is PTR record? Do I actually need it?
 
-Gmail and Outlook both penalise mail from IPs without matching forward-confirmed reverse DNS. Set a PTR at your VPS control panel pointing to the same hostname as your MX. `aimx setup` intentionally does not touch this — it's provider-specific.
-
-### Gmail still marks mail as spam after DKIM/SPF/DMARC pass — what now?
-
-The usual fix is (a) set PTR to your MX hostname, (b) have a recipient reply once or add a Gmail filter `from:*@yourdomain.com → Never send to Spam`, (c) stop sending terse one-line bodies from fresh IPs. New IPs need a short warm-up regardless of auth.
+PTR (Pointer Record) is a DNS record type that does reverse DNS lookup. It maps an IP address back to a hostname, the opposite of A/AAAA record. Setting one would increase the deliverability of your AIMX outgoing emails and you would usually need to contact your hosting provider to set it. As AIMX is not meant for email blasting, **setting of PTR is unnecessary** and optional especially if only a handful of targeted recipients (usually yourself) are to be receiving the emails, making sure DKIM/SPF/DMARC pass and if you need to, whitelist the address on your mail client would already do wonders.
 
 ### How do I rotate the DKIM key without a delivery gap?
 
@@ -49,17 +43,13 @@ Outbound delivery starts preferring AAAA records when the recipient publishes th
 
 ## Sending
 
-### Why does `aimx send` refuse to run as root?
-
-`aimx send` is a thin UDS client — it does not read `config.toml` or the DKIM key. All privileged work happens inside `aimx serve`. Refusing root nudges operators to invoke sends from their normal user or an agent account, which is the intended path.
-
 ### Can I send from `*@domain` (the catchall)?
 
 No. The catchall is inbound-only. Outbound `From` must resolve to a concrete, non-wildcard mailbox in `config.toml`; the daemon parses the submitted `From:` header itself and rejects catchalls.
 
 ### What happens on a deferred or failed MX delivery?
 
-AIMX does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted — the client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. AIMX does not generate DSNs.
+AIMX does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted — the client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. AIMX does not generate DSNs. This allows AI agents to get timely feedback on sending reports rather than simply send and pray.
 
 ### Can I send with attachments, a custom Reply-To, or a custom Message-Id?
 
@@ -75,10 +65,6 @@ Yes for reads. `rsync -a` or a filesystem snapshot of `/var/lib/aimx/` will prod
 
 `thread_id` is `sha256(root)[..8]` in hex, where `root` is the first Message-Id in `In-Reply-To`, else the first in `References`, else the email's own Message-Id. This walks the same header chain Gmail uses, so replies thread correctly in both. Subject-based collapsing (Gmail's fallback) is not replicated — if a conversation loses its `References` chain, the two systems can disagree.
 
-### Can I hand-edit an email's frontmatter, or will the daemon fight me?
-
-You can edit at rest, but concurrent writes are not arbitrated. A `MARK-READ`/`MARK-UNREAD` rewrite takes a per-mailbox lock, does a read-modify-write, and atomically renames the result back into place. A concurrent hand-edit will lose to whichever write lands last. Stop the daemon, edit, restart — or do it through MCP.
-
 ## Hooks
 
 ### My `on_receive` hook didn't fire — how do I tell why?
@@ -89,10 +75,6 @@ Check in this order:
 2. The target email's frontmatter: `trusted = "false"` plus `dangerously_support_untrusted` unset is the most common cause. See the [trust gate](hooks.md#trust-gate-on_receive-only).
 3. Match filters: `from`, `subject`, `has_attachment` are AND-combined; one mismatch skips silently.
 4. If the line is there with a non-zero `exit_code`, it's your shell command — test the `cmd` string against the saved `.md` manually.
-
-### Does a slow hook block the SMTP `DATA` response?
-
-Yes. Hooks run synchronously under `sh -c` and the daemon awaits the subprocess. The SMTP peer does not see a `250 OK` on DATA until the hook returns. Fan out to a queue or run the heavy work in `cmd &` if the hook body is more than a second or two.
 
 ### Env var vs. `{id}`/`{date}` placeholder — when do I use which?
 
@@ -114,9 +96,13 @@ It replaces. Setting `trusted_senders` under a mailbox fully overrides the top-l
 
 ### When is `dangerously_support_untrusted` actually appropriate?
 
-When the hook's side effect is safe regardless of sender — a logger, a metric counter, a `ntfy` notification with no email content in the payload. Never use it on a hook that hands the email body to an agent or to any shell command that quotes the body.
+When the hook's side effect is safe regardless of sender — a logger, a metric counter, a push notification with no email content in the payload. Never use it on a hook that hands the email body to an agent or to any shell command that quotes the body.
 
 ## Security model
+
+### I would run a mail daemon on my server. Can I use AIMX in place of Postfix or Stalwart? 
+
+
 
 ### `send.sock` is mode `0666` — why is that fine?
 
@@ -159,6 +145,12 @@ OpenRC does not have journald. AIMX writes nothing of its own — `aimx logs` ta
 Set `AIMX_TEST_MAIL_DROP=/path/to/dir` before starting `aimx serve`. Every outbound submission is written to that directory instead of being delivered; lettre is not invoked. The daemon logs a startup warning so you cannot leave this on in production by accident. Unset the env var and restart to go live.
 
 ## Verifier service
+
+### What is `services/verifier`?  
+
+* (EDIT THIS)
+* You do not need it.
+* It is only meant to fascilitate port 25 checks, i.e. `aimx portcheck`.
 
 ### When would I self-host `services/verifier/`?
 
