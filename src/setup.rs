@@ -1421,12 +1421,17 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
 
     print!(
         "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
-         Do you control this domain and have access to its DNS settings? (y/N) "
+         Do you control this domain and have access to its DNS settings? (Y/n) "
     );
     io::stdout().flush()?;
     let mut confirm = String::new();
     reader.read_line(&mut confirm)?;
-    if !confirm.trim().eq_ignore_ascii_case("y") {
+    if confirm
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N')
+    {
         return Err("Setup cancelled. You need DNS access to proceed.".into());
     }
 
@@ -3153,6 +3158,26 @@ mod tests {
     #[test]
     fn prompt_domain_exits_on_declined_confirmation() {
         let input = b"agent.example.com\nn\n";
+        let mut reader = io::Cursor::new(input);
+        let result = prompt_domain(&mut reader);
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("cancelled"),
+            "should indicate cancellation"
+        );
+    }
+
+    #[test]
+    fn prompt_domain_accepts_empty_confirmation_as_yes() {
+        let input = b"agent.example.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).expect("empty confirmation should default to yes");
+        assert_eq!(domain, "agent.example.com");
+    }
+
+    #[test]
+    fn prompt_domain_exits_on_uppercase_n() {
+        let input = b"agent.example.com\nN\n";
         let mut reader = io::Cursor::new(input);
         let result = prompt_domain(&mut reader);
         assert!(result.is_err());
