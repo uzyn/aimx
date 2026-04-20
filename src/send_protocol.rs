@@ -39,7 +39,7 @@
 //!
 //! Client → Server (HOOK-DELETE):
 //!   AIMX/1 HOOK-DELETE\n
-//!   Hook-Id: <id>\n
+//!   Hook-Name: <name>\n
 //!   Content-Length: 0\n
 //!   \n
 //!
@@ -73,9 +73,9 @@
 //! - `HOOK-CREATE` / `HOOK-DELETE` follow the same hot-swap pattern for
 //!   hook CRUD. `HOOK-CREATE` carries a TOML-encoded `Hook` stanza plus a
 //!   `Mailbox:` header picking the owning mailbox; `HOOK-DELETE` carries
-//!   a `Hook-Id:` header and empty body (the daemon locates the hook by
-//!   id across all mailboxes). Error codes reuse `VALIDATION`,
-//!   `MAILBOX`, `NOTFOUND`, and `IO`.
+//!   a `Hook-Name:` header and empty body (the daemon locates the hook by
+//!   effective name across all mailboxes). Error codes reuse
+//!   `VALIDATION`, `MAILBOX`, `NOTFOUND`, and `IO`.
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -154,12 +154,12 @@ pub struct HookCreateRequest {
     pub hook_toml: Vec<u8>,
 }
 
-/// Decoded `AIMX/1 HOOK-DELETE` request. Locates the hook by globally-
-/// unique 12-char id across every configured mailbox; there is no
-/// `Mailbox:` header on delete.
+/// Decoded `AIMX/1 HOOK-DELETE` request. Locates the hook by effective
+/// name (explicit or derived) across every configured mailbox; there is
+/// no `Mailbox:` header on delete.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HookDeleteRequest {
-    pub id: String,
+    pub name: String,
 }
 
 /// One decoded `AIMX/1` request, tagged by verb.
@@ -678,7 +678,7 @@ async fn parse_hook_delete_headers<R>(reader: &mut R) -> Result<HookDeleteReques
 where
     R: AsyncRead + Unpin,
 {
-    let mut id: Option<String> = None;
+    let mut name: Option<String> = None;
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -699,18 +699,18 @@ where
                 "non-ascii header name: {n:?}"
             )));
         }
-        let name_norm = n.trim().to_ascii_lowercase();
+        let header_name = n.trim().to_ascii_lowercase();
         let value = v.trim().to_string();
 
-        match name_norm.as_str() {
-            "hook-id" => {
-                if id.is_some() {
-                    return Err(ParseError::Malformed("duplicate Hook-Id header".into()));
+        match header_name.as_str() {
+            "hook-name" => {
+                if name.is_some() {
+                    return Err(ParseError::Malformed("duplicate Hook-Name header".into()));
                 }
                 if value.is_empty() {
-                    return Err(ParseError::Malformed("empty Hook-Id value".into()));
+                    return Err(ParseError::Malformed("empty Hook-Name value".into()));
                 }
-                id = Some(value);
+                name = Some(value);
             }
             "content-length" => {
                 if content_length.is_some() {
@@ -734,10 +734,11 @@ where
         }
     }
 
-    let id = id.ok_or_else(|| ParseError::Malformed("missing required header: Hook-Id".into()))?;
+    let name =
+        name.ok_or_else(|| ParseError::Malformed("missing required header: Hook-Name".into()))?;
     let _ = content_length;
 
-    Ok(HookDeleteRequest { id })
+    Ok(HookDeleteRequest { name })
 }
 
 /// Read a single `\n`-terminated line from `reader`, returning it without the
@@ -918,8 +919,8 @@ where
     W: AsyncWrite + Unpin,
 {
     let header = format!(
-        "AIMX/1 HOOK-DELETE\nHook-Id: {}\nContent-Length: 0\n\n",
-        sanitize_inline(&request.id),
+        "AIMX/1 HOOK-DELETE\nHook-Name: {}\nContent-Length: 0\n\n",
+        sanitize_inline(&request.name),
     );
     writer.write_all(header.as_bytes()).await?;
     writer.flush().await?;
@@ -1503,7 +1504,7 @@ mod tests {
 
     #[tokio::test]
     async fn parses_hook_create_request() {
-        let body = b"id = \"abc123def456\"\nevent = \"on_receive\"\ncmd = \"echo hi\"\n";
+        let body = b"name = \"my_hook\"\nevent = \"on_receive\"\ncmd = \"echo hi\"\n";
         let header = format!(
             "AIMX/1 HOOK-CREATE\nMailbox: alice\nContent-Length: {}\n\n",
             body.len()
@@ -1571,45 +1572,45 @@ mod tests {
 
     #[tokio::test]
     async fn parses_hook_delete_request() {
-        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\nContent-Length: 0\n\n";
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Name: nightly_summary\nContent-Length: 0\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
-            Request::HookDelete(r) => assert_eq!(r.id, "abc123def456"),
+            Request::HookDelete(r) => assert_eq!(r.name, "nightly_summary"),
             other => panic!("expected HookDelete, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn hook_delete_missing_id_is_malformed() {
+    async fn hook_delete_missing_name_is_malformed() {
         let input = b"AIMX/1 HOOK-DELETE\nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
-            ParseError::Malformed(m) => assert!(m.contains("Hook-Id"), "{m}"),
+            ParseError::Malformed(m) => assert!(m.contains("Hook-Name"), "{m}"),
             other => panic!("expected Malformed, got {other:?}"),
         }
     }
 
     #[tokio::test]
-    async fn hook_delete_empty_id_is_malformed() {
-        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: \nContent-Length: 0\n\n";
+    async fn hook_delete_empty_name_is_malformed() {
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Name: \nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
-            ParseError::Malformed(m) => assert!(m.contains("empty Hook-Id"), "{m}"),
+            ParseError::Malformed(m) => assert!(m.contains("empty Hook-Name"), "{m}"),
             other => panic!("expected Malformed, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn hook_delete_without_content_length_accepted() {
-        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\n\n";
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Name: nightly_summary\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
-            Request::HookDelete(r) => assert_eq!(r.id, "abc123def456"),
+            Request::HookDelete(r) => assert_eq!(r.name, "nightly_summary"),
             other => panic!("expected HookDelete, got {other:?}"),
         }
     }
 
     #[tokio::test]
     async fn hook_delete_nonzero_content_length_is_malformed() {
-        let input = b"AIMX/1 HOOK-DELETE\nHook-Id: abc123def456\nContent-Length: 5\n\nhello";
+        let input = b"AIMX/1 HOOK-DELETE\nHook-Name: nightly_summary\nContent-Length: 5\n\nhello";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("Content-Length: 0"), "{m}"),
@@ -1619,7 +1620,7 @@ mod tests {
 
     #[tokio::test]
     async fn hook_create_header_names_case_insensitive() {
-        let body = b"id = \"abc123def456\"\n";
+        let body = b"event = \"on_receive\"\ncmd = \"echo hi\"\n";
         let header = format!(
             "AIMX/1 HOOK-CREATE\nmailbox: alice\ncontent-length: {}\n\n",
             body.len()
@@ -1646,7 +1647,7 @@ mod tests {
     async fn hook_create_roundtrip() {
         let req = HookCreateRequest {
             mailbox: "alice".to_string(),
-            hook_toml: b"id = \"abc123def456\"\n".to_vec(),
+            hook_toml: b"event = \"on_receive\"\ncmd = \"echo hi\"\n".to_vec(),
         };
         let (mut client, mut server) = duplex(1024);
         let w = {
@@ -1669,7 +1670,7 @@ mod tests {
     #[tokio::test]
     async fn hook_delete_roundtrip() {
         let req = HookDeleteRequest {
-            id: "abc123def456".to_string(),
+            name: "nightly_summary".to_string(),
         };
         let (mut client, mut server) = duplex(1024);
         let w = {
@@ -1681,7 +1682,7 @@ mod tests {
         let parsed = parse_request(&mut server).await.unwrap();
         w.await.unwrap();
         match parsed {
-            Request::HookDelete(r) => assert_eq!(r.id, req.id),
+            Request::HookDelete(r) => assert_eq!(r.name, req.name),
             other => panic!("expected HookDelete, got {other:?}"),
         }
     }

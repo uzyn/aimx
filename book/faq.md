@@ -73,10 +73,9 @@ Yes for reads. `rsync -a` or a filesystem snapshot of `/var/lib/aimx/` will prod
 
 Check in this order:
 
-1. `journalctl -u aimx | grep hook_id=<id>` — every fire emits one structured line. No line means the hook was filtered out or gated.
+1. `journalctl -u aimx | grep hook_name=<name>` — every fire emits one structured line. No line means the hook was gated.
 2. The target email's frontmatter: `trusted = "false"` plus `dangerously_support_untrusted` unset is the most common cause. See the [trust gate](hooks.md#trust-gate-on_receive-only).
-3. Match filters: `from`, `subject`, `has_attachment` are AND-combined; one mismatch skips silently.
-4. If the line is there with a non-zero `exit_code`, it's your shell command — test the `cmd` string against the saved `.md` manually.
+3. If the line is there with a non-zero `exit_code`, it's your shell command — test the `cmd` string against the saved `.md` manually.
 
 ### Env var vs. `{id}`/`{date}` placeholder — when do I use which?
 

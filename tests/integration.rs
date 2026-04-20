@@ -986,7 +986,7 @@ data_dir = "{}"
 address = "*@agent.example.com"
 
 [[mailboxes.catchall.hooks]]
-id = "catchalltrig"
+name = "catchalltrig"
 event = "on_receive"
 cmd = "touch {}"
 dangerously_support_untrusted = true
@@ -1035,7 +1035,7 @@ data_dir = "{}"
 address = "*@agent.example.com"
 
 [[mailboxes.catchall.hooks]]
-id = "failtrigger1"
+name = "failtrigger1"
 event = "on_receive"
 cmd = "false"
 dangerously_support_untrusted = true
@@ -1077,7 +1077,7 @@ address = "*@agent.example.com"
 trust = "verified"
 
 [[mailboxes.catchall.hooks]]
-id = "verifiedhook"
+name = "verifiedhook"
 event = "on_receive"
 cmd = "touch {}"
 "#,
@@ -1122,7 +1122,7 @@ address = "*@agent.example.com"
 trust = "none"
 
 [[mailboxes.catchall.hooks]]
-id = "trustnonefir"
+name = "trustnonefir"
 event = "on_receive"
 cmd = "touch {}"
 dangerously_support_untrusted = true
@@ -1176,7 +1176,7 @@ trusted_senders = ["*@example.com"]
 address = "*@agent.example.com"
 
 [[mailboxes.catchall.hooks]]
-id = "inheritglobs"
+name = "inheritglobs"
 event = "on_receive"
 cmd = "touch {}"
 "#,
@@ -1238,7 +1238,7 @@ address = "*@agent.example.com"
 trust = "none"
 
 [[mailboxes.catchall.hooks]]
-id = "mbtrustover1"
+name = "mbtrustover1"
 event = "on_receive"
 cmd = "touch {}"
 dangerously_support_untrusted = true
@@ -1328,7 +1328,7 @@ trust = "verified"
 trusted_senders = ["*@example.com"]
 
 [[mailboxes.catchall.hooks]]
-id = "trustedsend1"
+name = "trustedsend1"
 event = "on_receive"
 cmd = "touch {}"
 dangerously_support_untrusted = true
@@ -1377,13 +1377,13 @@ data_dir = "{data_dir}"
 address = "*@agent.example.com"
 
 [[mailboxes.catchall.hooks]]
-id = "recipehook01"
+name = "recipehook01"
 event = "on_receive"
 cmd = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
 dangerously_support_untrusted = true
 
 [[mailboxes.catchall.hooks]]
-id = "recipehook02"
+name = "recipehook02"
 event = "on_receive"
 cmd = "false"
 dangerously_support_untrusted = true
@@ -2684,7 +2684,7 @@ address = "*@agent.example.com"
 address = "alice@agent.example.com"
 
 [[mailboxes.alice.hooks]]
-id = "aftersendhk1"
+name = "aftersendhk1"
 event = "after_send"
 cmd = 'printf "status=%s to=%s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" > {sentinel}'
 "#,
@@ -3837,17 +3837,14 @@ trust = "verified"
 trusted_senders = ["*@company.com", "boss@example.com"]
 
 [[mailboxes.support.hooks]]
-id = "aaaabbbbcccc"
+name = "inbound_urgent"
 event = "on_receive"
 cmd = "echo inbound"
-from = "*@gmail.com"
-subject = "urgent"
 
 [[mailboxes.support.hooks]]
-id = "ddddeeeeffff"
+name = "outbound_notify"
 event = "after_send"
 cmd = "echo outbound"
-to = "*@client.com"
 "#,
         tmp.path().display()
     );
@@ -3869,13 +3866,10 @@ to = "*@client.com"
         "verified",
         "*@company.com",
         "boss@example.com",
-        "aaaabbbbcccc",
-        "ddddeeeeffff",
+        "inbound_urgent",
+        "outbound_notify",
         "on_receive",
         "after_send",
-        "from=*@gmail.com",
-        "to=*@client.com",
-        "subject=urgent",
         "inbox:",
         "sent:",
     ] {
@@ -3950,8 +3944,8 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
             "on_receive",
             "--cmd",
             "echo hi",
-            "--from",
-            "*@example.com",
+            "--name",
+            "alice_greeter",
         ])
         .assert()
         .success();
@@ -3959,6 +3953,10 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
     assert!(
         create_out.contains("Hook created"),
         "create output: {create_out}"
+    );
+    assert!(
+        create_out.contains("alice_greeter"),
+        "create output should echo the hook name: {create_out}"
     );
     // A restart hint is expected on the socket-missing fallback path.
     assert!(
@@ -3976,8 +3974,47 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
     assert!(list_out.contains("alice"), "list output: {list_out}");
     assert!(list_out.contains("on_receive"), "list output: {list_out}");
     assert!(
-        list_out.contains("from=*@example.com"),
+        list_out.contains("alice_greeter"),
         "list output: {list_out}"
+    );
+}
+
+#[test]
+fn hooks_create_anonymous_prints_derived_name() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let create = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo anon",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(out.contains("Hook created"), "{out}");
+
+    // The on-disk config must not have a `name =` entry.
+    let toml_contents = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&toml_contents).unwrap();
+    let hooks = parsed
+        .get("mailboxes")
+        .and_then(|m| m.get("alice"))
+        .and_then(|a| a.get("hooks"))
+        .and_then(|h| h.as_array())
+        .unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert!(
+        hooks[0].get("name").is_none(),
+        "anonymous hook must not write name = ..., got: {toml_contents}"
     );
 }
 
@@ -3994,7 +4031,7 @@ fn hooks_alias_works() {
 }
 
 #[test]
-fn hooks_create_rejects_invalid_flag_combo() {
+fn hooks_create_rejects_invalid_name() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -4010,13 +4047,13 @@ fn hooks_create_rejects_invalid_flag_combo() {
             "on_receive",
             "--cmd",
             "echo hi",
-            "--to",
-            "*@example.com",
+            "--name",
+            "bad name!",
         ])
         .assert()
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-    assert!(stderr.contains("--to"), "expected --to error: {stderr}");
+    assert!(stderr.contains("--name"), "expected --name error: {stderr}");
 }
 
 #[test]
@@ -4063,30 +4100,18 @@ fn hooks_delete_prompts_and_removes_via_direct_edit() {
             "on_receive",
             "--cmd",
             "echo hi",
+            "--name",
+            "delete_me",
         ])
         .assert()
         .success();
     let create_out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
-    // Parse the created id out of the on-disk config.toml (the simplest
-    // robust path — we know it's the only hook registered).
-    let config_toml = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    let config_parsed: toml::Value = toml::from_str(&config_toml).unwrap();
-    let id = config_parsed
-        .get("mailboxes")
-        .and_then(|m| m.get("alice"))
-        .and_then(|a| a.get("hooks"))
-        .and_then(|h| h.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|h| h.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_else(|| panic!("could not extract hook id; create out was: {create_out}"))
-        .to_string();
-    assert_eq!(id.chars().count(), 12, "hook id should be 12 chars: {id}");
+    assert!(create_out.contains("delete_me"), "{create_out}");
 
     aimx_cmd_isolated(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
-        .args(["hooks", "delete", &id, "--yes"])
+        .args(["hooks", "delete", "delete_me", "--yes"])
         .assert()
         .success();
 
@@ -4097,17 +4122,17 @@ fn hooks_delete_prompts_and_removes_via_direct_edit() {
         .assert()
         .success();
     let out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
-    assert!(!out.contains(&id), "hook id should be gone: {out}");
+    assert!(!out.contains("delete_me"), "hook should be gone: {out}");
 }
 
 #[test]
-fn hooks_delete_unknown_id_errors() {
+fn hooks_delete_unknown_name_errors() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
     let assert = aimx_cmd_isolated(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
-        .args(["hooks", "delete", "aaaabbbbcccc", "--yes"])
+        .args(["hooks", "delete", "does_not_exist", "--yes"])
         .assert()
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
@@ -4165,6 +4190,85 @@ fn hooks_create_via_daemon_hot_swaps_config() {
     assert!(
         content.contains("echo via-daemon"),
         "config.toml should contain new hook: {content}"
+    );
+
+    stop_serve(daemon);
+}
+
+/// Mirror of `hooks_create_anonymous_prints_derived_name` but over the
+/// UDS/daemon path: confirms the CLI prints the derived 12-hex-char name
+/// returned by the daemon in `submit_hook_create_via_daemon`, and that
+/// the daemon did NOT write a `name =` line to `config.toml`.
+#[test]
+fn hooks_create_anonymous_prints_derived_name_via_daemon() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+
+    let runtime = tmp.path().join("run");
+    let create = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            "echo daemon-anon",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(out.contains("Hook created"), "{out}");
+    // No restart hint on the daemon-success path.
+    assert!(
+        !out.contains("Hint:"),
+        "daemon-success should not print restart hint: {out}"
+    );
+
+    // Compute the expected derived name (mirrors `derive_hook_name` in
+    // src/hook.rs) and assert it was printed by the CLI.
+    let expected = {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(b"on_receive");
+        hasher.update([0x1F]);
+        hasher.update(b"echo daemon-anon");
+        hasher.update([0x1F]);
+        hasher.update([0u8]); // dangerously_support_untrusted = false
+        let digest = hasher.finalize();
+        let mut s = String::with_capacity(12);
+        for b in digest.iter().take(6) {
+            s.push_str(&format!("{b:02x}"));
+        }
+        s
+    };
+    assert_eq!(expected.len(), 12);
+    assert!(
+        out.contains(&expected),
+        "expected derived name '{expected}' in CLI output: {out}"
+    );
+
+    // The daemon-rewritten config must not have a `name =` entry.
+    let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let parsed: toml::Value = toml::from_str(&content).unwrap();
+    let hooks = parsed
+        .get("mailboxes")
+        .and_then(|m| m.get("alice"))
+        .and_then(|a| a.get("hooks"))
+        .and_then(|h| h.as_array())
+        .unwrap();
+    assert_eq!(hooks.len(), 1);
+    assert!(
+        hooks[0].get("name").is_none(),
+        "anonymous hook must not write name = ..., got: {content}"
     );
 
     stop_serve(daemon);

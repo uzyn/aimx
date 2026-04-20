@@ -1473,14 +1473,10 @@ mod tests {
             crate::config::MailboxConfig {
                 address: "ops@test.com".to_string(),
                 hooks: vec![crate::hook::Hook {
-                    id: "docthook0001".to_string(),
+                    name: Some("docthook".to_string()),
                     event: crate::hook::HookEvent::OnReceive,
                     r#type: "cmd".to_string(),
                     cmd: "true".to_string(),
-                    from: None,
-                    to: None,
-                    subject: None,
-                    has_attachment: None,
                     dangerously_support_untrusted: false,
                 }],
                 trust: Some("verified".to_string()),

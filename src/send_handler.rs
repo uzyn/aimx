@@ -343,7 +343,6 @@ fn fire_after_send_hooks(
         from: from_header,
         to: to_header,
         subject,
-        has_attachment: false, // outbound via UDS is text-only in v0.2
         filepath: &filepath,
         message_id,
         send_status,
