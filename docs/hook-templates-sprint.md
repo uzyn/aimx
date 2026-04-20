@@ -268,7 +268,7 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 ---
 
-## Sprint 5 — MCP tools + agent primer updates (Days 10–12.5) [IN PROGRESS]
+## Sprint 5 — MCP tools + agent primer updates (Days 10–12.5) [DONE]
 
 **Goal:** Expose templates through MCP with four new tools, and update the agent-facing primer so every bundled agent knows how to use them.
 
@@ -280,11 +280,11 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `src/mcp.rs` gains a `#[tool(name = "hook_list_templates", description = "List hook templates available on this install for use with hook_create")]` method on `AimxMcpServer`
-- [ ] Return type is `Result<String, String>` — serialized JSON array; no params struct needed
-- [ ] Empty-config case returns `[]` (valid JSON) with a companion explanation in the tool description: "empty means no templates are enabled; the operator must install them via aimx setup"
-- [ ] Unit test calls the tool against a `Config` with 0 and 3 templates and asserts the serialized JSON matches a golden fixture
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/mcp.rs` gains a `#[tool(name = "hook_list_templates", description = "List hook templates available on this install for use with hook_create")]` method on `AimxMcpServer`
+- [x] Return type is `Result<String, String>` — serialized JSON array; no params struct needed
+- [x] Empty-config case returns `[]` (valid JSON) with a companion explanation in the tool description: "empty means no templates are enabled; the operator must install them via aimx setup"
+- [x] Unit test calls the tool against a `Config` with 0 and 3 templates and asserts the serialized JSON matches a golden fixture
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S5-2: MCP `hook_create` tool
 
@@ -292,11 +292,11 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] New `HookCreateParams` struct with fields `mailbox: String`, `event: String` (`"on_receive"` or `"after_send"`), `template: String`, `params: BTreeMap<String, String>`, `name: Option<String>`; each annotated with `#[schemars(description = "...")]` for MCP schema generation
-- [ ] `#[tool(name = "hook_create", description = "...")]` method wraps the UDS submit, surfaces daemon errors verbatim, and returns `{effective_name, substituted_argv}` on success
-- [ ] Tool description highlights the safety model: "Your agent cannot submit arbitrary shell — every hook must reference a template listed by hook_list_templates; the operator installs templates during aimx setup"
-- [ ] Integration test spins up a live daemon with one template configured, submits `hook_create` via the MCP transport, verifies the hook appears in `config.toml` with `origin = "mcp"`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `HookCreateParams` struct with fields `mailbox: String`, `event: String` (`"on_receive"` or `"after_send"`), `template: String`, `params: BTreeMap<String, String>`, `name: Option<String>`; each annotated with `#[schemars(description = "...")]` for MCP schema generation
+- [x] `#[tool(name = "hook_create", description = "...")]` method wraps the UDS submit, surfaces daemon errors verbatim, and returns `{effective_name, substituted_argv}` on success <!-- effective_name + substituted_argv computed client-side via derive_template_hook_name + substitute_argv since the wire verb returns bare OK -->
+- [x] Tool description highlights the safety model: "Your agent cannot submit arbitrary shell — every hook must reference a template listed by hook_list_templates; the operator installs templates during aimx setup"
+- [x] Integration test spins up a live daemon with one template configured, submits `hook_create` via the MCP transport, verifies the hook appears in `config.toml` with `origin = "mcp"`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S5-3: MCP `hook_list` tool with origin-masked output
 
@@ -304,11 +304,11 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `HookListParams { mailbox: Option<String> }` (filter optional)
-- [ ] Tool method reads `Config` directly (no UDS) and returns a JSON array; for each hook, the fields are conditional on `origin`: MCP-origin hooks include `{name, mailbox, event, template, params, origin: "mcp"}`; operator-origin hooks include `{name, mailbox, event, origin: "operator"}` only
-- [ ] Tool description explains the origin split so the agent understands why operator-origin hook contents are hidden
-- [ ] Unit test against a config with mixed operator- and MCP-origin hooks asserts the JSON output matches the masking rule exactly
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `HookListParams { mailbox: Option<String> }` (filter optional)
+- [x] Tool method reads `Config` directly (no UDS) and returns a JSON array; for each hook, the fields are conditional on `origin`: MCP-origin hooks include `{name, mailbox, event, template, params, origin: "mcp"}`; operator-origin hooks include `{name, mailbox, event, origin: "operator"}` only <!-- Masking enforced by struct shape + serde(skip_serializing_if); integration test greps payload for operator command text to confirm zero leak -->
+- [x] Tool description explains the origin split so the agent understands why operator-origin hook contents are hidden
+- [x] Unit test against a config with mixed operator- and MCP-origin hooks asserts the JSON output matches the masking rule exactly
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S5-4: MCP `hook_delete` tool
 
@@ -316,10 +316,10 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `HookDeleteParams { name: String }`; tool method submits UDS `HOOK-DELETE` via existing `submit_hook_delete_via_daemon` helper
-- [ ] Daemon error bodies surface verbatim to the MCP response; the tool description includes an example of `ERR origin-protected` so the agent understands the model
-- [ ] Integration test: submit `hook_delete` against an MCP-origin hook (succeeds) and an operator-origin hook (fails with the expected error)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `HookDeleteParams { name: String }`; tool method submits UDS `HOOK-DELETE` via existing `submit_hook_delete_via_daemon` helper
+- [x] Daemon error bodies surface verbatim to the MCP response; the tool description includes an example of `ERR origin-protected` so the agent understands the model
+- [x] Integration test: submit `hook_delete` against an MCP-origin hook (succeeds) and an operator-origin hook (fails with the expected error)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S5-5: Update agent primer + references with "Creating hooks" section
 
@@ -327,15 +327,15 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `agents/common/aimx-primer.md` gains a "Creating hooks" section (after the existing MCP tool summary) explaining: hooks react to inbound/outbound mail; agents create hooks via the four new tools; the template model prevents arbitrary-shell abuse; always call `hook_list_templates` first
-- [ ] New `agents/common/references/hooks.md` file with: full tool signatures, example agent prompts ("file mail from this sender + reply with system status"), the `origin` split explanation, the `ERR origin-protected` case, a troubleshooting subsection ("why does my hook not fire?" → check trust, template enabled, `aimx-hook` user exists)
-- [ ] `agent-setup` bundle for each agent with `progressive_disclosure = true` (Claude Code, Codex, OpenClaw) picks up the new reference file automatically via `include_dir!`; bundles without progressive disclosure (Goose, Gemini, OpenCode) get only the primer updates — verify no build failures in the `assemble_plugin_files` paths
-- [ ] Unit test on the bundled primer asserts the "Creating hooks" section is present for every agent (catches accidental deletion)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `agents/common/aimx-primer.md` gains a "Creating hooks" section (after the existing MCP tool summary) explaining: hooks react to inbound/outbound mail; agents create hooks via the four new tools; the template model prevents arbitrary-shell abuse; always call `hook_list_templates` first
+- [x] New `agents/common/references/hooks.md` file with: full tool signatures, example agent prompts ("file mail from this sender + reply with system status"), the `origin` split explanation, the `ERR origin-protected` case, a troubleshooting subsection ("why does my hook not fire?" → check trust, template enabled, `aimx-hook` user exists)
+- [x] `agent-setup` bundle for each agent with `progressive_disclosure = true` (Claude Code, Codex, OpenClaw) picks up the new reference file automatically via `include_dir!`; bundles without progressive disclosure (Goose, Gemini, OpenCode) get only the primer updates — verify no build failures in the `assemble_plugin_files` paths <!-- Hermes also added to progressive-disclosure set -->
+- [x] Unit test on the bundled primer asserts the "Creating hooks" section is present for every agent (catches accidental deletion)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 6 — Integration tests + book docs + doctor (Days 12.5–15) [NOT STARTED]
+## Sprint 6 — Integration tests + book docs + doctor (Days 12.5–15) [IN PROGRESS]
 
 **Goal:** Close out the track with end-to-end integration tests, placeholder-substitution fuzz coverage, book chapter updates, and `aimx doctor` visibility for operators.
 
@@ -407,8 +407,8 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 | 2 | 2.5–5 | Sandboxed executor | Done (PR #112) | argv + systemd-run/setuid + timeout runner replaces `sh -c` |
 | 3 | 5–7.5 | UDS + CLI + SIGHUP | Done (PR #113) | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
 | 4 | 7.5–10 | Templates + setup | Done (PR #114) | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
-| 5 | 10–12.5 | MCP tools + primer | In Progress | Four MCP tools live, `agents/common/` updated |
-| 6 | 12.5–15 | Tests + docs + doctor | Not Started | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
+| 5 | 10–12.5 | MCP tools + primer | Done (PR #115) | Four MCP tools live, `agents/common/` updated |
+| 6 | 12.5–15 | Tests + docs + doctor | In Progress | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
 
 ## Deferred to v2
 
@@ -426,7 +426,7 @@ Taken directly from [`hook-templates-prd.md`](hook-templates-prd.md) §9 "Out of
 
 ---
 
-*Status: Sprints 1–4 merged (PRs #111, #112, #113, #114; 2026-04-20). Sprint 5 — MCP tools + agent primer updates — is now active.*
+*Status: Sprints 1–5 merged (PRs #111, #112, #113, #114, #115; 2026-04-20). Sprint 6 — Integration tests + book docs + doctor — is now active (final sprint).*
 
 ---
 
