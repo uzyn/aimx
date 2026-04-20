@@ -10,7 +10,7 @@
 
 ---
 
-## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [IN PROGRESS]
+## Sprint 1 — Foundation: schema, socket rename, service user (Days 1–2.5) [DONE]
 
 **Goal:** Land all low-risk mechanical changes (socket rename, config schema additions, service user creation) so every downstream sprint builds on a clean base.
 
@@ -22,12 +22,12 @@
 
 **Priority:** P0
 
-- [ ] `SEND_SOCKET_NAME` constant in `src/serve.rs` renamed to `AIMX_SOCKET_NAME` with value `"aimx.sock"`; `send_socket_path()` renamed to `aimx_socket_path()` (or equivalent) and updated accordingly
-- [ ] All client call sites (`hook_client.rs`, `mailbox.rs`, `hooks.rs`, `state_handler.rs`, `send.rs`) resolve the new path via the shared helper — no literal `send.sock` strings remain in non-test code
-- [ ] All test fixtures, snapshot paths, and test helpers updated to use the new name; `grep -r "send.sock" src/ tests/` returns no hits except in historical comments (if any) that explicitly call out the rename
-- [ ] Systemd unit generator (`src/setup.rs`) and OpenRC template (same) still declare `RuntimeDirectory=aimx` — the directory name does not change, only the socket filename inside it
-- [ ] Release notes / `CHANGELOG.md` (if present) note the rename as a breaking change for pre-launch testers; `aimx doctor` surfaces a helpful error if it sees `send.sock` but not `aimx.sock`
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `SEND_SOCKET_NAME` constant in `src/serve.rs` renamed to `AIMX_SOCKET_NAME` with value `"aimx.sock"`; `send_socket_path()` renamed to `aimx_socket_path()` (or equivalent) and updated accordingly
+- [x] All client call sites (`hook_client.rs`, `mailbox.rs`, `hooks.rs`, `state_handler.rs`, `send.rs`) resolve the new path via the shared helper — no literal `send.sock` strings remain in non-test code
+- [x] All test fixtures, snapshot paths, and test helpers updated to use the new name; `grep -r "send.sock" src/ tests/` returns no hits except in historical comments (if any) that explicitly call out the rename
+- [x] Systemd unit generator (`src/setup.rs`) and OpenRC template (same) still declare `RuntimeDirectory=aimx` — the directory name does not change, only the socket filename inside it
+- [x] Release notes / `CHANGELOG.md` (if present) note the rename as a breaking change for pre-launch testers; `aimx doctor` surfaces a helpful error if it sees `send.sock` but not `aimx.sock`
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S1-2: Add `[[hook_template]]` schema with load-time validation
 
@@ -35,12 +35,12 @@
 
 **Priority:** P0
 
-- [ ] New `HookTemplate` struct in `src/config.rs` with `#[derive(Deserialize, Serialize, Clone, Debug)]` and fields matching PRD §6.1 exactly; field defaults applied via `#[serde(default = "...")]` where appropriate (e.g. `timeout_secs` defaults to 60, `run_as` defaults to `"aimx-hook"`, `allowed_events` defaults to both events)
-- [ ] `Config` struct gains `#[serde(default)] hook_templates: Vec<HookTemplate>`
-- [ ] New `validate_hook_templates(&[HookTemplate]) -> Result<(), ConfigError>` function called from `Config::load()` after TOML parse; returns `Err` on: duplicate template `name`, unknown placeholder in `cmd` not in `params + builtins`, declared-but-unused `params` entry, placeholder in `cmd[0]`, empty `cmd` array, `timeout_secs > 600` or `< 1`, `run_as` value other than `"aimx-hook"` or `"root"`
-- [ ] Unit tests cover each rejection path with a minimal failing TOML input, plus a golden "valid template" round-trip test
-- [ ] A TOML fixture file in `tests/fixtures/` demonstrating a valid multi-template config is round-tripped through `Config::load → Config::save` without diff
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `HookTemplate` struct in `src/config.rs` with `#[derive(Deserialize, Serialize, Clone, Debug)]` and fields matching PRD §6.1 exactly; field defaults applied via `#[serde(default = "...")]` where appropriate (e.g. `timeout_secs` defaults to 60, `run_as` defaults to `"aimx-hook"`, `allowed_events` defaults to both events)
+- [x] `Config` struct gains `#[serde(default)] hook_templates: Vec<HookTemplate>`
+- [x] New `validate_hook_templates(&[HookTemplate]) -> Result<(), ConfigError>` function called from `Config::load()` after TOML parse; returns `Err` on: duplicate template `name`, unknown placeholder in `cmd` not in `params + builtins`, declared-but-unused `params` entry, placeholder in `cmd[0]`, empty `cmd` array, `timeout_secs > 600` or `< 1`, `run_as` value other than `"aimx-hook"` or `"root"` <!-- Review follow-up: param charset validation + built-in collision rejection also added in fix commit -->
+- [x] Unit tests cover each rejection path with a minimal failing TOML input, plus a golden "valid template" round-trip test
+- [x] A TOML fixture file in `tests/fixtures/` demonstrating a valid multi-template config is round-tripped through `Config::load → Config::save` without diff
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S1-3: Extend `Hook` struct with `origin` + `template` + `params`
 
@@ -48,12 +48,12 @@
 
 **Priority:** P0
 
-- [ ] New `HookOrigin` enum (`Operator`, `Mcp`) with `#[serde(rename_all = "lowercase")]` in `src/hook.rs`; `Operator` is the `Default::default()` value
-- [ ] `Hook` struct gains `#[serde(default)] origin: HookOrigin`, `#[serde(default)] template: Option<String>`, `#[serde(default)] params: BTreeMap<String, String>`
-- [ ] Mutual-exclusion validation: if `template` is `Some`, `cmd` must be absent / empty; if `template` is `None`, `cmd` must be non-empty. Enforced in `Config::load` alongside existing hook validation
-- [ ] `Hook::is_template_bound(&self) -> bool` convenience method. (Note: `Hook::resolve_argv` was originally listed here but moved to Sprint 2's S2-1, where the `hook_substitute.rs` module it would delegate to actually lives — see the S2-1 bullet list below.)
-- [ ] Unit tests cover: operator-origin hook with raw cmd round-trips; MCP-origin hook with template + params round-trips; mutually-exclusive (`cmd` + `template`) fails validation; missing template reference fails validation
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `HookOrigin` enum (`Operator`, `Mcp`) with `#[serde(rename_all = "lowercase")]` in `src/hook.rs`; `Operator` is the `Default::default()` value
+- [x] `Hook` struct gains `#[serde(default)] origin: HookOrigin`, `#[serde(default)] template: Option<String>`, `#[serde(default)] params: BTreeMap<String, String>`
+- [x] Mutual-exclusion validation: if `template` is `Some`, `cmd` must be absent / empty; if `template` is `None`, `cmd` must be non-empty. Enforced in `Config::load` alongside existing hook validation <!-- Also: MCP-origin hooks cannot set dangerously_support_untrusted (both config load + UDS validate_single_hook paths) -->
+- [x] `Hook::is_template_bound(&self) -> bool` convenience method. (Note: `Hook::resolve_argv` was originally listed here but moved to Sprint 2's S2-1, where the `hook_substitute.rs` module it would delegate to actually lives — see the S2-1 bullet list below.)
+- [x] Unit tests cover: operator-origin hook with raw cmd round-trips; MCP-origin hook with template + params round-trips; mutually-exclusive (`cmd` + `template`) fails validation; missing template reference fails validation
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S1-4: Create `aimx-hook` system user in `aimx setup`
 
@@ -61,16 +61,16 @@
 
 **Priority:** P0
 
-- [ ] `src/setup.rs` gains an `ensure_hook_user(&dyn SystemOps) -> Result<()>` function that runs `useradd --system --no-create-home --shell /usr/sbin/nologin aimx-hook` (or the platform equivalent via `SystemOps`), gracefully no-ops if `id aimx-hook` already resolves, and creates a matching `aimx-hook` system group
-- [ ] `run_setup` calls `ensure_hook_user` after config + DKIM setup and before systemd unit install, so the unit file can reference the user if needed
-- [ ] `chown_datadir_for_hook_user(&Path, &dyn SystemOps)` helper chowns `<datadir>/inbox` and `<datadir>/sent` to `root:aimx-hook` and chmods `g+rX` recursively; called from `run_setup` after mailbox directories exist
-- [ ] `MockSystemOps` in the test module records user-creation and chown attempts so unit tests can assert `aimx setup` triggers them in the right order; integration test on a live Linux box is manual (CI does not root-create users)
-- [ ] Colorized `[User]` section in setup output reports `aimx-hook created` / `aimx-hook already present`, matching the existing `[DNS]` / `[MCP]` style
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/setup.rs` gains an `ensure_hook_user(&dyn SystemOps) -> Result<()>` function that runs `useradd --system --no-create-home --shell /usr/sbin/nologin aimx-hook` (or the platform equivalent via `SystemOps`), gracefully no-ops if `id aimx-hook` already resolves, and creates a matching `aimx-hook` system group <!-- Fallback to BusyBox adduser only on ErrorKind::NotFound (review fix) -->
+- [x] `run_setup` calls `ensure_hook_user` after config + DKIM setup and before systemd unit install, so the unit file can reference the user if needed
+- [x] `chown_datadir_for_hook_user(&Path, &dyn SystemOps)` helper chowns `<datadir>/inbox` and `<datadir>/sent` to `root:aimx-hook` and chmods `g+rX` recursively; called from `run_setup` after mailbox directories exist
+- [x] `MockSystemOps` in the test module records user-creation and chown attempts so unit tests can assert `aimx setup` triggers them in the right order; integration test on a live Linux box is manual (CI does not root-create users)
+- [x] Colorized `[User]` section in setup output reports `aimx-hook created` / `aimx-hook already present`, matching the existing `[DNS]` / `[MCP]` style
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 2 — Sandboxed hook executor (Days 2.5–5) [NOT STARTED]
+## Sprint 2 — Sandboxed hook executor (Days 2.5–5) [DONE]
 
 **Goal:** Replace today's `sh -c` executor with an argv-based, privilege-dropping, timeout-enforced sandboxed runner. This is the highest-risk sprint in the track — the current `Command::new("sh").arg("-c")` call at `src/hook.rs:309` is tightly coupled and every downstream sprint depends on a working new executor.
 
@@ -82,14 +82,14 @@
 
 **Priority:** P0
 
-- [ ] New `src/hook_substitute.rs` module exposing `pub fn substitute_argv(template_cmd: &[String], params: &BTreeMap<String, String>, builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>`
-- [ ] `Hook::resolve_argv(&self, templates: &[HookTemplate], builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>` (moved from S1-3): returns the final argv by delegating to `substitute_argv` for template-bound hooks and returning `vec!["/bin/sh".into(), "-c".into(), self.cmd.clone()]` for raw-cmd hooks. Grouped here because the implementation can't exist without `substitute_argv`
-- [ ] `BuiltinContext { event, mailbox, message_id, from, subject }` populated by the caller at fire time; missing builtins are substituted as empty strings (PRD: builtins are always available but may be empty when irrelevant)
-- [ ] `SubstitutionError` variants: `UnknownPlaceholder`, `ParamContainsWhitespace`, `ParamContainsNul`, `ParamContainsControl`, `ParamTooLong` (>8 KiB per value), `PlaceholderInBinaryPath`
-- [ ] Substitution happens after argv parse: placeholder appears anywhere inside a string slot → replace in-place; a placeholder occupying the entire slot still produces exactly one argv entry
-- [ ] Unit tests cover: happy path with multiple params; unknown placeholder rejection; whitespace rejection (space, tab, newline); NUL rejection; control-char rejection; long-value rejection; placeholder in `cmd[0]` rejection; placeholders only referenced via builtins; param declared but never used (caught at config load, not substitution)
-- [ ] Fuzz test (`cargo test --release`) iterates 10_000 random inputs containing shell metacharacters (`;`, `$(...)`, backticks, `|`, `&&`, `>`, newlines) and asserts `substituted.len() == template.len()` — substitution never expands argv count
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `src/hook_substitute.rs` module exposing `pub fn substitute_argv(template_cmd: &[String], params: &BTreeMap<String, String>, builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>`
+- [x] `Hook::resolve_argv(&self, templates: &[HookTemplate], builtins: &BuiltinContext) -> Result<Vec<String>, SubstitutionError>` (moved from S1-3): returns the final argv by delegating to `substitute_argv` for template-bound hooks and returning `vec!["/bin/sh".into(), "-c".into(), self.cmd.clone()]` for raw-cmd hooks. Grouped here because the implementation can't exist without `substitute_argv`
+- [x] `BuiltinContext { event, mailbox, message_id, from, subject }` populated by the caller at fire time; missing builtins are substituted as empty strings (PRD: builtins are always available but may be empty when irrelevant)
+- [x] `SubstitutionError` variants: `UnknownPlaceholder`, `ParamContainsWhitespace`, `ParamContainsNul`, `ParamContainsControl`, `ParamTooLong` (>8 KiB per value), `PlaceholderInBinaryPath`
+- [x] Substitution happens after argv parse: placeholder appears anywhere inside a string slot → replace in-place; a placeholder occupying the entire slot still produces exactly one argv entry
+- [x] Unit tests cover: happy path with multiple params; unknown placeholder rejection; whitespace rejection (space, tab, newline); NUL rejection; control-char rejection; long-value rejection; placeholder in `cmd[0]` rejection; placeholders only referenced via builtins; param declared but never used (caught at config load, not substitution)
+- [x] Fuzz test (`cargo test --release`) iterates 10_000 random inputs containing shell metacharacters (`;`, `$(...)`, backticks, `|`, `&&`, `>`, newlines) and asserts `substituted.len() == template.len()` — substitution never expands argv count <!-- Implemented as inline 15,624-iteration loop -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S2-2: `spawn_sandboxed` platform helper (systemd-run + setuid fallback)
 
@@ -97,14 +97,14 @@
 
 **Priority:** P0
 
-- [ ] New `src/platform.rs::spawn_sandboxed(argv: &[String], stdin: SandboxStdin, run_as: &str, timeout: Duration) -> Result<SandboxOutcome, SandboxError>` function
-- [ ] `SandboxStdin` enum: `Email(Vec<u8>)`, `EmailJson(Vec<u8>)`, `None`; written to the child's stdin and closed before timeout starts (no hook blocks on stdin read mid-run)
-- [ ] Systemd path detected via `detect_init_system()`; shells out to `systemd-run` with the exact `--property=...` set from PRD §6.7; captures stdout + stderr via `--pipe` and parses them from the `systemd-run` output stream
-- [ ] Fallback path uses `nix::unistd::{fork, setgid, setuid, execvp}` (or equivalent via `std::os::unix::process::CommandExt::uid/gid`) and a parent-side `select!` / `tokio::time::timeout` on the child's wait; SIGTERM at `timeout`, SIGKILL at `timeout + 5s`
-- [ ] `SandboxOutcome { exit_code: i32, stdout_tail: Vec<u8>, stderr_tail: Vec<u8>, duration: Duration, sandbox: "systemd-run" | "setuid" }` truncates stdout and stderr at 64 KiB each
-- [ ] `SandboxError` variants: `UserNotFound` (aimx-hook UID lookup failed), `SpawnFailed(io::Error)`, `SystemdRunFailed(String)`, `TimedOut`, `Killed(i32)` — all carry enough detail for the caller to log meaningfully
-- [ ] Unit tests use a fake binary in a tempdir (e.g. a tiny shell script that prints, sleeps, or exits with a chosen code) to verify exit code propagation, stdout/stderr capture, truncation at 64 KiB, and timeout behavior (a 2-second sleep with a 500ms timeout must be SIGKILLed); `setuid` path tests are skipped as non-root (CI) but run when `cargo test` is invoked as root
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] New `src/platform.rs::spawn_sandboxed(argv: &[String], stdin: SandboxStdin, run_as: &str, timeout: Duration) -> Result<SandboxOutcome, SandboxError>` function
+- [x] `SandboxStdin` enum: `Email(Vec<u8>)`, `EmailJson(Vec<u8>)`, `None`; written to the child's stdin and closed before timeout starts (no hook blocks on stdin read mid-run)
+- [x] Systemd path detected via `detect_init_system()`; shells out to `systemd-run` with the exact `--property=...` set from PRD §6.7; captures stdout + stderr via `--pipe` and parses them from the `systemd-run` output stream
+- [x] Fallback path uses `Command` + `pre_exec` (setsid + drop supplementary groups + setgid + setuid) and a parent-side poll loop on the child's wait; SIGTERM at `timeout`, SIGKILL at `timeout + 5s` (both signalled to the process group) <!-- Chose stdlib Command::pre_exec + libc over the nix crate; no new dependency -->
+- [x] `SandboxOutcome { exit_code: i32, stdout_tail: Vec<u8>, stderr_tail: Vec<u8>, duration: Duration, sandbox: "systemd-run" | "setuid" }` truncates stdout and stderr at 64 KiB each
+- [x] `SandboxError` variants: `UserNotFound` (aimx-hook UID lookup failed), `SpawnFailed(io::Error)`, `SystemdRunFailed(String)`, `TimedOut`, `Killed(i32)` — all carry enough detail for the caller to log meaningfully
+- [x] Unit tests use a fake binary in a tempdir (e.g. a tiny shell script that prints, sleeps, or exits with a chosen code) to verify exit code propagation, stdout/stderr capture, truncation at 64 KiB, and timeout behavior (a 2-second sleep with a 500ms timeout must be SIGKILLed); `setuid` path tests are skipped as non-root (CI) but run when `cargo test` is invoked as root <!-- Test-only AIMX_SANDBOX_FORCE_FALLBACK env var forces the fallback path on systemd CI hosts -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S2-3: Structured hook-fire log with new fields
 
@@ -112,11 +112,11 @@
 
 **Priority:** P0
 
-- [ ] Log line in `src/hook.rs` extended with `template = ?`, `run_as = ?`, `stderr_tail = ?` fields via `tracing::info!` structured kv syntax
-- [ ] `stderr_tail` is JSON-escaped so multi-line output doesn't break structured parsing; empty stderr is represented as `""`, not `null`
-- [ ] `aimx logs` (which pipes through `journalctl`) does not need changes — structured fields just flow through
-- [ ] Unit test for the log-line formatter verifies each field appears with the expected key and type, including edge cases (empty stderr, very long stderr truncated at 64 KiB, template=None becomes `-`)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] Log line in `src/hook.rs` extended with `template = ?`, `run_as = ?`, `stderr_tail = ?` fields via `tracing::info!` structured kv syntax <!-- Also added sandbox and timed_out for executor visibility -->
+- [x] `stderr_tail` is JSON-escaped so multi-line output doesn't break structured parsing; empty stderr is represented as `""`, not `null` <!-- UTF-8-safe truncation uses head...tail form with char-boundary checks -->
+- [x] `aimx logs` (which pipes through `journalctl`) does not need changes — structured fields just flow through
+- [x] Unit test for the log-line formatter verifies each field appears with the expected key and type, including edge cases (empty stderr, very long stderr truncated at 64 KiB, template=None becomes `-`)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S2-4: Wire sandboxed executor into on_receive + after_send
 
@@ -124,16 +124,16 @@
 
 **Priority:** P0
 
-- [ ] `run_and_log` refactored to: (a) resolve argv via `Hook::resolve_argv`, (b) build the `BuiltinContext` from the ingest/send event, (c) prepare stdin per `template.stdin` (or `"email"` default for raw-cmd), (d) call `spawn_sandboxed` with the hook's `run_as` (defaults to `"aimx-hook"`)
-- [ ] Raw-cmd hooks with `run_as = "root"` in `config.toml` still work — `spawn_sandboxed` accepts `"root"` and maps it to the current process user (no setuid)
-- [ ] Integration test spawns a raw-cmd hook that writes its effective UID to a tempfile; assertion verifies UID matches `aimx-hook` (skipped on non-root CI)
-- [ ] Env vars passed to hooks (`AIMX_MAILBOX`, `AIMX_EVENT`, `AIMX_MESSAGE_ID`, etc. — currently set in `src/hook.rs`) continue to work; check they propagate through `systemd-run --setenv=KEY=VAL` on the systemd path
-- [ ] Removed dead code from the old `Command::new("sh").arg("-c")` path; no fallbacks, no compat shim
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `run_and_log` refactored to: (a) resolve argv via `Hook::resolve_argv`, (b) build the `BuiltinContext` from the ingest/send event, (c) prepare stdin per `template.stdin` (or `"email"` default for raw-cmd), (d) call `spawn_sandboxed` with the hook's `run_as` (defaults to `"aimx-hook"`) <!-- Hook struct gained run_as: Option<String>; UDS rejects the field per PRD §6.7 via decode_hook_body stopgap -->
+- [x] Raw-cmd hooks with `run_as = "root"` in `config.toml` still work — `spawn_sandboxed` accepts `"root"` and maps it to the current process user (no setuid)
+- [x] Integration test spawns a raw-cmd hook that writes its effective UID to a tempfile; assertion verifies UID matches `aimx-hook` (skipped on non-root CI)
+- [x] Env vars passed to hooks (`AIMX_MAILBOX`, `AIMX_EVENT`, `AIMX_MESSAGE_ID`, etc. — currently set in `src/hook.rs`) continue to work; check they propagate through `systemd-run --setenv=KEY=VAL` on the systemd path <!-- Expanded: AIMX_MESSAGE_ID, AIMX_EVENT, AIMX_ID, AIMX_DATE on both paths -->
+- [x] Removed dead code from the old `Command::new("sh").arg("-c")` path; no fallbacks, no compat shim
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload (Days 5–7.5) [NOT STARTED]
+## Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload (Days 5–7.5) [IN PROGRESS]
 
 **Goal:** Lock down the UDS verb surface so MCP physically cannot submit raw-cmd hooks, and wire the operator's CLI path to write `config.toml` directly with a SIGHUP-based hot-reload.
 
@@ -399,14 +399,14 @@
 
 ## Summary table
 
-| Sprint | Days | Focus | Key Output |
-|--------|------|-------|------------|
-| 1 | 1–2.5 | Foundation | Socket renamed, schema lands, `aimx-hook` user created |
-| 2 | 2.5–5 | Sandboxed executor | argv + systemd-run/setuid + timeout runner replaces `sh -c` |
-| 3 | 5–7.5 | UDS + CLI + SIGHUP | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
-| 4 | 7.5–10 | Templates + setup | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
-| 5 | 10–12.5 | MCP tools + primer | Four MCP tools live, `agents/common/` updated |
-| 6 | 12.5–15 | Tests + docs + doctor | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
+| Sprint | Days | Focus | Status | Key Output |
+|--------|------|-------|--------|------------|
+| 1 | 1–2.5 | Foundation | Done (PR #111) | Socket renamed, schema lands, `aimx-hook` user created |
+| 2 | 2.5–5 | Sandboxed executor | Done (PR #112) | argv + systemd-run/setuid + timeout runner replaces `sh -c` |
+| 3 | 5–7.5 | UDS + CLI + SIGHUP | In Progress | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
+| 4 | 7.5–10 | Templates + setup | Not Started | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
+| 5 | 10–12.5 | MCP tools + primer | Not Started | Four MCP tools live, `agents/common/` updated |
+| 6 | 12.5–15 | Tests + docs + doctor | Not Started | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
 
 ## Deferred to v2
 
@@ -424,4 +424,22 @@ Taken directly from [`hook-templates-prd.md`](hook-templates-prd.md) §9 "Out of
 
 ---
 
-*Status: plan drafted. No code changes yet — implementation begins at S1-1 on approval.*
+*Status: Sprints 1–2 merged (PRs #111, #112; 2026-04-20). Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload — is now active.*
+
+---
+
+## Non-blocking Review Backlog
+
+This section collects non-blocking feedback from sprint reviews. Questions need human answers (edit inline). Improvements accumulate until triaged into a cleanup sprint.
+
+### Questions
+
+_None outstanding._
+
+### Improvements
+
+- [x] **(Sprint 1)** `Hook::resolve_argv` deferred from S1-3 to S2-1 because `hook_substitute.rs` doesn't exist until Sprint 2. AC moved, back-reference left in S1-3, `Hook::is_template_bound()` marked `#[allow(dead_code)]` pending Sprint 2 consumer. _Resolved by re-scoping in the Sprint 1 fix commit._
+- [ ] **(Sprint 1)** `validate_hooks` error-message ordering: for an MCP-origin `after_send` hook with `dangerously_support_untrusted = true`, the event-mismatch check fires before the MCP-origin check, so the rejection wording mentions the wrong invariant. Both are valid rejections — only the message text differs. Nice-to-have polish. *(from Sprint 1 re-review nit)*
+- [ ] **(Sprint 2)** `spawn_via_systemd_run` preflight + fallback path emit two WARN lines on the same unknown-user + non-root event (one from the systemd preflight, one from the fallback delegation). Cosmetic, dev-box-only. Collapse to a single log line by either (a) silencing the systemd-path warn when it delegates, or (b) silencing the fallback warn when the systemd preflight already logged. *(from Sprint 2 re-review nit)*
+- [ ] **(Sprint 2)** `AIMX_SANDBOX_FORCE_FALLBACK` env var is test-only scaffolding but lives in production `src/platform.rs`. Consider gating it behind `#[cfg(any(test, debug_assertions))]` or at least documenting it more explicitly so an operator who stumbles on it doesn't think it's a supported switch. *(from Sprint 2 implementation note)*
+- [ ] **(Sprint 2)** Unknown-user fallback for non-root callers (warns and runs as current UID) is a dev/CI safety net that production should never hit. Add a `doctor` check that flags this path if it ever fires in production logs. *(from Sprint 2 implementation note — track via `aimx doctor` work in Sprint 6)*
