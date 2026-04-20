@@ -1,0 +1,34 @@
+domain = "example.com"
+
+[[hook_template]]
+name = "invoke-claude"
+description = "Pipe the received email into Claude Code with a custom prompt."
+cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+run_as = "aimx-hook"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
+
+[[hook_template]]
+name = "webhook"
+description = "POST the email as JSON to a URL."
+cmd = [
+    "/usr/bin/curl",
+    "-sS",
+    "-X",
+    "POST",
+    "-H",
+    "Content-Type: application/json",
+    "--data-binary",
+    "@-",
+    "{url}",
+]
+params = ["url"]
+stdin = "email_json"
+run_as = "aimx-hook"
+timeout_secs = 30
+allowed_events = ["on_receive"]
+
+[mailboxes.catchall]
+address = "*@example.com"

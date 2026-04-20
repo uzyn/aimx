@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
+use crate::hook::{Hook, HookEvent, HookOrigin, effective_hook_name, is_valid_hook_name};
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
@@ -58,6 +58,19 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_senders: Vec<String>,
 
+    /// Installed hook templates. Each entry is a pre-vetted command shape
+    /// an agent can reference via MCP `hook_create`. Populated by
+    /// `aimx setup`'s interactive checkbox list. Validated at load time.
+    ///
+    /// Serialized as `[[hook_template]]` blocks (singular) to match the
+    /// PRD wording and the usual TOML convention for array-of-tables.
+    #[serde(
+        default,
+        rename = "hook_template",
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub hook_templates: Vec<HookTemplate>,
+
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
 
@@ -67,6 +80,94 @@ pub struct Config {
     #[serde(default)]
     pub enable_ipv6: bool,
 }
+
+/// Stdin delivery mode for a hook template. The daemon pipes the matching
+/// payload to the hook's child process on fire.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum HookTemplateStdin {
+    /// Pipe the raw `.md` file (TOML frontmatter + body) that ingest wrote.
+    #[default]
+    Email,
+    /// Pipe a JSON object `{ "frontmatter": {...}, "body": "..." }`.
+    EmailJson,
+    /// Close stdin immediately.
+    None,
+}
+
+/// A pre-vetted command shape an MCP agent can reference via `hook_create`.
+///
+/// Placeholders in argv entries (`{name}`) are substituted at fire time
+/// with either declared `params` values (operator-supplied via MCP) or
+/// built-in values (`{event}`, `{mailbox}`, `{message_id}`, `{from}`,
+/// `{subject}`). See [`validate_hook_templates`] for the load-time checks.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct HookTemplate {
+    /// Unique across all `[[hook_template]]` entries. Pattern
+    /// `[a-z0-9-]+` to keep it CLI-friendly (`aimx hooks template-enable`).
+    pub name: String,
+
+    /// Human-readable one-liner for the `aimx setup` checkbox UI and the
+    /// `hook_list_templates` MCP response.
+    pub description: String,
+
+    /// Argv for the child process. `cmd[0]` is the binary path — placeholders
+    /// are forbidden here (validation enforces this). Subsequent entries may
+    /// embed `{name}` placeholders inside their string value.
+    pub cmd: Vec<String>,
+
+    /// Declared placeholder names that may appear in `cmd`. Must be a 1:1
+    /// set with the placeholders referenced in `cmd` (minus the built-ins).
+    #[serde(default)]
+    pub params: Vec<String>,
+
+    /// Stdin delivery mode. Defaults to `"email"` (pipe the raw `.md`).
+    #[serde(default)]
+    pub stdin: HookTemplateStdin,
+
+    /// Unix user the daemon drops to before `exec`. `"aimx-hook"` (default)
+    /// or `"root"` — any other value is rejected at load time. `root` is
+    /// only accepted so operators can explicitly opt a template back into
+    /// the legacy behavior by editing `config.toml`; the flag is not
+    /// settable over the UDS.
+    #[serde(default = "default_hook_run_as")]
+    pub run_as: String,
+
+    /// Hard timeout in seconds. SIGTERM at `timeout_secs`, SIGKILL at
+    /// `timeout_secs + 5`. Must be in `[1, 600]`.
+    #[serde(default = "default_hook_timeout_secs")]
+    pub timeout_secs: u32,
+
+    /// Events the template may be wired to. Defaults to both. An MCP
+    /// `hook_create` request that selects a disallowed event is rejected.
+    #[serde(default = "default_hook_allowed_events")]
+    pub allowed_events: Vec<HookEvent>,
+}
+
+fn default_hook_run_as() -> String {
+    "aimx-hook".to_string()
+}
+
+fn default_hook_timeout_secs() -> u32 {
+    60
+}
+
+fn default_hook_allowed_events() -> Vec<HookEvent> {
+    vec![HookEvent::OnReceive, HookEvent::AfterSend]
+}
+
+/// Maximum allowed value for [`HookTemplate::timeout_secs`].
+pub const HOOK_TEMPLATE_TIMEOUT_SECS_MAX: u32 = 600;
+
+/// Built-in placeholders the daemon substitutes at fire time without
+/// requiring declaration in `params`.
+const HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS: &[&str] =
+    &["event", "mailbox", "message_id", "from", "subject"];
+
+/// Valid `run_as` values. `aimx-hook` is the default (unprivileged); `root`
+/// is only accepted when an operator explicitly sets it in `config.toml`.
+pub const VALID_HOOK_RUN_AS_VALUES: &[&str] = &["aimx-hook", "root"];
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MailboxConfig {
@@ -184,6 +285,11 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
 pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
     // Effective-name map: name -> (mailbox, is_explicit).
     let mut seen: HashMap<String, (String, bool)> = HashMap::new();
+    let template_names: std::collections::HashSet<&str> = config
+        .hook_templates
+        .iter()
+        .map(|t| t.name.as_str())
+        .collect();
 
     for (mailbox_name, mb) in &config.mailboxes {
         for hook in &mb.hooks {
@@ -196,10 +302,39 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                      must match [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
                 ));
             }
-            if hook.cmd.trim().is_empty() {
-                return Err(format!(
-                    "hook '{label}' on mailbox '{mailbox_name}' has empty `cmd`"
-                ));
+            // Template / cmd mutual exclusion:
+            //   - template = Some  → cmd must be empty; params may be set
+            //   - template = None  → cmd must be non-empty; params must be empty
+            match &hook.template {
+                Some(tmpl_name) => {
+                    if !hook.cmd.trim().is_empty() {
+                        return Err(format!(
+                            "hook '{label}' on mailbox '{mailbox_name}' sets both \
+                             `template = \"{tmpl_name}\"` and a non-empty `cmd`: \
+                             they are mutually exclusive"
+                        ));
+                    }
+                    if !template_names.contains(tmpl_name.as_str()) {
+                        return Err(format!(
+                            "hook '{label}' on mailbox '{mailbox_name}' references \
+                             unknown template '{tmpl_name}': add a matching \
+                             `[[hook_template]]` block or re-run `aimx setup`"
+                        ));
+                    }
+                }
+                None => {
+                    if hook.cmd.trim().is_empty() {
+                        return Err(format!(
+                            "hook '{label}' on mailbox '{mailbox_name}' has empty `cmd`"
+                        ));
+                    }
+                    if !hook.params.is_empty() {
+                        return Err(format!(
+                            "hook '{label}' on mailbox '{mailbox_name}' has `params` but no \
+                             `template`: params are only valid for template-bound hooks"
+                        ));
+                    }
+                }
             }
             if hook.r#type != "cmd" {
                 return Err(format!(
@@ -214,6 +349,16 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                      `dangerously_support_untrusted = true` on event \
                      '{}': this flag only applies to `on_receive` hooks",
                     hook.event.as_str()
+                ));
+            }
+            if hook.origin == HookOrigin::Mcp && hook.dangerously_support_untrusted {
+                // PRD §6.8: MCP-origin hooks always fire only on trusted
+                // mail, regardless of whether they are template-bound or
+                // raw-cmd. `dangerously_support_untrusted` is an
+                // operator-only knob.
+                return Err(format!(
+                    "hook '{label}' on mailbox '{mailbox_name}' is MCP-origin and sets \
+                     `dangerously_support_untrusted = true`: that flag is operator-only"
                 ));
             }
 
@@ -249,7 +394,9 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
 }
 
 /// Expose for the daemon handler, which needs to pre-validate a single
-/// submitted hook stanza before it ever lands in `Config`.
+/// submitted hook stanza before it ever lands in `Config`. Does not check
+/// template existence (that's the caller's responsibility — they hold the
+/// `Config` snapshot).
 pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
     if let Some(name) = &hook.name
         && !is_valid_hook_name(name)
@@ -259,8 +406,26 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
              [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
         ));
     }
-    if hook.cmd.trim().is_empty() {
-        return Err("hook has empty `cmd`".into());
+    match &hook.template {
+        Some(tmpl) => {
+            if !hook.cmd.trim().is_empty() {
+                return Err(format!(
+                    "hook sets both `template = \"{tmpl}\"` and a non-empty `cmd`: \
+                     they are mutually exclusive"
+                ));
+            }
+        }
+        None => {
+            if hook.cmd.trim().is_empty() {
+                return Err("hook has empty `cmd`".into());
+            }
+            if !hook.params.is_empty() {
+                return Err(
+                    "hook has `params` but no `template`: params are only valid for template-bound hooks"
+                        .into(),
+                );
+            }
+        }
     }
     if hook.r#type != "cmd" {
         return Err(format!(
@@ -273,7 +438,180 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
             "`dangerously_support_untrusted = true` only applies to `on_receive` hooks".into(),
         );
     }
+    if hook.origin == HookOrigin::Mcp && hook.dangerously_support_untrusted {
+        // PRD §6.8: MCP-origin hooks always fire only on trusted mail,
+        // regardless of whether they are template-bound or raw-cmd.
+        return Err(
+            "MCP-origin hooks may not set `dangerously_support_untrusted = true`: that flag is operator-only".into(),
+        );
+    }
     Ok(())
+}
+
+/// Iterate every `{placeholder}` substring in `s` and yield the name inside
+/// the braces. Matches `\{[a-z0-9_]+\}` greedy from left to right. Unclosed
+/// braces are silently ignored (they can never form a valid placeholder
+/// anyway and are surfaced to the operator as `cmd[0]` rejection or via
+/// substitution failure at fire time in a later sprint).
+fn iter_placeholders(s: &str) -> impl Iterator<Item = &str> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    std::iter::from_fn(move || {
+        while i < bytes.len() {
+            if bytes[i] == b'{' {
+                let start = i + 1;
+                let mut j = start;
+                while j < bytes.len() && bytes[j] != b'}' {
+                    let c = bytes[j];
+                    let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'_';
+                    if !ok {
+                        break;
+                    }
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'}' && j > start {
+                    let placeholder = &s[start..j];
+                    i = j + 1;
+                    return Some(placeholder);
+                }
+            }
+            i += 1;
+        }
+        None
+    })
+}
+
+/// Validate every `[[hook_template]]` block in `config.toml`. Runs at
+/// [`Config::load`] time so a malformed template fails daemon startup —
+/// not the first inbound email that would fire it.
+///
+/// Rejection rules (per PRD §6.1):
+/// - duplicate template `name`
+/// - empty `cmd` array
+/// - placeholder `{foo}` anywhere inside `cmd[0]` (the binary path)
+/// - placeholder not declared in `params` and not in the built-in set
+/// - `params` entry never referenced by any placeholder in `cmd`
+/// - `timeout_secs == 0` or `> 600`
+/// - `run_as` outside `{"aimx-hook", "root"}`
+/// - `name` not matching `[a-z0-9-]+`
+/// - `allowed_events` empty
+pub(crate) fn validate_hook_templates(templates: &[HookTemplate]) -> Result<(), String> {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for tmpl in templates {
+        if !is_valid_template_name(&tmpl.name) {
+            return Err(format!(
+                "invalid hook template name '{}': must match [a-z0-9-]+",
+                tmpl.name
+            ));
+        }
+        if !seen.insert(tmpl.name.as_str()) {
+            return Err(format!(
+                "duplicate hook template name '{}': template names must be unique",
+                tmpl.name
+            ));
+        }
+        if tmpl.cmd.is_empty() {
+            return Err(format!("hook template '{}' has empty `cmd`", tmpl.name));
+        }
+        if tmpl.timeout_secs == 0 || tmpl.timeout_secs > HOOK_TEMPLATE_TIMEOUT_SECS_MAX {
+            return Err(format!(
+                "hook template '{}' has invalid timeout_secs = {}: must be in [1, {}]",
+                tmpl.name, tmpl.timeout_secs, HOOK_TEMPLATE_TIMEOUT_SECS_MAX
+            ));
+        }
+        if !VALID_HOOK_RUN_AS_VALUES.contains(&tmpl.run_as.as_str()) {
+            return Err(format!(
+                "hook template '{}' has invalid run_as '{}': expected one of {:?}",
+                tmpl.name, tmpl.run_as, VALID_HOOK_RUN_AS_VALUES
+            ));
+        }
+        if tmpl.allowed_events.is_empty() {
+            return Err(format!(
+                "hook template '{}' has empty allowed_events: at least one event must be listed",
+                tmpl.name
+            ));
+        }
+
+        // Declared param names must match the placeholder charset
+        // (`[a-z0-9_]+`). Otherwise the placeholder extractor silently
+        // skips references like `{FOO}` and the operator gets the less
+        // helpful "unused param" error downstream.
+        for declared in &tmpl.params {
+            if !is_valid_placeholder_name(declared) {
+                return Err(format!(
+                    "hook template '{}' declares invalid param name '{}': param names must match [a-z0-9_]+",
+                    tmpl.name, declared
+                ));
+            }
+            if HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.contains(&declared.as_str()) {
+                return Err(format!(
+                    "hook template '{}' declares param '{}' that collides with a built-in placeholder ({})",
+                    tmpl.name,
+                    declared,
+                    HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.join(", ")
+                ));
+            }
+        }
+
+        // `cmd[0]` is the binary path and never admits placeholders.
+        let binary = &tmpl.cmd[0];
+        if iter_placeholders(binary).next().is_some() {
+            return Err(format!(
+                "hook template '{}' has a placeholder in cmd[0] ('{}'): the binary path must be a literal",
+                tmpl.name, binary,
+            ));
+        }
+
+        // Build the set of legal placeholder names (declared params + builtins).
+        let param_set: std::collections::HashSet<&str> =
+            tmpl.params.iter().map(String::as_str).collect();
+        let mut used_params: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+        for slot in &tmpl.cmd[1..] {
+            for placeholder in iter_placeholders(slot) {
+                if HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.contains(&placeholder) {
+                    continue;
+                }
+                if !param_set.contains(placeholder) {
+                    return Err(format!(
+                        "hook template '{}' references undeclared placeholder '{{{}}}': add it to `params` or use a built-in ({})",
+                        tmpl.name,
+                        placeholder,
+                        HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS.join(", ")
+                    ));
+                }
+                used_params.insert(placeholder);
+            }
+        }
+
+        // Every declared param must be referenced somewhere. Dead entries
+        // usually mean the operator forgot to wire up a placeholder.
+        for declared in &tmpl.params {
+            if !used_params.contains(declared.as_str()) {
+                return Err(format!(
+                    "hook template '{}' declares unused param '{}': either reference it via '{{{}}}' in `cmd` or remove it",
+                    tmpl.name, declared, declared
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_template_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
+/// Charset predicate for `[[hook_template]].params` entries and the
+/// placeholder names surfaced by [`iter_placeholders`]. Kept in lockstep
+/// with the parser so operators get a precise "invalid param name" error
+/// at load time rather than a misleading "unused param".
+fn is_valid_placeholder_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 fn validate_trust_values(config: &Config) -> Result<(), String> {
@@ -311,6 +649,8 @@ impl Config {
         reject_legacy_on_receive_schema(&content)?;
         let config: Config = toml::from_str(&content)?;
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        validate_hook_templates(&config.hook_templates)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         validate_hooks(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         Ok(config)
     }
@@ -1036,6 +1376,7 @@ dangerously_support_untrusted = true
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1187,6 +1528,7 @@ trusted_senders = []
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -1224,6 +1566,7 @@ trusted_senders = []
             dkim_selector: "aimx".to_string(),
             trust: "verified".to_string(),
             trusted_senders: vec!["*@company.com".to_string()],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1387,6 +1730,539 @@ enable_ipv6 = true
         assert!(
             msg.contains(&tmp.path().display().to_string()),
             "Expected config dir path in message, got: {msg}"
+        );
+    }
+
+    // ----- Hook template schema & validation (Sprint 1 S1-2) ---------------
+
+    fn write_template_config(body: &str) -> (TempDir, PathBuf) {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut toml = String::from("domain = \"test.com\"\n\n");
+        toml.push_str(body);
+        toml.push_str("\n[mailboxes.catchall]\naddress = \"*@test.com\"\n");
+        std::fs::write(&path, toml).unwrap();
+        (tmp, path)
+    }
+
+    #[test]
+    fn iter_placeholders_extracts_simple_names() {
+        let names: Vec<&str> = iter_placeholders("curl {url} --header 'X: {token}'").collect();
+        assert_eq!(names, vec!["url", "token"]);
+    }
+
+    #[test]
+    fn iter_placeholders_ignores_unclosed_braces() {
+        let names: Vec<&str> = iter_placeholders("echo {incomplete and done").collect();
+        assert!(names.is_empty(), "unclosed brace yields no placeholder");
+    }
+
+    #[test]
+    fn iter_placeholders_ignores_non_alphanum() {
+        let names: Vec<&str> = iter_placeholders("echo {BAD-NAME} {ok_name}").collect();
+        assert_eq!(names, vec!["ok_name"]);
+    }
+
+    #[test]
+    fn load_accepts_valid_hook_template() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "invoke-claude"
+description = "Pipe email into Claude Code with a prompt."
+cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+params = ["prompt"]
+stdin = "email"
+"#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.hook_templates.len(), 1);
+        let tmpl = &cfg.hook_templates[0];
+        assert_eq!(tmpl.name, "invoke-claude");
+        assert_eq!(tmpl.params, vec!["prompt".to_string()]);
+        assert_eq!(tmpl.run_as, "aimx-hook"); // default
+        assert_eq!(tmpl.timeout_secs, 60); // default
+        assert!(matches!(tmpl.stdin, HookTemplateStdin::Email));
+        // allowed_events defaults to both
+        assert_eq!(tmpl.allowed_events.len(), 2);
+    }
+
+    #[test]
+    fn load_accepts_builtin_placeholders_without_declaring_params() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "log-event"
+description = "Append event metadata to a log."
+cmd = ["/usr/bin/logger", "event={event} mailbox={mailbox} from={from}"]
+params = []
+"#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.hook_templates.len(), 1);
+        assert!(cfg.hook_templates[0].params.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_duplicate_template_names() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "dupe"
+description = "first"
+cmd = ["/bin/true"]
+
+[[hook_template]]
+name = "dupe"
+description = "second"
+cmd = ["/bin/true"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate hook template name"),
+            "expected duplicate-name rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_cmd() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "empty"
+description = "no cmd"
+cmd = []
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("empty `cmd`"),
+            "expected empty-cmd rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_placeholder_in_binary_path() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-binary"
+description = "placeholder in cmd[0]"
+cmd = ["/usr/local/bin/{binary}", "-p", "hi"]
+params = ["binary"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("placeholder in cmd[0]"),
+            "expected cmd[0] rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_undeclared_placeholder() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "ghost-param"
+description = "uses undeclared placeholder"
+cmd = ["/bin/echo", "{ghost}"]
+params = []
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("undeclared placeholder") && err.contains("ghost"),
+            "expected undeclared-placeholder rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_declared_but_unused_param() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "dead-param"
+description = "param never referenced"
+cmd = ["/bin/echo", "hello"]
+params = ["dead"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("unused param") && err.contains("dead"),
+            "expected dead-param rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_timeout_zero() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "zero-timeout"
+description = "timeout=0"
+cmd = ["/bin/true"]
+timeout_secs = 0
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid timeout_secs"),
+            "expected timeout rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_timeout_too_large() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "too-long"
+description = "timeout too large"
+cmd = ["/bin/true"]
+timeout_secs = 601
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid timeout_secs"),
+            "expected timeout rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_bad_run_as() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-runas"
+description = "weird run_as"
+cmd = ["/bin/true"]
+run_as = "nobody"
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid run_as"),
+            "expected run_as rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_run_as_root_when_explicit() {
+        // `root` is a legal but rarely-used value — operator must opt in
+        // via `config.toml`; it is NOT settable over the UDS.
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "legacy-root"
+description = "Operator-opted root exec"
+cmd = ["/usr/local/bin/legacy"]
+run_as = "root"
+"#,
+        );
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.hook_templates[0].run_as, "root");
+    }
+
+    #[test]
+    fn load_rejects_invalid_template_name() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "Invoke Claude"
+description = "bad name"
+cmd = ["/bin/true"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid hook template name"),
+            "expected name rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_allowed_events() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "nope"
+description = "no events"
+cmd = ["/bin/true"]
+allowed_events = []
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("empty allowed_events"),
+            "expected allowed_events rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_param_name_with_uppercase_letters() {
+        // Params must match the placeholder charset `[a-z0-9_]+`. An
+        // uppercase param name like `FOO` can never be referenced by the
+        // placeholder extractor, so we reject it at load time with a
+        // precise error rather than letting it surface as "unused param".
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-param"
+description = "uppercase param"
+cmd = ["/bin/echo", "{FOO}"]
+params = ["FOO"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid param name"),
+            "expected invalid-param-name rejection: {err}"
+        );
+        assert!(
+            err.contains("FOO"),
+            "error should name the offending param: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_param_name_with_dash() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "bad-param"
+description = "dashed param"
+cmd = ["/bin/echo", "placeholder"]
+params = ["foo-bar"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid param name"),
+            "expected invalid-param-name rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_param_name_colliding_with_builtin() {
+        let (_tmp, path) = write_template_config(
+            r#"
+[[hook_template]]
+name = "clash"
+description = "param collides with built-in"
+cmd = ["/bin/echo", "{event}"]
+params = ["event"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("built-in placeholder"),
+            "expected built-in collision rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn hook_templates_fixture_round_trips() {
+        let fixture = std::fs::read_to_string("tests/fixtures/hook_templates_valid.toml")
+            .expect("fixture present");
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(&path, &fixture).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert_eq!(cfg.hook_templates.len(), 2);
+
+        // Save and re-load — serialization must survive a round trip.
+        let round_trip = tmp.path().join("round_trip.toml");
+        cfg.save(&round_trip).unwrap();
+        let reloaded = Config::load(&round_trip).unwrap();
+        assert_eq!(cfg, reloaded);
+    }
+
+    // ----- Sprint 1 S1-3: Hook template/cmd mutual exclusion ---------------
+
+    #[test]
+    fn load_rejects_hook_with_both_cmd_and_template() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[[hook_template]]
+name = "echo"
+description = "Echo template"
+cmd = ["/bin/echo", "hi"]
+
+[mailboxes.catchall]
+address = "*@test.com"
+
+[[mailboxes.catchall.hooks]]
+name = "bad"
+event = "on_receive"
+template = "echo"
+cmd = "echo also-raw"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("mutually exclusive"),
+            "expected mutual-exclusion rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_hook_with_unknown_template_reference() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+
+[[mailboxes.catchall.hooks]]
+name = "ghost"
+event = "on_receive"
+template = "does-not-exist"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown template"),
+            "expected unknown-template rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_hook_with_params_but_no_template() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+
+[[mailboxes.catchall.hooks]]
+name = "raw-with-params"
+event = "on_receive"
+cmd = "echo hi"
+
+[mailboxes.catchall.hooks.params]
+prompt = "oops"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("params") && err.contains("template"),
+            "expected params-without-template rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_template_hook_with_known_template() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[[hook_template]]
+name = "invoke-claude"
+description = "Claude"
+cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+params = ["prompt"]
+
+[mailboxes.accounts]
+address = "accounts@test.com"
+
+[[mailboxes.accounts.hooks]]
+name = "ar"
+event = "on_receive"
+origin = "mcp"
+template = "invoke-claude"
+
+[mailboxes.accounts.hooks.params]
+prompt = "Draft a reply"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&path).unwrap();
+        let hooks = &cfg.mailboxes["accounts"].hooks;
+        assert_eq!(hooks.len(), 1);
+        assert_eq!(hooks[0].origin, crate::hook::HookOrigin::Mcp);
+        assert_eq!(hooks[0].template.as_deref(), Some("invoke-claude"));
+        assert_eq!(
+            hooks[0].params.get("prompt").map(|s| s.as_str()),
+            Some("Draft a reply")
+        );
+        assert!(hooks[0].cmd.is_empty());
+    }
+
+    #[test]
+    fn load_rejects_mcp_origin_raw_cmd_with_dangerously_flag() {
+        // PRD §6.8: MCP-origin hooks may not set
+        // `dangerously_support_untrusted`, regardless of whether they are
+        // template-bound or raw-cmd. The guard in `validate_hooks` drops
+        // the `is_template_bound()` qualifier so it catches this shape
+        // even though the UDS body-schema tightening lands in Sprint 3.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.accounts]
+address = "accounts@test.com"
+
+[[mailboxes.accounts.hooks]]
+name = "mcp_raw_danger"
+event = "on_receive"
+origin = "mcp"
+cmd = "echo hi"
+dangerously_support_untrusted = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("MCP-origin") && err.contains("operator-only"),
+            "expected mcp-origin dangerously rejection: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_single_hook_rejects_mcp_origin_raw_cmd_with_dangerously_flag() {
+        // The UDS `HOOK-CREATE` path calls `validate_single_hook` on the
+        // submitted stanza before it ever reaches `Config`. The MCP-origin
+        // guard must fire there too, for the same reason as above.
+        let hook = Hook {
+            name: Some("raw_danger".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo hi".into(),
+            dangerously_support_untrusted: true,
+            origin: HookOrigin::Mcp,
+            template: None,
+            params: std::collections::BTreeMap::new(),
+        };
+        let err = validate_single_hook(&hook).unwrap_err();
+        assert!(
+            err.contains("MCP-origin") && err.contains("operator-only"),
+            "expected mcp-origin dangerously rejection: {err}"
         );
     }
 }

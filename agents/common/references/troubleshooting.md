@@ -34,7 +34,7 @@ AIMX/1 ERR <CODE> <reason>
 ### "aimx daemon not running"
 
 `aimx send` or `email_send` fails with "aimx daemon not running" when the
-UDS socket at `/run/aimx/send.sock` is absent.
+UDS socket at `/run/aimx/aimx.sock` is absent.
 
 **Cause:** `aimx serve` is not running or was not started by systemd.
 

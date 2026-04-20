@@ -71,6 +71,152 @@ pub trait SystemOps {
     fn follow_service_logs(&self, unit: &str) -> Result<(), Box<dyn std::error::Error>> {
         crate::serve::service::follow_service_logs_default(unit)
     }
+
+    /// True iff a user named `user` exists on the local system (resolves via
+    /// `id <user>` / `getent passwd <user>`). Used by
+    /// [`ensure_hook_user`] to skip creation on re-runs.
+    fn user_exists(&self, user: &str) -> bool {
+        std::process::Command::new("id")
+            .arg(user)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /// Idempotently create a system user (+ matching primary group) with
+    /// no login shell and no home directory. Returns `Ok(true)` when the
+    /// user was newly created, `Ok(false)` when the user already existed,
+    /// and `Err` when the creation command failed.
+    fn create_system_user(&self, user: &str) -> Result<bool, Box<dyn std::error::Error>> {
+        if self.user_exists(user) {
+            return Ok(false);
+        }
+        // Try `useradd` first (Debian/Ubuntu/RHEL). Only fall back to
+        // `adduser` when `useradd` isn't on PATH (`ErrorKind::NotFound`).
+        // Any other failure (useradd ran and exited non-zero, permission
+        // denied spawning it, etc.) is propagated as-is so the operator
+        // sees the real cause rather than a confusing "adduser failed"
+        // downstream.
+        match std::process::Command::new("useradd")
+            .args([
+                "--system",
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                "--user-group",
+                user,
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+        {
+            Ok(s) if s.success() => Ok(true),
+            Ok(s) => {
+                Err(format!("`useradd` exited with {s} while creating system user '{user}'").into())
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Fall back to the Alpine / BusyBox `adduser` flags.
+                let s = std::process::Command::new("adduser")
+                    .args(["-S", "-H", "-s", "/sbin/nologin", user])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()?;
+                if !s.success() {
+                    return Err(format!("Failed to create system user '{user}'").into());
+                }
+                Ok(true)
+            }
+            Err(e) => Err(format!("failed to spawn `useradd` for user '{user}': {e}").into()),
+        }
+    }
+
+    /// Recursively `chown <owner>:<group>` and chmod `g+rX` on `path`. Used
+    /// to give `aimx-hook` group-read access to mailbox dirs so hook
+    /// processes can pipe `stdin = "email"` legitimately.
+    fn chown_group_readable(
+        &self,
+        path: &Path,
+        owner: &str,
+        group: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let chown = std::process::Command::new("chown")
+            .args(["-R", &format!("{owner}:{group}")])
+            .arg(path)
+            .status()?;
+        if !chown.success() {
+            return Err(format!("Failed to chown {} to {owner}:{group}", path.display()).into());
+        }
+        let chmod = std::process::Command::new("chmod")
+            .args(["-R", "g+rX"])
+            .arg(path)
+            .status()?;
+        if !chmod.success() {
+            return Err(format!("Failed to chmod g+rX {}", path.display()).into());
+        }
+        Ok(())
+    }
+}
+
+/// Fixed name of the unprivileged Unix user hook subprocesses run as.
+/// Created idempotently by `aimx setup` per PRD §6.3. Sprint 1 only
+/// creates the user + chowns the datadir; wiring the daemon to drop
+/// privileges before `exec` is Sprint 2's job.
+pub const HOOK_SERVICE_USER: &str = "aimx-hook";
+
+/// Ensure the `aimx-hook` service user + matching group exist and the
+/// mailbox directories are readable by that group. Called from
+/// [`run_setup`] after the config is written and before the systemd /
+/// OpenRC service file is installed (so the unit can reference the user
+/// if needed).
+///
+/// Idempotent: re-running on a box that already has the user is a no-op
+/// beyond the chown/chmod pass, which may be no-ops themselves if
+/// permissions are already correct.
+pub(crate) fn ensure_hook_user(
+    sys: &dyn SystemOps,
+    data_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n{}", term::header("[User]"));
+    let created = sys.create_system_user(HOOK_SERVICE_USER)?;
+    if created {
+        println!(
+            "  {} {}",
+            term::success("Created system user"),
+            term::highlight(HOOK_SERVICE_USER)
+        );
+    } else {
+        println!(
+            "  {} {}",
+            term::info(&format!("System user {HOOK_SERVICE_USER} already present")),
+            term::dim("(skipping creation)")
+        );
+    }
+
+    chown_datadir_for_hook_user(data_dir, sys)?;
+    Ok(())
+}
+
+/// Chown `<data_dir>/inbox` and `<data_dir>/sent` to `root:aimx-hook` and
+/// chmod them `g+rX` recursively. Creates the directories first if
+/// missing so a fresh install doesn't trip over "no such file or
+/// directory" on the chown.
+pub(crate) fn chown_datadir_for_hook_user(
+    data_dir: &Path,
+    sys: &dyn SystemOps,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for subdir in ["inbox", "sent"] {
+        let target = data_dir.join(subdir);
+        std::fs::create_dir_all(&target)?;
+        sys.chown_group_readable(&target, "root", HOOK_SERVICE_USER)?;
+    }
+    println!(
+        "  {} {} / {}",
+        term::success("Datadir readable by"),
+        term::highlight(HOOK_SERVICE_USER),
+        term::dim(&data_dir.display().to_string()),
+    );
+    Ok(())
 }
 
 pub trait NetworkOps {
@@ -1229,6 +1375,7 @@ pub fn finalize_setup(
             dkim_selector: dkim_selector.to_string(),
             trust: default_trust,
             trusted_senders: default_trusted_senders,
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1561,6 +1708,12 @@ pub fn run_setup(
     // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
+    // Step 4b: Create `aimx-hook` system user and chown mailbox dirs so
+    // hook processes can drop privileges before `exec` (Sprint 2). Runs
+    // before the service install so the unit file can reference the user
+    // if a future revision chooses to.
+    ensure_hook_user(sys, data_dir)?;
+
     // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
     let (ipv4_detected, ipv6_detected) = net.get_server_ips()?;
@@ -1796,6 +1949,15 @@ mod tests {
         service_running: bool,
         service_ready: bool,
         wait_for_ready_calls: RefCell<u32>,
+        /// Set of existing users (for `user_exists`) — mutable to simulate
+        /// a `create_system_user` call creating the user.
+        existing_users: RefCell<std::collections::HashSet<String>>,
+        /// Ordered list of user names passed to `create_system_user`.
+        created_users: RefCell<Vec<String>>,
+        /// Ordered list of `(path, owner, group)` tuples passed to
+        /// `chown_group_readable`. Lets tests assert the chown fires on
+        /// the right paths in the right order.
+        chown_calls: RefCell<Vec<(PathBuf, String, String)>>,
     }
 
     impl Default for MockSystemOps {
@@ -1810,6 +1972,9 @@ mod tests {
                 service_running: false,
                 service_ready: true,
                 wait_for_ready_calls: RefCell::new(0),
+                existing_users: RefCell::new(std::collections::HashSet::new()),
+                created_users: RefCell::new(vec![]),
+                chown_calls: RefCell::new(vec![]),
             }
         }
     }
@@ -1872,6 +2037,83 @@ mod tests {
             // Mock: no real bind; the network probe is mocked too.
             f()
         }
+        fn user_exists(&self, user: &str) -> bool {
+            self.existing_users.borrow().contains(user)
+        }
+        fn create_system_user(&self, user: &str) -> Result<bool, Box<dyn std::error::Error>> {
+            self.created_users.borrow_mut().push(user.to_string());
+            let newly = self.existing_users.borrow_mut().insert(user.to_string());
+            Ok(newly)
+        }
+        fn chown_group_readable(
+            &self,
+            path: &Path,
+            owner: &str,
+            group: &str,
+        ) -> Result<(), Box<dyn std::error::Error>> {
+            self.chown_calls.borrow_mut().push((
+                path.to_path_buf(),
+                owner.to_string(),
+                group.to_string(),
+            ));
+            Ok(())
+        }
+    }
+
+    // ----- Sprint 1 S1-4: aimx-hook user + datadir chown ------------------
+
+    #[test]
+    fn ensure_hook_user_creates_user_when_absent() {
+        let sys = MockSystemOps::default();
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::ensure_hook_user(&sys, tmp.path()).unwrap();
+        let created = sys.created_users.borrow();
+        assert_eq!(
+            created.as_slice(),
+            &[HOOK_SERVICE_USER.to_string()],
+            "ensure_hook_user must call create_system_user for aimx-hook"
+        );
+        // Datadir chown fires for inbox and sent.
+        let chowns = sys.chown_calls.borrow();
+        assert_eq!(
+            chowns.len(),
+            2,
+            "expected chown on inbox and sent: {chowns:?}"
+        );
+        assert_eq!(chowns[0].1, "root");
+        assert_eq!(chowns[0].2, HOOK_SERVICE_USER);
+        assert_eq!(chowns[1].1, "root");
+        assert_eq!(chowns[1].2, HOOK_SERVICE_USER);
+        let paths: Vec<&Path> = chowns.iter().map(|(p, _, _)| p.as_path()).collect();
+        assert!(paths.iter().any(|p| p.ends_with("inbox")));
+        assert!(paths.iter().any(|p| p.ends_with("sent")));
+    }
+
+    #[test]
+    fn ensure_hook_user_is_idempotent_when_user_exists() {
+        let sys = MockSystemOps::default();
+        sys.existing_users
+            .borrow_mut()
+            .insert(HOOK_SERVICE_USER.to_string());
+        let tmp = tempfile::TempDir::new().unwrap();
+        super::ensure_hook_user(&sys, tmp.path()).unwrap();
+        // create_system_user still gets called — the mock returns false
+        // (meaning "not newly created") when the user is pre-existing.
+        let created = sys.created_users.borrow();
+        assert_eq!(created.len(), 1);
+        // Datadir chown still fires: permissions may need re-asserting.
+        assert_eq!(sys.chown_calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn chown_datadir_for_hook_user_creates_missing_subdirs() {
+        let sys = MockSystemOps::default();
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Directory is empty — helper must create `inbox/` and `sent/` so
+        // the chown has something to target on a fresh install.
+        super::chown_datadir_for_hook_user(tmp.path(), &sys).unwrap();
+        assert!(tmp.path().join("inbox").is_dir());
+        assert!(tmp.path().join("sent").is_dir());
     }
 
     #[test]

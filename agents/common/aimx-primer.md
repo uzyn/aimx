@@ -65,7 +65,7 @@ worked examples.
 
 <!-- FR-50c: the datadir layout is documented explicitly. The real security
      boundary is DKIM keys at /etc/aimx/ (root-only) and the UDS socket at
-     /run/aimx/send.sock, not filesystem obscurity. -->
+     /run/aimx/aimx.sock, not filesystem obscurity. -->
 
 aimx stores mail under a data directory (default `/var/lib/aimx/`):
 

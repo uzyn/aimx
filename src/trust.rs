@@ -141,6 +141,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -354,6 +355,9 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
 
         for (from, dkim_result) in [

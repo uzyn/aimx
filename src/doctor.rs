@@ -17,6 +17,11 @@ pub struct StatusInfo {
     pub dkim_selector: String,
     pub dkim_key_present: bool,
     pub smtp_running: bool,
+    /// True when the old `send.sock` path still exists in the runtime dir
+    /// and the new `aimx.sock` is absent. Surfaced as a warn line in the
+    /// Service section so operators upgrading from pre-launch builds see
+    /// the rename without having to read release notes.
+    pub stale_send_sock_present: bool,
     /// Top-level default trust policy from `Config::trust`. Per-mailbox
     /// overrides are surfaced on each `MailboxStatus` row.
     pub default_trust: String,
@@ -61,6 +66,9 @@ pub fn gather_status_with_ops<S: SystemOps>(
 ) -> StatusInfo {
     let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
     let smtp_running = sys.is_service_running("aimx");
+    let runtime_dir = crate::serve::runtime_dir();
+    let stale_send_sock_present =
+        runtime_dir.join("send.sock").exists() && !runtime_dir.join("aimx.sock").exists();
 
     let mut mailboxes: Vec<MailboxStatus> = config
         .mailboxes
@@ -91,6 +99,7 @@ pub fn gather_status_with_ops<S: SystemOps>(
         dkim_selector: config.dkim_selector.clone(),
         dkim_key_present,
         smtp_running,
+        stale_send_sock_present,
         default_trust: config.trust.clone(),
         default_trusted_senders: config.trusted_senders.clone(),
         mailboxes,
@@ -372,6 +381,12 @@ pub fn format_status(info: &StatusInfo) -> String {
             term::warn("not running")
         }
     ));
+    if info.stale_send_sock_present {
+        out.push_str(&format!(
+            "UDS socket:       {} - the runtime socket was renamed to `aimx.sock`; restart `aimx serve` to replace the stale `send.sock`\n",
+            term::warn("stale send.sock detected"),
+        ));
+    }
 
     let total_msgs: usize = info.mailboxes.iter().map(|m| m.total).sum();
     let total_unread: usize = info.mailboxes.iter().map(|m| m.unread).sum();
@@ -571,6 +586,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -615,6 +631,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -625,6 +642,36 @@ mod tests {
         assert!(output.contains("present"));
         assert!(output.contains("running"));
         assert!(output.contains("0 (0 messages, 0 unread)"));
+        assert!(
+            !output.contains("stale send.sock"),
+            "no stale-socket warning when flag is false"
+        );
+    }
+
+    #[test]
+    fn format_status_flags_stale_send_sock() {
+        let info = StatusInfo {
+            domain: "test.example.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            dkim_selector: "aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: true,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+        };
+        let output = format_status(&info);
+        assert!(
+            output.contains("stale send.sock"),
+            "expected stale-socket warning in doctor output: {output}"
+        );
+        assert!(
+            output.contains("aimx.sock"),
+            "warning should mention the new socket name: {output}"
+        );
     }
 
     #[test]
@@ -636,6 +683,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: false,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![
@@ -680,6 +728,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
@@ -720,6 +769,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
@@ -755,6 +805,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
@@ -790,6 +841,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![
@@ -884,6 +936,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: false,
             smtp_running: false,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -992,6 +1045,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -1183,6 +1237,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -1213,6 +1268,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -1257,6 +1313,7 @@ mod tests {
             config_path: "/etc/aimx/config.toml".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -1292,6 +1349,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "verified".to_string(),
             default_trusted_senders: vec![
                 "alice@example.com".to_string(),
@@ -1336,6 +1394,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "verified".to_string(),
             default_trusted_senders: vec![
                 "alice@example.com".to_string(),
@@ -1364,6 +1423,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![],
@@ -1385,6 +1445,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
@@ -1414,6 +1475,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             dkim_key_present: true,
             smtp_running: true,
+            stale_send_sock_present: false,
             default_trust: "none".to_string(),
             default_trusted_senders: vec![],
             mailboxes: vec![MailboxStatus {
@@ -1478,6 +1540,9 @@ mod tests {
                     r#type: "cmd".to_string(),
                     cmd: "true".to_string(),
                     dangerously_support_untrusted: false,
+                    origin: crate::hook::HookOrigin::Operator,
+                    template: None,
+                    params: std::collections::BTreeMap::new(),
                 }],
                 trust: Some("verified".to_string()),
                 trusted_senders: Some(vec!["alice@example.com".to_string()]),
@@ -1490,6 +1555,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,

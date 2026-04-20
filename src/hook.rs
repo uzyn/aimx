@@ -19,6 +19,7 @@
 //! `trusted` frontmatter value (see `trust.rs`); the hook gate reads the
 //! resolved value, not the policy.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
@@ -62,8 +63,46 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
+/// Provenance tag recorded on every hook written to `config.toml`.
+///
+/// `Operator` = authored by root via CLI or hand-edit (default when the
+/// field is absent). `Mcp` = created by an agent over the UDS
+/// `HOOK-CREATE` verb. The daemon uses this tag at `HOOK-DELETE` time: MCP
+/// may only delete hooks whose `origin = "mcp"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HookOrigin {
+    #[default]
+    Operator,
+    Mcp,
+}
+
+impl HookOrigin {
+    /// String form used in the structured log line and any future
+    /// human-facing doctor / diagnostic output. Unused in Sprint 1 (no
+    /// call site emits the field yet); Sprint 2 wires it into the hook
+    /// fire log.
+    #[allow(dead_code)]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            HookOrigin::Operator => "operator",
+            HookOrigin::Mcp => "mcp",
+        }
+    }
+}
+
 /// One configured hook. `deny_unknown_fields` makes stale filter fields or
 /// typos fail loudly at config load.
+///
+/// A hook is one of two flavors:
+/// 1. **Raw-cmd** — `template = None`, `cmd` is a non-empty shell string.
+///    Created by the operator via CLI / hand-edit.
+/// 2. **Template-bound** — `template = Some(...)`, `params` carries the
+///    bound values, and `cmd` is empty. Created by an agent via MCP, or
+///    by the operator via `aimx hooks create --template`.
+///
+/// Mutual exclusion is enforced at config load (see
+/// [`crate::config::validate_hook_mutual_exclusion`]).
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
@@ -82,7 +121,9 @@ pub struct Hook {
     #[serde(default = "default_hook_type")]
     pub r#type: String,
 
-    /// Shell command executed under `sh -c` with `AIMX_*` env vars set.
+    /// Shell command for raw-cmd hooks. Empty string when `template` is
+    /// `Some` — the resolved argv comes from the template at fire time.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cmd: String,
 
     /// `on_receive` only: when `true`, the hook fires even if the email's
@@ -94,6 +135,33 @@ pub struct Hook {
         rename = "dangerously_support_untrusted"
     )]
     pub dangerously_support_untrusted: bool,
+
+    /// Provenance tag. Defaults to `Operator` when absent so legacy hooks
+    /// hand-edited into `config.toml` remain operator-origin. MCP writes
+    /// always stamp `Mcp`.
+    #[serde(default, skip_serializing_if = "is_default_origin")]
+    pub origin: HookOrigin,
+
+    /// Name of a `[[hook_template]]` this hook binds to. `None` on
+    /// raw-cmd hooks (mutually exclusive with a non-empty `cmd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+
+    /// Bound parameter values for template hooks. Keys must match the
+    /// template's declared `params`. Always empty for raw-cmd hooks.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+}
+
+impl Hook {
+    /// True iff this hook references a template (rather than carrying its
+    /// own raw `cmd`). Consumed by Sprint 2's `resolve_argv` dispatch and
+    /// by the `doctor` summary in a later sprint — not wired into a call
+    /// site yet, but load-bearing for the downstream branches.
+    #[allow(dead_code)]
+    pub fn is_template_bound(&self) -> bool {
+        self.template.is_some()
+    }
 }
 
 fn default_hook_type() -> String {
@@ -102,6 +170,10 @@ fn default_hook_type() -> String {
 
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+fn is_default_origin(o: &HookOrigin) -> bool {
+    matches!(o, HookOrigin::Operator)
 }
 
 /// Return true iff `s` matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`.
@@ -150,10 +222,45 @@ pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String 
     out
 }
 
+/// Derive a stable 12-hex-char name for a template-bound hook.
+///
+/// Uses sha256 over `(event, template, sorted_params)`. Two template-bound
+/// hooks with identical bound params collide — operators are nudged to set
+/// an explicit `name` via the same `validate_hooks` error path that
+/// catches duplicate raw-cmd hooks.
+pub fn derive_template_hook_name(
+    event: HookEvent,
+    template: &str,
+    params: &BTreeMap<String, String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(event.as_str().as_bytes());
+    hasher.update([0x1F]);
+    hasher.update(b"template=");
+    hasher.update(template.as_bytes());
+    for (k, v) in params {
+        hasher.update([0x1F]);
+        hasher.update(k.as_bytes());
+        hasher.update(b"=");
+        hasher.update(v.as_bytes());
+    }
+    let digest = hasher.finalize();
+    let mut out = String::with_capacity(DERIVED_HOOK_NAME_LEN);
+    for b in digest.iter().take(DERIVED_HOOK_NAME_LEN.div_ceil(2)) {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out
+}
+
 /// Resolve the effective name: explicit `name` if present, else derived.
+/// Template-bound hooks derive from `(event, template, sorted params)`;
+/// raw-cmd hooks derive from `(event, cmd, dangerous)` (legacy shape).
 pub fn effective_hook_name(hook: &Hook) -> String {
-    match &hook.name {
-        Some(n) => n.clone(),
+    if let Some(n) = &hook.name {
+        return n.clone();
+    }
+    match &hook.template {
+        Some(tmpl) => derive_template_hook_name(hook.event, tmpl, &hook.params),
         None => derive_hook_name(hook.event, &hook.cmd, hook.dangerously_support_untrusted),
     }
 }
@@ -395,6 +502,7 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
+            hook_templates: Vec::new(),
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -439,6 +547,9 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         }
     }
 
@@ -649,6 +760,9 @@ mod tests {
                 out.display()
             ),
             dangerously_support_untrusted: true,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
         let mailbox = MailboxConfig {
@@ -729,6 +843,9 @@ mod tests {
                 out.display()
             ),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
@@ -773,6 +890,9 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: "false".to_string(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
@@ -879,6 +999,9 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
             dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
@@ -971,5 +1094,140 @@ mod tests {
     #[test]
     fn placeholder_path_import() {
         let _p: &Path = Path::new("/tmp");
+    }
+
+    // ----- Sprint 1 S1-3: origin + template + params -----------------------
+
+    #[test]
+    fn hook_origin_default_is_operator() {
+        assert_eq!(HookOrigin::default(), HookOrigin::Operator);
+        assert_eq!(HookOrigin::Operator.as_str(), "operator");
+        assert_eq!(HookOrigin::Mcp.as_str(), "mcp");
+    }
+
+    #[test]
+    fn hook_origin_roundtrips_via_toml() {
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        struct W {
+            origin: HookOrigin,
+        }
+        let w = W {
+            origin: HookOrigin::Mcp,
+        };
+        let s = toml::to_string(&w).unwrap();
+        assert!(s.contains("origin = \"mcp\""), "serialized: {s}");
+        let back: W = toml::from_str(&s).unwrap();
+        assert_eq!(back, w);
+    }
+
+    #[test]
+    fn hook_is_template_bound() {
+        let mut hook = basic_hook("t1");
+        assert!(!hook.is_template_bound());
+        hook.cmd.clear();
+        hook.template = Some("invoke-claude".to_string());
+        assert!(hook.is_template_bound());
+    }
+
+    #[test]
+    fn template_hook_round_trips_through_toml() {
+        let mut params = BTreeMap::new();
+        params.insert("prompt".to_string(), "draft a reply".to_string());
+        let hook = Hook {
+            name: Some("auto-reply".to_string()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".to_string(),
+            cmd: String::new(),
+            dangerously_support_untrusted: false,
+            origin: HookOrigin::Mcp,
+            template: Some("invoke-claude".to_string()),
+            params,
+        };
+        let s = toml::to_string(&hook).unwrap();
+        assert!(s.contains("origin = \"mcp\""), "serialized: {s}");
+        assert!(
+            s.contains("template = \"invoke-claude\""),
+            "serialized: {s}"
+        );
+        assert!(!s.contains("cmd ="), "empty cmd must be skipped: {s}");
+        let back: Hook = toml::from_str(&s).unwrap();
+        assert_eq!(back, hook);
+    }
+
+    #[test]
+    fn raw_cmd_hook_omits_new_fields_on_serialize() {
+        let hook = Hook {
+            name: Some("raw".to_string()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".to_string(),
+            cmd: "echo hi".to_string(),
+            dangerously_support_untrusted: false,
+            origin: HookOrigin::Operator,
+            template: None,
+            params: BTreeMap::new(),
+        };
+        let s = toml::to_string(&hook).unwrap();
+        // origin = operator is the default → skipped
+        assert!(!s.contains("origin"), "default origin must be skipped: {s}");
+        assert!(
+            !s.contains("template"),
+            "None template must be skipped: {s}"
+        );
+        assert!(!s.contains("params"), "empty params must be skipped: {s}");
+    }
+
+    #[test]
+    fn legacy_hook_toml_defaults_to_operator_origin() {
+        // Hooks hand-edited into `config.toml` before this sprint had no
+        // origin field — load must default to Operator, not error.
+        let src = r#"
+event = "on_receive"
+cmd = "echo legacy"
+"#;
+        let hook: Hook = toml::from_str(src).unwrap();
+        assert_eq!(hook.origin, HookOrigin::Operator);
+        assert!(hook.template.is_none());
+        assert!(hook.params.is_empty());
+    }
+
+    #[test]
+    fn derive_template_hook_name_is_deterministic() {
+        let mut params = BTreeMap::new();
+        params.insert("prompt".to_string(), "hi".to_string());
+        let a = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
+        let b = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
+        assert_eq!(a, b);
+        assert_eq!(a.len(), DERIVED_HOOK_NAME_LEN);
+        assert!(is_valid_hook_name(&a));
+    }
+
+    #[test]
+    fn derive_template_hook_name_differs_by_params() {
+        let mut p1 = BTreeMap::new();
+        p1.insert("prompt".to_string(), "hi".to_string());
+        let mut p2 = BTreeMap::new();
+        p2.insert("prompt".to_string(), "hello".to_string());
+        let a = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &p1);
+        let b = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &p2);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn effective_hook_name_prefers_template_hash_over_cmd_hash() {
+        let mut params = BTreeMap::new();
+        params.insert("prompt".to_string(), "hi".to_string());
+        let hook = Hook {
+            name: None,
+            event: HookEvent::OnReceive,
+            r#type: "cmd".to_string(),
+            cmd: String::new(),
+            dangerously_support_untrusted: false,
+            origin: HookOrigin::Mcp,
+            template: Some("invoke-claude".to_string()),
+            params: params.clone(),
+        };
+        let effective = effective_hook_name(&hook);
+        let expected = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
+        assert_eq!(effective, expected);
     }
 }
