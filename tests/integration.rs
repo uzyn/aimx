@@ -1479,7 +1479,7 @@ fn doctor_shows_domain_and_mailboxes() {
         .stdout(predicate::str::contains("agent.example.com"))
         .stdout(predicate::str::contains("catchall"))
         .stdout(predicate::str::contains("alice"))
-        .stdout(predicate::str::contains("MAILBOX"));
+        .stdout(predicate::str::contains("Mailbox"));
 }
 
 #[test]
