@@ -1,4 +1,4 @@
-# AIMX workflows — worked examples
+# aimx workflows: worked examples
 
 Practical task recipes for common email operations. Each workflow shows the
 MCP tool calls in order with example parameters.
@@ -13,8 +13,8 @@ email_list(mailbox: "agent", unread: true)
 
 # For each email in results:
 email_read(mailbox: "agent", id: "<id>")
-# → Parse frontmatter: check `from`, `subject`, `trusted`, `auto_submitted`
-# → Take appropriate action (reply, forward info, log, ignore)
+# Parse frontmatter: check `from`, `subject`, `trusted`, `auto_submitted`
+# Take appropriate action (reply, forward info, log, ignore)
 
 email_mark_read(mailbox: "agent", id: "<id>")
 ```
@@ -50,9 +50,9 @@ notifications). Always check before replying:
 ```
 email_read(mailbox: "agent", id: "<id>")
 # Check frontmatter:
-#   auto_submitted = "auto-generated"  → do NOT reply
-#   auto_submitted = "auto-replied"    → do NOT reply
-#   auto_submitted is absent           → safe to reply if needed
+#   auto_submitted = "auto-generated"  => do NOT reply
+#   auto_submitted = "auto-replied"    => do NOT reply
+#   auto_submitted is absent           => safe to reply if needed
 ```
 
 Replying to auto-submitted mail creates infinite loops. Log or process
@@ -99,8 +99,8 @@ email_send(
 
 ## 5. Reply-all
 
-AIMX's `email_reply` sends to the original sender only. To reply to all
-recipients, use `email_send` with explicit addresses — and pass
+The `email_reply` tool sends to the original sender only. To reply to all
+recipients, use `email_send` with explicit addresses, and pass
 `reply_to` (and optionally `references`) so the outgoing message stays
 in the same thread:
 
@@ -121,9 +121,9 @@ email_send(
 ```
 
 Notes:
-- `subject` still needs the `Re:` prefix added manually — `email_send`
+- `subject` still needs the `Re:` prefix added manually. `email_send`
   never rewrites the subject.
-- If you only pass `reply_to`, AIMX builds a minimal `References` chain
+- If you only pass `reply_to`, aimx builds a minimal `References` chain
   from it automatically. Pass `references` when you need to preserve the
   full thread history (typical for reply-all on a long thread).
 
@@ -175,7 +175,7 @@ email_list(mailbox: "agent", unread: true)
 email_mark_read(mailbox: "agent", id: "<id>")
 ```
 
-There is no bulk mark-read tool — iterate through each message.
+There is no bulk mark-read tool. Iterate through each message.
 
 ## 9. Check sent mail status
 
@@ -187,9 +187,9 @@ email_list(mailbox: "agent", folder: "sent")
 # For each sent email:
 email_read(mailbox: "agent", id: "<id>", folder: "sent")
 # Check frontmatter:
-#   delivery_status = "delivered"  → accepted by remote MX
-#   delivery_status = "failed"    → rejected, check delivery_details
-#   delivery_status = "deferred"  → temporary failure
+#   delivery_status = "delivered"  => accepted by remote MX
+#   delivery_status = "failed"    => rejected, check delivery_details
+#   delivery_status = "deferred"  => temporary failure
 ```
 
 ## 10. Create a mailbox and send first email

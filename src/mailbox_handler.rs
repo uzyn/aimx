@@ -4,7 +4,7 @@
 //! `aimx mailboxes create` / `delete` route through the daemon over UDS so
 //! the in-memory `Config` is hot-swapped under a `RwLock<Arc<Config>>`
 //! whenever `config.toml` on disk changes. Inbound mail to a just-created
-//! mailbox routes correctly on the very next SMTP session — no restart,
+//! mailbox routes correctly on the very next SMTP session. No restart,
 //! no "silent fall through to catchall" surprise.
 //!
 //! Correctness model:
@@ -16,7 +16,7 @@
 //!    inserting or removing the stanza). Fail fast on duplicates /
 //!    missing / attempts to delete catchall / non-empty directories.
 //! 3. Write the new `Config` to disk **atomically** via
-//!    `write-temp-then-rename` — either we see the old snapshot or the
+//!    `write-temp-then-rename`. Either we see the old snapshot or the
 //!    new one, never a partial write.
 //! 4. Only after the rename succeeds, swap the in-memory `Config` via
 //!    [`ConfigHandle::store`]. This ordering matters: if we swapped
@@ -30,7 +30,7 @@
 //! mailbox can see the file system half-created / half-deleted. The
 //! **inner** process-wide [`CONFIG_WRITE_LOCK`] serializes the
 //! `load → modify → write → store` critical section across *all* mailbox
-//! names — without it, two concurrent `MAILBOX-CREATE alice` +
+//! names. Without it, two concurrent `MAILBOX-CREATE alice` +
 //! `MAILBOX-CREATE bob` requests hold disjoint per-mailbox locks and can
 //! interleave their loads + writes, clobbering one stanza on disk and in
 //! memory. Always outer → inner.
@@ -151,7 +151,7 @@ fn handle_create(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
     );
 
     if let Err(e) = write_config_atomic(&mb_ctx.config_path, &new_config) {
-        // Rename failed — leave the in-memory Config untouched so the
+        // Rename failed; leave the in-memory Config untouched so the
         // daemon continues running against the pre-call state on both
         // disk and memory. Best-effort clean up of the freshly-created
         // directories so the operator can retry cleanly.
@@ -220,7 +220,7 @@ fn handle_delete(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
 }
 
 /// Count the entries directly inside `dir`. Treats missing directory as
-/// zero files. Does not recurse — the mailbox layout only writes at the
+/// zero files. Does not recurse; the mailbox layout only writes at the
 /// top level (flat `.md` files) and one level deep (bundle directories);
 /// a non-empty bundle still trips the top-level count.
 fn count_files_if_exists(dir: &Path) -> usize {
@@ -235,7 +235,7 @@ fn count_files_if_exists(dir: &Path) -> usize {
 /// Writes to a sibling `<path>.tmp.<pid>` file first, syncs it, then
 /// renames over the target. On POSIX `rename(2)` is atomic for same-
 /// filesystem targets, so readers see either the old snapshot or the new
-/// one — never a truncated file. On failure the temp file is cleaned up
+/// one; never a truncated file. On failure the temp file is cleaned up
 /// best-effort so subsequent retries don't trip over stale state.
 ///
 /// **Unknown-key / comment behaviour (v1):** this function re-serializes
@@ -411,7 +411,7 @@ mod tests {
             AckResponse::Ok
         ));
 
-        // Delete with empty dirs — should succeed.
+        // Delete with empty dirs should succeed.
         let req = MailboxCrudRequest {
             name: "alice".into(),
             create: false,
@@ -504,7 +504,7 @@ mod tests {
     #[tokio::test]
     async fn create_failure_at_disk_write_leaves_handle_and_disk_unchanged() {
         // S47-3: this test used to force failure by pointing config_path
-        // at a non-existent parent directory — which tripped
+        // at a non-existent parent directory, which tripped
         // `File::create` before the temp write even started, so the
         // rename-rollback branch was never exercised. The rewritten form
         // below makes the temp write succeed (parent is writable) and the
@@ -516,7 +516,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        // `config.toml` as a non-empty *directory* — the temp write to
+        // `config.toml` as a non-empty *directory*: the temp write to
         // `.config.toml.tmp.<pid>` succeeds, then rename-over fails.
         let dir_path = tmp.path().join("configdir").join("config.toml");
         std::fs::create_dir_all(&dir_path).unwrap();
@@ -541,7 +541,7 @@ mod tests {
         assert!(!tmp.path().join("inbox").join("alice").exists());
         assert!(!tmp.path().join("sent").join("alice").exists());
 
-        // No `.config.toml.tmp.<pid>` was left behind — the rollback path
+        // No `.config.toml.tmp.<pid>` was left behind; the rollback path
         // cleans up the temp file after a rename failure.
         let parent = dir_path.parent().unwrap();
         let strays: Vec<_> = std::fs::read_dir(parent)
@@ -699,11 +699,11 @@ mod tests {
         // two concurrent `MAILBOX-CREATE` calls on *different* names
         // held disjoint per-mailbox locks and could interleave their
         // load-modify-write sequences, clobbering one stanza. The
-        // process-wide `CONFIG_WRITE_LOCK` closes the race — every
+        // process-wide `CONFIG_WRITE_LOCK` closes the race. Every
         // stanza must survive on disk and in the live handle.
         //
         // We fan out to many concurrent names to give the scheduler a
-        // realistic chance of interleaving without the lock — a
+        // realistic chance of interleaving without the lock; a
         // single-pair test is too easy for tokio's multi-thread runtime
         // to serialize accidentally.
         let tmp = TempDir::new().unwrap();

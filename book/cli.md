@@ -10,7 +10,7 @@ Accepted on every subcommand.
 |------|---------|-------------|
 | `--data-dir <path>` | `AIMX_DATA_DIR` | Override the mailbox data directory (default `/var/lib/aimx`). The flag wins when both are set. |
 
-For the full set of environment variables (`AIMX_DATA_DIR`, `AIMX_CONFIG_DIR`, `AIMX_TEST_MAIL_DROP`, `NO_COLOR`), see [Configuration — Environment variables](configuration.md#environment-variables).
+For the full set of environment variables (`AIMX_DATA_DIR`, `AIMX_CONFIG_DIR`, `AIMX_TEST_MAIL_DROP`, `NO_COLOR`), see [Configuration: Environment variables](configuration.md#environment-variables).
 
 ## Daemon and setup
 
@@ -39,7 +39,7 @@ See [Setup](setup.md) for the full walkthrough.
 
 ### `aimx uninstall`
 
-Stop the daemon and remove the installed init-system service file. Non-destructive — leaves `/etc/aimx/` and `/var/lib/aimx/` intact.
+Stop the daemon and remove the installed init-system service file. Non-destructive. Leaves `/etc/aimx/` and `/var/lib/aimx/` intact.
 
 | Flag | Description |
 |------|-------------|
@@ -53,7 +53,7 @@ Check port 25 connectivity (outbound EHLO + inbound EHLO probe). Requires root.
 |------|-------------|
 | `--verify-host <url>` | Override the verifier service host for this invocation. |
 
-See [Setup — End-to-end verification](setup.md#end-to-end-verification).
+See [Setup: End-to-end verification](setup.md#end-to-end-verification).
 
 ## Diagnostics
 
@@ -72,7 +72,7 @@ Tail or follow the `aimx serve` service log. Wraps `journalctl -u aimx` on syste
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--lines <N>` | 50 | Number of trailing lines to show. |
-| `-f`, `--follow` | — | Stream new lines as they arrive (like `journalctl -f`). |
+| `-f`, `--follow` | off | Stream new lines as they arrive (like `journalctl -f`). |
 
 ## Mail operations
 
@@ -90,7 +90,7 @@ Compose an RFC 5322 message and submit it to `aimx serve` via `/run/aimx/send.so
 | `--references <chain>` | Sets the full `References` header. Needed only for multi-step threads where `In-Reply-To` alone is insufficient. |
 | `--attachment <path>` | Attach a file. Repeatable for multiple attachments. |
 
-See [Mailboxes — Sending email](mailboxes.md#sending-email).
+See [Mailboxes: Sending email](mailboxes.md#sending-email).
 
 ### `aimx ingest <rcpt>`
 
@@ -125,7 +125,7 @@ Delete a mailbox. Refuses non-empty mailboxes with `ERR NONEMPTY` unless `--forc
 | `-y`, `--yes` | Skip the confirmation prompt. |
 | `--force` | Recursively wipe `inbox/<name>/` and `sent/<name>/` before deleting. Prompts before wiping unless paired with `--yes`. Refuses `catchall`. |
 
-See [Mailboxes — Managing mailboxes](mailboxes.md#managing-mailboxes).
+See [Mailboxes: Managing mailboxes](mailboxes.md#managing-mailboxes).
 
 ## Hook management
 
@@ -171,7 +171,7 @@ No flags. See [MCP Server](mcp.md).
 
 ### `aimx agent-setup [agent]`
 
-Install the AIMX plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
+Install the aimx plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
 
 | Flag | Description |
 |------|-------------|
@@ -191,4 +191,4 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--selector <name>` | `aimx` | DKIM selector name (controls the DNS record `<selector>._domainkey.<domain>`). |
-| `--force` | — | Overwrite existing keys. |
+| `--force` | off | Overwrite existing keys. |

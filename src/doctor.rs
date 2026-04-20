@@ -140,7 +140,7 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
     );
 
     // Without a local DKIM public key on disk we have no authoritative value
-    // to suggest in the "→ Add:" hint — drop the DKIM record so the hint is
+    // to suggest in the "→ Add:" hint, so drop the DKIM record and the hint is
     // suppressed. The DKIM DNS check itself still runs (it just verifies the
     // record exists) and its FAIL/MISSING badge is still rendered.
     if local_dkim_pubkey.is_none() {
@@ -492,7 +492,7 @@ mod tests {
 
     /// Minimal mock that exercises `is_service_running`. The log-tail
     /// hook is retained only to assert doctor does NOT call it. All
-    /// other `SystemOps` methods panic — they must not be reached by
+    /// other `SystemOps` methods panic; they must not be reached by
     /// `gather_status`.
     struct FakeServiceOps {
         running: bool,
@@ -1109,7 +1109,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
 
-        // Do NOT write a DKIM public.key — this is the scenario under test.
+        // Do NOT write a DKIM public.key. This is the scenario under test.
         assert!(
             !crate::config::dkim_dir().join("public.key").exists(),
             "precondition: no DKIM public key on disk"
@@ -1244,7 +1244,7 @@ mod tests {
         assert_eq!(
             ops.log_tail_calls.get(),
             0,
-            "doctor must not tail service logs — it now prints a pointer to `aimx logs`"
+            "doctor must not tail service logs; it now prints a pointer to `aimx logs`"
         );
     }
 

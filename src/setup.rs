@@ -524,7 +524,7 @@ pub fn derive_smtp_addr_from_verify_host(verify_host: &str) -> String {
     }
 
     // Hostname or IPv4: strip :port if present (rsplit handles hosts safely since
-    // non-IPv6 hosts have at most one colon — the port separator).
+    // non-IPv6 hosts have at most one colon, the port separator).
     let host = match authority.rsplit_once(':') {
         Some((h, _port)) => h,
         None => authority,
@@ -627,7 +627,7 @@ pub const COMPATIBLE_PROVIDERS: &[&str] = &[
 ];
 
 /// Per-attempt dig timeout in seconds. A single dig invocation uses
-/// `+time=DIG_TIMEOUT_SECS +tries=DIG_TRIES` — we rely on the outer
+/// `+time=DIG_TIMEOUT_SECS +tries=DIG_TRIES`. We rely on the outer
 /// `dig_with_cascade` retry/fallback to handle transient UDP loss
 /// rather than bloating a single invocation's budget.
 pub const DIG_TIMEOUT_SECS: u32 = 2;
@@ -640,7 +640,7 @@ pub const DIG_TRIES: u32 = 1;
 /// Total attempts per resolver in `dig_with_cascade`. A non-zero dig
 /// exit retries up to this many times before falling through to the
 /// next resolver. An exit-0 response (including an empty answer) stops
-/// the cascade immediately — NOERROR/NXDOMAIN is authoritative.
+/// the cascade immediately. NOERROR/NXDOMAIN is authoritative.
 pub(crate) const DIG_RETRY_ATTEMPTS: u32 = 3;
 
 /// Delay between retry attempts on the same resolver, in milliseconds.
@@ -649,7 +649,7 @@ pub(crate) const DIG_RETRY_DELAY_MS: u64 = 300;
 
 /// Public resolvers queried in order. Hardcoded because `aimx setup` /
 /// `aimx status` need reliable, cache-consistent answers and users have
-/// no reason to prefer their local recursive resolver — which is often
+/// no reason to prefer their local recursive resolver, which is often
 /// the source of the flakiness this cascade fixes (stale caches, UDP
 /// loss, round-robin across inconsistent upstreams).
 pub(crate) const DIG_RESOLVERS: &[&str] = &["1.1.1.1", "8.8.8.8", "9.9.9.9"];
@@ -670,7 +670,7 @@ pub fn dig_short_args(resolver: &str, record_type: &str, domain: &str) -> Vec<St
 }
 
 /// Retry delay between attempts on the same resolver. Extracted so tests
-/// can short-circuit the sleep — otherwise the all-resolvers-fail test
+/// can short-circuit the sleep; otherwise the all-resolvers-fail test
 /// alone would cost ~2.4s, compounded across multiple tests.
 #[cfg(not(test))]
 fn dig_retry_delay() -> std::time::Duration {
@@ -893,7 +893,7 @@ pub fn verify_spf(net: &dyn NetworkOps, domain: &str, expected_ip: &str) -> DnsV
 }
 
 fn extract_dkim_public_key(record: &str) -> Option<String> {
-    // Single source of truth for DKIM1 `p=` parsing lives in `dkim::` — see
+    // Single source of truth for DKIM1 `p=` parsing lives in `dkim::`; see
     // `public_key_spki_base64` / `extract_dkim_p_value`.
     crate::dkim::extract_dkim_p_value(record)
 }
@@ -1008,7 +1008,7 @@ fn dns_record_for_check<'a>(check: &str, records: &'a [DnsRecord]) -> Option<&'a
     }
 }
 
-/// Produce just the per-record DNS verification lines — no preamble, no
+/// Produce just the per-record DNS verification lines. No preamble, no
 /// trailing blank. Used by callers (like `aimx status`) that render their
 /// own section header and don't want the `DNS Verification:` heading.
 pub fn dns_verification_record_lines(
@@ -1033,7 +1033,7 @@ pub fn dns_verification_record_lines(
                 }
                 // S44-2: DKIM failures have an operator-silent consequence
                 // that bit us in finding #10. A single FAIL line in a
-                // column of PASS lines is too easy to skim past — print a
+                // column of PASS lines is too easy to skim past, so print a
                 // second, semantically-red line spelling out that outbound
                 // signatures will not verify at receivers until the DNS
                 // key matches the on-disk public key.
@@ -1072,8 +1072,8 @@ pub fn dns_verification_record_lines(
     (lines, all_pass)
 }
 
-/// Produce the full DNS verification output — preamble (`""`, `"DNS
-/// Verification:"`, `""`), per-record lines, trailing blank — as used by
+/// Produce the full DNS verification output: preamble (`""`, `"DNS
+/// Verification:"`, `""`), per-record lines, trailing blank. Used by
 /// the setup wizard. Callers that render their own section header should
 /// use `dns_verification_record_lines` instead to avoid double-headers.
 pub fn dns_verification_lines(
@@ -1113,7 +1113,7 @@ pub fn display_mcp_section(data_dir: &Path) {
 /// content without spawning a subprocess.
 pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("Wire AIMX into your AI agent with one command per agent:".to_string());
+    lines.push("Wire aimx into your AI agent with one command per agent:".to_string());
     lines.push(String::new());
 
     for spec in crate::agent_setup::registry() {
@@ -1161,7 +1161,7 @@ pub fn gmail_whitelist_instructions(domain: &str) -> String {
   5. Check "Never send it to Spam"
   6. Click "Create filter"
 
-Alternatively, just reply to an email from {domain} — Gmail will learn it's not spam."#
+Alternatively, just reply to an email from {domain}. Gmail will learn it's not spam."#
     )
 }
 
@@ -1170,7 +1170,7 @@ Alternatively, just reply to an email from {domain} — Gmail will learn it's no
 ///
 /// `trust_defaults` is honoured only on **fresh installs**. When `config.toml`
 /// already exists the existing top-level `trust` / `trusted_senders` are
-/// preserved, and `trust_defaults` is ignored — pass `None` in that case.
+/// preserved, and `trust_defaults` is ignored. Pass `None` in that case.
 pub fn finalize_setup(
     data_dir: &Path,
     domain: &str,
@@ -1261,7 +1261,7 @@ fn announce_setup_complete(domain: &str) {
 }
 
 /// Create the config dir (default `/etc/aimx`, or `AIMX_CONFIG_DIR` override)
-/// with mode `0o755`. Idempotent — a pre-existing directory is left as-is.
+/// with mode `0o755`. Idempotent: a pre-existing directory is left as-is.
 fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
     let dir = crate::config::config_dir();
     std::fs::create_dir_all(&dir)?;
@@ -1269,7 +1269,7 @@ fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
     // Gate mode enforcement on `is_root()` alone: an operator who happens
     // to have `AIMX_CONFIG_DIR` exported on a real install still gets
     // tightened perms. Tests run as a non-root user so the branch is
-    // skipped for their tempdir — `apply_config_file_mode_sets_640`
+    // skipped for their tempdir; `apply_config_file_mode_sets_640`
     // covers the real-install invariant directly.
     if is_root() {
         #[cfg(unix)]
@@ -1283,7 +1283,7 @@ fn install_config_dir() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Write `config.toml` and (on real installs) tighten its mode to `0o640`,
 /// owner `root:root`. Non-root invocations leave the mode at the OS default
-/// — the dedicated [`tests::apply_config_file_mode_sets_640`] test covers
+/// the dedicated [`tests::apply_config_file_mode_sets_640`] test covers
 /// the real-install invariant directly via [`apply_config_file_mode`].
 ///
 /// When the file does not yet exist and we are running as root, it is
@@ -1358,8 +1358,8 @@ fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Interactively prompt for the global default trust policy and — if the
-/// operator picks `verified` — an optional `trusted_senders` allowlist.
+/// Interactively prompt for the global default trust policy and, if the
+/// operator picks `verified`, an optional `trusted_senders` allowlist.
 ///
 /// Returns `(policy, senders)`:
 /// - policy: `"none"` (default) or `"verified"`.
@@ -1452,7 +1452,7 @@ pub fn is_already_configured(sys: &dyn SystemOps, _data_dir: &Path) -> bool {
 /// Gate detected IPv6 on `enable_ipv6`.
 ///
 /// IPv6 outbound is opt-in via `enable_ipv6` in `config.toml`. When disabled,
-/// the detected IPv6 is dropped — AAAA + `ip6:` SPF guidance/verification are
+/// the detected IPv6 is dropped. AAAA + `ip6:` SPF guidance/verification are
 /// omitted to match the IPv4-only default of `aimx send`.
 ///
 /// The caller passes the IPv6 from a single `get_server_ips()` call
@@ -1473,7 +1473,7 @@ pub fn run_setup(
         return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
     }
 
-    // Step 2: Port 25 preflight — runs BEFORE the domain prompt and any
+    // Step 2: Port 25 preflight. Runs BEFORE the domain prompt and any
     // filesystem writes. If the VPS blocks SMTP there is no point asking for
     // a domain, generating TLS certs, or writing config.
     let port25_status = sys.check_port25_occupancy()?;
@@ -1487,7 +1487,7 @@ pub fn run_setup(
 
     println!("{}\n", term::header("Port 25 preflight"));
     if matches!(port25_status, Port25Status::Aimx) {
-        println!("  `aimx serve` is already running on port 25 — probing the live daemon.");
+        println!("  `aimx serve` is already running on port 25. Probing the live daemon.");
         run_port25_preflight(net)?;
     } else {
         sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
@@ -1507,7 +1507,7 @@ pub fn run_setup(
         }
     };
 
-    println!("AIMX setup for {domain}\n");
+    println!("aimx setup for {domain}\n");
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
@@ -1530,7 +1530,7 @@ pub fn run_setup(
         println!(
             "{}",
             term::success(
-                "Existing AIMX configuration detected. Skipping install, proceeding to verification."
+                "Existing aimx configuration detected. Skipping install, proceeding to verification."
             )
         );
     } else {
@@ -1643,7 +1643,7 @@ pub fn run_setup(
 
     // Step 8: Install and start aimx.service as the final step, once all
     // preflight + DNS guidance is out of the way. Setup concludes with the
-    // daemon bound to :25 and verified healthy — or a loud error.
+    // daemon bound to :25 and verified healthy, or a loud error.
     if !already_configured {
         install_and_verify_service(sys, data_dir)?;
     }
@@ -1655,7 +1655,7 @@ pub fn run_setup(
 
 /// Install the systemd/OpenRC service file, restart the daemon, and poll
 /// `127.0.0.1:25` until it accepts a TCP connection. Errors out if the
-/// daemon doesn't bind within the readiness window — setup's last step
+/// daemon doesn't bind within the readiness window. Setup's last step
 /// must either leave `aimx serve` running or tell the operator exactly
 /// what went wrong.
 fn install_and_verify_service(
@@ -1869,7 +1869,7 @@ mod tests {
             &self,
             f: &mut dyn FnMut() -> Result<(), Box<dyn std::error::Error>>,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            // Mock: no real bind — the network probe is mocked too.
+            // Mock: no real bind; the network probe is mocked too.
             f()
         }
     }
@@ -1998,7 +1998,7 @@ mod tests {
 
         assert!(
             !records.iter().any(|r| r.record_type == "PTR"),
-            "PTR is the operator's responsibility — generate_dns_records must not emit PTR records"
+            "PTR is the operator's responsibility; generate_dns_records must not emit PTR records"
         );
     }
 
@@ -2249,7 +2249,7 @@ mod tests {
         // The [DNS] display table is produced by generate_dns_records in the
         // order A, [AAAA], MX, TXT(SPF), [TXT(SPF IPv6)], TXT(DKIM),
         // TXT(DMARC). Verification output must follow the same order so
-        // operators can scan one against the other — anything else is a
+        // operators can scan one against the other; anything else is a
         // regression of the fix from PR for fix/dns-verification-order.
         let ip: IpAddr = "1.2.3.4".parse().unwrap();
         let mut net = MockNetworkOps::default();
@@ -2471,7 +2471,7 @@ mod tests {
     #[test]
     fn run_setup_skips_install_on_reentrant_path() {
         // When `is_already_configured` returns true, the entire install
-        // block is skipped — so `install_service_file` must NOT be called.
+        // block is skipped, so `install_service_file` must NOT be called.
         // Guards against a future refactor that drops the re-entrant shortcut.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
@@ -2579,7 +2579,7 @@ mod tests {
     #[test]
     fn install_and_verify_service_errors_when_service_never_binds() {
         // Once preflight + DNS have passed and the final install step runs,
-        // a readiness timeout must surface a loud error — NOT silently
+        // a readiness timeout must surface a loud error, NOT silently
         // "proceed anyway" and leave the user with a failed systemd unit.
         let tmp = TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
@@ -2794,7 +2794,7 @@ mod tests {
 
     #[test]
     fn dig_resolvers_default_cascade_order() {
-        // Cloudflare first, then Google, then Quad9. Order matters —
+        // Cloudflare first, then Google, then Quad9. Order matters:
         // 1.1.1.1 has the best steady-state latency and the fewest
         // rate-limit surprises for scripted workloads.
         assert_eq!(DIG_RESOLVERS, &["1.1.1.1", "8.8.8.8", "9.9.9.9"]);
@@ -2830,7 +2830,7 @@ mod tests {
         assert!(validate_domain("example-.com").is_err());
     }
 
-    // S11.1 — Root Check + MTA Conflict Detection tests
+    // S11.1: Root Check + MTA Conflict Detection tests
 
     #[test]
     fn non_root_detection() {
@@ -2930,7 +2930,7 @@ mod tests {
         );
     }
 
-    // S11.2 — Reorder Setup Flow tests
+    // S11.2: Reorder Setup Flow tests
 
     #[test]
     fn derive_smtp_addr_from_https_url() {
@@ -3004,7 +3004,7 @@ mod tests {
         let _ = &net as &dyn NetworkOps;
     }
 
-    // S18.1 — Interactive domain prompt tests
+    // S18.1: Interactive domain prompt tests
 
     #[test]
     fn prompt_default_trust_defaults_to_none_on_enter() {
@@ -3104,7 +3104,7 @@ mod tests {
             Some(("verified".to_string(), vec!["*@company.com".to_string()])),
         )
         .unwrap();
-        // Re-entry passes None — the on-disk value must survive regardless.
+        // Re-entry passes None; the on-disk value must survive regardless.
         finalize_setup(tmp.path(), "trust.example.com", "aimx", None).unwrap();
 
         let on_disk = Config::load(&crate::config::config_path()).unwrap();
@@ -3239,7 +3239,7 @@ mod tests {
         assert_eq!(
             v4,
             Some("10.0.0.5".parse().unwrap()),
-            "takes the first IPv4 token (private is OK here — caller may filter)"
+            "takes the first IPv4 token (private is OK here; caller may filter)"
         );
         assert_eq!(
             v6,
@@ -3273,7 +3273,7 @@ mod tests {
         );
     }
 
-    // S18.4 — Re-entrant setup tests
+    // S18.4: Re-entrant setup tests
 
     #[test]
     fn is_already_configured_all_present() {
@@ -3329,7 +3329,7 @@ mod tests {
         assert!(!is_already_configured(&sys, tmp.path()));
     }
 
-    // S26-2 — IPv6 DNS record generation tests
+    // S26-2: IPv6 DNS record generation tests
 
     #[test]
     fn dns_record_generation_with_ipv6() {
@@ -3395,7 +3395,7 @@ mod tests {
         );
     }
 
-    // S26-3 — ip6: SPF verification tests
+    // S26-3: ip6: SPF verification tests
 
     #[test]
     fn spf_contains_ip_ipv6_pass() {
@@ -3593,7 +3593,7 @@ mod tests {
     }
 
     // ========================================================================
-    // dig_with_cascade tests — the core fix for the "A record flips between
+    // dig_with_cascade tests. The core fix for the "A record flips between
     // PASS and MISSING" flakiness reported against `aimx setup`'s DNS verify
     // loop. Prior behavior: a single dig UDP query with no in-process retry
     // and no exit-status check → transient loss masquerades as "no record".
@@ -3705,7 +3705,7 @@ mod tests {
 
     #[test]
     fn dig_cascade_empty_but_ok_is_success_no_fallback() {
-        // NOERROR/NXDOMAIN is authoritative — an empty answer from 1.1.1.1
+        // NOERROR/NXDOMAIN is authoritative. An empty answer from 1.1.1.1
         // must NOT cascade to 8.8.8.8. Otherwise the cascade would bloat
         // latency on every genuinely-missing-record check.
         let runner = ScriptedDigRunner::new(vec![ok_output("")]);
@@ -3718,7 +3718,7 @@ mod tests {
     fn dig_cascade_retries_on_spawn_error() {
         // If dig itself can't be spawned on one attempt (e.g., transient
         // resource exhaustion) and succeeds on retry, the cascade treats
-        // that the same as a non-zero exit — retry, don't bail.
+        // that the same as a non-zero exit: retry, don't bail.
         let responses: Vec<io::Result<std::process::Output>> = vec![
             Err(io::Error::other("spawn failed")),
             ok_output("8.8.4.4\n"),
@@ -3733,7 +3733,7 @@ mod tests {
     fn resolve_a_returns_err_when_all_resolvers_fail() {
         // Integration-level: an all-failing DigRunner must make
         // RealNetworkOps::resolve_a return Err, not Ok(vec![]). This is
-        // the bug that produced the "A: MISSING" flip — old code ignored
+        // the bug that produced the "A: MISSING" flip; old code ignored
         // dig exit status and silently reported empty stdout as missing.
         let total_attempts = DIG_RESOLVERS.len() * DIG_RETRY_ATTEMPTS as usize;
         let responses: Vec<_> = (0..total_attempts)

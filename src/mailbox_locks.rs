@@ -17,10 +17,10 @@
 //!
 //! Always acquire in this order; never the reverse:
 //!
-//! 1. **Outer** — per-mailbox [`tokio::sync::Mutex<()>`] from this map.
+//! 1. **Outer**: per-mailbox [`tokio::sync::Mutex<()>`] from this map.
 //!    Held for the full read-modify-write critical section on any file
 //!    in `<data_dir>/inbox/<mailbox>/` or `<data_dir>/sent/<mailbox>/`.
-//! 2. **Inner** — process-wide `CONFIG_WRITE_LOCK`
+//! 2. **Inner**: process-wide `CONFIG_WRITE_LOCK`
 //!    (`std::sync::Mutex<()>` in [`crate::mailbox_handler`]). Held only
 //!    for the `load → modify → write → store` sequence on
 //!    `config.toml`. `MAILBOX-CREATE` / `MAILBOX-DELETE` acquire the
@@ -28,7 +28,7 @@
 //!    same mailbox can never observe a half-written config while it
 //!    holds the outer lock.
 //!
-//! The outer → inner order is the only safe one: the config write is
+//! The outer then inner order is the only safe one: the config write is
 //! short and bounded, so holding it while a longer ingest critical
 //! section waits on the per-mailbox lock would be a straight-up
 //! priority-inversion. Inverting would deadlock: two concurrent
@@ -41,14 +41,14 @@
 //! the brief insert-if-absent step; the per-mailbox Mutex is what
 //! callers actually wait on. Hot paths (ingest under heavy inbound
 //! load) take one map-level lock cycle plus one per-mailbox lock per
-//! message — cheap in practice.
+//! message, which is cheap in practice.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// Shared per-mailbox lock map. Every writer — inbound ingest, MARK-*,
-/// MAILBOX-* — acquires its mailbox's lock before touching files under
+/// Shared per-mailbox lock map. Every writer (inbound ingest, MARK-*,
+/// MAILBOX-*) acquires its mailbox's lock before touching files under
 /// that mailbox's tree.
 pub struct MailboxLocks {
     // `std::sync::Mutex` around the map itself because the insert-if-

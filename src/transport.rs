@@ -1,6 +1,6 @@
 //! Daemon-side outbound SMTP transport.
 //!
-//! `aimx send` does not sign or deliver mail itself — it opens
+//! `aimx send` does not sign or deliver mail itself. It opens
 //! `/run/aimx/send.sock` and hands a composed RFC 5322 message to `aimx serve`.
 //! Signing and direct-SMTP delivery live here, behind the [`MailTransport`]
 //! trait so the send handler (`src/send_handler.rs`) can be unit-tested
@@ -265,7 +265,7 @@ impl LettreTransport {
 ///
 /// Mapping:
 /// - `is_permanent()` → `Permanent` (SMTP 5xx reply; recipient rejected the
-///   message outright — do not retry)
+///   message outright, do not retry)
 /// - `is_transient()` → `Temp` (SMTP 4xx reply; recipient asked us to retry)
 /// - `is_timeout()` → `Temp` (connect or read timeout)
 /// - `is_transport_shutdown()` → `Temp` (pool shut down)
@@ -288,8 +288,8 @@ fn classify_lettre_error(host: &str, e: &lettre::transport::smtp::Error) -> Tran
 }
 
 /// Test-only transport that writes every outbound message to a file and
-/// returns a canned success. Enabled by the `AIMX_TEST_MAIL_DROP` env var —
-/// when set, `aimx serve` swaps `LettreTransport` for `FileDropTransport`
+/// returns a canned success. Enabled by the `AIMX_TEST_MAIL_DROP` env var.
+/// When set, `aimx serve` swaps `LettreTransport` for `FileDropTransport`
 /// pointing at the given path. Used by the end-to-end send test (which
 /// cannot reach real MX inside CI).
 pub struct FileDropTransport {
@@ -448,7 +448,7 @@ mod tests {
 
     // Note (S43-5): `classify_lettre_error` maps `lettre::transport::smtp::Error`
     // variants to our typed `TransportError`. `smtp::Error` has no public
-    // constructor — its `new()`, `code()`, `response()`, `client()`, `network()`,
+    // constructor. Its `new()`, `code()`, `response()`, `client()`, `network()`,
     // `connection()`, `tls()`, and `transport_shutdown()` helpers are all
     // `pub(crate)`. That means we can't build a synthetic `smtp::Error` for a
     // branch-by-branch unit test; behaviour is covered end-to-end by the

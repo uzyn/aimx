@@ -71,7 +71,7 @@ rc-service aimx restart
 
 ## Where are the logs?
 
-AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
+aimx does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
 
 ```bash
 # Tail the last 50 lines (default)
@@ -103,7 +103,7 @@ journalctl -u aimx -n 200
 
 **OpenRC (Alpine)**
 
-The generated OpenRC init script uses `supervise-daemon`, which routes daemon output to the system logger (typically `/var/log/messages` or syslog). Check your OpenRC logging configuration for the exact destination. `aimx logs` makes a best-effort read of `/var/log/aimx/*.log` and falls back to `/var/log/messages`; `aimx logs --follow` is unsupported on OpenRC and will direct you to tail your syslog file directly.
+The generated OpenRC init script uses `supervise-daemon`, which routes daemon output to the system logger (typically `/var/log/messages` or syslog). Check your OpenRC logging configuration for the exact destination. `aimx logs` makes a best-effort read of `/var/log/aimx/*.log` and falls back to `/var/log/messages`. `aimx logs --follow` is unsupported on OpenRC and will direct you to tail your syslog file directly.
 
 ## DKIM/SPF debugging
 
@@ -145,16 +145,16 @@ Read an email's frontmatter to check inbound verification results:
 head -20 /var/lib/aimx/inbox/catchall/*.md
 ```
 
-Look at the `dkim` and `spf` fields -- they should show `pass` for properly authenticated senders.
+Look at the `dkim` and `spf` fields. They should show `pass` for properly authenticated senders.
 
 ## Spam prevention
 
 If outbound emails land in spam:
 
-1. **Check all DNS records** -- DKIM, SPF, and DMARC must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
+1. **Check all DNS records.** DKIM, SPF, and DMARC must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
 2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for aimx, but is critical for deliverability with Gmail/Outlook.
-3. **Gmail filter workaround** -- In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
-4. **Reply trick** -- Reply to one email from the domain. Gmail learns it's not spam.
+3. **Gmail filter workaround.** In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
+4. **Reply trick.** Reply to one email from the domain. Gmail learns it's not spam.
 
 ## File permissions
 
@@ -178,7 +178,7 @@ sudo chmod 600 /etc/aimx/dkim/private.key
 | Scenario | What happens |
 |----------|-------------|
 | **`aimx serve` running** | Outbound EHLO + inbound EHLO probe |
-| **Other process on port 25** (Postfix, Exim, etc.) | Fails -- advises to stop the conflicting process |
+| **Other process on port 25** (Postfix, Exim, etc.) | Fails. Advises to stop the conflicting process |
 | **Nothing on port 25** (fresh VPS) | Spawns temporary SMTP listener, then runs outbound + inbound EHLO checks |
 
 If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx serve` configuration rather than firewall/port access. Run `sudo systemctl status aimx` to check.

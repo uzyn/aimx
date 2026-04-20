@@ -1,4 +1,4 @@
-# AIMX frontmatter schema — full reference
+# aimx frontmatter schema: full reference
 
 Every email file begins with a TOML frontmatter block between `+++`
 delimiters. Fields are ordered by section: Identity, Parties, Content,
@@ -30,7 +30,7 @@ Threading, Auth, Storage, and (for sent copies) an Outbound block.
 |------------------|-----------|----------|-------|
 | `subject`        | string    | always   | Email subject, or `(no subject)` when absent |
 | `date`           | string    | always   | Sender-claimed RFC 3339 timestamp |
-| `received_at`    | string    | always   | Server-side RFC 3339 UTC timestamp when AIMX ingested the message |
+| `received_at`    | string    | always   | Server-side RFC 3339 UTC timestamp when aimx ingested the message |
 | `received_from_ip`| string   | optional | SMTP client IP address. Omitted when unavailable (e.g. piped ingest) |
 | `size_bytes`     | integer   | always   | Raw message size in bytes |
 | `attachments`    | table[]   | optional | Array of attachment metadata tables. Omitted when empty |
@@ -72,16 +72,16 @@ mailbox. The effective policy is the mailbox's own `trust` /
 `trusted_senders` if set, otherwise the top-level defaults in
 `config.toml`:
 
-- **`"none"`** — effective `trust` is `"none"` (the default). No trust
+- **`"none"`**: effective `trust` is `"none"` (the default). No trust
   evaluation was performed.
-- **`"true"`** — effective `trust` is `"verified"`, the sender matches
+- **`"true"`**: effective `trust` is `"verified"`, the sender matches
   one of the effective `trusted_senders` glob patterns, AND DKIM passed.
   This is equivalent to "the email passed the trigger gate."
-- **`"false"`** — effective `trust` is `"verified"`, but one or both
+- **`"false"`**: effective `trust` is `"verified"`, but one or both
   conditions were not met: the sender was not in the allowlist, or DKIM did
   not pass (or both).
 
-Trust config in `config.toml` — global defaults at the top, optional
+Trust config in `config.toml`. Global defaults at the top, optional
 per-mailbox overrides:
 ```toml
 # Global defaults applied to every mailbox unless overridden
@@ -100,7 +100,7 @@ trusted_senders = ["*@company.com", "alice@gmail.com"]
 |---------|----------|----------|-------|
 | `mailbox`| string  | always   | Name of the mailbox this email was routed to |
 | `read`   | bool    | always   | `false` on ingest. Updated by `email_mark_read`/`email_mark_unread` |
-| `read_at`| datetime| optional | RFC 3339 UTC timestamp set by `email_mark_read` (mirrors the `MARK-READ` UDS verb). Removed entirely by `email_mark_unread`. Reflects the most recent read — re-marking read overwrites the previous value rather than preserving "first read". Omitted when absent |
+| `read_at`| datetime| optional | RFC 3339 UTC timestamp set by `email_mark_read` (mirrors the `MARK-READ` UDS verb). Removed entirely by `email_mark_unread`. Reflects the most recent read. Re-marking read overwrites the previous value rather than preserving "first read". Omitted when absent |
 | `labels` | string[]| optional | Empty by default. Omitted when empty |
 
 ---
@@ -108,7 +108,7 @@ trusted_senders = ["*@company.com", "alice@gmail.com"]
 ## Outbound frontmatter
 
 Sent copies under `sent/<mailbox>/` use the same field ordering as inbound
-(Identity → Parties → Content → Threading → Auth → Storage) plus an
+(Identity, Parties, Content, Threading, Auth, Storage) plus an
 additional Outbound block at the end.
 
 ### Outbound block

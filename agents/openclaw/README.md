@@ -1,25 +1,25 @@
-# AIMX skill for OpenClaw
+# aimx skill for OpenClaw
 
-This directory is the source tree for the OpenClaw skill that wires
-AIMX into [OpenClaw](https://docs.openclaw.ai/). Contents are bundled
+AIMX (AI Mail Exchange) skill source tree for OpenClaw. This directory
+wires aimx into [OpenClaw](https://docs.openclaw.ai/). Contents are bundled
 into the `aimx` binary at compile time (via `include_dir!`) and
 installed by `aimx agent-setup openclaw`.
 
 ## What gets installed
 
-- `skills/aimx/SKILL.md` — an agent-facing skill dropped into
-  `~/.openclaw/skills/aimx/SKILL.md`. Its body is the canonical AIMX
-  primer (`agents/common/aimx-primer.md`); the installer assembles the
+- `skills/aimx/SKILL.md`: an agent-facing skill dropped into
+  `~/.openclaw/skills/aimx/SKILL.md`. Its body is the canonical aimx
+  primer (`agents/common/aimx-primer.md`). The installer assembles the
   final `SKILL.md` from a YAML header plus that primer so there is one
   source of truth.
-- `skills/aimx/references/` — detailed reference docs (MCP tool signatures,
+- `skills/aimx/references/`: detailed reference docs (MCP tool signatures,
   frontmatter schema, workflows, troubleshooting) copied from
   `agents/common/references/`.
 
 OpenClaw's MCP configuration lives in `~/.openclaw/openclaw.json` (a
 JSON5 file) under the `mcpServers` key. The installer does **not**
-mutate that file; instead it prints an `openclaw mcp set` command you
-paste into your shell to register AIMX's MCP server with one step.
+mutate that file. Instead it prints an `openclaw mcp set` command you
+paste into your shell to register the aimx MCP server with one step.
 
 ## Install
 
@@ -31,20 +31,20 @@ Default skill destination: `~/.openclaw/skills/aimx/SKILL.md`.
 
 ## Activation
 
-After the skill is installed, register AIMX's MCP server with OpenClaw's
+After the skill is installed, register the aimx MCP server with OpenClaw's
 built-in CLI:
 
 ```bash
 openclaw mcp set aimx '{"command":"/usr/local/bin/aimx","args":["mcp"]}'
 ```
 
-That command edits `~/.openclaw/openclaw.json` for you — no config-file
+That command edits `~/.openclaw/openclaw.json` for you, no config-file
 hand-editing. Restart the OpenClaw gateway after registration so the
 new server is loaded.
 
 ## Overriding the data directory
 
-If AIMX was set up with a non-default data directory, re-run the
+If aimx was set up with a non-default data directory, re-run the
 installer with `--data-dir`:
 
 ```bash
@@ -78,8 +78,8 @@ documented at <https://docs.openclaw.ai/cli/mcp>.
 ## Design choice: CLI-based activation
 
 OpenClaw provides a first-class `openclaw mcp set <name> <json>` CLI
-that registers an MCP server non-interactively. AIMX uses that command
+that registers an MCP server non-interactively. aimx uses that command
 as the activation step rather than asking users to hand-edit
-`~/.openclaw/openclaw.json` (a JSON5 file AIMX does not want to parse
+`~/.openclaw/openclaw.json` (a JSON5 file aimx does not want to parse
 and rewrite). This matches FR-49: the installer writes the skill to
 disk and prints one exact command the user runs.
