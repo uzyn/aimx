@@ -10,7 +10,7 @@
 
 One command gives your AI agents their own email addresses. No Gmail, no OAuth, no SaaS. Fully self-hosted means full sovereignty.
 
-Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent -- Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw.
+Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent -- Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
 
 
 - **Single binary.** One binary, no other dependencies. 
@@ -93,9 +93,9 @@ Install AIMX into your agent with one command:
 | Gemini CLI | `aimx agent-setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
 | Goose | `aimx agent-setup goose` | Run `goose run --recipe aimx`. |
 | OpenClaw | `aimx agent-setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
+| Hermes | `aimx agent-setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
 
-Run `aimx agent-setup --list` to see every supported agent and its
-destination path. See [`book/agent-integration.md`](book/agent-integration.md)
+Run `aimx agent-setup` (no args) or `aimx agent-setup --list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md)
 for per-agent activation steps and manual MCP wiring, and
 [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste
 hook recipes (email-driven agent invocation) covering every

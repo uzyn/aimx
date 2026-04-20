@@ -2,9 +2,9 @@
 
 `aimx agent-setup <agent>` installs AIMX's plugin/skill package into the agent's per-user config directory so the agent discovers AIMX as both an MCP server and an agent-facing primer. For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
-## Guided setup
+## Discovering supported agents
 
-`aimx agent-setup` with no argument on an interactive terminal prints a numbered menu of every supported agent plus an **MCP (General)** option that outputs a generic MCP stdio JSON snippet for clients not yet in the registry. The menu respects `--data-dir`, so the printed snippet includes any override. Non-interactive callers (scripts, CI) must pass the positional `<agent>` argument or `--list`.
+`aimx agent-setup` with no argument prints the supported-agent registry — one row per agent with its install command, destination path, and activation hint — and exits without installing anything. `aimx agent-setup --list` prints the same view. To install, pass the agent name positionally: `aimx agent-setup <agent>`.
 
 ## What `aimx agent-setup` does
 
