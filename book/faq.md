@@ -4,7 +4,11 @@ Short answers to questions that come up often. See the linked pages for depth.
 
 ## Deployment
 
-### Why do we need port 25 open for both inbound and outbound? 
+### Why do we need port 25 open for both inbound and outbound?
+
+Inbound: every receiving MTA listens on port 25 — it is the SMTP port defined by RFC 5321. Your MX record points at your server and delivering MTAs connect on 25 to hand mail over.
+
+Outbound: AIMX delivers directly to each recipient's MX on port 25 — no smarthost, no SaaS relay. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay; AIMX *is* the MTA, so they do not apply.
 
 ### Can I run AIMX in Docker or behind NAT?
 
@@ -26,7 +30,7 @@ Same domain, new server: `rsync -a /etc/aimx/ /var/lib/aimx/` to the new host, i
 
 ### What is PTR record? Do I actually need it?
 
-PTR (Pointer Record) is a DNS record type that does reverse DNS lookup. It maps an IP address back to a hostname, the opposite of A/AAAA record. Setting one would increase the deliverability of your AIMX outgoing emails and you would usually need to contact your hosting provider to set it. As AIMX is not meant for email blasting, **setting of PTR is unnecessary** and optional especially if only a handful of targeted recipients (usually yourself) are to be receiving the emails, making sure DKIM/SPF/DMARC pass and if you need to, whitelist the address on your mail client would already do wonders.
+PTR (Pointer Record) is a reverse-DNS record — it maps an IP back to a hostname, the opposite of an A/AAAA record. Setting one improves outbound deliverability and is usually configured at your hosting provider's control panel rather than at your normal DNS registrar. Because AIMX is not meant for bulk sending, **a PTR is optional**: if you are only mailing a handful of targeted recipients (often yourself), having DKIM/SPF/DMARC pass — and, if needed, whitelisting the sender in your mail client — is usually enough.
 
 ### How do I rotate the DKIM key without a delivery gap?
 
@@ -49,7 +53,7 @@ No. The catchall is inbound-only. Outbound `From` must resolve to a concrete, no
 
 ### What happens on a deferred or failed MX delivery?
 
-AIMX does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted — the client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. AIMX does not generate DSNs. This allows AI agents to get timely feedback on sending reports rather than simply send and pray.
+AIMX does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted — the client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. AIMX does not generate DSNs. This keeps the delivery result visible to the calling agent in real time — no send-and-pray.
 
 ### Can I send with attachments, a custom Reply-To, or a custom Message-Id?
 
@@ -100,9 +104,19 @@ When the hook's side effect is safe regardless of sender — a logger, a metric 
 
 ## Security model
 
-### I would run a mail daemon on my server. Can I use AIMX in place of Postfix or Stalwart? 
+### Can I use AIMX in place of Postfix or Stalwart?
 
+No — and that is intentional. AIMX is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
 
+Reach for [Postfix](https://www.postfix.org/), [Stalwart](https://stalw.art/), Maddy, or Exim instead if you need any of:
+
+- multiple human users with private inboxes
+- IMAP/POP3 clients (Thunderbird, iOS Mail, etc.)
+- webmail (Roundcube, Snappymail, etc.)
+- SMTP submission for outbound relays
+- large-volume outbound with persistent queueing and retries
+
+AIMX and a traditional MTA cannot share port 25 on the same IP — if you want both, run them on separate hosts or separate IPs.
 
 ### `send.sock` is mode `0666` — why is that fine?
 
@@ -110,7 +124,7 @@ Any local user can submit an outbound message, but the DKIM private key (`/etc/a
 
 ### The mailbox tree is world-readable — why is that fine?
 
-AIMX assumes a single-operator server where every local user/agent is in the trust boundary. If you need per-user mailbox isolation, tighten permissions yourself with `chmod`/ACLs, or run one AIMX instance per tenant on its own host. The documentation is explicit about this trade-off in [Security model](getting-started.md#security-model).
+AIMX assumes a single-operator server where every local user and agent is inside the trust boundary. If you need per-user mailbox isolation, AIMX is the wrong tool — run a general-purpose MTA like Postfix or Stalwart instead (see [Can I use AIMX in place of Postfix or Stalwart?](#can-i-use-aimx-in-place-of-postfix-or-stalwart) above). The trade-off is documented in [Security model](getting-started.md#security-model).
 
 ### Who can read the DKIM private key, and what happens if it leaks?
 
@@ -146,11 +160,9 @@ Set `AIMX_TEST_MAIL_DROP=/path/to/dir` before starting `aimx serve`. Every outbo
 
 ## Verifier service
 
-### What is `services/verifier`?  
+### What is `services/verifier`?
 
-* (EDIT THIS)
-* You do not need it.
-* It is only meant to fascilitate port 25 checks, i.e. `aimx portcheck`.
+A small companion service that exists purely to answer the question "is port 25 actually reachable from the public internet?". `aimx portcheck` and `aimx setup` call it during setup; nothing in the mail path depends on it. By default AIMX points at the hosted instance at `check.aimx.email`, so you do not need to run your own.
 
 ### When would I self-host `services/verifier/`?
 
