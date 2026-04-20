@@ -133,7 +133,7 @@
 
 ---
 
-## Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload (Days 5–7.5) [IN PROGRESS]
+## Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload (Days 5–7.5) [DONE]
 
 **Goal:** Lock down the UDS verb surface so MCP physically cannot submit raw-cmd hooks, and wire the operator's CLI path to write `config.toml` directly with a SIGHUP-based hot-reload.
 
@@ -145,14 +145,14 @@
 
 **Priority:** P0
 
-- [ ] `src/send_protocol.rs::Request::HookCreate` variant changes: body is now `HookTemplateCreateBody { template: String, params: BTreeMap<String, String>, name: Option<String> }` parsed via `serde_json`
-- [ ] Parser rejects bodies containing the forbidden fields (`cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, `stdin`) — this is enforced at the JSON schema level so error messages are precise
-- [ ] `src/hook_handler.rs::handle_hook_create` validates: mailbox exists, template exists and is enabled, event is in `template.allowed_events`, all declared `params` are present and pass substitution validation, resulting hook name is unique within the mailbox
-- [ ] Daemon stamps `origin = Mcp` on the constructed `Hook` before writing to config
-- [ ] Error responses carry specific reasons: `ERR unknown-template`, `ERR missing-param: KEY`, `ERR event-not-allowed`, `ERR mailbox-not-found`, `ERR name-conflict` — all human-readable and actionable
-- [ ] Unit tests cover each rejection path with a minimal request fixture
-- [ ] Integration test: submit a valid `HOOK-CREATE` → verify hook appears in `config.toml` with `origin = "mcp"`; submit a body with `cmd = "..."` → verify rejection
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/send_protocol.rs::Request::HookCreate` variant changes: body is now `HookTemplateCreateBody { template: String, params: BTreeMap<String, String>, name: Option<String> }` parsed via `serde_json` <!-- Template/Name moved to headers; body carries only `params` with serde(deny_unknown_fields) -->
+- [x] Parser rejects bodies containing the forbidden fields (`cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, `stdin`) — this is enforced at the JSON schema level so error messages are precise
+- [x] `src/hook_handler.rs::handle_hook_create` validates: mailbox exists, template exists and is enabled, event is in `template.allowed_events`, all declared `params` are present and pass substitution validation, resulting hook name is unique within the mailbox
+- [x] Daemon stamps `origin = Mcp` on the constructed `Hook` before writing to config
+- [x] Error responses carry specific reasons: `ERR unknown-template`, `ERR missing-param: KEY`, `ERR event-not-allowed`, `ERR mailbox-not-found`, `ERR name-conflict` — all human-readable and actionable <!-- Added: unknown-param, param-invalid -->
+- [x] Unit tests cover each rejection path with a minimal request fixture <!-- 20 handler tests + per-field codec tests -->
+- [x] Integration test: submit a valid `HOOK-CREATE` → verify hook appears in `config.toml` with `origin = "mcp"`; submit a body with `cmd = "..."` → verify rejection
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S3-2: Tighten UDS `HOOK-DELETE` with origin check
 
@@ -160,10 +160,10 @@
 
 **Priority:** P0
 
-- [ ] `src/hook_handler.rs::handle_hook_delete` looks up the target hook by name across all mailboxes, checks `hook.origin`, and returns `ERR origin-protected: hook was created by the operator — remove via \`sudo aimx hooks delete\` instead` if `origin == Operator`
-- [ ] Successful delete still swaps `ConfigHandle` via the existing atomic path; the response is `AIMX/1 OK` unchanged
-- [ ] Unit test covers operator-protected rejection, successful MCP-origin delete, and unknown-name case
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/hook_handler.rs::handle_hook_delete` looks up the target hook by name across all mailboxes, checks `hook.origin`, and returns `ERR origin-protected: hook was created by the operator — remove via \`sudo aimx hooks delete\` instead` if `origin == Operator` <!-- Origin snapshotted before lock and re-checked inside retain(); structural-impossibility comment expanded -->
+- [x] Successful delete still swaps `ConfigHandle` via the existing atomic path; the response is `AIMX/1 OK` unchanged
+- [x] Unit test covers operator-protected rejection, successful MCP-origin delete, and unknown-name case
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S3-3: CLI `aimx hooks create --template` + `--param`
 
@@ -173,12 +173,12 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `src/cli.rs::HookCreateArgs` gains `#[arg(long, conflicts_with = "cmd")] template: Option<String>` and `#[arg(long = "param", value_name = "KEY=VAL")] params: Vec<String>`; `cmd` field becomes optional and `ArgGroup` enforces exactly-one-of (`--template`, `--cmd`)
-- [ ] When `--template` is used, `src/hooks.rs::create` parses the `Vec<String>` into `BTreeMap<String, String>`, validates locally against the loaded config's templates (fast-fail on missing template / unknown params), then submits via a new `hook_client::submit_hook_template_create_via_daemon`
-- [ ] CLI-origin template hooks get `origin = "mcp"` in `config.toml` because they traverse the same UDS verb MCP uses (`origin` is a submission-channel marker, not an authorship marker — see Sprint context above). Operators who want `origin = "operator"` on a hook must use `--cmd` (which direct-writes `config.toml` and bypasses UDS). This is visible via `aimx hooks list` showing the `origin` column.
-- [ ] Error UX: `aimx hooks create --template invoke-claude --param prompt="..."` succeeds; `aimx hooks create --template invoke-claude` (missing required param) fails with a pointer to `aimx hooks templates` for param names
-- [ ] Unit + integration tests cover the happy path and the param-parse failure path
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/cli.rs::HookCreateArgs` gains `#[arg(long, conflicts_with = "cmd")] template: Option<String>` and `#[arg(long = "param", value_name = "KEY=VAL")] params: Vec<String>`; `cmd` field becomes optional and `ArgGroup` enforces exactly-one-of (`--template`, `--cmd`)
+- [x] When `--template` is used, `src/hooks.rs::create` parses the `Vec<String>` into `BTreeMap<String, String>`, validates locally against the loaded config's templates (fast-fail on missing template / unknown params), then submits via a new `hook_client::submit_hook_template_create_via_daemon`
+- [x] CLI-origin template hooks get `origin = "mcp"` in `config.toml` because they traverse the same UDS verb MCP uses (`origin` is a submission-channel marker, not an authorship marker — see Sprint context above). Operators who want `origin = "operator"` on a hook must use `--cmd` (which direct-writes `config.toml` and bypasses UDS). This is visible via `aimx hooks list` showing the `origin` column.
+- [x] Error UX: `aimx hooks create --template invoke-claude --param prompt="..."` succeeds; `aimx hooks create --template invoke-claude` (missing required param) fails with a pointer to `aimx hooks templates` for param names
+- [x] Unit + integration tests cover the happy path and the param-parse failure path <!-- 17 CLI unit tests for param parser + template pre-flight -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S3-4: Raw-cmd CLI path writes `config.toml` directly (no UDS)
 
@@ -186,12 +186,12 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `aimx hooks create --cmd "..."` requires root (returns `ERR requires-root: run with sudo` otherwise); the existing `check_root()` helper in `src/setup.rs` (or equivalent) is reused
-- [ ] When root, the CLI calls a new `hooks::write_raw_cmd_hook_to_config(&config_path, hook)` helper that reads `config.toml`, appends the new hook to the target mailbox's `hooks` vec, and writes back via atomic temp-then-rename (same pattern used by `mailbox_handler.rs`)
-- [ ] After the write, the CLI sends SIGHUP to `aimx serve` if it is running (PID discovered via `/run/aimx/aimx.pid` if present, otherwise `pgrep -x aimx | head -1` fallback); if no daemon is running the CLI prints "config updated — restart aimx when convenient"
-- [ ] `hooks create --cmd` does NOT go through UDS even when the daemon is reachable — the separation is absolute
-- [ ] Unit test verifies the direct-write + SIGHUP path; integration test (root-gated) verifies a live daemon picks up the new hook within 2 seconds of the SIGHUP
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `aimx hooks create --cmd "..."` requires root (returns `ERR requires-root: run with sudo` otherwise); the existing `check_root()` helper in `src/setup.rs` (or equivalent) is reused <!-- Test escape hatch: AIMX_TEST_SKIP_ROOT_CHECK=1 for non-root CI -->
+- [x] When root, the CLI calls a new `hooks::write_raw_cmd_hook_to_config(&config_path, hook)` helper that reads `config.toml`, appends the new hook to the target mailbox's `hooks` vec, and writes back via atomic temp-then-rename (same pattern used by `mailbox_handler.rs`)
+- [x] After the write, the CLI sends SIGHUP to `aimx serve` if it is running (PID discovered via `/run/aimx/aimx.pid` if present, otherwise `pgrep -x aimx | head -1` fallback); if no daemon is running the CLI prints "config updated — restart aimx when convenient" <!-- `pgrep` fallback removed — pidfile-only discovery, `run_serve` now writes the pidfile on startup -->
+- [x] `hooks create --cmd` does NOT go through UDS even when the daemon is reachable — the separation is absolute
+- [x] Unit test verifies the direct-write + SIGHUP path; integration test (root-gated) verifies a live daemon picks up the new hook within 2 seconds of the SIGHUP <!-- Test renamed hooks_raw_cmd_sighup_hot_swaps_config with positive "Reload:" banner assertion -->
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 #### S3-5: SIGHUP handler in `aimx serve`
 
@@ -199,16 +199,16 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 
 **Priority:** P0
 
-- [ ] `src/serve.rs` signal loop adds a SIGHUP branch that calls a new `reload_config(&ConfigHandle) -> Result<ReloadSummary, ReloadError>` function
-- [ ] `reload_config` re-reads `config.toml`, runs the full validation chain (hook templates, per-hook origin/template mutual exclusion, trust config), atomically swaps `ConfigHandle` on success, and logs `"config reloaded: M mailboxes, H hooks, T templates"` at info level
-- [ ] On validation error, `reload_config` logs at warn level with the specific error and **does not** swap the handle — the running daemon keeps operating on the last known-good config
-- [ ] Integration test sends SIGHUP to a live test daemon with a modified `config.toml` and asserts the daemon's in-memory config reflects the change within 2 seconds (polled via an MCP `mailbox_list` tool call)
-- [ ] Integration test sends SIGHUP with a malformed `config.toml` and asserts the daemon continues running on the old config (MCP `mailbox_list` still succeeds)
-- [ ] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
+- [x] `src/serve.rs` signal loop adds a SIGHUP branch that calls a new `reload_config(&ConfigHandle) -> Result<ReloadSummary, ReloadError>` function <!-- loop-based signal handler so repeated SIGHUPs work -->
+- [x] `reload_config` re-reads `config.toml`, runs the full validation chain (hook templates, per-hook origin/template mutual exclusion, trust config), atomically swaps `ConfigHandle` on success, and logs `"config reloaded: M mailboxes, H hooks, T templates"` at info level
+- [x] On validation error, `reload_config` logs at warn level with the specific error and **does not** swap the handle — the running daemon keeps operating on the last known-good config
+- [x] Integration test sends SIGHUP to a live test daemon with a modified `config.toml` and asserts the daemon's in-memory config reflects the change within 2 seconds (polled via an MCP `mailbox_list` tool call) <!-- sighup_signal_loop_handles_two_consecutive_reloads locks down the loop-based refactor -->
+- [x] Integration test sends SIGHUP with a malformed `config.toml` and asserts the daemon continues running on the old config (MCP `mailbox_list` still succeeds)
+- [x] `cargo test`, `cargo clippy --all-targets -- -D warnings`, `cargo fmt -- --check` clean
 
 ---
 
-## Sprint 4 — Default templates + interactive setup + agent-setup hint (Days 7.5–10) [NOT STARTED]
+## Sprint 4 — Default templates + interactive setup + agent-setup hint (Days 7.5–10) [IN PROGRESS]
 
 **Goal:** Ship the 8 default templates inside the binary, surface them behind an interactive `aimx setup` checkbox, and make `aimx agent-setup` print the matching template-enable hint for each agent.
 
@@ -405,8 +405,8 @@ The template CLI path deliberately traverses UDS (not a direct-write) to keep th
 |--------|------|-------|--------|------------|
 | 1 | 1–2.5 | Foundation | Done (PR #111) | Socket renamed, schema lands, `aimx-hook` user created |
 | 2 | 2.5–5 | Sandboxed executor | Done (PR #112) | argv + systemd-run/setuid + timeout runner replaces `sh -c` |
-| 3 | 5–7.5 | UDS + CLI + SIGHUP | In Progress | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
-| 4 | 7.5–10 | Templates + setup | Not Started | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
+| 3 | 5–7.5 | UDS + CLI + SIGHUP | Done (PR #113) | `HOOK-CREATE` template-only, raw-cmd via config write, hot-reload works |
+| 4 | 7.5–10 | Templates + setup | In Progress | 8 defaults embedded, interactive checkbox, `agent-setup` hint |
 | 5 | 10–12.5 | MCP tools + primer | Not Started | Four MCP tools live, `agents/common/` updated |
 | 6 | 12.5–15 | Tests + docs + doctor | Not Started | E2E + fuzz tests green, 9 book chapters updated, `aimx doctor` surfaces templates |
 
@@ -426,7 +426,7 @@ Taken directly from [`hook-templates-prd.md`](hook-templates-prd.md) §9 "Out of
 
 ---
 
-*Status: Sprints 1–2 merged (PRs #111, #112; 2026-04-20). Sprint 3 — UDS protocol + CLI wiring + SIGHUP reload — is now active.*
+*Status: Sprints 1–3 merged (PRs #111, #112, #113; 2026-04-20). Sprint 4 — Default templates + interactive setup + agent-setup hint — is now active.*
 
 ---
 
@@ -446,3 +446,5 @@ _None outstanding._
 - [ ] **(Sprint 2)** `AIMX_SANDBOX_FORCE_FALLBACK` env var is test-only scaffolding but lives in production `src/platform.rs`. Consider gating it behind `#[cfg(any(test, debug_assertions))]` or at least documenting it more explicitly so an operator who stumbles on it doesn't think it's a supported switch. *(from Sprint 2 implementation note)*
 - [ ] **(Sprint 2)** Unknown-user fallback for non-root callers (warns and runs as current UID) is a dev/CI safety net that production should never hit. Add a `doctor` check that flags this path if it ever fires in production logs. *(from Sprint 2 implementation note — track via `aimx doctor` work in Sprint 6)*
 - [ ] **(Sprint 3)** `origin` field semantics: the daemon stamps `origin = "mcp"` on any UDS-submitted hook, including CLI `--template` invocations, making `origin` a submission-channel marker rather than an authorship marker. Sprint 5's `hook_delete` MCP tool description should note that it can remove CLI-template hooks; PRD §6.5 / §6.6 / §11 Q2 may want a one-paragraph clarification once Sprint 5 lands. *(from Sprint 3 review — AC line 176 intentionally relaxed to preserve "UDS is the single source of truth for template hooks")*
+- [ ] **(Sprint 3)** `AIMX_TEST_SKIP_ROOT_CHECK` env var is a second test-only scaffolding switch living in production `src/hooks.rs` (mirrors the pattern of `AIMX_SANDBOX_FORCE_FALLBACK` from Sprint 2). Consolidate documentation / gating strategy for both when the Sprint 2 equivalent is addressed. *(from Sprint 3 implementation note)*
+- [ ] **(Sprint 3)** `sighup_signal_loop_handles_two_consecutive_reloads` replicates the `run_serve` SIGHUP branch inline rather than exercising `run_serve` end-to-end (binding a real SMTP listener in a unit test requires TLS mocking). Functionally equivalent for the "loop correctly re-arms" invariant, but if Sprint 5 / 6 refactor adds a non-obvious ordering between signal recv and reload, a true end-to-end sub-process test may be warranted. *(from Sprint 3 fix-commit note)*
