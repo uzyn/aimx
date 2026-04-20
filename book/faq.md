@@ -1,14 +1,12 @@
 # FAQ
 
-Short answers to questions that come up often. See the linked pages for depth.
-
 ## Deployment
 
 ### Why do we need port 25 open for both inbound and outbound?
 
 Inbound: every receiving MTA listens on port 25 — it is the SMTP port defined by RFC 5321. Your MX record points at your server and delivering MTAs connect on 25 to hand mail over.
 
-Outbound: AIMX delivers directly to each recipient's MX on port 25 — no smarthost, no SaaS relay. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay; AIMX *is* the MTA, so they do not apply.
+Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay; AIMX *is* the MTA, so they do not apply.
 
 ### Can I run AIMX in Docker or behind NAT?
 
@@ -108,17 +106,7 @@ When the hook's side effect is safe regardless of sender — a logger, a metric 
 
 No — and that is intentional. AIMX is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
 
-Reach for [Postfix](https://www.postfix.org/), [Stalwart](https://stalw.art/), Maddy, or Exim instead if you need any of:
-
-- multiple human users with private inboxes
-- IMAP/POP3 clients (Thunderbird, iOS Mail, etc.)
-- webmail (Roundcube, Snappymail, etc.)
-- SMTP submission for outbound relays
-- large-volume outbound with persistent queueing and retries
-
-AIMX and a traditional MTA cannot share port 25 on the same IP — if you want both, run them on separate hosts or separate IPs.
-
-### `send.sock` is mode `0666` — why is that fine?
+### send.sock` is mode `0666` — why is that fine?
 
 Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run AIMX on a dedicated host.
 
