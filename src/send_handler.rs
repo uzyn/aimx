@@ -347,7 +347,7 @@ fn fire_after_send_hooks(
         message_id,
         send_status,
     };
-    hook::execute_after_send(mailbox_config, &ctx);
+    hook::execute_after_send(config, mailbox_config, &ctx);
 }
 
 fn has_any_after_send(mailbox: &MailboxConfig) -> bool {

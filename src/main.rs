@@ -8,6 +8,7 @@ mod frontmatter;
 mod hook;
 mod hook_client;
 mod hook_handler;
+mod hook_substitute;
 mod hooks;
 mod ingest;
 mod logs;

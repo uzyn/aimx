@@ -71,6 +71,12 @@ fn setup_test_env(tmp: &Path) -> String {
 fn aimx_cmd(tmp: &Path) -> Command {
     let mut cmd = Command::cargo_bin("aimx").unwrap();
     cmd.env("AIMX_CONFIG_DIR", tmp);
+    // Integration tests fire hooks via the sandboxed executor. On a
+    // systemd host the default path shells out to `systemd-run`, which
+    // refuses interactive auth for non-root users and makes every
+    // hook-firing test fail. Force the fallback path so tests exercise
+    // the same observable surface (exit code, stderr capture, env vars).
+    cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
     cmd
 }
 
@@ -1867,6 +1873,7 @@ fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
     let mut child = StdCommand::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", tmp)
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
         .arg("--data-dir")
         .arg(tmp)
         .arg("serve")
@@ -2476,6 +2483,7 @@ fn start_serve_with_mail_drop(
         .env("AIMX_CONFIG_DIR", tmp)
         .env("AIMX_RUNTIME_DIR", &runtime)
         .env("AIMX_TEST_MAIL_DROP", mail_drop)
+        .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
         .arg("--data-dir")
         .arg(tmp)
         .arg("serve")
@@ -3365,7 +3373,8 @@ fn start_serve_with_env(tmp: &Path, port: u16, extra_env: &[(&str, &str)]) -> st
     std::fs::create_dir_all(&runtime).ok();
     let mut cmd = StdCommand::new(aimx_binary_path());
     cmd.env("AIMX_CONFIG_DIR", tmp)
-        .env("AIMX_RUNTIME_DIR", &runtime);
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -3919,6 +3928,7 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     let mut cmd = Command::cargo_bin("aimx").unwrap();
     cmd.env("AIMX_CONFIG_DIR", tmp);
     cmd.env("AIMX_RUNTIME_DIR", &runtime);
+    cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
     cmd
 }
 

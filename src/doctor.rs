@@ -1543,6 +1543,7 @@ mod tests {
                     origin: crate::hook::HookOrigin::Operator,
                     template: None,
                     params: std::collections::BTreeMap::new(),
+                    run_as: None,
                 }],
                 trust: Some("verified".to_string()),
                 trusted_senders: Some(vec!["alice@example.com".to_string()]),

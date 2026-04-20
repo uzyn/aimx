@@ -2258,6 +2258,7 @@ dangerously_support_untrusted = true
             origin: HookOrigin::Mcp,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         };
         let err = validate_single_hook(&hook).unwrap_err();
         assert!(
