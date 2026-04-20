@@ -256,6 +256,7 @@ mod tests {
             origin: crate::hook::HookOrigin::Operator,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         }
     }
 
@@ -335,6 +336,7 @@ mod tests {
             origin: crate::hook::HookOrigin::Operator,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         };
         let req = HookCreateRequest {
             mailbox: "alice".into(),

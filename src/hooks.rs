@@ -84,6 +84,7 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         origin: crate::hook::HookOrigin::Operator,
         template: None,
         params: std::collections::BTreeMap::new(),
+        run_as: None,
     };
     let effective = effective_hook_name(&hook);
 
@@ -410,6 +411,7 @@ mod tests {
             origin: crate::hook::HookOrigin::Operator,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         });
         // Anonymous
         let anon = Hook {
@@ -421,6 +423,7 @@ mod tests {
             origin: crate::hook::HookOrigin::Operator,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         };
         let anon_derived = effective_hook_name(&anon);
         cfg.mailboxes.get_mut("catchall").unwrap().hooks.push(anon);

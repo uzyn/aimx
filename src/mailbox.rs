@@ -1017,6 +1017,7 @@ mod tests {
                         origin: crate::hook::HookOrigin::Operator,
                         template: None,
                         params: std::collections::BTreeMap::new(),
+                        run_as: None,
                     },
                     crate::hook::Hook {
                         name: Some("outbound_notify".into()),
@@ -1027,6 +1028,7 @@ mod tests {
                         origin: crate::hook::HookOrigin::Operator,
                         template: None,
                         params: std::collections::BTreeMap::new(),
+                        run_as: None,
                     },
                 ],
                 trust: Some("verified".into()),
@@ -1148,6 +1150,7 @@ mod tests {
                 origin: crate::hook::HookOrigin::Operator,
                 template: None,
                 params: std::collections::BTreeMap::new(),
+                run_as: None,
             });
         let lines = super::build_show_lines(&config, "support").unwrap();
         let joined = strip_ansi(&lines.join("\n"));

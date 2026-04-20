@@ -358,6 +358,7 @@ mod tests {
             origin: crate::hook::HookOrigin::Operator,
             template: None,
             params: std::collections::BTreeMap::new(),
+            run_as: None,
         };
 
         for (from, dkim_result) in [
