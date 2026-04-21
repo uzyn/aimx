@@ -373,6 +373,14 @@ impl SmtpSession {
         if addr.is_empty() {
             return "501 Syntax: RCPT TO:<address>\r\n".to_string();
         }
+        let configured_domain = self.params.config_handle.load().domain.clone();
+        if !recipient_domain_matches(&addr, &configured_domain) {
+            eprintln!(
+                "[{}] RCPT rejected (relay): recipient={} configured_domain={}",
+                self.params.peer_addr, addr, configured_domain
+            );
+            return "550 5.7.1 relay not permitted\r\n".to_string();
+        }
         session_state.forward_paths.push(addr);
         session_state.state = State::RcptTo;
         "250 OK\r\n".to_string()
@@ -649,6 +657,16 @@ fn extract_angle_addr(s: &str) -> String {
     s.to_string()
 }
 
+fn recipient_domain_matches(addr: &str, configured_domain: &str) -> bool {
+    let Some((_, domain)) = addr.rsplit_once('@') else {
+        return false;
+    };
+    if domain.is_empty() {
+        return false;
+    }
+    domain.eq_ignore_ascii_case(configured_domain)
+}
+
 #[cfg(test)]
 mod unit_tests {
     use super::*;
@@ -682,5 +700,53 @@ mod unit_tests {
         );
         assert_eq!(extract_angle_addr("<>"), "");
         assert_eq!(extract_angle_addr("user@example.com"), "user@example.com");
+    }
+
+    #[test]
+    fn recipient_domain_matches_exact() {
+        assert!(recipient_domain_matches("alice@test.local", "test.local"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_case_insensitive() {
+        assert!(recipient_domain_matches("alice@TEST.LOCAL", "test.local"));
+        assert!(recipient_domain_matches("ALICE@test.local", "test.local"));
+        assert!(recipient_domain_matches("alice@test.local", "TEST.LOCAL"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_rejects_different_domain() {
+        assert!(!recipient_domain_matches("alice@other.com", "test.local"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_rejects_subdomain() {
+        assert!(!recipient_domain_matches(
+            "alice@sub.test.local",
+            "test.local"
+        ));
+    }
+
+    #[test]
+    fn recipient_domain_matches_rejects_parent_domain() {
+        assert!(!recipient_domain_matches("alice@local", "test.local"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_rejects_missing_at() {
+        assert!(!recipient_domain_matches("alice", "test.local"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_rejects_empty_domain() {
+        assert!(!recipient_domain_matches("alice@", "test.local"));
+    }
+
+    #[test]
+    fn recipient_domain_matches_quoted_local_part() {
+        assert!(recipient_domain_matches(
+            "\"weird@name\"@test.local",
+            "test.local"
+        ));
     }
 }

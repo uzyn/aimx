@@ -390,6 +390,154 @@ async fn test_double_mail_from() {
     assert!(resp.starts_with("503"));
 }
 
+// --- Relay rejection: RCPT TO for domains other than config.domain ---
+
+#[tokio::test]
+async fn test_rcpt_rejects_unrelated_domain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<user@evil.example>").await;
+    assert!(
+        resp.starts_with("550 5.7.1"),
+        "Expected 550 5.7.1 for relay reject: {resp}"
+    );
+
+    let resp = client.send_and_read("DATA").await;
+    assert!(
+        resp.starts_with("503"),
+        "Expected 503 when no RCPT accepted: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+
+    let catchall_dir = inbox(tmp.path(), "catchall");
+    let md_files = collect_md_files(&catchall_dir);
+    assert_eq!(
+        md_files.len(),
+        0,
+        "No file should land in catchall for rejected RCPT"
+    );
+}
+
+#[tokio::test]
+async fn test_rcpt_rejects_subdomain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<user@sub.test.local>").await;
+    assert!(
+        resp.starts_with("550 5.7.1"),
+        "Expected 550 5.7.1 for subdomain reject: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+
+    let catchall_dir = inbox(tmp.path(), "catchall");
+    let md_files = collect_md_files(&catchall_dir);
+    assert_eq!(md_files.len(), 0);
+}
+
+#[tokio::test]
+async fn test_rcpt_rejects_missing_at() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<alice>").await;
+    assert!(
+        resp.starts_with("550 5.7.1"),
+        "Expected 550 5.7.1 for missing-@ reject: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+}
+
+#[tokio::test]
+async fn test_rcpt_mixed_valid_invalid() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<alice@test.local>").await;
+    assert!(resp.starts_with("250"), "Expected 250 for alice: {resp}");
+
+    let resp = client.send_and_read("RCPT TO:<mallory@evil.example>").await;
+    assert!(
+        resp.starts_with("550 5.7.1"),
+        "Expected 550 5.7.1 for evil.example: {resp}"
+    );
+
+    let resp = client.send_and_read("DATA").await;
+    assert!(
+        resp.starts_with("354"),
+        "Expected 354 (one accepted RCPT is enough): {resp}"
+    );
+
+    client.send(test_email()).await;
+    let resp = client.send_and_read(".").await;
+    assert!(resp.starts_with("250"), "Expected 250 on DATA end: {resp}");
+
+    client.send_and_read("QUIT").await;
+
+    let alice_mds = collect_md_files(&inbox(tmp.path(), "alice"));
+    let catchall_mds = collect_md_files(&inbox(tmp.path(), "catchall"));
+    assert_eq!(alice_mds.len(), 1, "alice should have one message");
+    assert_eq!(catchall_mds.len(), 0, "catchall should have nothing");
+}
+
+#[tokio::test]
+async fn test_rcpt_accepts_case_insensitive_domain() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<alice@TEST.LOCAL>").await;
+    assert!(
+        resp.starts_with("250"),
+        "Expected 250 for case-insensitive domain: {resp}"
+    );
+
+    let resp = client.send_and_read("DATA").await;
+    assert!(resp.starts_with("354"), "Expected 354: {resp}");
+
+    client.send(test_email()).await;
+    let resp = client.send_and_read(".").await;
+    assert!(resp.starts_with("250"), "Expected 250: {resp}");
+
+    client.send_and_read("QUIT").await;
+
+    let alice_mds = collect_md_files(&inbox(tmp.path(), "alice"));
+    assert_eq!(alice_mds.len(), 1);
+}
+
 // --- S19.1: Size limit tests ---
 
 #[tokio::test]

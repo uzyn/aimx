@@ -32,10 +32,14 @@ as a sibling file when attachments are present.
 
 When an email arrives, aimx matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
 
+RCPT TO addresses whose domain is not the configured `domain` (case-insensitive exact match) are rejected at SMTP time with `550 5.7.1 relay not permitted` and never reach storage. aimx is not an open relay: `catchall` only covers unrecognized local parts *at your configured domain*, not unrelated domains or subdomains.
+
 For example, with mailboxes `support` and `catchall` configured:
 - `support@agent.yourdomain.com` -> delivered to the `support` mailbox
 - `billing@agent.yourdomain.com` -> delivered to the `catchall` mailbox (no `billing` mailbox exists)
 - `anything@agent.yourdomain.com` -> delivered to the `catchall` mailbox
+- `anything@some-other-domain.com` -> rejected at RCPT TO with `550 5.7.1 relay not permitted`
+- `anything@sub.agent.yourdomain.com` -> rejected at RCPT TO with `550 5.7.1 relay not permitted`
 
 ## Managing mailboxes
 
