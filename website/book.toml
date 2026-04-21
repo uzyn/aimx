@@ -16,6 +16,9 @@ additional-css = [
     "styles/typography.css",
     "styles/chrome.css",
 ]
+additional-js = [
+    "scripts/nav.js",
+]
 
 [output.html.fold]
 enable = true

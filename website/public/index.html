@@ -78,6 +78,8 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
   padding-bottom: 24px;
   border-bottom: 1px solid var(--rule);
 }
@@ -89,33 +91,41 @@ header {
   font-size: 1.17em;
   letter-spacing: 0.04em;
   font-variant-caps: small-caps;
+  color: var(--ink);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.brand:hover {
+  color: var(--accent);
 }
 
 .brand .dot { color: var(--accent); }
 
-.status {
+.topnav {
+  display: flex;
+  gap: 22px;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.43em;
+  letter-spacing: 0.02em;
+}
+
+.topnav a {
   color: var(--ink-faded);
-  display: flex;
-  align-items: center;
-  gap: 8px;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 2px;
+  transition: color 0.15s, border-color 0.15s;
 }
 
-.status::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 0 rgba(185, 83, 28, 0.5);
-  animation: pulse 2.4s infinite;
+.topnav a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
 }
 
-@keyframes pulse {
-  0% { box-shadow: 0 0 0 0 rgba(185, 83, 28, 0.5); }
-  70% { box-shadow: 0 0 0 9px rgba(185, 83, 28, 0); }
-  100% { box-shadow: 0 0 0 0 rgba(185, 83, 28, 0); }
+.topnav a.active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
 }
 
 main {
@@ -240,35 +250,58 @@ h1 em {
   color: var(--ink);
 }
 
-.links-row {
+.hero-ctas {
   display: flex;
   flex-wrap: wrap;
-  gap: 28px 40px;
+  gap: 14px 16px;
+  margin-top: 40px;
 }
 
-.followup {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.31em;
-  color: var(--ink-faded);
+.btn {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 0.4em;
+  font-weight: 500;
   letter-spacing: 0.01em;
+  padding: 0.7em 1.3em;
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  background: var(--paper);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 
-.followup::before {
-  content: "→ ";
+.btn::after {
+  content: "→";
   color: var(--accent);
   font-weight: 500;
 }
 
-.followup a {
-  color: var(--ink);
-  text-decoration: none;
-  border-bottom: 1px solid var(--accent);
-  padding-bottom: 1px;
-  transition: color 0.15s;
+.btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
-.followup a:hover {
+.btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.btn.primary::after {
   color: var(--accent);
+}
+
+.btn.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--paper);
+}
+
+.btn.primary:hover::after {
+  color: var(--paper);
 }
 
 .detail {
@@ -337,7 +370,6 @@ footer a:hover {
 
 @media (prefers-reduced-motion: reduce) {
   .fade { opacity: 1; transform: none; animation: none; }
-  .status::before { animation: none; }
 }
 </style>
 </head>
@@ -345,8 +377,12 @@ footer a:hover {
 <div class="grain"></div>
 <div class="wrap">
   <header>
-    <div class="brand fade d1">aimx<span class="dot">.</span></div>
-    <div class="status fade d1">alpha · pre-v1</div>
+    <a class="brand fade d1" href="/">aimx<span class="dot">.</span></a>
+    <nav class="topnav fade d1" aria-label="Primary">
+      <a href="/" class="active">home</a>
+      <a href="/book/">book</a>
+      <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
+    </nav>
   </header>
 
   <main>
@@ -365,6 +401,11 @@ footer a:hover {
       Human-friendly setup. LLM-friendly everything else.<br>
       Free and open source.
     </p>
+
+    <div class="hero-ctas fade d4">
+      <a class="btn primary" href="/book/">Read the book</a>
+      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Get the code</a>
+    </div>
 
     <section class="block fade d5">
       <h2 class="section-label">What it is</h2>
@@ -400,14 +441,6 @@ sudo aimx setup</pre>
         <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Nine tools covering mailbox CRUD, read, list, send, reply, mark-read.</li>
         <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. Nothing phones home. MIT licensed.</li>
       </ul>
-    </section>
-
-    <section class="block fade d8">
-      <h2 class="section-label">Go deeper</h2>
-      <div class="links-row">
-        <div class="followup"><a href="/book/">Read the book</a></div>
-        <div class="followup"><a href="https://github.com/uzyn/aimx">Get the code</a></div>
-      </div>
     </section>
 
     <div class="detail fade d8">
