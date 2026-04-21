@@ -691,7 +691,9 @@ mod tests {
         // `aimx-hook`. The equivalent failure path when the caller IS
         // root is covered by the production code review, not a unit
         // test (CI runs non-root).
-        let argv = vec!["/bin/true".into()];
+        let tmp = tempfile::tempdir().unwrap();
+        let script = write_script(tmp.path(), "x.sh", "exit 0\n");
+        let argv = vec![script.to_string_lossy().into_owned()];
         let res = spawn_via_fork_setuid(
             &argv,
             SandboxStdin::None,
