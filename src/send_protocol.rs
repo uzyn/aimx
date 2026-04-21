@@ -141,14 +141,22 @@ pub struct MarkRequest {
 
 /// Decoded `AIMX/1 MAILBOX-CREATE` / `AIMX/1 MAILBOX-DELETE` request.
 ///
-/// Both verbs share the same shape (a single `Name:` header and an empty
-/// body); the enum selection is encoded in `create` so the codec stays a
-/// single flat struct rather than two near-identical types.
+/// Both verbs share the same shape; the enum selection is encoded in
+/// `create` so the codec stays a single flat struct rather than two
+/// near-identical types. `MAILBOX-CREATE` requires an `Owner:` header
+/// (Sprint 2 §6.3) so the daemon knows which Linux user to chown the
+/// newly-created mailbox directories to. `MAILBOX-DELETE` ignores
+/// `owner` — the daemon only needs the name to remove the stanza.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxCrudRequest {
     pub name: String,
     /// `true` for `MAILBOX-CREATE`, `false` for `MAILBOX-DELETE`.
     pub create: bool,
+    /// Linux user that owns the mailbox storage. Required on CREATE,
+    /// ignored on DELETE. The daemon validates the owner resolves via
+    /// `getpwnam` and chowns `inbox/<name>/` + `sent/<name>/` to
+    /// `<owner>:<owner>` mode `0700`.
+    pub owner: Option<String>,
 }
 
 /// Decoded `AIMX/1 HOOK-CREATE` request. Template-only (Sprint 3 S3-1):
@@ -240,6 +248,11 @@ pub enum ErrCode {
     /// contains files. Operator must archive / remove files first; the
     /// daemon never silently removes mail on delete.
     NonEmpty,
+    /// `MAILBOX-CREATE` found `inbox/<name>/` / `sent/<name>/` already
+    /// present but owned by a different uid/gid than the requested
+    /// owner. Ambiguous state — operator must fix it with `chown`
+    /// before the daemon will claim the directories. Sprint 2 §6.3.
+    Conflict,
 }
 
 impl ErrCode {
@@ -256,6 +269,7 @@ impl ErrCode {
             ErrCode::Io => "IO",
             ErrCode::Validation => "VALIDATION",
             ErrCode::NonEmpty => "NONEMPTY",
+            ErrCode::Conflict => "ECONFLICT",
         }
     }
 }
@@ -571,6 +585,7 @@ where
     R: AsyncRead + Unpin,
 {
     let mut name: Option<String> = None;
+    let mut owner: Option<String> = None;
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -604,6 +619,25 @@ where
                 }
                 name = Some(value);
             }
+            "owner" => {
+                if owner.is_some() {
+                    return Err(ParseError::Malformed("duplicate Owner header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Owner value".into()));
+                }
+                // Shape-check the owner at parse time so malformed
+                // header values (embedded whitespace, colons, tabs,
+                // etc.) reject with a precise `Malformed` here rather
+                // than at the `getpwnam`/resolver layer further in.
+                // Mirrors the Sprint-1 `validate_run_as` regex gate.
+                if !crate::config::is_valid_system_username(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Owner value: {value:?} (must match [a-z_][a-z0-9_-]*[$]?)"
+                    )));
+                }
+                owner = Some(value);
+            }
             "content-length" => {
                 if content_length.is_some() {
                     return Err(ParseError::Malformed(
@@ -630,7 +664,19 @@ where
     // Content-Length is optional for MAILBOX-CRUD verbs; 0 is implicit.
     let _ = content_length;
 
-    Ok(MailboxCrudRequest { name, create })
+    // Owner is REQUIRED on CREATE (Sprint 2 §6.3). On DELETE the daemon
+    // only needs the name; Owner is ignored even if supplied.
+    if create && owner.is_none() {
+        return Err(ParseError::Malformed(
+            "missing required header: Owner".into(),
+        ));
+    }
+
+    Ok(MailboxCrudRequest {
+        name,
+        create,
+        owner,
+    })
 }
 
 async fn parse_hook_create_headers_and_body<R>(
@@ -947,7 +993,8 @@ where
 
 /// Write an `AIMX/1 MAILBOX-CREATE` or `AIMX/1 MAILBOX-DELETE` request
 /// frame. Verb chosen by `request.create` (`true` → MAILBOX-CREATE,
-/// `false` → MAILBOX-DELETE).
+/// `false` → MAILBOX-DELETE). `Owner:` is emitted when `request.owner`
+/// is `Some`; the parser requires it on CREATE.
 pub async fn write_mailbox_crud_request<W>(
     writer: &mut W,
     request: &MailboxCrudRequest,
@@ -960,10 +1007,11 @@ where
     } else {
         "MAILBOX-DELETE"
     };
-    let header = format!(
-        "AIMX/1 {verb}\nName: {}\nContent-Length: 0\n\n",
-        sanitize_inline(&request.name),
-    );
+    let mut header = format!("AIMX/1 {verb}\nName: {}\n", sanitize_inline(&request.name),);
+    if let Some(owner) = &request.owner {
+        header.push_str(&format!("Owner: {}\n", sanitize_inline(owner)));
+    }
+    header.push_str("Content-Length: 0\n\n");
     writer.write_all(header.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
@@ -1231,6 +1279,7 @@ mod tests {
             (ErrCode::Io, "IO"),
             (ErrCode::Validation, "VALIDATION"),
             (ErrCode::NonEmpty, "NONEMPTY"),
+            (ErrCode::Conflict, "ECONFLICT"),
         ] {
             let (mut client, mut server) = duplex(256);
             write_response(
@@ -1421,11 +1470,12 @@ mod tests {
 
     #[tokio::test]
     async fn parses_mailbox_create_request() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nContent-Length: 0\n\n";
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: alice\nContent-Length: 0\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
             Request::MailboxCrud(r) => {
                 assert_eq!(r.name, "alice");
                 assert!(r.create);
+                assert_eq!(r.owner.as_deref(), Some("alice"));
             }
             other => panic!("expected MailboxCrud, got {other:?}"),
         }
@@ -1433,11 +1483,13 @@ mod tests {
 
     #[tokio::test]
     async fn parses_mailbox_delete_request() {
+        // DELETE does not require Owner: — it's ignored even if present.
         let input = b"AIMX/1 MAILBOX-DELETE\nName: alice\nContent-Length: 0\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
             Request::MailboxCrud(r) => {
                 assert_eq!(r.name, "alice");
                 assert!(!r.create);
+                assert!(r.owner.is_none());
             }
             other => panic!("expected MailboxCrud, got {other:?}"),
         }
@@ -1445,7 +1497,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_crud_without_content_length_accepted() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\n\n";
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: alice\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
             Request::MailboxCrud(r) => assert_eq!(r.name, "alice"),
             other => panic!("expected MailboxCrud, got {other:?}"),
@@ -1454,7 +1506,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_crud_missing_name_is_malformed() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nContent-Length: 0\n\n";
+        let input = b"AIMX/1 MAILBOX-CREATE\nOwner: alice\nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("Name"), "{m}"),
@@ -1463,12 +1515,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mailbox_create_missing_owner_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Owner"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn mailbox_crud_empty_name_is_malformed() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nName: \nContent-Length: 0\n\n";
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: \nOwner: alice\nContent-Length: 0\n\n";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("empty Name"), "{m}"),
             other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_empty_owner_is_malformed() {
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: \nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("empty Owner"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_malformed_owner_shape_is_malformed() {
+        // Values that fail the `is_valid_system_username` regex must
+        // reject at the parser layer, not the resolver. Covers shapes
+        // like uppercase letters, embedded colons, whitespace, leading
+        // digits, and Samba `$` suffix in the wrong position.
+        for bad in [
+            "Alice",         // uppercase
+            "alicé",         // unicode
+            "nobody: extra", // embedded colon+space
+            "nobody\textra", // embedded tab
+            "9bad",          // leading digit
+            "bad name",      // embedded space
+            "$bad",          // leading $
+        ] {
+            let input =
+                format!("AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: {bad}\nContent-Length: 0\n\n");
+            let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+            match err {
+                ParseError::Malformed(m) => assert!(
+                    m.contains("invalid Owner value"),
+                    "for input {bad:?}, got: {m}"
+                ),
+                other => panic!("expected Malformed for {bad:?}, got {other:?}"),
+            }
         }
     }
 
@@ -1483,8 +1583,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mailbox_crud_duplicate_owner_is_malformed() {
+        let input =
+            b"AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: alice\nOwner: bob\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("duplicate Owner"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn mailbox_crud_nonzero_content_length_is_malformed() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nContent-Length: 5\n\nhello";
+        let input = b"AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: alice\nContent-Length: 5\n\nhello";
         let err = parse_any_from_bytes(input).await.unwrap_err();
         match err {
             ParseError::Malformed(m) => assert!(m.contains("Content-Length: 0"), "{m}"),
@@ -1494,7 +1605,7 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_crud_header_names_case_insensitive() {
-        let input = b"AIMX/1 MAILBOX-CREATE\nname: alice\ncontent-length: 0\n\n";
+        let input = b"AIMX/1 MAILBOX-CREATE\nname: alice\nowner: alice\ncontent-length: 0\n\n";
         match parse_any_from_bytes(input).await.unwrap() {
             Request::MailboxCrud(r) => assert_eq!(r.name, "alice"),
             other => panic!("expected MailboxCrud, got {other:?}"),
@@ -1503,10 +1614,11 @@ mod tests {
 
     #[tokio::test]
     async fn mailbox_crud_request_roundtrip() {
-        for create in [true, false] {
+        for (create, owner) in [(true, Some("alice".to_string())), (false, None)] {
             let req = MailboxCrudRequest {
                 name: "alice".to_string(),
                 create,
+                owner: owner.clone(),
             };
             let (mut client, mut server) = duplex(1024);
             let w = {
@@ -1521,6 +1633,7 @@ mod tests {
                 Request::MailboxCrud(r) => {
                     assert_eq!(r.name, "alice");
                     assert_eq!(r.create, create);
+                    assert_eq!(r.owner, owner);
                 }
                 other => panic!("expected MailboxCrud, got {other:?}"),
             }
@@ -1531,13 +1644,18 @@ mod tests {
     async fn mailbox_crud_verb_selection_in_wire_format() {
         // Explicit verb-selection: `create=true` serializes to
         // MAILBOX-CREATE, `create=false` serializes to MAILBOX-DELETE.
-        for (create, verb) in [
-            (true, b"AIMX/1 MAILBOX-CREATE".as_slice()),
-            (false, b"AIMX/1 MAILBOX-DELETE".as_slice()),
+        for (create, verb, owner) in [
+            (
+                true,
+                b"AIMX/1 MAILBOX-CREATE".as_slice(),
+                Some("alice".to_string()),
+            ),
+            (false, b"AIMX/1 MAILBOX-DELETE".as_slice(), None),
         ] {
             let req = MailboxCrudRequest {
                 name: "alice".to_string(),
                 create,
+                owner,
             };
             let (mut client, mut server) = duplex(1024);
             write_mailbox_crud_request(&mut client, &req).await.unwrap();

@@ -182,6 +182,13 @@ pub enum MailboxCommand {
     Create {
         /// Mailbox name (local part of email address)
         name: String,
+
+        /// Linux user that owns the mailbox's storage. Defaults to the
+        /// local part of the address if a user with that name already
+        /// exists on the host; otherwise required. The owner must
+        /// resolve via `getpwnam` at daemon load time.
+        #[arg(long)]
+        owner: Option<String>,
     },
 
     /// List all mailboxes

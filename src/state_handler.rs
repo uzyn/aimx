@@ -31,6 +31,7 @@ use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox_locks::MailboxLocks;
 use crate::mcp::resolve_email_path;
+use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 
 /// Per-connection shared state for the MARK verbs (and the MAILBOX-CRUD
@@ -127,17 +128,14 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
 
     // Mailbox existence is resolved live through the handle so a
     // freshly-created mailbox is immediately target-able from MARK.
-    if !ctx
-        .config_handle
-        .load()
-        .mailboxes
-        .contains_key(&req.mailbox)
-    {
+    let config_snapshot = ctx.config_handle.load();
+    if !config_snapshot.mailboxes.contains_key(&req.mailbox) {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
             reason: format!("mailbox '{}' does not exist", req.mailbox),
         };
     }
+    let mailbox_cfg = config_snapshot.mailboxes.get(&req.mailbox).cloned();
 
     let lock = ctx.lock_for(&req.mailbox);
     let _guard = lock.lock().await;
@@ -214,10 +212,61 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
     out.push_str("+++");
     out.push_str(body);
 
-    if let Err(e) = std::fs::write(&filepath, out) {
+    // Write-temp-then-rename with chown on the temp file BEFORE
+    // `rename(2)`. Ordering matters (PRD §6.3): a post-rename chown
+    // would briefly expose the file as `root:root` in a readable
+    // directory. Doing the chown while the file is still under its
+    // `.<stem>.tmp` name means the published inode already carries the
+    // correct owner + mode the instant `rename(2)` lands.
+    let parent = match filepath.parent() {
+        Some(p) => p,
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Io,
+                reason: format!("no parent dir for {}", filepath.display()),
+            };
+        }
+    };
+    let tmp_name = format!(
+        ".{}.tmp.{}",
+        filepath
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mark"),
+        std::process::id()
+    );
+    let tmp_path = parent.join(&tmp_name);
+    if let Err(e) = std::fs::write(&tmp_path, out) {
         return AckResponse::Err {
             code: ErrCode::Io,
-            reason: format!("failed to write {}: {e}", filepath.display()),
+            reason: format!("failed to write {}: {e}", tmp_path.display()),
+        };
+    }
+    if let Some(mb_cfg) = &mailbox_cfg {
+        // Chown + chmod BEFORE the rename publishes the new inode. A
+        // failure here is not fatal for the MARK operation (the
+        // containing dir is `0o700 <owner>:<owner>` so the file is
+        // still safe from non-owners even if ownership drifts) but we
+        // log so doctor can surface the drift.
+        if let Err(e) = chown_as_owner(&tmp_path, mb_cfg, 0o600) {
+            tracing::warn!(
+                target: "aimx::state",
+                "chown temp file failed mailbox={mailbox} path={path} err={err}",
+                mailbox = req.mailbox,
+                path = tmp_path.display(),
+                err = e,
+            );
+        }
+    }
+    if let Err(e) = std::fs::rename(&tmp_path, &filepath) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return AckResponse::Err {
+            code: ErrCode::Io,
+            reason: format!(
+                "failed to rename {} -> {}: {e}",
+                tmp_path.display(),
+                filepath.display()
+            ),
         };
     }
 
@@ -603,6 +652,197 @@ mod tests {
         assert!(
             second > first,
             "second read_at ({second}) must be later than first ({first})"
+        );
+    }
+
+    /// Sprint 2 S2-3: after a MARK-READ the rewritten file still lives
+    /// at the same path with the same ownership + mode (0o600). The
+    /// write-temp-then-rename dance chowns the temp file BEFORE the
+    /// rename so the published inode lands with the correct owner
+    /// instantly — no observable intermediate state.
+    ///
+    /// The test uses `owner = "testowner"` (not the reserved `root`)
+    /// so the pluggable user resolver seam is active and a chown+chmod
+    /// to the current process's uid/gid succeeds on any CI runner.
+    #[tokio::test]
+    async fn mark_read_preserves_mode_0600_on_rewrite() {
+        use std::os::unix::fs::MetadataExt;
+
+        let tmp = TempDir::new().unwrap();
+        let meta = sample_meta("2025-06-01-001", false);
+        let inbox = tmp.path().join("inbox").join("alice");
+        write_email(&inbox, "2025-06-01-001", &meta);
+
+        fn fake(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "testowner" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "testowner".into(),
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(fake);
+
+        // Build a dedicated context whose `alice` mailbox is owned by
+        // `testowner` so the chown resolver seam is exercised.
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".into(),
+                owner: "testowner".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".into(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
+
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-001".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+
+        let target = inbox.join("2025-06-01-001.md");
+        let md = std::fs::metadata(&target).unwrap();
+        assert_eq!(
+            md.mode() & 0o777,
+            0o600,
+            "MARK-READ rewrite must preserve mode 0o600 via chown-before-rename"
+        );
+        // No stray temp file left behind.
+        let strays: Vec<_> = std::fs::read_dir(&inbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(strays.is_empty(), "no temp file must remain after rename");
+    }
+
+    /// Sprint 2 S2-3: when `chown_as_owner` fails (non-root process +
+    /// unprivileged chown target), the handler logs a warning and
+    /// **still succeeds** — the mail stays on disk with fresh content
+    /// (`read = true`) and the published file contents match what the
+    /// MARK verb produced. Non-fatal chown is the contract documented
+    /// in PRD §6.3: the containing dir is already `0o700 owner:owner`
+    /// on a properly-provisioned host so file-level chown drift doesn't
+    /// break the isolation invariant.
+    ///
+    /// Skipped on root where chown-to-nobody succeeds (no failure to
+    /// test). Uses a resolver that maps `nobody` to uid/gid 65534 so a
+    /// non-root process cannot chown to it.
+    #[tokio::test]
+    async fn mark_nonfatal_on_chown_failure_preserves_rewrite() {
+        use std::os::unix::fs::MetadataExt;
+
+        let is_root = unsafe { libc::geteuid() == 0 };
+        if is_root {
+            // chown-to-nobody succeeds as root — the failure path we
+            // want to test isn't reachable here. Skip.
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let meta = sample_meta("2025-06-01-001", false);
+        let inbox = tmp.path().join("inbox").join("alice");
+        write_email(&inbox, "2025-06-01-001", &meta);
+
+        fn nobody(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "nobody" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "nobody".into(),
+                    uid: 65534,
+                    gid: 65534,
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(nobody);
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".into(),
+                owner: "nobody".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".into(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
+
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-001".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        // chown will fail (EPERM) but the handler must still return Ok.
+        assert!(
+            matches!(handle_mark(&sctx, &req).await, AckResponse::Ok),
+            "chown failure must be non-fatal"
+        );
+
+        // The file must still be on disk after the rename — we just
+        // verify the rewrite actually landed (content has read = true).
+        let target = inbox.join("2025-06-01-001.md");
+        assert!(
+            target.exists(),
+            "target file must survive chown-failure path"
+        );
+        let content = std::fs::read_to_string(&target).unwrap();
+        assert!(
+            content.contains("read = true"),
+            "rewrite must have published the new content despite chown failure; got:\n{content}"
+        );
+        // And no stray tmp file remains.
+        let strays: Vec<_> = std::fs::read_dir(&inbox)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "no tmp file must remain after a non-fatal chown failure"
+        );
+        // Guard against an unexpected ownership change despite the
+        // failure log: the file should still be owned by the current
+        // process's uid (since chown-to-65534 failed with EPERM).
+        let md = std::fs::metadata(&target).unwrap();
+        assert_eq!(
+            md.uid(),
+            unsafe { libc::geteuid() },
+            "file ownership must be unchanged after chown failure"
         );
     }
 

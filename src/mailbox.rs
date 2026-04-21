@@ -6,7 +6,7 @@ use std::path::Path;
 
 pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
-        MailboxCommand::Create { name } => create(&config, &name),
+        MailboxCommand::Create { name, owner } => create(&config, &name, owner.as_deref()),
         MailboxCommand::List => list(&config),
         MailboxCommand::Show { name } => show(&config, &name),
         MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
@@ -47,7 +47,11 @@ pub(crate) fn validate_mailbox_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub fn create_mailbox(
+    config: &Config,
+    name: &str,
+    owner: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     validate_mailbox_name(name).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     if config.mailboxes.contains_key(name) {
@@ -67,17 +71,11 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     }
 
     let mut config = config.clone();
-    // Per PRD §6.2 the mailbox `owner` field is required. Sprint 3's
-    // setup refactor introduces the interactive owner prompt; for now,
-    // default to the local part of the address so existing CLI flows
-    // (`aimx mailboxes create <name>`) keep working. Operators can edit
-    // `config.toml` or re-run with Sprint 3's flow to pick a different
-    // owner.
     config.mailboxes.insert(
         name.to_string(),
         MailboxConfig {
             address: format!("{name}@{}", config.domain),
-            owner: name.to_string(),
+            owner: owner.to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,
@@ -206,25 +204,67 @@ pub fn count_messages(dir: &Path) -> usize {
     total
 }
 
-fn create(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
+fn create(
+    config: &Config,
+    name: &str,
+    owner: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Resolve the effective owner: explicit `--owner`, else fall back
+    // to the local-part-as-owner convention when that user exists,
+    // else error out. Sprint 3 introduces an interactive prompt; for
+    // the CLI-only path in Sprint 2 the resolve-or-error shape is the
+    // minimum needed to avoid creating a mailbox with a bogus owner.
+    let owner = resolve_create_owner(name, owner)?;
     // Try the UDS path first so the daemon hot-swaps its in-memory
     // Config. On socket-missing (daemon stopped, fresh install), fall
     // back to direct on-disk edit + the restart-hint banner. When UDS
     // succeeds we suppress the hint; the daemon already picked up the
     // change.
-    match crate::mcp::submit_mailbox_crud_via_daemon(name, true) {
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, true, Some(&owner)) {
         Ok(()) => {
-            println!("{}", term::success(&format!("Mailbox '{name}' created.")));
+            println!(
+                "{}",
+                term::success(&format!("Mailbox '{name}' created (owner: {owner})."))
+            );
             Ok(())
         }
         Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
-            create_mailbox(config, name)?;
-            println!("{}", term::success(&format!("Mailbox '{name}' created.")));
+            create_mailbox(config, name, &owner)?;
+            println!(
+                "{}",
+                term::success(&format!("Mailbox '{name}' created (owner: {owner})."))
+            );
             print_restart_hint();
             Ok(())
         }
         Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
+}
+
+/// Resolve the owner value for `mailbox create`. Explicit `--owner`
+/// wins; otherwise the local-part convention kicks in but only if a
+/// Linux user with that name already exists. Missing user + no flag
+/// prints an actionable error so operators know which `useradd`
+/// command to run.
+fn resolve_create_owner(
+    name: &str,
+    explicit: Option<&str>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    if let Some(o) = explicit {
+        if o.is_empty() {
+            return Err("--owner value cannot be empty".into());
+        }
+        return Ok(o.to_string());
+    }
+    if crate::user_resolver::resolve_user(name).is_some() {
+        return Ok(name.to_string());
+    }
+    Err(format!(
+        "Linux user '{name}' does not exist and no --owner was supplied. \
+         Either `useradd --system {name}` first, or pass --owner <existing-user> \
+         to create the mailbox owned by a different Linux user."
+    )
+    .into())
 }
 
 fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -473,7 +513,7 @@ fn delete(
     // Fall back to direct edit only when the socket is absent. After a
     // successful `--force` wipe the daemon sees empty directories and
     // succeeds normally.
-    match crate::mcp::submit_mailbox_crud_via_daemon(name, false) {
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, false, None) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
             println!(
@@ -647,7 +687,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice").unwrap();
+        create_mailbox(&config, "alice", "root").unwrap();
 
         // Both `inbox/<name>/` and `sent/<name>/` exist.
         assert!(tmp.path().join("inbox").join("alice").is_dir());
@@ -667,11 +707,11 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice").unwrap();
+        create_mailbox(&config, "alice", "root").unwrap();
         // Re-creating via a fresh Config (as if registration rolled back)
         // must not error; dir creation is idempotent.
         let fresh = test_config(tmp.path());
-        create_mailbox(&fresh, "alice").unwrap();
+        create_mailbox(&fresh, "alice", "root").unwrap();
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
     }
@@ -682,7 +722,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        let result = create_mailbox(&config, "catchall");
+        let result = create_mailbox(&config, "catchall", "root");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -715,7 +755,7 @@ mod tests {
         let _guard = setup_config_file(tmp.path(), &config);
 
         // Registered mailbox: catchall + an `alice` we register.
-        create_mailbox(&config, "alice").unwrap();
+        create_mailbox(&config, "alice", "root").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         let inbox_alice = tmp.path().join("inbox").join("alice");
         std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
@@ -765,7 +805,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice").unwrap();
+        create_mailbox(&config, "alice", "root").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
 
@@ -821,7 +861,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        let result = create_mailbox(&config, "");
+        let result = create_mailbox(&config, "", "root");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
     }
@@ -832,7 +872,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        let result = create_mailbox(&config, "../etc");
+        let result = create_mailbox(&config, "../etc", "root");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains(".."));
     }
@@ -843,7 +883,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        let result = create_mailbox(&config, "foo/bar");
+        let result = create_mailbox(&config, "foo/bar", "root");
         assert!(result.is_err());
         assert!(
             result
@@ -859,7 +899,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        let result = create_mailbox(&config, "foo\\bar");
+        let result = create_mailbox(&config, "foo\\bar", "root");
         assert!(result.is_err());
         assert!(
             result

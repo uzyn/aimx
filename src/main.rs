@@ -19,6 +19,7 @@ mod mailbox_handler;
 mod mailbox_locks;
 mod mcp;
 mod mx;
+mod ownership;
 mod platform;
 mod portcheck;
 mod send;

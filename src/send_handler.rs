@@ -17,12 +17,13 @@ use std::sync::{Arc, Mutex};
 use rsa::RsaPrivateKey;
 use uuid::Uuid;
 
-use crate::config::{ConfigHandle, MailboxConfig};
+use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::dkim;
 use crate::frontmatter::{
     DeliveryStatus, OutboundFrontmatter, compute_thread_id, format_outbound_frontmatter,
 };
 use crate::hook::{self, AfterSendContext, SendStatus};
+use crate::ownership::chown_as_owner;
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
 use crate::slug::{allocate_filename, slugify};
 use crate::transport::{MailTransport, TransportError};
@@ -246,6 +247,7 @@ where
             let delivered_at = chrono::Utc::now().to_rfc3339();
             let path = persist_sent_file(
                 ctx,
+                &config,
                 &from_mailbox,
                 &message_id,
                 &from_header,
@@ -280,6 +282,7 @@ where
             let path = if code == ErrCode::Delivery {
                 persist_sent_file(
                     ctx,
+                    &config,
                     &from_mailbox,
                     &message_id,
                     &from_header,
@@ -491,6 +494,7 @@ fn extract_bare_address(value: &str) -> Option<String> {
 #[allow(clippy::too_many_arguments)]
 fn persist_sent_file(
     ctx: &SendContext,
+    config: &Config,
     from_mailbox: &str,
     message_id: &str,
     from_header: &str,
@@ -511,6 +515,22 @@ fn persist_sent_file(
             sent_dir.display()
         );
         return None;
+    }
+    // Chown the sent directory (idempotent when already correct; heals
+    // drift otherwise). The mailbox lookup can only miss in exotic
+    // cases because `from_mailbox` was resolved from `config.mailboxes`
+    // earlier in the request.
+    let mailbox_cfg = config.mailboxes.get(from_mailbox);
+    if let Some(mb_cfg) = mailbox_cfg
+        && let Err(e) = chown_as_owner(&sent_dir, mb_cfg, 0o700)
+    {
+        tracing::warn!(
+            target: "aimx::send",
+            "chown sent dir failed mailbox={from_mailbox} path={path} err={err}",
+            from_mailbox = from_mailbox,
+            path = sent_dir.display(),
+            err = e,
+        );
     }
 
     let slug = slugify(subject);
@@ -604,6 +624,22 @@ fn persist_sent_file(
             md_path.display()
         );
         return None;
+    }
+
+    // Chown the newly-written sent file to the mailbox owner (PRD §6.3).
+    // Mode `0o600` — only the owner can read. Failures are logged but
+    // not fatal: the file sits inside a `0o700` directory, so non-
+    // owners cannot traverse to reach it.
+    if let Some(mb_cfg) = mailbox_cfg
+        && let Err(e) = chown_as_owner(&md_path, mb_cfg, 0o600)
+    {
+        tracing::warn!(
+            target: "aimx::send",
+            "chown sent file failed mailbox={from_mailbox} path={path} err={err}",
+            from_mailbox = from_mailbox,
+            path = md_path.display(),
+            err = e,
+        );
     }
 
     Some(md_path)
@@ -1217,5 +1253,96 @@ mod tests {
         assert_eq!(parsed.mailbox, "alice");
         assert_eq!(parsed.message_id, "<abc@example.com>");
         assert!(parsed.delivered_at.is_some());
+    }
+
+    /// Sprint 2 S2-3: sent files land `0o600` via the post-persist
+    /// chown. Uses a test resolver that maps `testowner` (a non-
+    /// reserved name so it routes through the resolver) to the current
+    /// uid/gid, and a dedicated SendContext whose alice mailbox has
+    /// `owner = "testowner"`. The chown-to-self syscall is accepted by
+    /// every user; the explicit chmod inside `chown_as_owner` sets
+    /// mode 0o600.
+    #[tokio::test]
+    async fn sent_file_lands_mode_0600() {
+        use std::os::unix::fs::MetadataExt;
+
+        fn fake(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "testowner" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "testowner".into(),
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(fake);
+
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let tmp = tempfile::TempDir::new().unwrap();
+        dkim::generate_keypair(tmp.path(), false).unwrap();
+        let key = dkim::load_private_key(tmp.path()).unwrap();
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "catchall".into(),
+            crate::config::MailboxConfig {
+                address: "*@example.com".into(),
+                owner: "aimx-catchall".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        mailboxes.insert(
+            "alice".into(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".into(),
+                owner: "testowner".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".into(),
+            data_dir: data_dir.path().to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let ctx = SendContext {
+            dkim_key: Arc::new(key),
+            dkim_selector: "aimx".into(),
+            config_handle: ConfigHandle::new(config),
+            transport: mock,
+            data_dir: data_dir.path().to_path_buf(),
+        };
+
+        let req = SendRequest {
+            body: body("alice@example.com"),
+        };
+        let resp = handle_send(req, &ctx).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+
+        let sent_dir = data_dir.path().join("sent").join("alice");
+        let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        let md = std::fs::metadata(entries[0].path()).unwrap();
+        assert_eq!(
+            md.mode() & 0o777,
+            0o600,
+            "sent file must land 0o600 via Sprint 2 chown"
+        );
     }
 }
