@@ -4,6 +4,14 @@
 > [!CAUTION]
 > **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes in v0 releases. Pin to an exact version if you use it on stable systems.
 
+<p align="center">
+    <picture>
+        <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
+        <img src="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg" alt="aimx Pigeon Mascot" width="300">
+    </picture>
+</p>
+
+
 <h3 align="center">SMTP for AI agents. No middleman.</h2>
 
 <p align="center">
