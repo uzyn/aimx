@@ -36,7 +36,7 @@ pub fn run(yes: bool, sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Err
 }
 
 fn resolve_data_dir_for_display() -> String {
-    crate::config::Config::load_resolved()
+    crate::config::Config::load_resolved_ignore_warnings()
         .map(|c| c.data_dir.display().to_string())
         .unwrap_or_else(|_| "/var/lib/aimx".to_string())
 }

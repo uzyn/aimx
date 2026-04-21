@@ -969,6 +969,7 @@ mod tests {
     fn execute_single(hook: Hook, trusted: TrustedValue) -> (MailboxConfig, PathBuf) {
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1042,6 +1043,7 @@ mod tests {
         );
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1082,6 +1084,7 @@ mod tests {
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1124,6 +1127,7 @@ mod tests {
         );
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1165,6 +1169,7 @@ mod tests {
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
+            owner: "root".to_string(),
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
@@ -1213,6 +1218,7 @@ mod tests {
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
+            owner: "root".to_string(),
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
@@ -1238,6 +1244,7 @@ mod tests {
         hook.cmd = "true".to_string();
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1286,6 +1293,7 @@ mod tests {
         hook.cmd = "false".to_string();
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1323,6 +1331,7 @@ mod tests {
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
+            owner: "root".to_string(),
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
@@ -1357,6 +1366,7 @@ mod tests {
         hook.cmd = format!("printf 'FROM=%s\\n' \"$AIMX_FROM\" > {}", out.display());
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1385,6 +1395,7 @@ mod tests {
         hook.cmd = "echo \"$AIMX_SUBJECT\" > /dev/null".to_string();
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1729,6 +1740,7 @@ cmd = "echo legacy"
         hook.cmd = "echo hi 1>&2; exit 1".to_string();
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1804,6 +1816,7 @@ cmd = "echo legacy"
         cfg.hook_templates.push(tmpl);
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1827,6 +1840,7 @@ cmd = "echo legacy"
     fn execute_on_receive_zero_hooks_emits_no_hooks_log() {
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1857,6 +1871,7 @@ cmd = "echo legacy"
         hook.cmd = format!("touch {}", marker.display());
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1888,6 +1903,7 @@ cmd = "echo legacy"
         hook.cmd = format!("touch {}", marker.display());
         let mailbox = MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
@@ -1915,6 +1931,7 @@ cmd = "echo legacy"
     fn execute_after_send_zero_hooks_emits_no_hooks_log() {
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
+            owner: "root".to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,
@@ -1953,6 +1970,7 @@ cmd = "echo legacy"
         };
         let mailbox = MailboxConfig {
             address: "alice@test.com".to_string(),
+            owner: "root".to_string(),
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,

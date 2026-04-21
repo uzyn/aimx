@@ -388,7 +388,7 @@ fn current_hook_templates(config_path: &Path) -> Vec<String> {
     if !config_path.exists() {
         return Vec::new();
     }
-    match Config::load(config_path) {
+    match Config::load_ignore_warnings(config_path) {
         Ok(cfg) => cfg.hook_templates.into_iter().map(|t| t.name).collect(),
         Err(_) => Vec::new(),
     }
@@ -411,7 +411,7 @@ fn apply_selected_templates(
         )
         .into());
     }
-    let mut cfg = Config::load(config_path)?;
+    let mut cfg = Config::load_ignore_warnings(config_path)?;
 
     let bundled_names: std::collections::HashSet<&str> =
         bundled.iter().map(|t| t.name.as_str()).collect();
@@ -1554,7 +1554,7 @@ pub fn finalize_setup(
 
     let config_path = crate::config::config_path();
     let _config = if config_path.exists() {
-        let mut cfg = Config::load(&config_path)?;
+        let mut cfg = Config::load_ignore_warnings(&config_path)?;
         if cfg.domain != domain {
             let old_domain = cfg.domain.clone();
             cfg.domain = domain.to_string();
@@ -1574,6 +1574,7 @@ pub fn finalize_setup(
                 "catchall".to_string(),
                 MailboxConfig {
                     address: format!("*@{domain}"),
+                    owner: crate::config::RESERVED_RUN_AS_CATCHALL.to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
@@ -1590,6 +1591,7 @@ pub fn finalize_setup(
             "catchall".to_string(),
             MailboxConfig {
                 address: format!("*@{domain}"),
+                owner: crate::config::RESERVED_RUN_AS_CATCHALL.to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1889,7 +1891,7 @@ pub fn run_setup(
 
     let config_path = crate::config::config_path();
     let (dkim_selector, enable_ipv6) = if config_path.exists() {
-        match Config::load(&config_path) {
+        match Config::load_ignore_warnings(&config_path) {
             Ok(c) => (c.dkim_selector, c.enable_ipv6),
             Err(_) => ("aimx".to_string(), false),
         }
@@ -2340,6 +2342,7 @@ mod tests {
 
 [mailboxes.catchall]
 address = "*@test.example"
+owner = "aimx-catchall"
 "#;
         std::fs::write(&cfg_path, body).unwrap();
         (tmp, cfg_path)
@@ -2362,7 +2365,7 @@ address = "*@test.example"
             "prompt must not render when --non-interactive is passed"
         );
 
-        let cfg = Config::load(&cfg_path).unwrap();
+        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         assert!(
             cfg.hook_templates.is_empty(),
             "config.toml should have no hook_templates after non-interactive setup"
@@ -2411,7 +2414,7 @@ address = "*@test.example"
             "non-interactive re-run must not invoke the prompt"
         );
 
-        let cfg = Config::load(&cfg_path).unwrap();
+        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
         assert_eq!(
             names,
@@ -2430,7 +2433,7 @@ address = "*@test.example"
         let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
         assert_eq!(selected, vec!["invoke-claude", "webhook"]);
 
-        let cfg = Config::load(&cfg_path).unwrap();
+        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
         assert_eq!(names, vec!["invoke-claude", "webhook"]);
 
@@ -2485,7 +2488,7 @@ address = "*@test.example"
         *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
         super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
 
-        let cfg = Config::load(&cfg_path).unwrap();
+        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
         assert_eq!(
             names,
@@ -2515,6 +2518,7 @@ allowed_events = ["on_receive"]
 
 [mailboxes.catchall]
 address = "*@test.example"
+owner = "aimx-catchall"
 "#;
         std::fs::write(&cfg_path, body).unwrap();
 
@@ -2523,7 +2527,7 @@ address = "*@test.example"
 
         super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
 
-        let cfg = Config::load(&cfg_path).unwrap();
+        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
         let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
         assert!(
             names.contains(&"custom-one".to_string()),
@@ -3416,7 +3420,7 @@ address = "*@test.example"
         assert!(tmp.path().join("dkim/private.key").exists());
         assert!(tmp.path().join("dkim/public.key").exists());
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert_eq!(config.domain, "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
         assert_eq!(config.mailboxes["catchall"].address, "*@test.example.com");
@@ -3435,7 +3439,7 @@ address = "*@test.example"
         let key2 = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
         assert_eq!(key1, key2);
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert_eq!(config.domain, "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
     }
@@ -3446,12 +3450,12 @@ address = "*@test.example"
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         mailbox::create_mailbox(&config, "alice").unwrap();
 
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
         assert!(config.mailboxes.contains_key("catchall"));
     }
@@ -3464,7 +3468,7 @@ address = "*@test.example"
 
         finalize_setup(tmp.path(), "new.example.com", "aimx", None).unwrap();
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert_eq!(config.domain, "new.example.com");
         let catchall = config.mailboxes.get("catchall").unwrap();
         assert_eq!(catchall.address, "*@new.example.com");
@@ -3799,7 +3803,7 @@ address = "*@test.example"
         )
         .unwrap();
 
-        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        let on_disk = Config::load_ignore_warnings(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "verified");
         assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
         // Catchall mailbox inherits; its own fields remain unset.
@@ -3824,7 +3828,7 @@ address = "*@test.example"
         // Re-entry passes None; the on-disk value must survive regardless.
         finalize_setup(tmp.path(), "trust.example.com", "aimx", None).unwrap();
 
-        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        let on_disk = Config::load_ignore_warnings(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "verified");
         assert_eq!(on_disk.trusted_senders, vec!["*@company.com".to_string()]);
     }
@@ -3837,7 +3841,7 @@ address = "*@test.example"
         let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
         finalize_setup(tmp.path(), "trust.example.com", "aimx", None).unwrap();
 
-        let on_disk = Config::load(&crate::config::config_path()).unwrap();
+        let on_disk = Config::load_ignore_warnings(&crate::config::config_path()).unwrap();
         assert_eq!(on_disk.trust, "none");
         assert!(on_disk.trusted_senders.is_empty());
     }

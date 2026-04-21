@@ -406,7 +406,10 @@ mod tests {
             cmd: vec!["/usr/bin/echo".into(), "{prompt}".into()],
             params: vec!["prompt".into()],
             stdin: HookTemplateStdin::Email,
-            run_as: "aimx-hook".into(),
+            // Sprint 1 S1-3 invariant: hook.run_as must equal
+            // mailbox.owner OR "root". The alice fixture is owned by
+            // `root`, so `root` satisfies the invariant on every host.
+            run_as: "root".into(),
             timeout_secs: 60,
             allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
         }
@@ -418,6 +421,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@example.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -427,6 +431,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -492,7 +497,7 @@ mod tests {
         );
         assert_eq!(hooks[0].cmd, "");
 
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert_eq!(reloaded.mailboxes["alice"].hooks[0].origin, HookOrigin::Mcp);
     }
 
@@ -960,7 +965,7 @@ mod tests {
             assert!(matches!(h.await.unwrap(), AckResponse::Ok));
         }
 
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert_eq!(reloaded.mailboxes["alice"].hooks.len(), 1);
         assert_eq!(reloaded.mailboxes["catchall"].hooks.len(), 1);
     }

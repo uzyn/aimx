@@ -353,7 +353,14 @@ pub fn reload_config(
     path: &Path,
     handle: &ConfigHandle,
 ) -> Result<ReloadSummary, Box<dyn std::error::Error>> {
-    let new_config = Config::load(path)?;
+    let (new_config, warnings) = Config::load(path)?;
+    for w in &warnings {
+        tracing::warn!(
+            target: "aimx::config",
+            "reload: {msg}",
+            msg = w.message(),
+        );
+    }
     let summary = ReloadSummary {
         mailboxes: new_config.mailboxes.len(),
         hooks: new_config.mailboxes.values().map(|mb| mb.hooks.len()).sum(),
@@ -1410,6 +1417,7 @@ mod tests {
                 "catchall".to_string(),
                 crate::config::MailboxConfig {
                     address: "*@test.local".to_string(),
+                    owner: "aimx-catchall".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
@@ -1707,6 +1715,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@example.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1716,6 +1725,7 @@ mod tests {
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1862,6 +1872,7 @@ mod tests {
                 "alice".to_string(),
                 crate::config::MailboxConfig {
                     address: "alice@example.com".to_string(),
+                    owner: "root".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
@@ -2101,15 +2112,16 @@ mod tests {
         let path = tmp.path().join("config.toml");
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
-        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
         assert_eq!(handle.load().mailboxes.len(), 2);
 
         // Mutate the file on disk: add a third mailbox stanza.
-        let mut mutated = Config::load(&path).unwrap();
+        let mut mutated = Config::load_ignore_warnings(&path).unwrap();
         mutated.mailboxes.insert(
             "bob".to_string(),
             crate::config::MailboxConfig {
                 address: "bob@example.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -2131,7 +2143,7 @@ mod tests {
         let path = tmp.path().join("config.toml");
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
-        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
         let before_domain = handle.load().domain.clone();
 
         // Corrupt the file — not valid TOML.
@@ -2155,7 +2167,7 @@ mod tests {
         let path = tmp.path().join("config.toml");
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
-        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
 
         // Write a config that parses but fails `validate_hooks`:
         // references an unknown template.
@@ -2165,10 +2177,12 @@ dkim_selector = "aimx"
 
 [mailboxes.catchall]
 address = "*@example.com"
+owner = "aimx-catchall"
 hooks = []
 
 [mailboxes.alice]
 address = "alice@example.com"
+owner = "root"
 
   [[mailboxes.alice.hooks]]
   event = "on_receive"
@@ -2198,7 +2212,7 @@ address = "alice@example.com"
         let path = tmp.path().join("config.toml");
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
-        let handle = ConfigHandle::new(Config::load(&path).unwrap());
+        let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
         assert_eq!(handle.load().mailboxes.len(), 2);
 
         // Replicate just the SIGHUP branch of `run_serve`'s signal
@@ -2242,11 +2256,12 @@ address = "alice@example.com"
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
             // First reload: add mailbox "bob".
-            let mut cfg1 = Config::load(&path).unwrap();
+            let mut cfg1 = Config::load_ignore_warnings(&path).unwrap();
             cfg1.mailboxes.insert(
                 "bob".to_string(),
                 crate::config::MailboxConfig {
                     address: "bob@example.com".to_string(),
+                    owner: "root".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
@@ -2270,11 +2285,12 @@ address = "alice@example.com"
 
             // Second reload: add mailbox "carol". If the loop were
             // one-shot this edit would never become visible.
-            let mut cfg2 = Config::load(&path).unwrap();
+            let mut cfg2 = Config::load_ignore_warnings(&path).unwrap();
             cfg2.mailboxes.insert(
                 "carol".to_string(),
                 crate::config::MailboxConfig {
                     address: "carol@example.com".to_string(),
+                    owner: "root".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,

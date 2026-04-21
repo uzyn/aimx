@@ -663,6 +663,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@example.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -672,6 +673,7 @@ mod tests {
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,

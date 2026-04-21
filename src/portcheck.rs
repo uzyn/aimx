@@ -14,7 +14,7 @@ pub(crate) fn run_portcheck(
         return Err("`aimx portcheck` requires root. Run with: sudo aimx portcheck".into());
     }
 
-    let config = Config::load_resolved().ok();
+    let config = Config::load_resolved_ignore_warnings().ok();
 
     let host = resolve_verify_host(verify_host, config.as_ref(), DEFAULT_VERIFY_HOST);
     let net = setup::RealNetworkOps::from_verify_host(host)?;

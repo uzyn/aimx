@@ -167,6 +167,7 @@ impl AimxMcpServer {
 
     fn load_config(&self) -> Result<Config, String> {
         Config::load_resolved_with_data_dir(self.data_dir_override.as_deref())
+            .map(|(cfg, _warnings)| cfg)
             .map_err(|e| format!("Failed to load config: {e}"))
     }
 }
@@ -1330,6 +1331,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1339,6 +1341,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@test.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,

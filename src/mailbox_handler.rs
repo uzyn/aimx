@@ -144,6 +144,7 @@ fn handle_create(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
         name.to_string(),
         MailboxConfig {
             address,
+            owner: name.to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,
@@ -288,6 +289,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@example.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -337,7 +339,7 @@ mod tests {
         assert!(tmp.path().join("sent").join("alice").is_dir());
 
         // config.toml reloads the new mailbox
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert!(reloaded.mailboxes.contains_key("alice"));
         assert_eq!(reloaded.mailboxes["alice"].address, "alice@example.com");
 
@@ -422,7 +424,7 @@ mod tests {
             AckResponse::Ok
         ));
 
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert!(!reloaded.mailboxes.contains_key("alice"));
         assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
     }
@@ -607,13 +609,14 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".into(),
+                owner: "root".into(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
             },
         );
         write_config_atomic(&path, &c2).unwrap();
-        let reloaded = Config::load(&path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&path).unwrap();
         assert!(reloaded.mailboxes.contains_key("alice"));
 
         // No `.tmp.*` file left behind
@@ -731,7 +734,7 @@ mod tests {
         }
 
         // Every stanza survives on disk.
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         for name in &names {
             assert!(
                 reloaded.mailboxes.contains_key(name),

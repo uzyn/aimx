@@ -4,6 +4,25 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use crate::hook::{Hook, HookEvent, HookOrigin, effective_hook_name, is_valid_hook_name};
+use crate::user_resolver::{ResolvedUser, resolve_user};
+
+/// Reserved `run_as` / `owner` values that never require a `getpwnam`
+/// resolve. `root` always exists (uid 0, gid 0); `aimx-catchall` is a
+/// system user that setup creates on demand when the operator configures
+/// a catchall mailbox (PRD §6.4). Hook templates that target either
+/// value are accepted even on hosts where `aimx-catchall` hasn't been
+/// created yet — the invariant check in [`check_hook_owner_invariant`]
+/// is what prevents misconfigured pairings.
+pub const RESERVED_RUN_AS_ROOT: &str = "root";
+pub const RESERVED_RUN_AS_CATCHALL: &str = "aimx-catchall";
+
+/// `useradd`-style valid Linux username regex subset used by
+/// [`validate_run_as`]. The full POSIX grammar is `[a-z_][a-z0-9_-]*[$]?`;
+/// we hand-roll the predicate here to avoid pulling in a regex crate for
+/// one call site. The `$` suffix is allowed for Samba-style trailing
+/// machine accounts even though aimx never generates them — rejecting
+/// them here would confuse operators who imported such users.
+pub const USERNAME_MAX_LEN: usize = 32;
 
 const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
@@ -126,12 +145,13 @@ pub struct HookTemplate {
     #[serde(default)]
     pub stdin: HookTemplateStdin,
 
-    /// Unix user the daemon drops to before `exec`. `"aimx-hook"` (default)
-    /// or `"root"` — any other value is rejected at load time. `root` is
-    /// only accepted so operators can explicitly opt a template back into
-    /// the legacy behavior by editing `config.toml`; the flag is not
-    /// settable over the UDS.
-    #[serde(default = "default_hook_run_as")]
+    /// Unix user the daemon drops to before `exec`. Accepts any
+    /// `getpwnam`-resolvable username plus the reserved values `"root"`
+    /// and `"aimx-catchall"` (PRD §6.1). Usernames that can't resolve at
+    /// `Config::load` time do not hard-fail — the template is flagged as
+    /// orphan via [`LoadWarning::OrphanTemplateRunAs`] and callers log a
+    /// warning under `aimx::config`. The field is required; there is no
+    /// default.
     pub run_as: String,
 
     /// Hard timeout in seconds. SIGTERM at `timeout_secs`, SIGKILL at
@@ -143,10 +163,6 @@ pub struct HookTemplate {
     /// `hook_create` request that selects a disallowed event is rejected.
     #[serde(default = "default_hook_allowed_events")]
     pub allowed_events: Vec<HookEvent>,
-}
-
-fn default_hook_run_as() -> String {
-    "aimx-hook".to_string()
 }
 
 fn default_hook_timeout_secs() -> u32 {
@@ -165,13 +181,111 @@ pub const HOOK_TEMPLATE_TIMEOUT_SECS_MAX: u32 = 600;
 const HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS: &[&str] =
     &["event", "mailbox", "message_id", "from", "subject"];
 
-/// Valid `run_as` values. `aimx-hook` is the default (unprivileged); `root`
-/// is only accepted when an operator explicitly sets it in `config.toml`.
-pub const VALID_HOOK_RUN_AS_VALUES: &[&str] = &["aimx-hook", "root"];
+/// Resolved shape for a `run_as` value returned by [`validate_run_as`].
+///
+/// `Reserved` short-circuits the `getpwnam` call entirely for `root` and
+/// `aimx-catchall`; `User` carries the resolved numeric uid so callers
+/// don't have to re-resolve. An orphan `run_as` (regex-valid but absent
+/// from `getpwnam`) never produces this type — the caller sees
+/// [`ConfigError::OrphanUser`] so it can decide whether to warn (config
+/// load) or hard-fail (`aimx agent-setup`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunAsKind {
+    /// `root` or `aimx-catchall`. The inner `&'static str` echoes the
+    /// canonical lowercase name.
+    Reserved(&'static str),
+    /// A `getpwnam`-resolved Linux user. `uid` is the numeric id;
+    /// `name` is the normalized username (identical to the input).
+    User(ResolvedUser),
+}
+
+/// Validation errors for `run_as` / `owner` names.
+///
+/// `InvalidUsername` is a hard-failure (regex-invalid names can never
+/// resolve). `OrphanUser` is a soft-signal — callers decide whether to
+/// warn (config load, per PRD §6.1 orphan tolerance) or reject
+/// (`aimx agent-setup` registration, where the user must exist now).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigError {
+    InvalidUsername(String),
+    OrphanUser(String),
+}
+
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConfigError::InvalidUsername(name) => write!(
+                f,
+                "invalid username '{name}': must match [a-z_][a-z0-9_-]*[$]?"
+            ),
+            ConfigError::OrphanUser(name) => write!(
+                f,
+                "user '{name}' does not exist on this host (getpwnam miss)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for ConfigError {}
+
+/// Predicate: does `s` match the standard `useradd` regex
+/// `[a-z_][a-z0-9_-]*[$]?`? Empty strings and over-long strings fail.
+/// Keeps parity with Linux `useradd` so aimx accepts every username the
+/// system itself accepts.
+pub fn is_valid_system_username(s: &str) -> bool {
+    if s.is_empty() || s.len() > USERNAME_MAX_LEN {
+        return false;
+    }
+    let mut bytes = s.bytes();
+    let first = match bytes.next() {
+        Some(b) => b,
+        None => return false,
+    };
+    if !(first.is_ascii_lowercase() || first == b'_') {
+        return false;
+    }
+    // Optional trailing `$` (Samba machine account suffix).
+    let rest: Vec<u8> = bytes.collect();
+    let (body, _tail) = match rest.last() {
+        Some(b'$') => (&rest[..rest.len() - 1], Some(b'$')),
+        _ => (&rest[..], None),
+    };
+    body.iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'_' || *b == b'-')
+}
+
+/// Validate a `run_as` (or `owner`) name. Reserved names short-circuit;
+/// everything else must pass the regex gate and then resolve via
+/// `getpwnam`. See [`RunAsKind`] and [`ConfigError`] for the return
+/// shape.
+pub fn validate_run_as(name: &str) -> Result<RunAsKind, ConfigError> {
+    if name == RESERVED_RUN_AS_ROOT {
+        return Ok(RunAsKind::Reserved(RESERVED_RUN_AS_ROOT));
+    }
+    if name == RESERVED_RUN_AS_CATCHALL {
+        return Ok(RunAsKind::Reserved(RESERVED_RUN_AS_CATCHALL));
+    }
+    if !is_valid_system_username(name) {
+        return Err(ConfigError::InvalidUsername(name.to_string()));
+    }
+    match resolve_user(name) {
+        Some(u) => Ok(RunAsKind::User(u)),
+        None => Err(ConfigError::OrphanUser(name.to_string())),
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct MailboxConfig {
     pub address: String,
+
+    /// Linux user that owns this mailbox's storage under
+    /// `/var/lib/aimx/{inbox,sent}/<mailbox>/`. Required (no default);
+    /// missing `owner` on any mailbox fails `Config::load`.
+    ///
+    /// Resolved via `getpwnam` at load time. Unknown users produce a
+    /// [`LoadWarning::OrphanMailboxOwner`] rather than a hard failure,
+    /// and the mailbox is flagged inactive for the session (PRD §6.2).
+    pub owner: String,
 
     /// v2 schema: hooks grouped by event (`on_receive`, `after_send`).
     /// Replaces the v1 `on_receive` array-of-tables. Legacy schema is
@@ -194,6 +308,49 @@ pub struct MailboxConfig {
 }
 
 impl MailboxConfig {
+    /// True iff this mailbox's `address` is the wildcard catchall for
+    /// the configured `domain` (`*@domain`). Used by
+    /// [`check_hook_owner_invariant`] to relax the owner-match rule for
+    /// the catchall (hooks run as `aimx-catchall` there, not the
+    /// mailbox owner).
+    pub fn is_catchall(&self, config: &Config) -> bool {
+        self.address
+            .eq_ignore_ascii_case(&format!("*@{}", config.domain))
+    }
+
+    /// Resolve the mailbox's `owner` via [`validate_run_as`]. Returns
+    /// the resolved `uid`, or a [`ConfigError`] the caller decides how
+    /// to handle. Loops through [`validate_run_as`] to keep one code
+    /// path for regex + `getpwnam` semantics.
+    ///
+    /// Wired into Sprint 2's chown paths; callers in Sprint 1 use it
+    /// only through tests.
+    #[allow(dead_code)]
+    pub fn owner_uid(&self) -> Result<u32, ConfigError> {
+        match validate_run_as(&self.owner)? {
+            RunAsKind::Reserved(RESERVED_RUN_AS_ROOT) => Ok(0),
+            RunAsKind::Reserved(_) => match resolve_user(&self.owner) {
+                Some(u) => Ok(u.uid),
+                None => Err(ConfigError::OrphanUser(self.owner.clone())),
+            },
+            RunAsKind::User(u) => Ok(u.uid),
+        }
+    }
+
+    /// Resolve the mailbox's `owner` primary gid. Mirrors
+    /// [`Self::owner_uid`].
+    #[allow(dead_code)]
+    pub fn owner_gid(&self) -> Result<u32, ConfigError> {
+        match validate_run_as(&self.owner)? {
+            RunAsKind::Reserved(RESERVED_RUN_AS_ROOT) => Ok(0),
+            RunAsKind::Reserved(_) => match resolve_user(&self.owner) {
+                Some(u) => Ok(u.gid),
+                None => Err(ConfigError::OrphanUser(self.owner.clone())),
+            },
+            RunAsKind::User(u) => Ok(u.gid),
+        }
+    }
+
     /// Iterate only this mailbox's `on_receive` hooks.
     pub fn on_receive_hooks(&self) -> impl Iterator<Item = &Hook> {
         self.hooks
@@ -223,6 +380,168 @@ impl MailboxConfig {
             None => config.trusted_senders.as_slice(),
         }
     }
+}
+
+/// Non-fatal issues surfaced by [`Config::load`]. The daemon retains the
+/// offending mailbox or template in the in-memory config but flags it
+/// (via [`ConfigResolved`]) so ingest / MCP / hook-fire paths can treat
+/// orphans as inactive. Callers (daemon startup, SIGHUP reload, doctor)
+/// log each variant under the `aimx::config` tracing target per PRD §7.4.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoadWarning {
+    /// Mailbox `owner` doesn't resolve via `getpwnam`. Mailbox is
+    /// flagged inactive for the session.
+    OrphanMailboxOwner { mailbox: String, owner: String },
+    /// Hook attached to a mailbox names a `run_as` user that does not
+    /// resolve. Fire attempts against this hook are soft-skipped.
+    OrphanHookRunAs {
+        mailbox: String,
+        hook_name: String,
+        run_as: String,
+    },
+    /// `[[hook_template]]` names a `run_as` user that does not resolve.
+    /// The template is retained but flagged orphan; Sprint 6's doctor
+    /// work surfaces it.
+    OrphanTemplateRunAs { template: String, run_as: String },
+    /// A stale `aimx-hook` system user is present on the host. aimx no
+    /// longer creates this user; doctor notes its presence so the
+    /// operator can clean up.
+    #[allow(dead_code)]
+    LegacyAimxHookUser,
+}
+
+impl LoadWarning {
+    /// Human-readable one-liner for log output. Structured fields live
+    /// in the tracing call alongside this rendering.
+    pub fn message(&self) -> String {
+        match self {
+            LoadWarning::OrphanMailboxOwner { mailbox, owner } => format!(
+                "mailbox '{mailbox}' owner '{owner}' does not resolve via getpwnam; \
+                 mailbox marked inactive — create the user or update config.toml"
+            ),
+            LoadWarning::OrphanHookRunAs {
+                mailbox,
+                hook_name,
+                run_as,
+            } => format!(
+                "hook '{hook_name}' on mailbox '{mailbox}' has run_as='{run_as}' \
+                 which does not resolve; hook will be soft-skipped on fire"
+            ),
+            LoadWarning::OrphanTemplateRunAs { template, run_as } => format!(
+                "hook template '{template}' has run_as='{run_as}' which does \
+                 not resolve; template marked orphan"
+            ),
+            LoadWarning::LegacyAimxHookUser => {
+                "legacy 'aimx-hook' system user present; aimx no longer \
+                 manages it — remove via 'userdel aimx-hook' when safe"
+                    .to_string()
+            }
+        }
+    }
+}
+
+/// Resolved-side view of a loaded `Config`. Keeps orphan flags out of
+/// the serializable [`Config`] struct so TOML round-trips stay pure
+/// schema. Populated by [`Config::load`] after the orphan-aware
+/// validation pass.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigResolved {
+    pub inactive_mailboxes: std::collections::HashSet<String>,
+    pub orphan_templates: std::collections::HashSet<String>,
+}
+
+impl ConfigResolved {
+    /// True iff the named mailbox is active (owner resolved) in the
+    /// current session. Missing names return `false` on the theory that
+    /// "does this mailbox exist and can we act on it?" answers the same
+    /// way as "no such mailbox."
+    ///
+    /// Wired into Sprint 2's ingest / MCP / UDS paths; this Sprint
+    /// ships the helper on its own.
+    #[allow(dead_code)]
+    pub fn is_mailbox_active(&self, name: &str) -> bool {
+        !self.inactive_mailboxes.contains(name)
+    }
+
+    /// True iff the named template has resolved successfully at load
+    /// time.
+    #[allow(dead_code)]
+    pub fn is_template_active(&self, name: &str) -> bool {
+        !self.orphan_templates.contains(name)
+    }
+}
+
+/// Hook/mailbox owner invariant (PRD §6.3): for every hook on a mailbox
+/// the hook's `run_as` must equal the mailbox's `owner` OR be `root`.
+/// Catchall relaxes the equality: `run_as` may be `aimx-catchall` or
+/// `root` regardless of the catchall's nominal owner.
+///
+/// This helper is called both at [`Config::load`] (via
+/// [`validate_hooks`]) and in the UDS `HOOK-CREATE` path so both gates
+/// speak the exact same rule.
+pub fn check_hook_owner_invariant(
+    config: &Config,
+    mailbox_name: &str,
+    mailbox: &MailboxConfig,
+    hook: &Hook,
+) -> Result<(), String> {
+    let effective_run_as = resolve_effective_run_as(config, hook);
+    let Some(run_as) = effective_run_as else {
+        // No explicit run_as, no template to inherit from — a raw-cmd
+        // hook without explicit run_as is already rejected at load; the
+        // UDS path forbids raw-cmd entirely, so this branch is a
+        // defensive no-op.
+        return Ok(());
+    };
+
+    if run_as == RESERVED_RUN_AS_ROOT {
+        return Ok(());
+    }
+
+    if mailbox.is_catchall(config) {
+        if run_as == RESERVED_RUN_AS_CATCHALL {
+            return Ok(());
+        }
+        let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+        return Err(format!(
+            "hook '{hook_label}' on catchall mailbox '{mailbox_name}' has \
+             run_as='{run_as}'; catchall hooks must use run_as='{catchall}' or \
+             run_as='{root}' (PRD §6.3)",
+            catchall = RESERVED_RUN_AS_CATCHALL,
+            root = RESERVED_RUN_AS_ROOT,
+        ));
+    }
+
+    if run_as == mailbox.owner {
+        return Ok(());
+    }
+
+    let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+    Err(format!(
+        "hook '{hook_label}' on mailbox '{mailbox_name}' has run_as='{run_as}' \
+         but the mailbox is owned by '{owner}'; fix: set run_as='{owner}' \
+         or run_as='{root}' so the hook can read this mailbox's files \
+         (PRD §6.3)",
+        owner = mailbox.owner,
+        root = RESERVED_RUN_AS_ROOT,
+    ))
+}
+
+/// Compute the effective `run_as` for a hook: explicit `hook.run_as`
+/// wins; otherwise fall back to the template's `run_as` if the hook is
+/// template-bound and the template exists. Returns `None` when neither
+/// source is available (raw-cmd hook without explicit `run_as` — in
+/// which case callers treat it as "no invariant to enforce").
+fn resolve_effective_run_as(config: &Config, hook: &Hook) -> Option<String> {
+    if let Some(explicit) = &hook.run_as {
+        return Some(explicit.clone());
+    }
+    let tmpl_name = hook.template.as_ref()?;
+    let tmpl = config
+        .hook_templates
+        .iter()
+        .find(|t| &t.name == tmpl_name)?;
+    Some(tmpl.run_as.clone())
 }
 
 fn default_trust() -> String {
@@ -362,6 +681,11 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                 ));
             }
 
+            // Hook/mailbox owner invariant (PRD §6.3). Runs after the
+            // template-reference check so we know the template exists
+            // (when referenced) before resolving the effective run_as.
+            check_hook_owner_invariant(config, mailbox_name, mb, hook)?;
+
             let effective = effective_hook_name(hook);
             let is_explicit = hook.name.is_some();
             if let Some((prior_mb, prior_explicit)) =
@@ -492,10 +816,18 @@ fn iter_placeholders(s: &str) -> impl Iterator<Item = &str> {
 /// - placeholder not declared in `params` and not in the built-in set
 /// - `params` entry never referenced by any placeholder in `cmd`
 /// - `timeout_secs == 0` or `> 600`
-/// - `run_as` outside `{"aimx-hook", "root"}`
+/// - `run_as` is regex-invalid as a Linux username
 /// - `name` not matching `[a-z0-9-]+`
 /// - `allowed_events` empty
-pub(crate) fn validate_hook_templates(templates: &[HookTemplate]) -> Result<(), String> {
+///
+/// Soft (orphan) issues — `run_as` is regex-valid but `getpwnam` does
+/// not resolve — are returned as [`LoadWarning::OrphanTemplateRunAs`]
+/// via the second tuple slot. Callers log them and mark the template
+/// orphan in [`ConfigResolved`].
+pub(crate) fn validate_hook_templates(
+    templates: &[HookTemplate],
+) -> Result<Vec<LoadWarning>, String> {
+    let mut warnings = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for tmpl in templates {
         if !is_valid_template_name(&tmpl.name) {
@@ -519,11 +851,22 @@ pub(crate) fn validate_hook_templates(templates: &[HookTemplate]) -> Result<(), 
                 tmpl.name, tmpl.timeout_secs, HOOK_TEMPLATE_TIMEOUT_SECS_MAX
             ));
         }
-        if !VALID_HOOK_RUN_AS_VALUES.contains(&tmpl.run_as.as_str()) {
-            return Err(format!(
-                "hook template '{}' has invalid run_as '{}': expected one of {:?}",
-                tmpl.name, tmpl.run_as, VALID_HOOK_RUN_AS_VALUES
-            ));
+        match validate_run_as(&tmpl.run_as) {
+            Ok(_) => {}
+            Err(ConfigError::InvalidUsername(_)) => {
+                return Err(format!(
+                    "hook template '{}' has invalid run_as '{}': must be \
+                     'root', 'aimx-catchall', or a valid Linux username \
+                     matching [a-z_][a-z0-9_-]*[$]?",
+                    tmpl.name, tmpl.run_as
+                ));
+            }
+            Err(ConfigError::OrphanUser(name)) => {
+                warnings.push(LoadWarning::OrphanTemplateRunAs {
+                    template: tmpl.name.clone(),
+                    run_as: name,
+                });
+            }
         }
         if tmpl.allowed_events.is_empty() {
             return Err(format!(
@@ -595,7 +938,7 @@ pub(crate) fn validate_hook_templates(templates: &[HookTemplate]) -> Result<(), 
             }
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn is_valid_template_name(s: &str) -> bool {
@@ -612,6 +955,72 @@ fn is_valid_placeholder_name(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+}
+
+/// Resolve every mailbox `owner` via [`validate_run_as`]. Regex
+/// failures hard-reject; `getpwnam` misses surface as orphan warnings
+/// (PRD §6.2). Reserved names (`root`, `aimx-catchall`) pass silently —
+/// the extra rules around root / catchall owners land in Sprint 3's
+/// S3-4 check.
+fn validate_mailbox_owners(config: &Config) -> Vec<LoadWarning> {
+    let mut warnings = Vec::new();
+    for (name, mb) in &config.mailboxes {
+        match validate_run_as(&mb.owner) {
+            Ok(_) => {}
+            Err(ConfigError::InvalidUsername(_)) => {
+                // Regex-invalid usernames can never resolve. We return
+                // this as a warning rather than a hard failure so the
+                // daemon stays up, but it will always be flagged by
+                // doctor and the mailbox is inactive.
+                warnings.push(LoadWarning::OrphanMailboxOwner {
+                    mailbox: name.clone(),
+                    owner: mb.owner.clone(),
+                });
+            }
+            Err(ConfigError::OrphanUser(_)) => {
+                warnings.push(LoadWarning::OrphanMailboxOwner {
+                    mailbox: name.clone(),
+                    owner: mb.owner.clone(),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+/// Resolve every hook's explicit `run_as` (when set) — template
+/// inheritance is handled at fire time. Regex failures hard-reject;
+/// `getpwnam` misses surface as [`LoadWarning::OrphanHookRunAs`].
+fn validate_hook_run_as(config: &Config) -> Result<Vec<LoadWarning>, String> {
+    let mut warnings = Vec::new();
+    for (mailbox_name, mb) in &config.mailboxes {
+        for hook in &mb.hooks {
+            let Some(run_as) = &hook.run_as else {
+                continue;
+            };
+            match validate_run_as(run_as) {
+                Ok(_) => {}
+                Err(ConfigError::InvalidUsername(_)) => {
+                    let label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+                    return Err(format!(
+                        "hook '{label}' on mailbox '{mailbox_name}' has \
+                         invalid run_as '{run_as}': must be 'root', \
+                         'aimx-catchall', or a valid Linux username \
+                         matching [a-z_][a-z0-9_-]*[$]?"
+                    ));
+                }
+                Err(ConfigError::OrphanUser(name)) => {
+                    let label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+                    warnings.push(LoadWarning::OrphanHookRunAs {
+                        mailbox: mailbox_name.clone(),
+                        hook_name: label,
+                        run_as: name,
+                    });
+                }
+            }
+        }
+    }
+    Ok(warnings)
 }
 
 fn validate_trust_values(config: &Config) -> Result<(), String> {
@@ -634,7 +1043,17 @@ fn validate_trust_values(config: &Config) -> Result<(), String> {
 }
 
 impl Config {
-    pub fn load(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+    /// Load and validate a `config.toml`. Returns both the parsed
+    /// `Config` and a vector of non-fatal warnings (orphan mailbox
+    /// owners, orphan hook/template `run_as` users). Callers (daemon
+    /// startup, SIGHUP reload, `aimx doctor`) log the warnings under
+    /// the `aimx::config` tracing target — the operator sees them in
+    /// `aimx logs`.
+    ///
+    /// Hard errors (regex-invalid names, template/cmd mutual-exclusion
+    /// violations, hook/owner invariant violations, …) still return
+    /// `Err` so the daemon refuses to start on a misconfigured host.
+    pub fn load(path: &Path) -> Result<(Self, Vec<LoadWarning>), Box<dyn std::error::Error>> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 format!(
@@ -648,11 +1067,25 @@ impl Config {
         })?;
         reject_legacy_on_receive_schema(&content)?;
         let config: Config = toml::from_str(&content)?;
+        for (name, mb) in &config.mailboxes {
+            if mb.owner.trim().is_empty() {
+                return Err(format!(
+                    "mailbox '{name}' is missing required field 'owner'; \
+                     re-run 'sudo aimx setup' or hand-edit config.toml"
+                )
+                .into());
+            }
+        }
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        validate_hook_templates(&config.hook_templates)
+        let mut warnings = validate_hook_templates(&config.hook_templates)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let mailbox_warnings = validate_mailbox_owners(&config);
+        warnings.extend(mailbox_warnings);
+        let hook_warnings = validate_hook_run_as(&config)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        warnings.extend(hook_warnings);
         validate_hooks(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        Ok(config)
+        Ok((config, warnings))
     }
 
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -666,7 +1099,7 @@ impl Config {
     /// Replaces the old `load_from_data_dir`. Config no longer lives inside
     /// the storage directory. Override via the `AIMX_CONFIG_DIR` env var
     /// (tests, non-standard installs).
-    pub fn load_resolved() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_resolved() -> Result<(Self, Vec<LoadWarning>), Box<dyn std::error::Error>> {
         Self::load(&config_path())
     }
 
@@ -676,12 +1109,50 @@ impl Config {
     /// (its documented purpose) without touching the config file on disk.
     pub fn load_resolved_with_data_dir(
         data_dir_override: Option<&Path>,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut cfg = Self::load_resolved()?;
+    ) -> Result<(Self, Vec<LoadWarning>), Box<dyn std::error::Error>> {
+        let (mut cfg, warnings) = Self::load_resolved()?;
         if let Some(dir) = data_dir_override {
             cfg.data_dir = dir.to_path_buf();
         }
-        Ok(cfg)
+        Ok((cfg, warnings))
+    }
+
+    /// Convenience wrapper around [`Self::load`] for call sites that
+    /// only want the parsed [`Config`] and don't care about warnings.
+    /// Warnings are silently discarded — production callers that need
+    /// to surface them (daemon startup, SIGHUP reload, doctor) must
+    /// use [`Self::load`] directly.
+    pub fn load_ignore_warnings(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load(path).map(|(cfg, _)| cfg)
+    }
+
+    /// Companion to [`Self::load_ignore_warnings`] for the resolved
+    /// config path.
+    pub fn load_resolved_ignore_warnings() -> Result<Self, Box<dyn std::error::Error>> {
+        Self::load_resolved().map(|(cfg, _)| cfg)
+    }
+
+    /// Compute a [`ConfigResolved`] side-table from the load warnings.
+    /// Used by ingest / MCP / hook-fire paths to skip inactive
+    /// mailboxes and orphan templates without re-running validation.
+    ///
+    /// Wired into Sprint 2's ingest / MCP / UDS paths; Sprint 1 tests
+    /// exercise it through the orphan-tolerance unit tests.
+    #[allow(dead_code)]
+    pub fn resolved_from_warnings(warnings: &[LoadWarning]) -> ConfigResolved {
+        let mut resolved = ConfigResolved::default();
+        for w in warnings {
+            match w {
+                LoadWarning::OrphanMailboxOwner { mailbox, .. } => {
+                    resolved.inactive_mailboxes.insert(mailbox.clone());
+                }
+                LoadWarning::OrphanTemplateRunAs { template, .. } => {
+                    resolved.orphan_templates.insert(template.clone());
+                }
+                _ => {}
+            }
+        }
+        resolved
     }
 
     /// Path to a mailbox's inbox directory (`<data_dir>/inbox/<name>/`).
@@ -839,9 +1310,11 @@ data_dir = "/tmp/aimx-test"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@agent.example.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "support_inbound"
@@ -863,6 +1336,7 @@ trust = "verfied"
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 "#,
         )
         .unwrap();
@@ -888,6 +1362,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 trust = "strict"
 "#,
         )
@@ -916,14 +1391,16 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 
 [mailboxes.public]
 address = "hello@test.com"
+owner = "root"
 trust = "none"
 "#,
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.trust, "verified");
         assert_eq!(cfg.mailboxes["public"].trust.as_deref(), Some("none"));
     }
@@ -961,6 +1438,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "support_env"
@@ -971,7 +1449,7 @@ printf 'from=%s subject=%s id=%s\n' "$AIMX_FROM" "$AIMX_SUBJECT" "{id}"
 "#,
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.mailboxes["support"].hooks.len(), 1);
     }
 
@@ -986,6 +1464,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -993,7 +1472,7 @@ cmd = "echo derive-me"
 "#,
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         let hooks = &cfg.mailboxes["support"].hooks;
         assert_eq!(hooks.len(), 1);
         assert!(
@@ -1016,6 +1495,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -1042,6 +1522,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -1068,6 +1549,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
+owner = "root"
 
 [[mailboxes.one.hooks]]
 event = "on_receive"
@@ -1075,6 +1557,7 @@ cmd = "echo same"
 
 [mailboxes.two]
 address = "two@test.com"
+owner = "root"
 
 [[mailboxes.two.hooks]]
 event = "on_receive"
@@ -1104,6 +1587,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
+owner = "root"
 
 [[mailboxes.one.hooks]]
 event = "on_receive"
@@ -1111,6 +1595,7 @@ cmd = "echo collide"
 
 [mailboxes.two]
 address = "two@test.com"
+owner = "root"
 
 [[mailboxes.two.hooks]]
 name = "{derived}"
@@ -1137,6 +1622,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
@@ -1174,6 +1660,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "support_legacy"
@@ -1203,6 +1690,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1228,6 +1716,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1255,6 +1744,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "bad name!"
@@ -1281,6 +1771,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
+owner = "root"
 
 [[mailboxes.one.hooks]]
 name = "same_name"
@@ -1289,6 +1780,7 @@ cmd = "echo one"
 
 [mailboxes.two]
 address = "two@test.com"
+owner = "root"
 
 [[mailboxes.two.hooks]]
 name = "same_name"
@@ -1319,6 +1811,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
+owner = "root"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1364,6 +1857,7 @@ dangerously_support_untrusted = true
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1383,7 +1877,7 @@ dangerously_support_untrusted = true
         };
 
         config.save(&path).unwrap();
-        let loaded = Config::load(&path).unwrap();
+        let loaded = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(config, loaded);
     }
 
@@ -1406,6 +1900,7 @@ domain = "test.com"
 
 [mailboxes.secure]
 address = "secure@test.com"
+owner = "root"
 trust = "verified"
 trusted_senders = ["*@company.com", "boss@gmail.com"]
 "#;
@@ -1425,6 +1920,7 @@ domain = "test.com"
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.trust, "none");
@@ -1445,6 +1941,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert_eq!(config.trust, "verified");
@@ -1468,6 +1965,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.public]
 address = "hello@test.com"
+owner = "root"
 trust = "none"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -1489,6 +1987,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.strict]
 address = "strict@test.com"
+owner = "root"
 trusted_senders = ["boss@gmail.com"]
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -1510,6 +2009,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.sealed]
 address = "sealed@test.com"
+owner = "root"
 trusted_senders = []
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -1555,6 +2055,7 @@ trusted_senders = []
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1693,7 +2194,7 @@ enable_ipv6 = true
         )
         .unwrap();
 
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert_eq!(config.domain, "resolved.example.com");
     }
 
@@ -1740,7 +2241,9 @@ enable_ipv6 = true
         let path = tmp.path().join("config.toml");
         let mut toml = String::from("domain = \"test.com\"\n\n");
         toml.push_str(body);
-        toml.push_str("\n[mailboxes.catchall]\naddress = \"*@test.com\"\n");
+        toml.push_str(
+            "\n[mailboxes.catchall]\naddress = \"*@test.com\"\nowner = \"aimx-catchall\"\n",
+        );
         std::fs::write(&path, toml).unwrap();
         (tmp, path)
     }
@@ -1773,14 +2276,18 @@ description = "Pipe email into Claude Code with a prompt."
 cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
+run_as = "root"
 "#,
         );
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.hook_templates.len(), 1);
         let tmpl = &cfg.hook_templates[0];
         assert_eq!(tmpl.name, "invoke-claude");
         assert_eq!(tmpl.params, vec!["prompt".to_string()]);
-        assert_eq!(tmpl.run_as, "aimx-hook"); // default
+        // Sprint 1 S1-2: `run_as` is required (no default). The fixture
+        // above sets it explicitly to `root` so it resolves on every
+        // host.
+        assert_eq!(tmpl.run_as, "root");
         assert_eq!(tmpl.timeout_secs, 60); // default
         assert!(matches!(tmpl.stdin, HookTemplateStdin::Email));
         // allowed_events defaults to both
@@ -1796,9 +2303,10 @@ name = "log-event"
 description = "Append event metadata to a log."
 cmd = ["/usr/bin/logger", "event={event} mailbox={mailbox} from={from}"]
 params = []
+run_as = "root"
 "#,
         );
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.hook_templates.len(), 1);
         assert!(cfg.hook_templates[0].params.is_empty());
     }
@@ -1811,11 +2319,13 @@ params = []
 name = "dupe"
 description = "first"
 cmd = ["/bin/true"]
+run_as = "root"
 
 [[hook_template]]
 name = "dupe"
 description = "second"
 cmd = ["/bin/true"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1833,6 +2343,7 @@ cmd = ["/bin/true"]
 name = "empty"
 description = "no cmd"
 cmd = []
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1851,6 +2362,7 @@ name = "bad-binary"
 description = "placeholder in cmd[0]"
 cmd = ["/usr/local/bin/{binary}", "-p", "hi"]
 params = ["binary"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1869,6 +2381,7 @@ name = "ghost-param"
 description = "uses undeclared placeholder"
 cmd = ["/bin/echo", "{ghost}"]
 params = []
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1887,6 +2400,7 @@ name = "dead-param"
 description = "param never referenced"
 cmd = ["/bin/echo", "hello"]
 params = ["dead"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1905,6 +2419,7 @@ name = "zero-timeout"
 description = "timeout=0"
 cmd = ["/bin/true"]
 timeout_secs = 0
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1923,6 +2438,7 @@ name = "too-long"
 description = "timeout too large"
 cmd = ["/bin/true"]
 timeout_secs = 601
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1934,13 +2450,16 @@ timeout_secs = 601
 
     #[test]
     fn load_rejects_bad_run_as() {
+        // Sprint 1 S1-2 retired the static allowlist. A `run_as` that
+        // fails the `useradd`-style regex (uppercase, leading digit,
+        // spaces) still hard-rejects at load time.
         let (_tmp, path) = write_template_config(
             r#"
 [[hook_template]]
 name = "bad-runas"
 description = "weird run_as"
 cmd = ["/bin/true"]
-run_as = "nobody"
+run_as = "Bad Name"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1963,7 +2482,7 @@ cmd = ["/usr/local/bin/legacy"]
 run_as = "root"
 "#,
         );
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.hook_templates[0].run_as, "root");
     }
 
@@ -1975,6 +2494,7 @@ run_as = "root"
 name = "Invoke Claude"
 description = "bad name"
 cmd = ["/bin/true"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1993,6 +2513,7 @@ name = "nope"
 description = "no events"
 cmd = ["/bin/true"]
 allowed_events = []
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -2015,6 +2536,7 @@ name = "bad-param"
 description = "uppercase param"
 cmd = ["/bin/echo", "{FOO}"]
 params = ["FOO"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -2037,6 +2559,7 @@ name = "bad-param"
 description = "dashed param"
 cmd = ["/bin/echo", "placeholder"]
 params = ["foo-bar"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -2055,6 +2578,7 @@ name = "clash"
 description = "param collides with built-in"
 cmd = ["/bin/echo", "{event}"]
 params = ["event"]
+run_as = "root"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -2071,13 +2595,13 @@ params = ["event"]
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(&path, &fixture).unwrap();
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.hook_templates.len(), 2);
 
         // Save and re-load — serialization must survive a round trip.
         let round_trip = tmp.path().join("round_trip.toml");
         cfg.save(&round_trip).unwrap();
-        let reloaded = Config::load(&round_trip).unwrap();
+        let reloaded = Config::load_ignore_warnings(&round_trip).unwrap();
         assert_eq!(cfg, reloaded);
     }
 
@@ -2096,9 +2620,11 @@ domain = "test.com"
 name = "echo"
 description = "Echo template"
 cmd = ["/bin/echo", "hi"]
+run_as = "root"
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "bad"
@@ -2126,6 +2652,7 @@ domain = "test.com"
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "ghost"
@@ -2152,6 +2679,7 @@ domain = "test.com"
 
 [mailboxes.catchall]
 address = "*@test.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "raw-with-params"
@@ -2184,9 +2712,11 @@ name = "invoke-claude"
 description = "Claude"
 cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
+run_as = "root"
 
 [mailboxes.accounts]
 address = "accounts@test.com"
+owner = "root"
 
 [[mailboxes.accounts.hooks]]
 name = "ar"
@@ -2199,7 +2729,7 @@ prompt = "Draft a reply"
 "#,
         )
         .unwrap();
-        let cfg = Config::load(&path).unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
         let hooks = &cfg.mailboxes["accounts"].hooks;
         assert_eq!(hooks.len(), 1);
         assert_eq!(hooks[0].origin, crate::hook::HookOrigin::Mcp);
@@ -2227,6 +2757,7 @@ domain = "test.com"
 
 [mailboxes.accounts]
 address = "accounts@test.com"
+owner = "root"
 
 [[mailboxes.accounts.hooks]]
 name = "mcp_raw_danger"
@@ -2265,5 +2796,499 @@ dangerously_support_untrusted = true
             err.contains("MCP-origin") && err.contains("operator-only"),
             "expected mcp-origin dangerously rejection: {err}"
         );
+    }
+
+    // ----- Sprint 1 S1-1: MailboxConfig.owner ---------------------------
+
+    #[test]
+    fn load_accepts_mailbox_with_owner_root() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "root"
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes["support"].owner, "root");
+        assert!(
+            warnings.is_empty(),
+            "root owner must not warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_mailbox_missing_owner_field() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("owner"),
+            "missing owner must produce an actionable error: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_mailbox_empty_owner_string() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "   "
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(err.contains("owner"), "empty owner must reject: {err}");
+    }
+
+    #[test]
+    fn load_mailbox_orphan_owner_warns_not_errors() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_catchall(name: &str) -> Option<ResolvedUser> {
+            // aimx-catchall resolves; everyone else is an orphan.
+            if name == "aimx-catchall" {
+                Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 999,
+                    gid: 999,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(only_catchall);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+
+[mailboxes.orphanbox]
+address = "orphan@test.com"
+owner = "deleted-user"
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes.len(), 2);
+        let orphan_warnings: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, LoadWarning::OrphanMailboxOwner { .. }))
+            .collect();
+        assert_eq!(orphan_warnings.len(), 1, "{warnings:?}");
+        let resolved = Config::resolved_from_warnings(&warnings);
+        assert!(!resolved.is_mailbox_active("orphanbox"));
+        assert!(resolved.is_mailbox_active("catchall"));
+    }
+
+    #[test]
+    fn load_mailbox_owner_roundtrip_preserved() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "root"
+"#,
+        )
+        .unwrap();
+        let (cfg, _warnings) = Config::load(&path).unwrap();
+        let path2 = tmp.path().join("round.toml");
+        cfg.save(&path2).unwrap();
+        let (cfg2, _) = Config::load(&path2).unwrap();
+        assert_eq!(cfg, cfg2);
+        assert_eq!(cfg2.mailboxes["support"].owner, "root");
+        assert_eq!(cfg2.mailboxes["catchall"].owner, "aimx-catchall");
+    }
+
+    // ----- Sprint 1 S1-2: validate_run_as -------------------------------
+
+    #[test]
+    fn validate_run_as_reserved_root() {
+        assert!(matches!(
+            validate_run_as("root").unwrap(),
+            RunAsKind::Reserved("root")
+        ));
+    }
+
+    #[test]
+    fn validate_run_as_reserved_catchall() {
+        assert!(matches!(
+            validate_run_as("aimx-catchall").unwrap(),
+            RunAsKind::Reserved("aimx-catchall")
+        ));
+    }
+
+    #[test]
+    fn validate_run_as_rejects_uppercase_username() {
+        assert_eq!(
+            validate_run_as("Alice"),
+            Err(ConfigError::InvalidUsername("Alice".into()))
+        );
+    }
+
+    #[test]
+    fn validate_run_as_rejects_unicode_username() {
+        assert_eq!(
+            validate_run_as("alicé"),
+            Err(ConfigError::InvalidUsername("alicé".into()))
+        );
+    }
+
+    #[test]
+    fn validate_run_as_rejects_leading_digit() {
+        assert_eq!(
+            validate_run_as("9bad"),
+            Err(ConfigError::InvalidUsername("9bad".into()))
+        );
+    }
+
+    #[test]
+    fn validate_run_as_resolves_via_getpwnam_or_returns_orphan() {
+        // Happy path — root is the only universal username on a real
+        // Linux host. Under test override, we can exercise both the
+        // resolve-success and resolve-miss branches deterministically.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            if name == "alice" {
+                Some(ResolvedUser {
+                    name: "alice".into(),
+                    uid: 1001,
+                    gid: 1001,
+                })
+            } else if name == "root" {
+                Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(resolver);
+        match validate_run_as("alice").unwrap() {
+            RunAsKind::User(u) => assert_eq!(u.uid, 1001),
+            other => panic!("expected User, got {other:?}"),
+        }
+        assert_eq!(
+            validate_run_as("deleted"),
+            Err(ConfigError::OrphanUser("deleted".into()))
+        );
+    }
+
+    // ----- Sprint 1 S1-3: check_hook_owner_invariant --------------------
+
+    fn mailbox_for_invariant(address: &str, owner: &str) -> MailboxConfig {
+        MailboxConfig {
+            address: address.into(),
+            owner: owner.into(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+        }
+    }
+
+    fn hook_for_invariant(run_as: Option<&str>) -> Hook {
+        Hook {
+            name: Some("h1".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo hi".into(),
+            dangerously_support_untrusted: false,
+            origin: HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
+            run_as: run_as.map(|s| s.to_string()),
+        }
+    }
+
+    fn invariant_config(domain: &str) -> Config {
+        Config {
+            domain: domain.into(),
+            data_dir: PathBuf::from("/tmp/x"),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes: HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[test]
+    fn invariant_matching_owner_passes() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "alice");
+        let h = hook_for_invariant(Some("alice"));
+        assert!(check_hook_owner_invariant(&cfg, "alice", &mb, &h).is_ok());
+    }
+
+    #[test]
+    fn invariant_mismatched_owner_fails_with_clear_message() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "alice");
+        let h = hook_for_invariant(Some("bob"));
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        assert!(
+            err.contains("run_as='bob'") && err.contains("owned by 'alice'"),
+            "message must name both run_as and owner: {err}"
+        );
+        assert!(err.contains("set run_as="), "{err}");
+    }
+
+    #[test]
+    fn invariant_root_always_passes_even_on_non_catchall() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "alice");
+        let h = hook_for_invariant(Some("root"));
+        assert!(check_hook_owner_invariant(&cfg, "alice", &mb, &h).is_ok());
+    }
+
+    #[test]
+    fn invariant_root_always_passes_on_catchall() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("*@test.com", "aimx-catchall");
+        let h = hook_for_invariant(Some("root"));
+        assert!(check_hook_owner_invariant(&cfg, "catchall", &mb, &h).is_ok());
+    }
+
+    #[test]
+    fn invariant_catchall_accepts_aimx_catchall_run_as() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("*@test.com", "aimx-catchall");
+        let h = hook_for_invariant(Some("aimx-catchall"));
+        assert!(check_hook_owner_invariant(&cfg, "catchall", &mb, &h).is_ok());
+    }
+
+    #[test]
+    fn invariant_catchall_rejects_non_catchall_run_as() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("*@test.com", "aimx-catchall");
+        let h = hook_for_invariant(Some("alice"));
+        let err = check_hook_owner_invariant(&cfg, "catchall", &mb, &h).unwrap_err();
+        assert!(
+            err.contains("aimx-catchall") && err.contains("catchall"),
+            "catchall error must name the expected run_as: {err}"
+        );
+    }
+
+    #[test]
+    fn invariant_non_catchall_rejects_aimx_catchall_run_as() {
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "alice");
+        let h = hook_for_invariant(Some("aimx-catchall"));
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        assert!(err.contains("run_as='aimx-catchall'"), "{err}");
+    }
+
+    #[test]
+    fn load_enforces_invariant_on_mailbox_hook() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        // Hook run_as does not match owner and is not root → hard fail.
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.alice]
+address = "alice@test.com"
+owner = "root"
+
+[[mailboxes.alice.hooks]]
+name = "mismatch"
+event = "on_receive"
+cmd = "echo hi"
+run_as = "someoneelse"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("run_as='someoneelse'"),
+            "load must bubble the invariant error: {err}"
+        );
+    }
+
+    // ----- Sprint 1 S1-4: Orphan tolerance -------------------------------
+
+    #[test]
+    fn load_valid_config_produces_empty_warning_vec() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "root"
+"#,
+        )
+        .unwrap();
+        let (_cfg, warnings) = Config::load(&path).unwrap();
+        assert!(
+            warnings.is_empty(),
+            "valid config should warn nothing: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_template_orphan_run_as_surfaces_as_warning() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_root(name: &str) -> Option<ResolvedUser> {
+            if name == "root" {
+                Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                })
+            } else if name == "aimx-catchall" {
+                Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 999,
+                    gid: 999,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(only_root);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[[hook_template]]
+name = "orphan-tmpl"
+description = "points at a non-existent user"
+cmd = ["/bin/true"]
+run_as = "ghost"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.hook_templates.len(), 1);
+        let orphan_warnings: Vec<_> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                LoadWarning::OrphanTemplateRunAs { template, run_as } => {
+                    Some((template.clone(), run_as.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            orphan_warnings,
+            vec![("orphan-tmpl".to_string(), "ghost".to_string())]
+        );
+        let resolved = Config::resolved_from_warnings(&warnings);
+        assert!(
+            !resolved.is_template_active("orphan-tmpl"),
+            "orphan templates must flag as inactive"
+        );
+    }
+
+    #[test]
+    fn load_mixed_valid_and_orphan_only_orphans_surface() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_alice_and_reserved(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "alice" => Some(ResolvedUser {
+                    name: "alice".into(),
+                    uid: 1001,
+                    gid: 1001,
+                }),
+                "root" => Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                }),
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: "aimx-catchall".into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(only_alice_and_reserved);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+
+[mailboxes.alice]
+address = "alice@test.com"
+owner = "alice"
+
+[mailboxes.ghostbox]
+address = "ghost@test.com"
+owner = "ghost-user"
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes.len(), 3);
+        assert_eq!(warnings.len(), 1);
+        assert!(matches!(
+            &warnings[0],
+            LoadWarning::OrphanMailboxOwner { mailbox, owner }
+                if mailbox == "ghostbox" && owner == "ghost-user"
+        ));
     }
 }

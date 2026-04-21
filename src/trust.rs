@@ -181,6 +181,7 @@ mod tests {
     fn mailbox_none() -> MailboxConfig {
         MailboxConfig {
             address: "*@test.com".to_string(),
+            owner: "aimx-catchall".to_string(),
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
             hooks: vec![],
@@ -190,6 +191,7 @@ mod tests {
     fn mailbox_verified(trusted_senders: Vec<String>) -> MailboxConfig {
         MailboxConfig {
             address: "secure@test.com".to_string(),
+            owner: "root".to_string(),
             trust: Some("verified".to_string()),
             trusted_senders: Some(trusted_senders),
             hooks: vec![],
@@ -292,6 +294,7 @@ mod tests {
         let cfg = bare_config();
         let mb = MailboxConfig {
             address: "test@test.com".to_string(),
+            owner: "root".to_string(),
             trust: Some("typo".to_string()),
             trusted_senders: Some(vec![]),
             hooks: vec![],
@@ -308,6 +311,7 @@ mod tests {
 
         let mb = MailboxConfig {
             address: "any@test.com".to_string(),
+            owner: "root".to_string(),
             trust: None,
             trusted_senders: None,
             hooks: vec![],
@@ -328,6 +332,7 @@ mod tests {
 
         let mb = MailboxConfig {
             address: "public@test.com".to_string(),
+            owner: "root".to_string(),
             trust: Some("none".to_string()),
             trusted_senders: None,
             hooks: vec![],
@@ -345,6 +350,7 @@ mod tests {
 
         let mb = MailboxConfig {
             address: "strict@test.com".to_string(),
+            owner: "root".to_string(),
             trust: None,
             trusted_senders: Some(vec!["boss@company.com".to_string()]),
             hooks: vec![],
