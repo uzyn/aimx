@@ -57,15 +57,15 @@ jobs:
       # create system users.
       #
       # `sudo` on Ubuntu runners clears PATH via `secure_path`, which
-      # drops `$HOME/.cargo/bin` and makes `cargo` unresolvable inside
-      # the sudo environment. Resolve the toolchain cargo to an absolute
-      # path with `rustup which cargo` and invoke it directly so the
-      # isolation job actually runs the test body instead of exiting
-      # 127 on step invocation.
+      # drops `$HOME/.cargo/bin` and makes `cargo` / `rustc` unresolvable
+      # inside the sudo environment. Propagate the full PATH via `env
+      # PATH=$PATH` so both `cargo` and the `rustc -vV` probe cargo runs
+      # internally can be resolved. Without this, the step exits 127 on
+      # step invocation (cargo missing) or 101 (rustc missing, reported
+      # by cargo itself), and the test body never runs.
       - name: Run isolation integration test (root)
         run: |
-          CARGO_BIN="$(rustup which cargo)"
-          sudo -E env AIMX_INTEGRATION_SUDO=1 "$CARGO_BIN" test --test isolation -- --ignored
+          sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test isolation -- --ignored
 
   verifier-tests:
     runs-on: ubuntu-latest
