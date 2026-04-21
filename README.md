@@ -1,16 +1,17 @@
-# aimx
+# AIMX — AI Mail Exchange
 
-> You give your agents an entire server. Why borrow someone else's inbox?
-
-**SMTP for agents. No middleman.**
-
-> The internet's oldest protocol, rebuilt for agents.
-> Runs entirely on your box. No third parties.
-> Your mail, your machine, end to end.
-> Human-friendly setup. LLM-friendly everything else.
 
 > [!CAUTION]
 > **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes in v0 releases. Pin to an exact version if you use it on stable systems.
+
+<h3 align="center">SMTP for AI agents. No middleman.</h2>
+
+<p align="center">
+The internet's oldest protocol, rebuilt for agents.<br>
+Runs entirely on your box. No third parties.<br>
+Your mail, your machine, end to end.<br>
+Human-friendly setup. LLM-friendly everything else.  
+</p>
 
 
 AIMX (AI Mail Exchange) is a self-hosted mail server for AI agents. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted means full sovereignty.
@@ -19,18 +20,18 @@ Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capa
 
 
 - **Single binary.** One binary, no other dependencies.
-- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. aimx turns it back into direct server-to-server delivery, closer to an API call.
+- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. aimx turns it back into direct server-to-server delivery. Feels like an API call.
 - **Push, not poll.** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
-- **Trust modeling.** Signatures verified on ingest, stamped into the frontmatter. Configurable globally or per mailbox.
-- **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
-- **Markdown-first storage.** No `.eml`, no database. Just Markdown with TOML frontmatter, LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
+- **Markdown emails.** No `.eml`, no database. Just Markdown with TOML frontmatter, LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
+- **Trust modeling.** Built-in DKIM-based trust model. Widely compatible. Minimizes prompt injection attacks.
 - **You own the inbox.** Mail lives on your disk, under your domain. Nothing phones home.
 - **Hot-swappable mailboxes.** Agents (or you) create and manage mailboxes. Changes take effect live.
-- **Built-in MCP server.** Stdio tools: list, read, send, reply, mark read/unread, mailbox CRUD.
-- **One-line agent integration.** `aimx agent-setup` wires aimx into any supported agent above.
+- **Built-in MCP server.** Stdio MCP. Efficient. Create address, send mail, receive mail and more.
+- **One-line agent integration.** Integrates directly into your favorite AI agents: OpenClaw, Claude Code, etc.
+- **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
 - **MIT licensed.** No license server, no telemetry, no account.
 
-Check [Frequently Asked Questions](book/faq.md) for more.
+Read the [Book](book/) to learn more. See also [Frequently Asked Questions](book/faq.md).
 
 ## Requirements
 
@@ -184,4 +185,4 @@ See [`book/mailboxes.md`](book/mailboxes.md#email-format) for the full field sch
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
-Copyright (c) [U-Zyn Chua](https://uzyn.com).
+Copyright (c) 2026 [U-Zyn Chua](https://uzyn.com).
