@@ -4349,10 +4349,12 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
 /// Like `setup_test_env`, but also registers a single `invoke-claude`
 /// template so the Sprint 5 MCP tool tests have something to bind to.
 fn setup_test_env_with_template(tmp: &Path) -> String {
-    // `run_as = "aimx-hook"` is retained so this fixture exercises the
-    // Sprint 1 S1-4 orphan-tolerance path: the template loads with a
-    // LoadWarning but is still surfaced to MCP (subject to Sprint 6's
-    // orphan filtering — not yet implemented).
+    // `run_as = "root"` is used here so the fixture loads on any CI
+    // host (Sprint 1 S1-2 retired the `aimx-hook` system user; `root`
+    // always resolves and is invariant-safe for any mailbox owner).
+    // Sprint 2 will introduce a real non-root test user and flip this
+    // back to exercise the orphan-tolerance path the earlier comment
+    // described.
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
          [[hook_template]]\n\
@@ -5019,6 +5021,12 @@ owner = "root"
         let uid_str = std::fs::read_to_string(&uid_log)
             .expect("mock-curl uid log must exist when running as root");
         let uid: u32 = uid_str.trim().parse().expect("uid log must be numeric");
+        // TODO(sprint-2): Sprint 2 creates a real non-root test user so
+        // this assertion can flip back to `uid != 0` — the original
+        // assertion that exercised the privilege-drop path. The current
+        // `uid == 0` form was a Sprint 1 concession: the fixture uses
+        // `run_as = "root"` because `aimx-hook` no longer exists, so
+        // there is no privilege drop to observe yet.
         assert_eq!(
             uid, 0,
             "subprocess must run as root when template sets run_as = root"

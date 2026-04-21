@@ -403,6 +403,16 @@ pub enum LoadWarning {
     /// The template is retained but flagged orphan; Sprint 6's doctor
     /// work surfaces it.
     OrphanTemplateRunAs { template: String, run_as: String },
+    /// The hook/mailbox owner invariant (PRD §6.3) was skipped at load
+    /// because either the mailbox owner or the hook's effective `run_as`
+    /// is orphan-flagged. Per PRD §6.1 the daemon stays up — the hook is
+    /// unfireable until the user reappears, at which point the next SIGHUP
+    /// / restart re-runs the invariant check.
+    HookInvariantSkippedDueToOrphan {
+        mailbox: String,
+        hook_name: String,
+        reason: String,
+    },
     /// A stale `aimx-hook` system user is present on the host. aimx no
     /// longer creates this user; doctor notes its presence so the
     /// operator can clean up.
@@ -430,6 +440,15 @@ impl LoadWarning {
             LoadWarning::OrphanTemplateRunAs { template, run_as } => format!(
                 "hook template '{template}' has run_as='{run_as}' which does \
                  not resolve; template marked orphan"
+            ),
+            LoadWarning::HookInvariantSkippedDueToOrphan {
+                mailbox,
+                hook_name,
+                reason,
+            } => format!(
+                "hook '{hook_name}' on mailbox '{mailbox}': owner/run_as \
+                 invariant skipped — {reason}; hook will be soft-skipped \
+                 on fire until the user reappears (PRD §6.1)"
             ),
             LoadWarning::LegacyAimxHookUser => {
                 "legacy 'aimx-hook' system user present; aimx no longer \
@@ -517,13 +536,23 @@ pub fn check_hook_owner_invariant(
     }
 
     let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+    // When the mailbox owner is already `root` the fallback hint
+    // (`or run_as='root'`) would duplicate the primary suggestion, so
+    // drop the `or` clause for that one case.
+    let fix_suggestion = if mailbox.owner == RESERVED_RUN_AS_ROOT {
+        format!("set run_as='{RESERVED_RUN_AS_ROOT}'")
+    } else {
+        format!(
+            "set run_as='{owner}' or run_as='{root}'",
+            owner = mailbox.owner,
+            root = RESERVED_RUN_AS_ROOT,
+        )
+    };
     Err(format!(
         "hook '{hook_label}' on mailbox '{mailbox_name}' has run_as='{run_as}' \
-         but the mailbox is owned by '{owner}'; fix: set run_as='{owner}' \
-         or run_as='{root}' so the hook can read this mailbox's files \
-         (PRD §6.3)",
+         but the mailbox is owned by '{owner}'; fix: {fix_suggestion} so the \
+         hook can read this mailbox's files (PRD §6.3)",
         owner = mailbox.owner,
-        root = RESERVED_RUN_AS_ROOT,
     ))
 }
 
@@ -601,7 +630,66 @@ fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
-pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
+/// Context passed to [`validate_hooks`] describing which mailbox
+/// owners / template `run_as` names were already flagged orphan by the
+/// surrounding load-time validators. `validate_hooks` uses the sets to
+/// downgrade the hook/owner invariant check (PRD §6.3) to a warning
+/// when either side is unresolvable — PRD §6.1's orphan tolerance
+/// requires that a user deletion cannot kill the daemon.
+///
+/// Callers that create fresh hooks (UDS `HOOK-CREATE`, `aimx hooks
+/// create`) pass `OrphanSkipContext::strict()`: at create time we do
+/// not want to silently accept a hook whose `run_as` can't be resolved.
+#[derive(Debug, Default)]
+pub(crate) struct OrphanSkipContext {
+    /// Mailboxes whose `owner` did not resolve at load time.
+    pub orphan_mailbox_owners: std::collections::HashSet<String>,
+    /// Hook templates whose `run_as` did not resolve at load time.
+    pub orphan_templates: std::collections::HashSet<String>,
+    /// Per-mailbox hook names whose explicit `run_as` did not resolve.
+    /// Keyed by `(mailbox, hook_effective_name)` so we only skip the
+    /// specific hook that was flagged, not every hook on the mailbox.
+    pub orphan_hook_run_as: std::collections::HashSet<(String, String)>,
+}
+
+impl OrphanSkipContext {
+    /// Strict context: no orphan skipping. Used by UDS / CLI create
+    /// paths where the operator is actively introducing a new hook.
+    pub(crate) fn strict() -> Self {
+        Self::default()
+    }
+
+    /// Build a context from an in-progress warning vector. Called by
+    /// [`Config::load`] after the owner / template / hook-run_as
+    /// validators have run so the invariant pass can see which names
+    /// are already known orphan.
+    pub(crate) fn from_warnings(warnings: &[LoadWarning]) -> Self {
+        let mut ctx = Self::default();
+        for w in warnings {
+            match w {
+                LoadWarning::OrphanMailboxOwner { mailbox, .. } => {
+                    ctx.orphan_mailbox_owners.insert(mailbox.clone());
+                }
+                LoadWarning::OrphanTemplateRunAs { template, .. } => {
+                    ctx.orphan_templates.insert(template.clone());
+                }
+                LoadWarning::OrphanHookRunAs {
+                    mailbox, hook_name, ..
+                } => {
+                    ctx.orphan_hook_run_as
+                        .insert((mailbox.clone(), hook_name.clone()));
+                }
+                _ => {}
+            }
+        }
+        ctx
+    }
+}
+
+pub(crate) fn validate_hooks(
+    config: &Config,
+    orphan_ctx: &OrphanSkipContext,
+) -> Result<Vec<LoadWarning>, String> {
     // Effective-name map: name -> (mailbox, is_explicit).
     let mut seen: HashMap<String, (String, bool)> = HashMap::new();
     let template_names: std::collections::HashSet<&str> = config
@@ -609,6 +697,7 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
         .iter()
         .map(|t| t.name.as_str())
         .collect();
+    let mut warnings: Vec<LoadWarning> = Vec::new();
 
     for (mailbox_name, mb) in &config.mailboxes {
         for hook in &mb.hooks {
@@ -684,9 +773,43 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
             // Hook/mailbox owner invariant (PRD §6.3). Runs after the
             // template-reference check so we know the template exists
             // (when referenced) before resolving the effective run_as.
-            check_hook_owner_invariant(config, mailbox_name, mb, hook)?;
+            //
+            // PRD §6.1 orphan tolerance: if either the mailbox owner or
+            // the effective run_as is orphan-flagged by the surrounding
+            // validators, downgrade the invariant mismatch to a warning
+            // — the hook is unfireable anyway and the daemon must stay
+            // up on a user-deletion event.
+            let hook_effective_name = effective_hook_name(hook);
+            let owner_is_orphan = orphan_ctx.orphan_mailbox_owners.contains(mailbox_name);
+            let hook_run_as_is_orphan = orphan_ctx
+                .orphan_hook_run_as
+                .contains(&(mailbox_name.clone(), hook_effective_name.clone()));
+            let template_is_orphan = hook
+                .template
+                .as_ref()
+                .is_some_and(|t| orphan_ctx.orphan_templates.contains(t));
+            if owner_is_orphan || hook_run_as_is_orphan || template_is_orphan {
+                if let Err(_reason) = check_hook_owner_invariant(config, mailbox_name, mb, hook) {
+                    let skip_reason = if owner_is_orphan {
+                        format!("mailbox owner '{}' is orphan", mb.owner)
+                    } else if template_is_orphan {
+                        let tmpl = hook.template.as_deref().unwrap_or("<unknown>");
+                        format!("template '{tmpl}' run_as is orphan")
+                    } else {
+                        let run_as = hook.run_as.as_deref().unwrap_or("<unknown>");
+                        format!("hook run_as '{run_as}' is orphan")
+                    };
+                    warnings.push(LoadWarning::HookInvariantSkippedDueToOrphan {
+                        mailbox: mailbox_name.clone(),
+                        hook_name: hook_effective_name.clone(),
+                        reason: skip_reason,
+                    });
+                }
+            } else {
+                check_hook_owner_invariant(config, mailbox_name, mb, hook)?;
+            }
 
-            let effective = effective_hook_name(hook);
+            let effective = hook_effective_name;
             let is_explicit = hook.name.is_some();
             if let Some((prior_mb, prior_explicit)) =
                 seen.insert(effective.clone(), (mailbox_name.clone(), is_explicit))
@@ -714,7 +837,7 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
             }
         }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 /// Expose for the daemon handler, which needs to pre-validate a single
@@ -958,24 +1081,24 @@ fn is_valid_placeholder_name(s: &str) -> bool {
 }
 
 /// Resolve every mailbox `owner` via [`validate_run_as`]. Regex
-/// failures hard-reject; `getpwnam` misses surface as orphan warnings
-/// (PRD §6.2). Reserved names (`root`, `aimx-catchall`) pass silently —
-/// the extra rules around root / catchall owners land in Sprint 3's
-/// S3-4 check.
-fn validate_mailbox_owners(config: &Config) -> Vec<LoadWarning> {
+/// failures hard-reject (symmetric with [`validate_hook_run_as`] — per
+/// PRD §6.1 a regex-invalid owner can never resolve, so it is treated
+/// as a config typo rather than an orphan). `getpwnam` misses surface
+/// as [`LoadWarning::OrphanMailboxOwner`] (PRD §6.2). Reserved names
+/// (`root`, `aimx-catchall`) pass silently — the extra rules around
+/// root / catchall owners land in Sprint 3's S3-4 check.
+fn validate_mailbox_owners(config: &Config) -> Result<Vec<LoadWarning>, String> {
     let mut warnings = Vec::new();
     for (name, mb) in &config.mailboxes {
         match validate_run_as(&mb.owner) {
             Ok(_) => {}
             Err(ConfigError::InvalidUsername(_)) => {
-                // Regex-invalid usernames can never resolve. We return
-                // this as a warning rather than a hard failure so the
-                // daemon stays up, but it will always be flagged by
-                // doctor and the mailbox is inactive.
-                warnings.push(LoadWarning::OrphanMailboxOwner {
-                    mailbox: name.clone(),
-                    owner: mb.owner.clone(),
-                });
+                return Err(format!(
+                    "mailbox '{name}' has invalid owner '{owner}': must be \
+                     'root', 'aimx-catchall', or a valid Linux username \
+                     matching [a-z_][a-z0-9_-]*[$]?",
+                    owner = mb.owner,
+                ));
             }
             Err(ConfigError::OrphanUser(_)) => {
                 warnings.push(LoadWarning::OrphanMailboxOwner {
@@ -985,7 +1108,7 @@ fn validate_mailbox_owners(config: &Config) -> Vec<LoadWarning> {
             }
         }
     }
-    warnings
+    Ok(warnings)
 }
 
 /// Resolve every hook's explicit `run_as` (when set) — template
@@ -1079,12 +1202,19 @@ impl Config {
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let mut warnings = validate_hook_templates(&config.hook_templates)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-        let mailbox_warnings = validate_mailbox_owners(&config);
+        let mailbox_warnings = validate_mailbox_owners(&config)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         warnings.extend(mailbox_warnings);
         let hook_warnings = validate_hook_run_as(&config)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         warnings.extend(hook_warnings);
-        validate_hooks(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        // Derive orphan-context for the invariant skip (PRD §6.1): a hook
+        // whose effective run_as or mailbox owner is orphan-flagged must
+        // not hard-fail the load, since the hook is unfireable anyway.
+        let orphan_ctx = OrphanSkipContext::from_warnings(&warnings);
+        let invariant_warnings = validate_hooks(&config, &orphan_ctx)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        warnings.extend(invariant_warnings);
         Ok((config, warnings))
     }
 
@@ -3120,9 +3250,36 @@ owner = "root"
 
     #[test]
     fn load_enforces_invariant_on_mailbox_hook() {
+        // Hook run_as resolves via getpwnam but does not match the owner
+        // and is not root → hard fail. We inject a resolver so the
+        // mismatched user exists; this isolates the invariant check
+        // from the orphan-tolerance path (see
+        // `load_orphan_mailbox_owner_with_invariant_mismatch_becomes_warning`
+        // for the orphan-skip coverage).
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "root" => Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                }),
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: "aimx-catchall".into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                "someoneelse" => Some(ResolvedUser {
+                    name: "someoneelse".into(),
+                    uid: 1234,
+                    gid: 1234,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(resolver);
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
-        // Hook run_as does not match owner and is not root → hard fail.
         std::fs::write(
             &path,
             r#"
@@ -3290,5 +3447,273 @@ owner = "ghost-user"
             LoadWarning::OrphanMailboxOwner { mailbox, owner }
                 if mailbox == "ghostbox" && owner == "ghost-user"
         ));
+    }
+
+    // ----- Review-cycle follow-ups --------------------------------------
+
+    #[test]
+    fn invariant_error_drops_redundant_root_when_owner_is_root() {
+        // When the mailbox owner is `root`, the fallback hint
+        // (`or run_as='root'`) collides with the primary suggestion.
+        // The message should render just `set run_as='root'` — no
+        // `or run_as='root'` duplication.
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "root");
+        let h = hook_for_invariant(Some("nobody"));
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        assert!(
+            err.contains("set run_as='root'"),
+            "message must suggest run_as=root: {err}"
+        );
+        assert!(
+            !err.contains("or run_as='root'"),
+            "message must not duplicate run_as='root' in the or-clause: {err}"
+        );
+    }
+
+    #[test]
+    fn invariant_error_retains_or_clause_for_non_root_owner() {
+        // Sanity: when the owner is not `root`, the `or run_as='root'`
+        // clause must still be present.
+        let cfg = invariant_config("test.com");
+        let mb = mailbox_for_invariant("alice@test.com", "alice");
+        let h = hook_for_invariant(Some("nobody"));
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        assert!(err.contains("set run_as='alice'"), "{err}");
+        assert!(err.contains("or run_as='root'"), "{err}");
+    }
+
+    #[test]
+    fn load_regex_invalid_mailbox_owner_hard_fails() {
+        // PRD §6.1 — regex-invalid usernames are hard-rejected so the
+        // behavior matches `validate_hook_run_as`. A stray "Bad Name"
+        // typed into the owner field must not silently degrade to a
+        // warning (the earlier behavior was asymmetric with the hook
+        // run_as side and confused operators).
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.weird]
+address = "weird@test.com"
+owner = "Bad Name"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid owner") && err.contains("Bad Name"),
+            "load must hard-fail on regex-invalid owner: {err}"
+        );
+    }
+
+    #[test]
+    fn load_orphan_template_with_invariant_mismatch_becomes_warning() {
+        // PRD §6.1 orphan tolerance interplay with PRD §6.3 invariant:
+        // a template whose `run_as` is orphan-flagged must not hard-
+        // fail the load even when attached to a mailbox with a valid,
+        // non-matching owner. The hook is unfireable anyway; the
+        // daemon must stay up. Regression coverage for the reviewer-
+        // reproduced failure mode.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_reserved(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "root" => Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                }),
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: "aimx-catchall".into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(only_reserved);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[[hook_template]]
+name = "t1"
+description = "bound to a deleted user"
+cmd = ["/bin/true"]
+run_as = "totally-missing-user"
+
+[mailboxes.alice]
+address = "alice@test.com"
+owner = "root"
+
+[[mailboxes.alice.hooks]]
+name = "uses-t1"
+event = "on_receive"
+template = "t1"
+"#,
+        )
+        .unwrap();
+        let (_cfg, warnings) = Config::load(&path).expect(
+            "orphan template + invariant-mismatch must load with warnings, not error (PRD §6.1)",
+        );
+
+        let orphan_template: Vec<_> = warnings
+            .iter()
+            .filter(|w| matches!(w, LoadWarning::OrphanTemplateRunAs { template, .. } if template == "t1"))
+            .collect();
+        assert_eq!(orphan_template.len(), 1, "{warnings:?}");
+
+        let skipped: Vec<_> = warnings
+            .iter()
+            .filter(|w| {
+                matches!(
+                    w,
+                    LoadWarning::HookInvariantSkippedDueToOrphan { mailbox, hook_name, .. }
+                        if mailbox == "alice" && hook_name == "uses-t1"
+                )
+            })
+            .collect();
+        assert_eq!(
+            skipped.len(),
+            1,
+            "invariant-skip warning must fire for the orphan-template hook: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_orphan_mailbox_owner_with_invariant_mismatch_becomes_warning() {
+        // Mirror of the orphan-template case: a mailbox whose `owner`
+        // is orphan-flagged plus a hook that would otherwise violate
+        // the invariant must soft-pass. The daemon stays up and the
+        // mailbox is inactive; the hook never fires.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_reserved(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "root" => Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                }),
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: "aimx-catchall".into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(only_reserved);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.ghostbox]
+address = "ghost@test.com"
+owner = "deleted-user"
+
+[[mailboxes.ghostbox.hooks]]
+name = "stale"
+event = "on_receive"
+cmd = "echo hi"
+run_as = "root"
+"#,
+        )
+        .unwrap();
+        // Note: here the hook run_as='root' IS valid against any owner
+        // (even an orphan one), so no invariant skip fires — the
+        // invariant would pass normally. Add a second fixture where
+        // the mismatch is real to exercise the skip branch.
+        let (_cfg, warnings) = Config::load(&path).expect("must load");
+        assert!(
+            warnings.iter().any(|w| matches!(
+                w,
+                LoadWarning::OrphanMailboxOwner { mailbox, .. } if mailbox == "ghostbox"
+            )),
+            "orphan mailbox owner must surface: {warnings:?}"
+        );
+
+        // Second fixture: orphan owner + non-root mismatched run_as.
+        let path2 = tmp.path().join("config2.toml");
+        std::fs::write(
+            &path2,
+            r#"
+domain = "test.com"
+
+[mailboxes.ghostbox]
+address = "ghost@test.com"
+owner = "deleted-user"
+
+[[mailboxes.ghostbox.hooks]]
+name = "stale"
+event = "on_receive"
+cmd = "echo hi"
+run_as = "aimx-catchall"
+"#,
+        )
+        .unwrap();
+        let (_cfg2, warnings2) = Config::load(&path2).expect(
+            "orphan owner + invariant-mismatch must load with warnings, not error (PRD §6.1)",
+        );
+        assert!(
+            warnings2.iter().any(|w| matches!(
+                w,
+                LoadWarning::HookInvariantSkippedDueToOrphan { mailbox, hook_name, .. }
+                    if mailbox == "ghostbox" && hook_name == "stale"
+            )),
+            "invariant-skip warning must fire when mailbox owner is orphan: {warnings2:?}"
+        );
+    }
+
+    #[test]
+    fn load_fresh_hook_create_still_hard_rejects_invariant_mismatch() {
+        // Regression guard: the orphan-skip only triggers on the load
+        // path. The strict `OrphanSkipContext` used by UDS `HOOK-CREATE`
+        // and `aimx hooks create` must still hard-reject an invariant
+        // mismatch even when an orphan template is present in the same
+        // config. This test invokes `validate_hooks` directly with the
+        // strict context to pin the semantics.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn only_reserved(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "root" => Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                }),
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: "aimx-catchall".into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(only_reserved);
+
+        let mut cfg = invariant_config("test.com");
+        cfg.mailboxes.insert(
+            "alice".into(),
+            mailbox_for_invariant("alice@test.com", "root"),
+        );
+        cfg.mailboxes
+            .get_mut("alice")
+            .unwrap()
+            .hooks
+            .push(hook_for_invariant(Some("totally-missing")));
+
+        let err = validate_hooks(&cfg, &OrphanSkipContext::strict()).unwrap_err();
+        assert!(
+            err.contains("run_as='totally-missing'"),
+            "strict context must surface the invariant error: {err}"
+        );
     }
 }

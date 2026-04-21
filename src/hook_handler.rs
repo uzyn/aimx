@@ -31,7 +31,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{Config, HookTemplate, validate_hooks, validate_single_hook};
+use crate::config::{
+    Config, HookTemplate, OrphanSkipContext, validate_hooks, validate_single_hook,
+};
 use crate::hook::{Hook, HookEvent, HookOrigin, effective_hook_name, is_valid_hook_name};
 use crate::hook_substitute::{BuiltinContext, substitute_argv};
 use crate::mailbox_handler::{CONFIG_WRITE_LOCK, MailboxContext, write_config_atomic};
@@ -205,8 +207,12 @@ pub async fn handle_hook_create(
     }
 
     // Re-run the full load-time validator so the daemon refuses to write
-    // a config that would fail on next start.
-    if let Err(reason) = validate_hooks(&new_config) {
+    // a config that would fail on next start. UDS HOOK-CREATE is a fresh
+    // create path, not a migration load, so we pass the strict context:
+    // orphan-skip only applies when the daemon is booting an existing
+    // config with a now-missing user (PRD §6.1). Operators creating hooks
+    // through MCP/UDS must point at resolvable users.
+    if let Err(reason) = validate_hooks(&new_config, &OrphanSkipContext::strict()) {
         return AckResponse::Err {
             code: ErrCode::Validation,
             reason,

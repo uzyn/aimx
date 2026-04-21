@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 
 use crate::cli::{HookCommand, HookCreateArgs};
-use crate::config::{Config, validate_hooks};
+use crate::config::{Config, OrphanSkipContext, validate_hooks};
 use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
 use crate::hook_client::{
     HookCrudFallback, submit_hook_delete_via_daemon, submit_hook_template_create_via_daemon,
@@ -490,7 +490,11 @@ fn apply_create_direct(
     if let Some(mb) = new_config.mailboxes.get_mut(mailbox) {
         mb.hooks.push(hook);
     }
-    validate_hooks(&new_config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    // Fresh create path: orphan-skip does not apply — if the operator
+    // typed a missing user, surface the invariant error now, not at
+    // next daemon restart.
+    validate_hooks(&new_config, &OrphanSkipContext::strict())
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     new_config.save(&crate::config::config_path())?;
     Ok(())
 }
