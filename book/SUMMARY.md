@@ -8,6 +8,7 @@
 - [Mailboxes & Email](mailboxes.md)
 - [Hooks & Trust](hooks.md)
 - [Hook Recipes](hook-recipes.md)
+- [Security](security.md)
 - [MCP Server](mcp.md)
 - [Agent Integration](agent-integration.md)
 - [CLI Reference](cli.md)

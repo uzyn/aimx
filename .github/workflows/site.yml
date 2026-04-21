@@ -41,6 +41,7 @@ jobs:
           test -f website/dist/index.html
           test -f website/dist/book/index.html
           test -f website/dist/book/faq.html
+          test -f website/dist/book/security.html
           test -f website/dist/assets/aimx-pigeon.svg
 
       - name: Add CNAME for custom domain
