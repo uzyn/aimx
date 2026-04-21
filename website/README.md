@@ -32,7 +32,9 @@ Opens a plain Python static server on `http://localhost:8000/`. The guide is at 
 
 ## Deploy
 
-`dist/` is a self-contained static tree. Drop it behind any HTTP server — Caddy, nginx, Cloudflare Pages, GitHub Pages, S3 + CloudFront. No runtime dependencies.
+The site deploys automatically to GitHub Pages (served on `aimx.email`) via `.github/workflows/site.yml`. Any push to `main` that touches `website/**`, `book/**`, or the mascot SVG rebuilds and publishes. Manual runs are available through the **Actions → Site → Run workflow** button.
+
+`dist/` is a self-contained static tree, so if you ever need to deploy elsewhere (Caddy, nginx, Cloudflare Pages, S3 + CloudFront) just drop that directory behind any HTTP server — no runtime dependencies.
 
 ## Layout
 
