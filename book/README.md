@@ -47,6 +47,7 @@ See [Getting Started](getting-started.md) for the full walkthrough.
 | [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
 | [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, match filters, trust gate |
 | [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, Aider) |
+| [Security](security.md) | Threat model, trust boundaries, what aimx defends and what it does not |
 | [MCP Server](mcp.md) | The 9 MCP tools: parameters, frontmatter contract, workflow examples |
 | [Agent Integration](agent-integration.md) | `aimx agent-setup` installer, per-agent configuration, manual MCP wiring |
 | [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
