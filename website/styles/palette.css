@@ -1,0 +1,117 @@
+/* aimx palette — applied to ALL built-in mdBook theme classes so the theme
+   picker effectively chooses between "light" (aimx light) and "coal" (aimx dark).
+   The three remaining slots (rust / navy / ayu) are mapped to sensible siblings
+   rather than left as jarring defaults. Values from docs/branding.md §2.1. */
+
+:root {
+  color-scheme: light;
+}
+
+html.light,
+html.rust,
+html.ayu {
+  --bg: #F4EEE3;
+  --fg: #151310;
+
+  --sidebar-bg: #EBE3D4;
+  --sidebar-fg: #2B2620;
+  --sidebar-non-existant: #8C8270;
+  --sidebar-active: #B9531C;
+  --sidebar-spacer: #D8CFBE;
+
+  --scrollbar: #D8CFBE;
+
+  --icons: #5C5549;
+  --icons-hover: #B9531C;
+
+  --links: #B9531C;
+
+  --inline-code-color: #151310;
+
+  --theme-popup-bg: #F4EEE3;
+  --theme-popup-border: #D8CFBE;
+  --theme-hover: #EBE3D4;
+
+  --quote-bg: #EBE3D4;
+  --quote-border: #B9531C;
+
+  --warning-border: #B9531C;
+
+  --table-border-color: #D8CFBE;
+  --table-header-bg: transparent;
+  --table-alternate-bg: transparent;
+
+  --searchbar-border-color: #D8CFBE;
+  --searchbar-bg: #F4EEE3;
+  --searchbar-fg: #151310;
+  --searchbar-shadow-color: rgba(21, 19, 16, 0.06);
+  --searchresults-header-fg: #5C5549;
+  --searchresults-border-color: #D8CFBE;
+  --searchresults-li-bg: #EBE3D4;
+  --search-mark-bg: #B9531C;
+
+  --color-scheme: light;
+
+  --aimx-paper: #F4EEE3;
+  --aimx-paper-2: #EBE3D4;
+  --aimx-ink: #151310;
+  --aimx-ink-soft: #2B2620;
+  --aimx-ink-faded: #5C5549;
+  --aimx-accent: #B9531C;
+  --aimx-accent-dark: #8E3E14;
+  --aimx-rule: #D8CFBE;
+}
+
+html.coal,
+html.navy {
+  --bg: #1A1612;
+  --fg: #EDE4D3;
+
+  --sidebar-bg: #231D17;
+  --sidebar-fg: #D6CBB5;
+  --sidebar-non-existant: #8C8270;
+  --sidebar-active: #D06B2E;
+  --sidebar-spacer: #2F2821;
+
+  --scrollbar: #2F2821;
+
+  --icons: #8C8270;
+  --icons-hover: #D06B2E;
+
+  --links: #D06B2E;
+
+  --inline-code-color: #EDE4D3;
+
+  --theme-popup-bg: #231D17;
+  --theme-popup-border: #2F2821;
+  --theme-hover: #2F2821;
+
+  --quote-bg: #231D17;
+  --quote-border: #D06B2E;
+
+  --warning-border: #D06B2E;
+
+  --table-border-color: #2F2821;
+  --table-header-bg: transparent;
+  --table-alternate-bg: transparent;
+
+  --searchbar-border-color: #2F2821;
+  --searchbar-bg: #231D17;
+  --searchbar-fg: #EDE4D3;
+  --searchbar-shadow-color: rgba(0, 0, 0, 0.4);
+  --searchresults-header-fg: #8C8270;
+  --searchresults-border-color: #2F2821;
+  --searchresults-li-bg: #2F2821;
+  --search-mark-bg: #D06B2E;
+
+  --color-scheme: dark;
+
+  --aimx-paper: #1A1612;
+  --aimx-paper-2: #231D17;
+  --aimx-ink: #EDE4D3;
+  --aimx-ink-soft: #D6CBB5;
+  --aimx-ink-faded: #8C8270;
+  --aimx-accent: #D06B2E;
+  --aimx-accent-dark: #E6873F;
+  --aimx-rule: #2F2821;
+}

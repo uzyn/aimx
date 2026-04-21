@@ -1,0 +1,233 @@
+/* aimx typography — Fraunces display, IBM Plex Sans body, IBM Plex Mono code.
+   Rules from docs/branding.md §2.2 and §5.3. */
+
+html {
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.content {
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+  font-size: 16px;
+  line-height: 1.65;
+  color: var(--aimx-ink-soft);
+}
+
+.content h1,
+.content h2,
+.content h3,
+.content h4,
+.content h5,
+.content h6 {
+  font-family: 'Fraunces', Georgia, serif;
+  font-weight: 400;
+  color: var(--aimx-ink);
+  letter-spacing: -0.015em;
+  line-height: 1.25;
+  margin-top: 1.8em;
+  margin-bottom: 0.6em;
+}
+
+.content h1 {
+  font-variation-settings: 'opsz' 144;
+  font-size: 2.25em;
+  letter-spacing: -0.022em;
+  margin-top: 0.4em;
+  padding-bottom: 0.35em;
+  border-bottom: 1px solid var(--aimx-rule);
+}
+
+.content h2 {
+  font-variation-settings: 'opsz' 72;
+  font-size: 1.65em;
+  margin-top: 2.2em;
+}
+
+.content h3 {
+  font-variation-settings: 'opsz' 48;
+  font-size: 1.3em;
+}
+
+.content h4 {
+  font-variation-settings: 'opsz' 24;
+  font-size: 1.1em;
+  font-weight: 500;
+}
+
+.content h5,
+.content h6 {
+  font-variation-settings: 'opsz' 18;
+  font-size: 1em;
+  font-weight: 500;
+}
+
+.content p {
+  margin: 0.9em 0;
+  max-width: 72ch;
+}
+
+.content em {
+  font-style: italic;
+  color: var(--aimx-accent-dark);
+}
+
+.content strong {
+  font-weight: 600;
+  color: var(--aimx-ink);
+}
+
+.content a {
+  color: var(--aimx-accent);
+  text-decoration: none;
+  border-bottom: 1px solid var(--aimx-accent);
+  padding-bottom: 1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.content a:hover {
+  color: var(--aimx-accent-dark);
+  border-bottom-color: var(--aimx-accent-dark);
+}
+
+.content a.header,
+.content h1 a,
+.content h2 a,
+.content h3 a,
+.content h4 a,
+.content h5 a,
+.content h6 a {
+  color: var(--aimx-ink);
+  border-bottom: none;
+}
+
+.content a.header:hover,
+.content h1 a:hover,
+.content h2 a:hover,
+.content h3 a:hover,
+.content h4 a:hover {
+  color: var(--aimx-accent);
+}
+
+/* Inline code — paper-2 bg, rule border, 3px radius, 90% body size (branding §5.3). */
+.content code {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+  background: var(--aimx-paper-2);
+  border: 1px solid var(--aimx-rule);
+  border-radius: 3px;
+  padding: 0.05em 0.35em;
+  color: var(--aimx-ink);
+}
+
+/* Block code — no background fill, 2px accent left border, 14px / 1.55 (branding §5.3). */
+.content pre {
+  font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: none;
+  border: none;
+  border-left: 2px solid var(--aimx-accent);
+  border-radius: 0;
+  padding: 0.4em 0 0.4em 1.2em;
+  margin: 1.2em 0;
+  overflow-x: auto;
+  line-height: 1.55;
+}
+
+.content pre code {
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 0;
+  font-size: 14px;
+  color: var(--aimx-ink-soft);
+}
+
+.content pre > .buttons button {
+  color: var(--aimx-ink-faded);
+  background: var(--aimx-paper-2);
+  border: 1px solid var(--aimx-rule);
+  border-radius: 3px;
+}
+
+.content pre > .buttons button:hover {
+  color: var(--aimx-accent);
+  border-color: var(--aimx-accent);
+}
+
+/* Tables — header row underlined, no row stripes, no outer borders (branding §5.3). */
+.content table {
+  border-collapse: collapse;
+  border: none;
+  margin: 1.4em 0;
+  font-size: 0.95em;
+}
+
+.content table thead {
+  background: none;
+}
+
+.content table thead tr {
+  border-bottom: 1px solid var(--aimx-rule);
+}
+
+.content table thead th {
+  font-weight: 600;
+  color: var(--aimx-ink);
+  text-align: left;
+  padding: 0.6em 1em 0.6em 0;
+  border: none;
+  background: none;
+}
+
+.content table tbody tr {
+  border: none;
+  background: none;
+}
+
+.content table tbody tr:nth-child(even) {
+  background: none;
+}
+
+.content table td {
+  padding: 0.55em 1em 0.55em 0;
+  border: none;
+  vertical-align: top;
+}
+
+/* Blockquotes / callouts — no boxed cards. Hairline rule above and below, italic text (branding §5.3). */
+.content blockquote {
+  background: none;
+  border: none;
+  border-top: 1px solid var(--aimx-rule);
+  border-bottom: 1px solid var(--aimx-rule);
+  border-left: 2px solid var(--aimx-accent);
+  padding: 0.6em 0 0.6em 1.2em;
+  margin: 1.4em 0;
+  font-style: italic;
+  color: var(--aimx-ink-soft);
+}
+
+.content blockquote p {
+  margin: 0.35em 0;
+}
+
+.content hr {
+  border: none;
+  border-top: 1px solid var(--aimx-rule);
+  margin: 2.2em 0;
+}
+
+.content ul,
+.content ol {
+  margin: 0.9em 0;
+  padding-left: 1.6em;
+  max-width: 72ch;
+}
+
+.content li {
+  margin: 0.3em 0;
+}
+
+.content li::marker {
+  color: var(--aimx-ink-faded);
+}
