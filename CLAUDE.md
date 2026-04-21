@@ -84,6 +84,12 @@ These are NOT a Cargo workspace. They have independent `Cargo.toml` files and `t
 - `trust.rs`: effective trust evaluation. `TrustedValue::{None, True, False}` serializes to lowercase strings for the frontmatter `trusted` field (FR-37b). `evaluate_trust()` takes `&Config` and `&MailboxConfig`; it resolves the effective `trust` / `trusted_senders` via `MailboxConfig::effective_trust(&Config)` / `effective_trusted_senders(&Config)`: per-mailbox override if set (`Option::Some`), otherwise the top-level `Config` defaults. Per-mailbox `trusted_senders` fully **replaces** the global list (no merging).
 - `term.rs`: semantic color helpers for CLI output (success / error / warn / info / header / highlight / dim / badges). Auto-respects `NO_COLOR` and non-TTY stdout.
 - `platform.rs`: tiny OS helper. `is_root()` via `libc::geteuid()` on Unix.
+- `uninstall.rs`: `aimx uninstall`. Stops the daemon and removes the service file; preserves `/etc/aimx/` and `/var/lib/aimx/`. Requires root.
+- `hooks.rs`: `aimx hooks list | create | delete` CLI (with `hook` clap alias). Split by flag: `--template NAME --param K=V` goes through the daemon UDS (`HOOK-CREATE`) so `Arc<Config>` hot-swaps live; `--cmd "..."` requires root, writes `config.toml` directly and `SIGHUP`s the daemon (never UDS — the socket never accepts raw argv). Delete resolves against effective names; operator-origin hooks can only be removed via CLI, MCP-origin hooks can also be removed over UDS.
+- `hook_client.rs`: client-side UDS helpers for template-bound `HOOK-CREATE` and `HOOK-DELETE`. Surfaces socket-missing distinctly so callers can fall back to direct `config.toml` edits.
+- `hook_handler.rs`: daemon-side handler for `HOOK-CREATE` (template-only — the UDS never accepts raw `cmd`, `run_as`, `timeout_secs`, `stdin`, or `dangerously_*`) and `HOOK-DELETE` (origin-protected). Same write-temp-then-rename + `ConfigHandle::store` pattern as `mailbox_handler`.
+- `hook_substitute.rs`: pure argv-safe `{placeholder}` substitution for template hooks. `cmd[0]` is never substituted; values cannot introduce new argv entries, carry NUL/control bytes, or exceed `MAX_PARAM_BYTES`. Fuzzed via `tests/hook_substitute_fuzz.rs`.
+- `hook_templates_defaults.rs`: embeds `hook-templates/defaults.toml` at compile time (`include_str!`) and validates it via `validate_hook_templates`. `aimx setup`'s interactive checkbox UI reads from here.
 - `setup.rs` also contains `run_setup` which drives the full interactive setup flow, and `display_deliverability_section` which prints optional Gmail-whitelist instructions. Reverse DNS (PTR) is the operator's responsibility and is out of scope for aimx.
 
 ### Trait-based testing pattern
@@ -119,12 +125,11 @@ Axum HTTP server with `/probe` (EHLO handshake) and `/health` endpoints. Runs a 
 - Integration tests (`tests/integration.rs`) use `assert_cmd` to test the binary as a subprocess with `--data-dir` pointing at temp directories.
 - Test fixtures in `tests/fixtures/` (`.eml` files for ingest testing).
 - Agent-facing plugins live under `agents/<agent>/` and are embedded at compile time. The canonical primer is `agents/common/aimx-primer.md` with reference docs in `agents/common/references/`. The datadir README template is `src/datadir_readme.md.tpl`.
+- Built-in hook templates live at `hook-templates/defaults.toml` (plain TOML, embedded via `include_str!` by `hook_templates_defaults.rs`). Edit this file — not the Rust source — to add or change a bundled template.
 
 ## Documentation
 
-User-facing guide lives in `book/` (index, getting-started, setup, configuration, mailboxes, hooks, hook-recipes, mcp, agent-integration, troubleshooting). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
+User-facing guide lives in `book/` (index, getting-started, setup, configuration, mailboxes, hooks, hook-recipes, mcp, agent-integration, cli, faq, troubleshooting). When making changes that affect CLI behavior, setup output, or MCP tools, update the corresponding guide files too.
 
-- `docs/prd.md`: product requirements document
-- `docs/sprint.md`: sprint plan (do not modify `[DONE]` or `[IN PROGRESS]` sprints)
 - `agents/common/aimx-primer.md`: canonical agent-facing primer (bundled into all agent plugins)
 - `agents/common/references/`: detailed reference docs (frontmatter schema, MCP tools, workflows, troubleshooting)
