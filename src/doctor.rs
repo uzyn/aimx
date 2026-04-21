@@ -55,6 +55,14 @@ pub struct HookTemplatesSection {
     /// of `0` so an operator can tell "no fires in 24h" apart from
     /// "logs unavailable, count unknown".
     pub log_source: Option<&'static str>,
+    /// 24h count of the "unknown user fallback" WARN emitted by
+    /// `spawn_via_fork_setuid` when `run_as` (`aimx-hook` in production)
+    /// is not resolvable and the caller is non-root. Any non-zero count
+    /// means hooks ran as the daemon's current UID without privilege
+    /// drop — a dev-box state that should never hold in production.
+    /// Surfaced as a WARN with a `sudo aimx setup` hint. `None` when
+    /// `log_source` is `None`.
+    pub unknown_user_fallback_24h: Option<u32>,
 }
 
 impl Default for HookTemplatesSection {
@@ -68,6 +76,7 @@ impl Default for HookTemplatesSection {
                 datadir_readable: false,
             },
             log_source: None,
+            unknown_user_fallback_24h: None,
         }
     }
 }
@@ -196,15 +205,18 @@ pub fn gather_status_with_ops<S: SystemOps>(
 fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> HookTemplatesSection {
     use crate::setup::HOOK_SERVICE_USER;
 
-    let log_text = if config.hook_templates.is_empty() {
-        // No templates → no point shelling out to journalctl. The empty
-        // section is explicit ("(no templates enabled)" in the renderer).
-        None
-    } else {
+    // We scan logs when any template is enabled *or* an `aimx-hook` user
+    // exists on the box — in both cases we want to surface the
+    // unknown-user fallback signal. A no-templates-no-user install
+    // skips the shell-out to journalctl entirely.
+    let want_logs = !config.hook_templates.is_empty() || sys.user_exists(HOOK_SERVICE_USER);
+    let log_text = if want_logs {
         // 24h of structured `aimx::hook` lines is bounded — even a noisy
         // install with hooks firing on every email rarely produces
         // >10K lines per day. We ask for 5K which is a reasonable cap.
         sys.tail_service_logs(crate::logs::SERVICE_UNIT, 5_000).ok()
+    } else {
+        None
     };
     let log_source = if log_text.is_some() {
         Some("logs")
@@ -215,6 +227,7 @@ fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> Hook
         .as_deref()
         .map(parse_hook_fire_counts)
         .unwrap_or_default();
+    let unknown_user_fallback_24h = log_text.as_deref().map(parse_unknown_user_fallback_count);
 
     let templates: Vec<HookTemplateStatus> = config
         .hook_templates
@@ -255,7 +268,29 @@ fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> Hook
             datadir_readable,
         },
         log_source,
+        unknown_user_fallback_24h,
     }
+}
+
+/// Count the "unknown user fallback" WARN lines emitted by
+/// `platform::spawn_via_fork_setuid` when `run_as` is not resolvable and
+/// the caller is non-root. The exact format emitted by `tracing_subscriber::fmt`
+/// is:
+///
+/// ```text
+/// ... WARN aimx::hook: run_as 'aimx-hook' not found and caller is non-root: running hook as current user
+/// ```
+///
+/// We match on the stable substring `not found and caller is non-root`
+/// so the count is robust to timestamp/target/level formatting drift.
+fn parse_unknown_user_fallback_count(text: &str) -> u32 {
+    let mut count = 0u32;
+    for line in text.lines() {
+        if line.contains("not found and caller is non-root") {
+            count = count.saturating_add(1);
+        }
+    }
+    count
 }
 
 /// Parse `(fire_count, failure_count)` per template from the structured
@@ -755,6 +790,20 @@ fn format_hook_templates_section(section: &HookTemplatesSection) -> String {
             )
         };
         out.push_str(&datadir_line);
+    }
+
+    if let Some(n) = section.unknown_user_fallback_24h
+        && n > 0
+    {
+        // Any non-zero count means at least one hook ran without the
+        // `aimx-hook` privilege drop. In production the daemon runs as
+        // root under systemd and the user was created at `aimx setup`
+        // time, so the WARN should never appear in operator logs.
+        out.push_str(&format!(
+            "  {} {} unknown-user fallback event(s) in 24h - re-run `sudo aimx setup` to create `aimx-hook`\n",
+            term::warn("Sandbox:"),
+            n,
+        ));
     }
 
     if section.templates.is_empty() {
@@ -2218,6 +2267,136 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
     }
 
     #[test]
+    fn parse_unknown_user_fallback_count_matches_production_warn_line() {
+        // Mirrors the WARN line emitted by `platform::spawn_via_fork_setuid`
+        // when `run_as='aimx-hook'` is unresolvable and the caller is non-root.
+        let text = "\
+2026-04-20T12:00:00Z WARN aimx::hook: run_as 'aimx-hook' not found and caller is non-root: running hook as current user\n\
+2026-04-20T12:00:05Z INFO aimx::hook hook_name=h1 template=invoke-claude exit_code=0\n\
+2026-04-20T12:00:10Z WARN aimx::hook: run_as 'aimx-hook' not found and caller is non-root: running hook as current user\n\
+unrelated line\n\
+";
+        assert_eq!(parse_unknown_user_fallback_count(text), 2);
+    }
+
+    #[test]
+    fn parse_unknown_user_fallback_count_returns_zero_for_empty_or_unrelated() {
+        assert_eq!(parse_unknown_user_fallback_count(""), 0);
+        assert_eq!(
+            parse_unknown_user_fallback_count("INFO aimx::hook ...\nINFO aimx ..."),
+            0
+        );
+    }
+
+    #[test]
+    fn gather_hook_templates_section_counts_unknown_user_fallback_when_logs_present() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let templates = vec![template_for_test("invoke-claude", "/usr/bin/true")];
+        let config = config_with_templates(tmp.path(), templates);
+        let log_text = "\
+2026-04-20T12:00:00Z WARN aimx::hook: run_as 'aimx-hook' not found and caller is non-root: running hook as current user\n\
+hook_name=h1 template=invoke-claude exit_code=0 timed_out=false\n\
+";
+        let ops = FakeServiceOps::new(true).with_logs(log_text);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert_eq!(info.hook_templates.unknown_user_fallback_24h, Some(1));
+    }
+
+    #[test]
+    fn gather_hook_templates_section_tails_logs_when_only_user_exists() {
+        // Even with zero templates configured, an `aimx-hook` user on the
+        // box means operator hooks (raw-cmd) could fire and we want to
+        // surface the unknown-user signal on a misconfigured box. Scanning
+        // the logs in this case is the only way to catch that state.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        let config = config_with_templates(tmp.path(), Vec::new());
+        let log_text = "2026-04-20T12:00:00Z WARN aimx::hook: run_as 'aimx-hook' not found and caller is non-root: running hook as current user\n";
+        let ops = FakeServiceOps::new(true)
+            .with_hook_user(9999, 9999)
+            .with_logs(log_text);
+        let info = gather_status_with_ops(&config, &ops, &MockNetworkOps::default());
+        assert_eq!(info.hook_templates.unknown_user_fallback_24h, Some(1));
+    }
+
+    #[test]
+    fn format_hook_templates_section_renders_sandbox_warn_on_non_zero_fallback() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+            hook_templates: HookTemplatesSection {
+                templates: vec![],
+                hook_user: HookUserStatus {
+                    user: "aimx-hook".to_string(),
+                    user_exists: true,
+                    uid_gid: Some((9001, 9001)),
+                    datadir_readable: true,
+                },
+                log_source: Some("logs"),
+                unknown_user_fallback_24h: Some(3),
+            },
+        };
+        let out = format_status(&info);
+        let plain = strip_ansi(&out);
+        assert!(
+            plain.contains("Sandbox:"),
+            "expected 'Sandbox:' warn badge when fallback fired: {plain}"
+        );
+        assert!(
+            plain.contains("3 unknown-user fallback event"),
+            "expected the count in the warn line: {plain}"
+        );
+        assert!(
+            plain.contains("sudo aimx setup"),
+            "expected a remediation hint in the warn line: {plain}"
+        );
+    }
+
+    #[test]
+    fn format_hook_templates_section_suppresses_sandbox_warn_on_zero_fallback() {
+        let info = StatusInfo {
+            domain: "test.com".to_string(),
+            data_dir: "/var/lib/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+            hook_templates: HookTemplatesSection {
+                templates: vec![],
+                hook_user: HookUserStatus {
+                    user: "aimx-hook".to_string(),
+                    user_exists: true,
+                    uid_gid: Some((9001, 9001)),
+                    datadir_readable: true,
+                },
+                log_source: Some("logs"),
+                unknown_user_fallback_24h: Some(0),
+            },
+        };
+        let out = format_status(&info);
+        let plain = strip_ansi(&out);
+        assert!(
+            !plain.contains("Sandbox:"),
+            "Sandbox warn must be suppressed at count=0: {plain}"
+        );
+    }
+
+    #[test]
     fn gather_hook_templates_section_skips_log_tail_when_empty() {
         let tmp = tempfile::TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
@@ -2405,6 +2584,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
                     datadir_readable: true,
                 },
                 log_source: Some("logs"),
+                unknown_user_fallback_24h: Some(0),
             },
         };
         let out = format_status(&info);
@@ -2453,6 +2633,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
                     datadir_readable: true,
                 },
                 log_source: None,
+                unknown_user_fallback_24h: None,
             },
         };
         let out = format_status(&info);

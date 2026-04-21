@@ -37,6 +37,24 @@ use crate::hook_client::{
 };
 use crate::term;
 
+/// `AIMX_TEST_SKIP_ROOT_CHECK=1` lets the integration-test harness
+/// exercise the raw-cmd and operator-origin-delete paths without `sudo`.
+/// Production never sets this: the daemon's runtime env is scrubbed by
+/// systemd, and release binaries ignore the variable entirely because
+/// `debug_assertions` is off. Kept next to the env lookup in `platform`
+/// (`AIMX_SANDBOX_FORCE_FALLBACK`) so both test-only switches live in
+/// the same gated tier.
+fn skip_root_check() -> bool {
+    #[cfg(any(test, debug_assertions))]
+    {
+        std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some()
+    }
+    #[cfg(not(any(test, debug_assertions)))]
+    {
+        false
+    }
+}
+
 pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         HookCommand::List { mailbox } => list(&config, mailbox.as_deref()),
@@ -279,13 +297,7 @@ fn create_raw_cmd(
     args: &HookCreateArgs,
     cmd: String,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Test-only escape hatch: CI runs non-root, but integration tests
-    // exercise the raw-cmd path to verify the direct-write + SIGHUP
-    // flow. Production never sets this env var; the daemon's runtime
-    // env is scrubbed by systemd. The same pattern is used by
-    // `platform::spawn_sandboxed` (AIMX_SANDBOX_FORCE_FALLBACK).
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
-    if !skip_root_check && !crate::platform::is_root() {
+    if !skip_root_check() && !crate::platform::is_root() {
         return Err(
             "--cmd hooks require root: run again with `sudo aimx hooks create --cmd ...`.\n\
              Raw-cmd hooks are operator-only and never traverse the UDS socket. \
@@ -386,9 +398,8 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     // `hook_handler::handle_hook_delete`). Route them through the
     // direct-write path, which requires root anyway. MCP-origin hooks
     // try UDS first (fast, hot-swap) and fall back on socket-missing.
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
     if is_operator_origin {
-        if !skip_root_check && !crate::platform::is_root() {
+        if !skip_root_check() && !crate::platform::is_root() {
             return Err(
                 "hook is operator-origin and requires root to delete: run again with \
                  `sudo aimx hooks delete`"

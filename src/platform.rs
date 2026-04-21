@@ -153,8 +153,13 @@ pub fn spawn_sandboxed(
     // the `systemd-run` path via `AIMX_SANDBOX_FORCE_FALLBACK=1`. This
     // exists because `systemd-run --user` semantics and PolicyKit
     // interactions make it impossible to exercise the fallback code
-    // path under `cargo test` on a systemd host without it.
+    // path under `cargo test` on a systemd host without it. Gated to
+    // test + debug builds so an operator who stumbles on the env var in
+    // a release binary cannot silently downgrade the sandbox.
+    #[cfg(any(test, debug_assertions))]
     let force_fallback = std::env::var_os("AIMX_SANDBOX_FORCE_FALLBACK").is_some();
+    #[cfg(not(any(test, debug_assertions)))]
+    let force_fallback = false;
     match (init, force_fallback) {
         (InitSystem::Systemd, false) => {
             spawn_via_systemd_run(argv, stdin, run_as, timeout, envs, started)
@@ -180,15 +185,13 @@ fn spawn_via_systemd_run(
     // user name" message. Catching it here produces the same
     // `SandboxError::UserNotFound` that the fallback path returns, so
     // operators get a consistent "run `aimx setup` to create aimx-hook"
-    // signal regardless of init system.
+    // signal regardless of init system. The single WARN is emitted by
+    // `spawn_via_fork_setuid`; delegating silently here avoids the
+    // duplicate log line the two preflights would otherwise produce.
     #[cfg(unix)]
     if run_as != "root" {
         match lookup_user(run_as) {
             Err(SandboxError::UserNotFound(_)) if !is_root() => {
-                tracing::warn!(
-                    target: "aimx::hook",
-                    "run_as '{run_as}' not found and caller is non-root: running hook as current user via systemd-run"
-                );
                 return spawn_via_fork_setuid(argv, stdin, run_as, timeout, envs, started);
             }
             Err(e) => return Err(e),

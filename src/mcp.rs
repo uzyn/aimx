@@ -611,9 +611,16 @@ impl AimxMcpServer {
         description = "Delete a hook by effective name. The daemon refuses \
                        operator-origin hooks with `ERR origin-protected`; the \
                        error points at `sudo aimx hooks delete` which the \
-                       operator must run on the host. MCP-origin hooks \
-                       (created via hook_create or `aimx hooks create \
-                       --template`) delete successfully."
+                       operator must run on the host. MCP-origin hooks delete \
+                       successfully. The `origin` tag marks the submission \
+                       channel, not authorship: hooks written via the UDS verb \
+                       (this tool, hook_create, or `aimx hooks create \
+                       --template`) are all `origin = \"mcp\"`, while hooks \
+                       written via direct `config.toml` edits or `aimx hooks \
+                       create --cmd` are `origin = \"operator\"`. A hook an \
+                       operator created from the CLI with `--template` is \
+                       therefore deletable via this tool; only `--cmd` and \
+                       hand-edited hooks are UDS-protected."
     )]
     fn hook_delete(
         &self,

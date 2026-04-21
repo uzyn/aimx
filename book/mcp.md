@@ -248,6 +248,8 @@ ERR origin-protected: hook was created by the operator — remove via `sudo aimx
 
 The agent should surface this verbatim so the user knows the hook is operator-owned.
 
+The `origin` field marks the **submission channel**, not authorship. Any hook written via the UDS verb — whether from this tool, `hook_create`, or the operator typing `aimx hooks create --template ...` — is tagged `origin = "mcp"` and is deletable from here. Only `--cmd` hooks and hand-edited `config.toml` entries are tagged `origin = "operator"` and UDS-protected. If an operator wants a template-based hook that agents cannot remove, they need to hand-edit `config.toml` with `origin = "operator"` rather than using `--template`.
+
 ---
 
 ## Frontmatter reference
