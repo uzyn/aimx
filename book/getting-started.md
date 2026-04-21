@@ -51,6 +51,8 @@ All mutations (send, reply, mark-read, create/delete mailboxes) go through the `
 
 **If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), aimx is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use aimx in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
 
+See [Security](security.md) for the full threat model, trust boundaries, and non-goals.
+
 ## Setup
 
 Run the interactive setup wizard:

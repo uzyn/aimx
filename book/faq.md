@@ -129,6 +129,8 @@ When the hook's side effect is safe regardless of sender. A logger, a metric cou
 
 ## Security model
 
+> The canonical write-up lives at [Security](security.md). The entries below are the common questions; that page has the full model.
+
 ### Can I use aimx in place of Postfix or Stalwart?
 
 No, and that is intentional. aimx is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
