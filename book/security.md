@@ -82,7 +82,7 @@ Everything aimx creates on disk has a deliberate permission choice. The surprisi
 
 Two choices are load-bearing and deserve their own sections below: the **world-readable storage tree** and the **world-writable socket**. Both are deliberate, and both have their escape hatches (run on a dedicated host, don't share the box with untrusted users).
 
-### Why `/etc/aimx/` is locked and `/var/lib/aimx/` is open
+### `/etc/aimx/` and `/var/lib/aimx/`
 
 The two directories exist on purpose to hold opposite kinds of data.
 
@@ -96,7 +96,7 @@ The boundary between these two directories is why the design holds: secrets neve
 
 `aimx serve` listens on port 25 and accepts plain SMTP. STARTTLS is advertised and supported but **not required** — remote MTAs that speak plain SMTP are accepted, because that is still the norm for inter-MTA traffic. There is no `AUTH` extension, no `SMTP-AUTH`, and no rate limit. Any sender on the public internet can connect, complete an SMTP dialogue, and hand aimx a message.
 
-### Why port 25 being open is fine, and why aimx is not an open relay
+### Port 25 is open, but aimx is not an open relay
 
 Every MTA on the public internet listens on port 25. That is where RFC 5321 says mail arrives. Exposing it is not a security posture; it is a prerequisite for receiving mail at all. The interesting question is *what the listener is willing to do* with what it receives.
 
@@ -303,7 +303,3 @@ The design leaves a few knobs you can tighten beyond the defaults:
 - **Review hook-fire logs** after a new template lands: `journalctl -u aimx | grep hook_name=<name>`.
 - **Switch `trust` to `"verified"`** and populate `trusted_senders` once you know which senders should trigger agents. Default `"none"` is safe but silent.
 - **Set `run_as` explicitly** on raw-cmd hooks you hand-edit, even to the default `aimx-hook`. Explicit configs survive refactors better than implicit defaults.
-
-## Reporting a security issue
-
-If you believe you have found a vulnerability in aimx, please report it privately rather than opening a public issue. Email the maintainer at [chua@uzyn.com](mailto:chua@uzyn.com) or open a GitHub Security Advisory on the [`uzyn/aimx` repository](https://github.com/uzyn/aimx). Include a description, reproduction steps, and the commit or release you tested against. Public issues on the tracker are fine for design questions and "is this a bug?" discussions — but drop anything that looks like an active exploit into email first.
