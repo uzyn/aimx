@@ -200,6 +200,29 @@ fn ingest_plain_fixture_full_pipeline() {
 }
 
 #[test]
+fn ingest_emits_tracing_logs_on_stderr() {
+    // Smoke test for the logging refactor: the stdin `aimx ingest` path
+    // now installs a tracing subscriber on entry, so stderr must carry
+    // the `aimx::ingest` / `aimx::trust` structured records.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
+
+    aimx_cmd(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("ingest")
+        .arg("catchall@agent.example.com")
+        .write_stdin(eml)
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("aimx::ingest"))
+        .stderr(predicate::str::contains("received email"))
+        .stderr(predicate::str::contains("stored email"))
+        .stderr(predicate::str::contains("aimx::trust"));
+}
+
+#[test]
 fn ingest_html_fixture_full_pipeline() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
