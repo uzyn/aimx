@@ -11,7 +11,7 @@ repository = "https://github.com/uzyn/aimx"
 homepage = "https://aimx.email"
 keywords = ["email", "smtp", "mcp", "self-hosted", "ai-agent"]
 categories = ["command-line-utilities", "email"]
-exclude = ["/etc"]
+exclude = ["/etc", "/website"]
 
 [dependencies]
 clap = { version = "4", features = ["derive", "env"] }
