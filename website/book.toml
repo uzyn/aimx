@@ -1,0 +1,32 @@
+[book]
+title = "aimx — user guide"
+authors = ["U-Zyn Chua"]
+description = "Self-hosted SMTP for AI agents. The user guide."
+src = "../book"
+language = "en"
+
+[output.html]
+default-theme = "light"
+preferred-dark-theme = "coal"
+git-repository-url = "https://github.com/uzyn/aimx"
+edit-url-template = "https://github.com/uzyn/aimx/edit/main/book/{path}"
+site-url = "/book/"
+additional-css = [
+    "styles/palette.css",
+    "styles/typography.css",
+    "styles/chrome.css",
+]
+additional-js = [
+    "scripts/nav.js",
+]
+
+[output.html.fold]
+enable = true
+level = 1
+
+[output.html.playground]
+runnable = false
+
+[build]
+build-dir = "dist/book"
+create-missing = false

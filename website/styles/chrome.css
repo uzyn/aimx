@@ -1,0 +1,246 @@
+/* aimx chrome — sidebar, topbar, search, menu (branding §5.3 + §2.5). */
+
+/* Page background picks up the palette, with the same radial copper accents used on the landing. */
+html,
+body {
+  background: var(--bg);
+}
+
+html.light,
+html.rust,
+html.ayu {
+  background-image:
+    radial-gradient(ellipse at 12% 0%, rgba(185, 83, 28, 0.055), transparent 55%),
+    radial-gradient(ellipse at 92% 100%, rgba(185, 83, 28, 0.04), transparent 55%);
+  background-attachment: fixed;
+}
+
+html.coal,
+html.navy {
+  background-image:
+    radial-gradient(ellipse at 12% 0%, rgba(208, 107, 46, 0.06), transparent 55%),
+    radial-gradient(ellipse at 92% 100%, rgba(208, 107, 46, 0.05), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* Sidebar */
+.sidebar {
+  background: var(--sidebar-bg);
+  border-right: 1px solid var(--aimx-rule);
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+}
+
+.sidebar .sidebar-scrollbox {
+  padding: 16px 14px;
+}
+
+.chapter {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+.chapter li.chapter-item {
+  padding: 3px 0;
+  line-height: 1.4;
+}
+
+.chapter li a,
+.chapter li a:visited {
+  color: var(--sidebar-fg);
+  border-bottom: none;
+  padding: 4px 10px 4px 14px;
+  border-left: 3px solid transparent;
+  border-radius: 0;
+  display: block;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.chapter li a:hover {
+  color: var(--aimx-accent);
+  background: none;
+}
+
+.chapter li a.active {
+  color: var(--aimx-accent);
+  border-left-color: var(--aimx-accent);
+  background: none;
+  font-weight: 500;
+}
+
+.chapter li.part-title {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--aimx-accent);
+  padding: 18px 14px 8px;
+}
+
+.chapter li.spacer {
+  margin: 10px 14px;
+  border-top: 1px solid var(--sidebar-spacer);
+  height: 0;
+  background: none;
+}
+
+/* Top menu bar */
+#menu-bar,
+#menu-bar.bordered,
+#menu-bar.sticky {
+  background: var(--bg);
+  border-bottom: 1px solid var(--aimx-rule);
+  box-shadow: none;
+  font-family: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
+}
+
+#menu-bar .menu-title {
+  font-family: 'Fraunces', Georgia, serif;
+  font-variation-settings: 'opsz' 14;
+  font-weight: 500;
+  font-size: 1.05em;
+  letter-spacing: -0.015em;
+  color: var(--aimx-ink);
+}
+
+.menu-title-home {
+  color: inherit;
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.menu-title-home:hover {
+  color: var(--aimx-accent);
+  border-bottom-color: var(--aimx-accent);
+}
+
+/* Top-right primary nav — matches the homepage header nav. */
+.aimx-topnav {
+  display: flex;
+  gap: 20px;
+  align-items: center;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+  margin-right: 8px;
+}
+
+.aimx-topnav a {
+  color: var(--aimx-ink-faded);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.aimx-topnav a:hover {
+  color: var(--aimx-accent);
+  border-bottom-color: var(--aimx-accent);
+}
+
+.aimx-topnav a.active {
+  color: var(--aimx-ink);
+  border-bottom-color: var(--aimx-accent);
+}
+
+@media (max-width: 520px) {
+  .aimx-topnav {
+    gap: 14px;
+    font-size: 12px;
+  }
+}
+
+.menu-bar .icon-button,
+.menu-bar a.icon-button {
+  color: var(--icons);
+  border: none;
+  background: none;
+}
+
+.menu-bar .icon-button:hover,
+.menu-bar a.icon-button:hover {
+  color: var(--aimx-accent);
+  background: none;
+}
+
+/* Theme popup */
+.theme-popup {
+  background: var(--theme-popup-bg);
+  border: 1px solid var(--theme-popup-border);
+  box-shadow: 0 3px 12px rgba(21, 19, 16, 0.08);
+  border-radius: 3px;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+}
+
+.theme-popup .theme {
+  color: var(--fg);
+  padding: 6px 14px;
+  border-radius: 0;
+}
+
+.theme-popup .theme:hover {
+  background: var(--theme-hover);
+  color: var(--aimx-accent);
+}
+
+/* Search */
+#searchbar {
+  background: var(--searchbar-bg);
+  color: var(--searchbar-fg);
+  border: 1px solid var(--searchbar-border-color);
+  border-radius: 3px;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  box-shadow: none;
+}
+
+#searchresults li {
+  background: none;
+  border-bottom: 1px solid var(--aimx-rule);
+  padding: 10px 6px;
+}
+
+#searchresults li:hover {
+  background: var(--theme-hover);
+}
+
+mark {
+  background: transparent;
+  color: var(--aimx-accent);
+  font-weight: 500;
+}
+
+/* Page navigation (prev/next chapter links) */
+.nav-chapters {
+  color: var(--icons);
+  text-decoration: none;
+  border: none;
+}
+
+.nav-chapters:hover {
+  color: var(--aimx-accent);
+  background: none;
+}
+
+/* Footer print-only bits — no-op here, just ensure no extra decoration */
+.content main {
+  padding: 0 16px;
+}
+
+/* Scrollbar (WebKit) */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scrollbar);
+  border-radius: 0;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--aimx-accent);
+}

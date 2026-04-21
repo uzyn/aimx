@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>aimx — AI Mail Exchange · Email for AI agents</title>
+<meta name="description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for agents. Your mail, your machine, end to end. No third parties.">
+
+<meta property="og:title" content="aimx — AI Mail Exchange">
+<meta property="og:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for agents.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://aimx.email">
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="aimx — AI Mail Exchange">
+<meta name="twitter:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for agents.">
+
+<meta name="theme-color" content="#F4EEE3">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --paper: #F4EEE3;
+  --paper-2: #EBE3D4;
+  --ink: #151310;
+  --ink-soft: #2B2620;
+  --ink-faded: #5C5549;
+  --accent: #B9531C;
+  --accent-dark: #8E3E14;
+  --rule: #D8CFBE;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body { background: var(--paper); color: var(--ink); }
+
+body {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 30px;
+  line-height: 1.7;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background-image:
+    radial-gradient(ellipse at 15% 0%, rgba(185, 83, 28, 0.07), transparent 55%),
+    radial-gradient(ellipse at 90% 100%, rgba(185, 83, 28, 0.05), transparent 55%);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.grain {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  mix-blend-mode: multiply;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
+  z-index: 1;
+}
+
+.wrap {
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 32px 28px 40px;
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--rule);
+}
+
+.brand {
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 14;
+  font-weight: 500;
+  font-size: 1.17em;
+  letter-spacing: 0.04em;
+  color: var(--ink);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+
+.brand:hover {
+  color: var(--accent);
+}
+
+.brand .dot { color: var(--accent); }
+
+.topnav {
+  display: flex;
+  gap: 22px;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.43em;
+  letter-spacing: 0.02em;
+}
+
+.topnav a {
+  color: var(--ink-faded);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  padding-bottom: 2px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.topnav a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.topnav a.active {
+  color: var(--ink);
+  border-bottom-color: var(--accent);
+}
+
+main {
+  padding: 56px 0 40px;
+  flex: 1;
+  font-size: 1.5em;
+}
+
+.mascot {
+  display: block;
+  margin: 0 auto 32px;
+  width: 260px;
+  max-width: 68%;
+  height: auto;
+}
+
+.eyebrow {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.29em;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 24px;
+}
+
+h1 {
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 144;
+  font-weight: 400;
+  font-size: 1.3em;
+  line-height: 1.2;
+  letter-spacing: -0.022em;
+  margin-bottom: 40px;
+  color: var(--ink);
+}
+
+h1 em {
+  font-style: italic;
+  font-weight: 400;
+  color: var(--accent-dark);
+}
+
+.pitch {
+  font-size: 0.4em;
+  line-height: 1.8;
+  color: var(--ink-soft);
+  max-width: 56ch;
+  margin-bottom: 0;
+}
+
+.pitch code,
+.prose code,
+.features code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.88em;
+  background: var(--paper-2);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+}
+
+.block {
+  margin-top: 56px;
+  padding-top: 28px;
+  border-top: 1px solid var(--rule);
+}
+
+.section-label {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.29em;
+  line-height: 1.2;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 20px 0;
+  font-weight: 500;
+}
+
+.prose {
+  font-size: 0.4em;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  max-width: 60ch;
+}
+
+.prose + .prose {
+  margin-top: 0.85em;
+}
+
+.code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.34em;
+  line-height: 1.7;
+  color: var(--ink-soft);
+  background: none;
+  border-left: 2px solid var(--accent);
+  padding: 0.1em 0 0.1em 1.1em;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.features {
+  font-size: 0.4em;
+  line-height: 1.75;
+  color: var(--ink-soft);
+  list-style: none;
+  max-width: 60ch;
+}
+
+.features li {
+  padding: 0.45em 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.features li:last-child {
+  border-bottom: none;
+}
+
+.features li strong {
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.hero-ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px 16px;
+  margin-top: 40px;
+}
+
+.btn {
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 0.4em;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 0.7em 1.3em;
+  border: 1px solid var(--rule);
+  color: var(--ink);
+  background: var(--paper);
+  text-decoration: none;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.btn::after {
+  content: "→";
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn.primary {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--paper);
+}
+
+.btn.primary::after {
+  color: var(--accent);
+}
+
+.btn.primary:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--paper);
+}
+
+.btn.primary:hover::after {
+  color: var(--paper);
+}
+
+.detail {
+  margin-top: 56px;
+  padding-top: 24px;
+  border-top: 1px solid var(--rule);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.29em;
+  color: var(--ink-faded);
+  line-height: 1.9;
+}
+
+.detail .k { color: var(--ink); }
+.detail .c { color: var(--accent); }
+
+footer {
+  padding: 24px 0 8px;
+  border-top: 1px solid var(--rule);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.4em;
+  color: var(--ink-faded);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  letter-spacing: 0.02em;
+}
+
+footer a {
+  color: var(--ink-faded);
+  text-decoration: none;
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+footer a:hover {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+@media (max-width: 560px) {
+  .wrap { padding: 24px 20px 28px; }
+  main { padding: 40px 0 32px; }
+  h1 { font-size: 1em; }
+  .mascot { width: 200px; margin-bottom: 24px; }
+  .pitch, .prose, .features { font-size: 0.38em; }
+  .block { margin-top: 40px; padding-top: 24px; }
+  .detail { margin-top: 40px; }
+}
+
+.fade { opacity: 0; transform: translateY(8px); animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.fade.d1 { animation-delay: 0.05s; }
+.fade.d2 { animation-delay: 0.14s; }
+.fade.d3 { animation-delay: 0.24s; }
+.fade.d4 { animation-delay: 0.34s; }
+.fade.d5 { animation-delay: 0.44s; }
+.fade.d6 { animation-delay: 0.54s; }
+.fade.d7 { animation-delay: 0.64s; }
+.fade.d8 { animation-delay: 0.74s; }
+
+@keyframes rise {
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fade { opacity: 1; transform: none; animation: none; }
+}
+</style>
+</head>
+<body>
+<div class="grain"></div>
+<div class="wrap">
+  <header>
+    <a class="brand fade d1" href="/">aimx<span class="dot">.</span></a>
+    <nav class="topnav fade d1" aria-label="Primary">
+      <a href="/" class="active">home</a>
+      <a href="/book/">book</a>
+      <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
+    </nav>
+  </header>
+
+  <main>
+    <img class="mascot fade d2" src="/assets/aimx-pigeon.svg" alt="aimx mechanical pigeon mascot" width="260" height="260">
+
+    <div class="eyebrow fade d3">AI Mail Exchange</div>
+
+    <h1 class="fade d3">
+      You give your AI agent a server.
+      <em>Why borrow someone else's inbox?</em>
+    </h1>
+
+    <p class="pitch fade d4">
+      The internet's oldest protocol, <strong>rebuilt for agents.</strong><br>
+      Your mail, your machine, end to end. No third parties.<br>
+      Human-friendly setup. LLM-friendly everything else.<br>
+      Free and open source.
+    </p>
+
+    <div class="hero-ctas fade d4">
+      <a class="btn primary" href="/book/">Read the book</a>
+      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Get the code</a>
+    </div>
+
+    <section class="block fade d5">
+      <h2 class="section-label">What it is</h2>
+      <p class="prose">
+        aimx is a self-hosted mail server for AI agents. One binary. One <code>aimx setup</code> command and your agents have their own email addresses on a domain you control. No Gmail, no OAuth, no SaaS.
+      </p>
+      <p class="prose">
+        Mail arrives over SMTP, gets parsed into Markdown with TOML frontmatter, and lands on disk. Outbound mail is DKIM-signed and delivered direct to the recipient's MX. Agents read and send through the built-in stdio MCP server, the <code>aimx</code> CLI, or the filesystem.
+      </p>
+      <p class="prose">
+        Works with any MCP-capable agent — Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
+      </p>
+    </section>
+
+    <section class="block fade d6">
+      <h2 class="section-label">Quick start</h2>
+<pre class="code">git clone https://github.com/uzyn/aimx.git &amp;&amp; cd aimx
+cargo build --release
+sudo cp target/release/aimx /usr/local/bin/
+sudo aimx setup</pre>
+      <p class="prose" style="margin-top: 1.1em;">
+        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements.
+      </p>
+    </section>
+
+    <section class="block fade d7">
+      <h2 class="section-label">What&rsquo;s in the box</h2>
+      <ul class="features">
+        <li><strong>Single binary.</strong> Written in Rust. No runtime dependencies, no database, no relay.</li>
+        <li><strong>Direct MTA-to-MTA.</strong> Outbound goes straight to the recipient's MX. Inbound hits your server on port 25. Feels like an API call.</li>
+        <li><strong>Push, not poll.</strong> Inbound fires <code>on_receive</code> hooks the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves.</li>
+        <li><strong>Markdown emails.</strong> No <code>.eml</code>, no database. Just Markdown with TOML frontmatter — LLM- and RAG-friendly without a parser.</li>
+        <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Nine tools covering mailbox CRUD, read, list, send, reply, mark-read.</li>
+        <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. Nothing phones home. MIT licensed.</li>
+      </ul>
+    </section>
+
+    <div class="detail fade d8">
+      <div>$ <span class="c">dig</span> aimx.email <span class="k">MX</span></div>
+      <div>;; <span class="k">ANSWER SECTION:</span></div>
+      <div>aimx.email.&nbsp;&nbsp;300&nbsp;&nbsp;IN&nbsp;&nbsp;MX&nbsp;&nbsp;10&nbsp;&nbsp;<span class="c">// alpha</span></div>
+    </div>
+  </main>
+
+  <footer>
+    <div>© 2026 <a href="https://uzyn.com" target="_blank" rel="noopener">U-Zyn Chua</a> · chua@uzyn.com</div>
+    <div>self-hosted mail for self-hosted agents</div>
+  </footer>
+</div>
+
+</body>
+</html>
