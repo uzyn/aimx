@@ -1,9 +1,10 @@
-use crate::config::Config;
+use crate::config::{Config, MailboxConfig};
 use crate::frontmatter::{
     AttachmentMeta, AuthResults, InboundFrontmatter, compute_thread_id, format_frontmatter,
 };
 use crate::hook::{self, OnReceiveContext};
 use crate::mailbox_locks::MailboxLocks;
+use crate::ownership::chown_as_owner;
 use crate::slug::{allocate_filename, slugify};
 use crate::trust;
 use mail_parser::{MessageParser, MimeHeaders};
@@ -52,6 +53,17 @@ pub fn ingest_email(
     let inbox_dir = config.inbox_dir(&mailbox);
 
     std::fs::create_dir_all(&inbox_dir)?;
+    // Chown the mailbox directory to the configured owner (PRD §6.3).
+    // Missing mailbox config (which shouldn't happen since resolve_mailbox
+    // falls back to "catchall", which is always present) would make the
+    // chown a silent no-op; `get` returns None in that case.
+    if let Some(mb_cfg) = config.mailboxes.get(&mailbox) {
+        // The inbox directory may already exist from a prior delivery.
+        // We still re-apply the chown/chmod here to heal any drift —
+        // safe because `chown_as_owner` is idempotent when the target
+        // already has the requested owner.
+        chown_as_owner_or_warn(&inbox_dir, mb_cfg, 0o700, "inbox_dir", &mailbox);
+    }
 
     let message = match MessageParser::default().parse(raw) {
         Some(m) => m,
@@ -227,6 +239,15 @@ pub fn ingest_email(
         .to_path_buf();
 
     std::fs::create_dir_all(&parent_dir)?;
+    // Chown the bundle directory (when `parent_dir != inbox_dir` this
+    // is the Zola-style bundle just created, else the mailbox dir we
+    // already chowned above). Mode `0o700`.
+    let mailbox_cfg_opt: Option<&MailboxConfig> = config.mailboxes.get(&mailbox);
+    if let Some(mb_cfg) = mailbox_cfg_opt
+        && parent_dir != inbox_dir
+    {
+        chown_as_owner_or_warn(&parent_dir, mb_cfg, 0o700, "bundle_dir", &mailbox);
+    }
 
     let id = md_path
         .file_stem()
@@ -240,16 +261,17 @@ pub fn ingest_email(
         }
     };
 
-    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|e| {
-        tracing::warn!(
-            target: "aimx::ingest",
-            "attachment write failed mailbox={mailbox} path={path}: {err}",
-            mailbox = mailbox,
-            path = parent_dir.display(),
-            err = e,
-        );
-        cleanup_bundle();
-    })?;
+    let attachments = write_attachments(&parent_dir, prepared_attachments, mailbox_cfg_opt)
+        .inspect_err(|e| {
+            tracing::warn!(
+                target: "aimx::ingest",
+                "attachment write failed mailbox={mailbox} path={path}: {err}",
+                mailbox = mailbox,
+                path = parent_dir.display(),
+                err = e,
+            );
+            cleanup_bundle();
+        })?;
 
     let meta = InboundFrontmatter {
         id: id.clone(),
@@ -298,6 +320,15 @@ pub fn ingest_email(
         );
         cleanup_bundle();
     })?;
+
+    // Chown the newly-written markdown file to the mailbox owner.
+    // Mode `0o600` — only the owner can read. Failures are logged but
+    // not fatal: the file is still in a `0o700` directory, so non-owners
+    // cannot traverse to read it. The owner sees `chown_as_owner_or_warn`
+    // log a warning so the operator can spot drift via `aimx doctor`.
+    if let Some(mb_cfg) = mailbox_cfg_opt {
+        chown_as_owner_or_warn(&md_path, mb_cfg, 0o600, "markdown", &mailbox);
+    }
 
     let attachments_count = meta.attachments.len();
 
@@ -788,6 +819,7 @@ fn is_filename_unsafe(ch: char) -> bool {
 fn write_attachments(
     bundle_dir: &Path,
     attachments: Vec<PreparedAttachment>,
+    mailbox_cfg: Option<&MailboxConfig>,
 ) -> Result<Vec<AttachmentMeta>, Box<dyn std::error::Error>> {
     let mut result = Vec::with_capacity(attachments.len());
 
@@ -795,6 +827,13 @@ fn write_attachments(
         let dest_filename = deduplicate_filename(bundle_dir, &att.filename);
         let dest_path = bundle_dir.join(&dest_filename);
         std::fs::write(&dest_path, &att.body)?;
+        if let Some(mb_cfg) = mailbox_cfg {
+            // Attachments sit inside the `0o700` bundle directory, so
+            // file-level mode is belt-and-braces. Still chown to the
+            // owner so ownership is consistent if the bundle dir is
+            // ever moved or permissions drift.
+            chown_as_owner_or_warn(&dest_path, mb_cfg, 0o600, "attachment", &mb_cfg.address);
+        }
 
         result.push(AttachmentMeta {
             filename: dest_filename.clone(),
@@ -843,6 +882,27 @@ fn write_markdown(
     let content = format_frontmatter(meta, body);
     file.write_all(content.as_bytes())?;
     Ok(path.to_path_buf())
+}
+
+/// Chown `path` to the mailbox's owner with the supplied `mode`. A
+/// failure is logged as a warning and swallowed rather than aborting
+/// the ingest — the containing directory is already `0o700 <owner>:<owner>`
+/// on a freshly-created mailbox, so a failed file-level chown still keeps
+/// the mail inaccessible to non-owners via filesystem permissions. The
+/// warning surfaces in `aimx logs` and `aimx doctor` so the operator
+/// can investigate. `kind` / `ctx` are the structured-field labels.
+fn chown_as_owner_or_warn(path: &Path, mb: &MailboxConfig, mode: u32, kind: &str, ctx: &str) {
+    if let Err(e) = chown_as_owner(path, mb, mode) {
+        tracing::warn!(
+            target: "aimx::ingest",
+            "chown failed kind={kind} mailbox={ctx} path={path} owner={owner} err={err}",
+            kind = kind,
+            ctx = ctx,
+            path = path.display(),
+            owner = mb.owner,
+            err = e,
+        );
+    }
 }
 
 #[cfg(test)]

@@ -3451,7 +3451,7 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        mailbox::create_mailbox(&config, "alice").unwrap();
+        mailbox::create_mailbox(&config, "alice", "root").unwrap();
 
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 

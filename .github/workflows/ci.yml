@@ -40,6 +40,24 @@ jobs:
           fi
           echo "Author metadata check passed"
 
+  integration-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Sprint 2 S2-4: root-gated per-mailbox isolation test. Creates
+      # `aimx-it-alice` and `aimx-it-bob` via `useradd`, delivers an
+      # email to alice, asserts bob gets EACCES on alice's inbox. The
+      # test is `#[ignore]` and also guarded by AIMX_INTEGRATION_SUDO=1
+      # so a `cargo test` from a casual contributor does not try to
+      # create system users.
+      - name: Run isolation integration test (root)
+        run: sudo -E env AIMX_INTEGRATION_SUDO=1 cargo test --test isolation -- --ignored
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:

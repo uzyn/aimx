@@ -430,6 +430,12 @@ async fn run_serve(
     // subscriber; the first init wins.
     crate::logging::init();
 
+    // Sprint 2 S2-2: clamp the process umask so freshly-created files
+    // default to `0o600` / directories to `0o700` *before* any explicit
+    // chown lands. Defense in depth — if a code path forgets the
+    // post-write `chown_as_owner`, the file is still not world-readable.
+    crate::ownership::set_process_umask(0o077);
+
     // Refresh the agent-facing README if the baked-in version differs from
     // what is on disk. Runs before any listener is bound so the file is
     // up-to-date by the time agents read it.

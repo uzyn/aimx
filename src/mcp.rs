@@ -32,6 +32,10 @@ pub struct AimxMcpServer {
 pub struct MailboxCreateParams {
     #[schemars(description = "Name of the mailbox to create (local part of email address)")]
     pub name: String,
+    #[schemars(description = "Linux user that owns this mailbox's storage under \
+                       /var/lib/aimx/{inbox,sent}/<name>/. Defaults to the \
+                       mailbox name. Must resolve via getpwnam.")]
+    pub owner: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -184,11 +188,13 @@ impl AimxMcpServer {
         // inbound mail routes correctly with no restart. Fall back to
         // direct on-disk edit only when the socket isn't reachable
         // (daemon stopped, first-time setup, etc.).
-        match submit_mailbox_crud_via_daemon(&params.name, true) {
+        let owner_val = params.owner.clone().unwrap_or_else(|| params.name.clone());
+        match submit_mailbox_crud_via_daemon(&params.name, true, Some(&owner_val)) {
             Ok(()) => Ok(format!("Mailbox '{}' created successfully.", params.name)),
             Err(MailboxCrudFallback::SocketMissing) => {
                 let config = self.load_config()?;
-                mailbox::create_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
+                mailbox::create_mailbox(&config, &params.name, &owner_val)
+                    .map_err(|e| e.to_string())?;
                 Ok(format!(
                     "Mailbox '{}' created successfully (daemon not running. Restart aimx to apply the change).",
                     params.name
@@ -236,7 +242,7 @@ impl AimxMcpServer {
         // error into a structured hint that names the exact CLI command
         // (S48-6). The fallback direct-on-disk path runs only when the
         // daemon is unreachable.
-        match submit_mailbox_crud_via_daemon(&params.name, false) {
+        match submit_mailbox_crud_via_daemon(&params.name, false, None) {
             Ok(()) => Ok(format!(
                 "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
                  directories remain on disk. Run `rmdir` to tidy up if desired.",
@@ -878,13 +884,16 @@ pub(crate) enum MailboxCrudFallback {
 }
 
 /// Submit a `MAILBOX-CREATE` / `MAILBOX-DELETE` request over UDS.
+/// `owner` is required on CREATE (Sprint 2 §6.3); ignored on DELETE.
 pub(crate) fn submit_mailbox_crud_via_daemon(
     name: &str,
     create: bool,
+    owner: Option<&str>,
 ) -> Result<(), MailboxCrudFallback> {
     let request = MailboxCrudRequest {
         name: name.to_string(),
         create,
+        owner: owner.map(|s| s.to_string()),
     };
     let socket = crate::serve::aimx_socket_path();
 
