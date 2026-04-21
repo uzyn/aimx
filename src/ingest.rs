@@ -13,6 +13,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    // Install the shared tracing subscriber so the INFO/WARN lines emitted
+    // below land on stderr for the manual stdin path. `aimx serve` installs
+    // the subscriber itself before any in-process ingest runs, so we do not
+    // call `logging::init` from `ingest_email`.
+    crate::logging::init();
     let mut raw = Vec::new();
     std::io::stdin().read_to_end(&mut raw)?;
     // Manual stdin path: no SMTP session, so received_from_ip is the
@@ -48,9 +53,19 @@ pub fn ingest_email(
 
     std::fs::create_dir_all(&inbox_dir)?;
 
-    let message = MessageParser::default()
-        .parse(raw)
-        .ok_or("Failed to parse email")?;
+    let message = match MessageParser::default().parse(raw) {
+        Some(m) => m,
+        None => {
+            tracing::warn!(
+                target: "aimx::ingest",
+                "Failed to parse email rcpt={rcpt} mailbox={mailbox} size_bytes={size}",
+                rcpt = rcpt,
+                mailbox = mailbox,
+                size = raw.len(),
+            );
+            return Err("Failed to parse email".into());
+        }
+    };
 
     let from = message
         .from()
@@ -64,6 +79,15 @@ pub fn ingest_email(
                 .unwrap_or_default()
         })
         .unwrap_or_default();
+
+    tracing::info!(
+        target: "aimx::ingest",
+        "received email rcpt={rcpt} mailbox={mailbox} size_bytes={size} from={from}",
+        rcpt = rcpt,
+        mailbox = mailbox,
+        size = raw.len(),
+        from = from,
+    );
 
     let to = message
         .to()
@@ -157,6 +181,15 @@ pub fn ingest_email(
 
     let auth_results = verify_auth(raw, received_from_ip, envelope_mail_from);
 
+    tracing::info!(
+        target: "aimx::ingest",
+        "auth result dkim={dkim} spf={spf} dmarc={dmarc} rcpt={rcpt}",
+        dkim = auth_results.dkim,
+        spf = auth_results.spf,
+        dmarc = auth_results.dmarc,
+        rcpt = rcpt,
+    );
+
     let trusted_value = config
         .mailboxes
         .get(&mailbox)
@@ -207,7 +240,14 @@ pub fn ingest_email(
         }
     };
 
-    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|_| {
+    let attachments = write_attachments(&parent_dir, prepared_attachments).inspect_err(|e| {
+        tracing::warn!(
+            target: "aimx::ingest",
+            "attachment write failed mailbox={mailbox} path={path}: {err}",
+            mailbox = mailbox,
+            path = parent_dir.display(),
+            err = e,
+        );
         cleanup_bundle();
     })?;
 
@@ -248,9 +288,27 @@ pub fn ingest_email(
         labels: vec![],
     };
 
-    write_markdown(&md_path, &meta, &body).inspect_err(|_| {
+    write_markdown(&md_path, &meta, &body).inspect_err(|e| {
+        tracing::warn!(
+            target: "aimx::ingest",
+            "markdown write failed mailbox={mailbox} path={path}: {err}",
+            mailbox = mailbox,
+            path = md_path.display(),
+            err = e,
+        );
         cleanup_bundle();
     })?;
+
+    let attachments_count = meta.attachments.len();
+
+    tracing::info!(
+        target: "aimx::ingest",
+        "stored email id={id} path={path} mailbox={mailbox} attachments={attachments}",
+        id = id,
+        path = md_path.display(),
+        mailbox = mailbox,
+        attachments = attachments_count,
+    );
 
     drop(_guard);
 
@@ -2207,5 +2265,82 @@ mod tests {
             table1.get("thread_id").unwrap().as_str().unwrap(),
             table2.get("thread_id").unwrap().as_str().unwrap(),
         );
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn ingest_email_emits_received_auth_stored_logs() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let locks = test_locks();
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+
+        assert!(logs_contain("aimx::ingest"));
+        assert!(logs_contain("received email"));
+        assert!(logs_contain("rcpt=alice@test.com"));
+        assert!(logs_contain("mailbox=alice"));
+        assert!(logs_contain("size_bytes="));
+        assert!(logs_contain("from=sender@example.com"));
+
+        assert!(logs_contain("auth result"));
+        assert!(logs_contain("dkim="));
+        assert!(logs_contain("spf="));
+        assert!(logs_contain("dmarc="));
+
+        assert!(logs_contain("stored email"));
+        assert!(logs_contain("id="));
+        assert!(logs_contain("path="));
+        assert!(logs_contain("attachments=0"));
+
+        // Trust log also fires.
+        assert!(logs_contain("aimx::trust"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn ingest_email_logs_attachments_count_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let locks = test_locks();
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            attachment_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+
+        assert!(logs_contain("stored email"));
+        assert!(logs_contain("attachments=1"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn ingest_email_emits_warn_on_parse_failure() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let locks = test_locks();
+        // Raw bytes that mail-parser can't make sense of.
+        let bogus: &[u8] = b"";
+        let result = ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            bogus,
+            sentinel_ip(),
+            None,
+        );
+        assert!(result.is_err(), "empty input must propagate parse failure");
+        assert!(logs_contain("Failed to parse email"));
     }
 }

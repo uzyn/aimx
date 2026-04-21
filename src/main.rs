@@ -12,6 +12,7 @@ mod hook_substitute;
 mod hook_templates_defaults;
 mod hooks;
 mod ingest;
+mod logging;
 mod logs;
 mod mailbox;
 mod mailbox_handler;

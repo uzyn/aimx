@@ -230,28 +230,6 @@ pub fn log_dkim_startup_check(outcome: &DkimStartupCheck, domain: &str, selector
     }
 }
 
-/// Idempotently install the global tracing subscriber. Called on
-/// `aimx serve` startup so structured `tracing::info!` records (notably
-/// the per-fire `aimx::hook` line that doctor parses for fire counts)
-/// land in stderr / journalctl.
-///
-/// `RUST_LOG` (env-filter) overrides the default `info` level so
-/// operators can debug-trace specific modules without a rebuild.
-fn init_tracing_subscriber() {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    // `try_init` returns Err when a subscriber is already installed,
-    // which is the case under integration-test re-entry. We swallow
-    // the error: the first install wins and subsequent calls are
-    // no-ops, exactly the contract we want.
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .compact()
-        .try_init();
-}
-
 fn truncate(s: &str, n: usize) -> String {
     if s.len() <= n {
         s.to_string()
@@ -443,7 +421,7 @@ async fn run_serve(
     // `try_init` keeps re-runs (e.g. test harnesses that re-enter
     // `run_serve` in-process) from panicking on a duplicate global
     // subscriber; the first init wins.
-    init_tracing_subscriber();
+    crate::logging::init();
 
     // Refresh the agent-facing README if the baked-in version differs from
     // what is on disk. Runs before any listener is bound so the file is

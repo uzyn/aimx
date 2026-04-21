@@ -83,23 +83,52 @@ pub fn evaluate_trust(
     from: &str,
 ) -> TrustedValue {
     let trust = mailbox.effective_trust(config);
-    if trust == "none" {
-        return TrustedValue::None;
-    }
+    let sender_bare = extract_email_for_match(from);
+    let mailbox_name = mailbox_key_for_log(config, mailbox);
 
-    if trust == "verified" {
+    let (result, sender_allowlisted) = if trust == "none" {
+        (TrustedValue::None, false)
+    } else if trust == "verified" {
         let senders = mailbox.effective_trusted_senders(config);
         let sender_allowlisted = is_sender_in_trusted_senders(senders, from);
         let dkim_passed = auth.dkim == "pass";
 
         if sender_allowlisted && dkim_passed {
-            return TrustedValue::True;
+            (TrustedValue::True, sender_allowlisted)
+        } else {
+            (TrustedValue::False, sender_allowlisted)
         }
-        return TrustedValue::False;
-    }
+    } else {
+        // Unknown trust value: fail closed.
+        (TrustedValue::False, false)
+    };
 
-    // Unknown trust value: fail closed.
-    TrustedValue::False
+    tracing::info!(
+        target: "aimx::trust",
+        "trust eval mailbox={mailbox} policy={policy} sender={sender} dkim={dkim} sender_allowlisted={sender_allowlisted} result={result}",
+        mailbox = mailbox_name,
+        policy = trust,
+        sender = sender_bare,
+        dkim = auth.dkim,
+        sender_allowlisted = sender_allowlisted,
+        result = result.as_str(),
+    );
+
+    result
+}
+
+/// Best-effort resolution of the mailbox's display name for logs.
+/// `MailboxConfig` doesn't carry its own key, so we search the `Config`
+/// map for a reverse-lookup. Falls back to the mailbox `address` when
+/// the caller constructed an ad-hoc `MailboxConfig` not in the map
+/// (e.g. unit tests).
+fn mailbox_key_for_log(config: &Config, mailbox: &MailboxConfig) -> String {
+    for (name, mb) in &config.mailboxes {
+        if mb.address == mailbox.address {
+            return name.clone();
+        }
+    }
+    mailbox.address.clone()
 }
 
 fn extract_email_for_match(from: &str) -> String {
@@ -133,6 +162,7 @@ mod tests {
     use crate::frontmatter::AuthResults;
     use std::collections::HashMap;
     use std::path::PathBuf;
+    use tracing_test::traced_test;
 
     fn bare_config() -> Config {
         Config {
@@ -384,6 +414,54 @@ mod tests {
         for trusted in [TrustedValue::None, TrustedValue::False, TrustedValue::True] {
             assert!(should_fire_on_receive(&yolo, trusted));
         }
+    }
+
+    #[traced_test]
+    #[test]
+    fn evaluate_trust_emits_aimx_trust_log_none() {
+        let cfg = bare_config();
+        let mb = mailbox_none();
+        let _ = evaluate_trust(&cfg, &mb, &auth("pass"), "anyone@example.com");
+        assert!(logs_contain("aimx::trust"));
+        assert!(logs_contain("trust eval"));
+        assert!(logs_contain("policy=none"));
+        assert!(logs_contain("result=none"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn evaluate_trust_emits_aimx_trust_log_verified_true() {
+        let cfg = bare_config();
+        let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
+        let _ = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
+        assert!(logs_contain("aimx::trust"));
+        assert!(logs_contain("policy=verified"));
+        assert!(logs_contain("sender=alice@gmail.com"));
+        assert!(logs_contain("dkim=pass"));
+        assert!(logs_contain("sender_allowlisted=true"));
+        assert!(logs_contain("result=true"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn evaluate_trust_emits_aimx_trust_log_verified_false_dkim_fail() {
+        let cfg = bare_config();
+        let mb = mailbox_verified(vec!["*@gmail.com".to_string()]);
+        let _ = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
+        assert!(logs_contain("policy=verified"));
+        assert!(logs_contain("dkim=fail"));
+        assert!(logs_contain("sender_allowlisted=true"));
+        assert!(logs_contain("result=false"));
+    }
+
+    #[traced_test]
+    #[test]
+    fn evaluate_trust_emits_aimx_trust_log_not_allowlisted() {
+        let cfg = bare_config();
+        let mb = mailbox_verified(vec!["*@company.com".to_string()]);
+        let _ = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
+        assert!(logs_contain("sender_allowlisted=false"));
+        assert!(logs_contain("result=false"));
     }
 
     #[test]

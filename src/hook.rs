@@ -398,9 +398,29 @@ pub fn should_fire_on_receive(hook: &Hook, email_trusted: TrustedValue) -> bool 
 /// propagate.
 pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: &OnReceiveContext) {
     let email_trusted = parse_trusted(&ctx.metadata.trusted);
+    let mailbox_name = &ctx.metadata.mailbox;
 
-    for hook in mailbox_config.on_receive_hooks() {
+    let hooks: Vec<&Hook> = mailbox_config.on_receive_hooks().collect();
+    if hooks.is_empty() {
+        tracing::info!(
+            target: "aimx::hook",
+            "No hooks found for event=on_receive mailbox={mailbox}",
+            mailbox = mailbox_name,
+        );
+        return;
+    }
+
+    for hook in hooks {
         if !should_fire_on_receive(hook, email_trusted) {
+            let hook_name = effective_hook_name(hook);
+            tracing::info!(
+                target: "aimx::hook",
+                "hook_name={hook_name} event=on_receive mailbox={mailbox} skipped: trusted={trusted} dangerously_support_untrusted={dangerous}",
+                hook_name = hook_name,
+                mailbox = mailbox_name,
+                trusted = email_trusted.as_str(),
+                dangerous = hook.dangerously_support_untrusted,
+            );
             continue;
         }
 
@@ -443,7 +463,17 @@ pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: 
 /// The daemon awaits subprocess completion for predictable timing, but exit
 /// codes are discarded (hooks cannot affect delivery).
 pub fn execute_after_send(config: &Config, mailbox_config: &MailboxConfig, ctx: &AfterSendContext) {
-    for hook in mailbox_config.after_send_hooks() {
+    let hooks: Vec<&Hook> = mailbox_config.after_send_hooks().collect();
+    if hooks.is_empty() {
+        tracing::info!(
+            target: "aimx::hook",
+            "No hooks found for event=after_send mailbox={mailbox}",
+            mailbox = ctx.mailbox,
+        );
+        return;
+    }
+
+    for hook in hooks {
         let hook_name = effective_hook_name(hook);
         let send_status = ctx.send_status.as_str();
 
@@ -560,6 +590,21 @@ fn run_and_log(
         .map(|t| t.stdin)
         .unwrap_or(HookTemplateStdin::Email);
     let stdin_payload = build_stdin(stdin_mode, stdin_source);
+
+    let pre_fire_template_tag = hook
+        .template
+        .as_deref()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    tracing::info!(
+        target: "aimx::hook",
+        "firing hook_name={hook_name} event={event} mailbox={mailbox} template={template_tag} run_as={run_as}",
+        hook_name = hook_name,
+        event = hook.event.as_str(),
+        mailbox = mailbox,
+        template_tag = pre_fire_template_tag,
+        run_as = run_as,
+    );
 
     // --- Spawn -------------------------------------------------------------
     let outcome_result = spawn_sandboxed(&argv, stdin_payload, &run_as, timeout, env);
@@ -1775,5 +1820,157 @@ cmd = "echo legacy"
             "log line should carry template=echoer"
         );
         assert!(std::fs::read_to_string(&out_path).unwrap().contains("hi"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn execute_on_receive_zero_hooks_emits_no_hooks_log() {
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            hooks: vec![],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+        };
+        let meta = sample_metadata();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let filepath = tmp.path().join("test.md");
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&sample_config(), &mailbox, &ctx);
+
+        assert!(logs_contain("aimx::hook"));
+        assert!(logs_contain(
+            "No hooks found for event=on_receive mailbox=catchall"
+        ));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn execute_on_receive_skipped_by_gate_emits_skip_log() {
+        // A regular hook with trusted=none fails the trust gate, so it
+        // must emit the skip log rather than fire.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("fired");
+        let mut hook = basic_hook("gated");
+        hook.cmd = format!("touch {}", marker.display());
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+        };
+        let mut meta = sample_metadata();
+        meta.trusted = "none".to_string();
+        let filepath = tmp.path().join("test.md");
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&sample_config(), &mailbox, &ctx);
+
+        assert!(!marker.exists(), "gated hook must not fire");
+        assert!(logs_contain("hook_name=gated"));
+        assert!(logs_contain("event=on_receive"));
+        assert!(logs_contain("mailbox=catchall"));
+        assert!(logs_contain("skipped"));
+        assert!(logs_contain("trusted=none"));
+        assert!(logs_contain("dangerously_support_untrusted=false"));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn execute_on_receive_emits_pre_fire_log_before_summary() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("fired");
+        let mut hook = basic_hook("firing_hook");
+        hook.cmd = format!("touch {}", marker.display());
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+        };
+        let mut meta = sample_metadata();
+        meta.trusted = "true".to_string();
+        let filepath = tmp.path().join("test.md");
+        std::fs::write(&filepath, b"test\n").ok();
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&sample_config(), &mailbox, &ctx);
+
+        assert!(marker.exists());
+        assert!(logs_contain("firing hook_name=firing_hook"));
+        assert!(logs_contain("event=on_receive"));
+        assert!(logs_contain("mailbox=catchall"));
+        // Post-fire summary is still emitted.
+        assert!(logs_contain("exit_code="));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn execute_after_send_zero_hooks_emits_no_hooks_log() {
+        let mailbox = MailboxConfig {
+            address: "alice@test.com".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+        };
+        let ctx = AfterSendContext {
+            mailbox: "alice",
+            from: "alice@test.com",
+            to: "bob@example.com",
+            subject: "Hi",
+            filepath: "",
+            message_id: "<m@test.com>",
+            send_status: SendStatus::Delivered,
+        };
+        execute_after_send(&sample_config(), &mailbox, &ctx);
+
+        assert!(logs_contain(
+            "No hooks found for event=after_send mailbox=alice"
+        ));
+    }
+
+    #[tracing_test::traced_test]
+    #[test]
+    fn execute_after_send_emits_pre_fire_log() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("fired");
+        let hook = Hook {
+            name: Some("after_hook".to_string()),
+            event: HookEvent::AfterSend,
+            r#type: "cmd".to_string(),
+            cmd: format!("touch {}", marker.display()),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
+            run_as: None,
+        };
+        let mailbox = MailboxConfig {
+            address: "alice@test.com".to_string(),
+            hooks: vec![hook],
+            trust: None,
+            trusted_senders: None,
+        };
+        let ctx = AfterSendContext {
+            mailbox: "alice",
+            from: "alice@test.com",
+            to: "bob@example.com",
+            subject: "Hi",
+            filepath: "",
+            message_id: "<m@test.com>",
+            send_status: SendStatus::Delivered,
+        };
+        execute_after_send(&sample_config(), &mailbox, &ctx);
+
+        assert!(marker.exists());
+        assert!(logs_contain("firing hook_name=after_hook"));
+        assert!(logs_contain("event=after_send"));
+        assert!(logs_contain("mailbox=alice"));
     }
 }
