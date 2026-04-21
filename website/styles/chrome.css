@@ -6,21 +6,17 @@ body {
   background: var(--bg);
 }
 
-html.aimx,
-body.aimx,
-body.light,
-body.navy,
-body.rust,
-body.coal,
-body.ayu {
+html.light,
+html.rust,
+html.ayu {
   background-image:
     radial-gradient(ellipse at 12% 0%, rgba(185, 83, 28, 0.055), transparent 55%),
     radial-gradient(ellipse at 92% 100%, rgba(185, 83, 28, 0.04), transparent 55%);
   background-attachment: fixed;
 }
 
-html.aimx-dark,
-body.aimx-dark {
+html.coal,
+html.navy {
   background-image:
     radial-gradient(ellipse at 12% 0%, rgba(208, 107, 46, 0.06), transparent 55%),
     radial-gradient(ellipse at 92% 100%, rgba(208, 107, 46, 0.05), transparent 55%);

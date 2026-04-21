@@ -73,7 +73,7 @@ html {
 }
 
 .content strong {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--aimx-ink);
 }
 
@@ -117,7 +117,7 @@ html {
   border: 1px solid var(--aimx-rule);
   border-radius: 3px;
   padding: 0.05em 0.35em;
-  color: var(--aimx-ink);
+  color: var(--inline-code-color);
 }
 
 /* Block code — no background fill, 2px accent left border, 14px / 1.55 (branding §5.3). */
@@ -171,7 +171,7 @@ html {
 }
 
 .content table thead th {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--aimx-ink);
   text-align: left;
   padding: 0.6em 1em 0.6em 0;

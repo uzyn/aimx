@@ -20,7 +20,7 @@
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
 :root {
@@ -87,7 +87,8 @@ header {
   font-variation-settings: 'opsz' 14;
   font-weight: 500;
   font-size: 1.17em;
-  letter-spacing: -0.015em;
+  letter-spacing: 0.04em;
+  font-variant-caps: small-caps;
 }
 
 .brand .dot { color: var(--accent); }
@@ -186,10 +187,11 @@ h1 em {
 .section-label {
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.29em;
+  line-height: 1.2;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--accent);
-  margin-bottom: 20px;
+  margin: 0 0 20px 0;
   font-weight: 500;
 }
 
@@ -234,7 +236,7 @@ h1 em {
 }
 
 .features li strong {
-  font-weight: 600;
+  font-weight: 500;
   color: var(--ink);
 }
 
@@ -343,7 +345,7 @@ footer a:hover {
 <div class="grain"></div>
 <div class="wrap">
   <header>
-    <div class="brand fade d1">AIMX<span class="dot">.</span></div>
+    <div class="brand fade d1">aimx<span class="dot">.</span></div>
     <div class="status fade d1">alpha · pre-v1</div>
   </header>
 
@@ -365,7 +367,7 @@ footer a:hover {
     </p>
 
     <section class="block fade d5">
-      <div class="section-label">What it is</div>
+      <h2 class="section-label">What it is</h2>
       <p class="prose">
         aimx is a self-hosted mail server for AI agents. One binary. One <code>aimx setup</code> command and your agents have their own email addresses on a domain you control. No Gmail, no OAuth, no SaaS.
       </p>
@@ -378,7 +380,7 @@ footer a:hover {
     </section>
 
     <section class="block fade d6">
-      <div class="section-label">Quick start</div>
+      <h2 class="section-label">Quick start</h2>
 <pre class="code">git clone https://github.com/uzyn/aimx.git &amp;&amp; cd aimx
 cargo build --release
 sudo cp target/release/aimx /usr/local/bin/
@@ -389,7 +391,7 @@ sudo aimx setup</pre>
     </section>
 
     <section class="block fade d7">
-      <div class="section-label">What's in the box</div>
+      <h2 class="section-label">What&rsquo;s in the box</h2>
       <ul class="features">
         <li><strong>Single binary.</strong> Written in Rust. No runtime dependencies, no database, no relay.</li>
         <li><strong>Direct MTA-to-MTA.</strong> Outbound goes straight to the recipient's MX. Inbound hits your server on port 25. Feels like an API call.</li>
@@ -401,10 +403,10 @@ sudo aimx setup</pre>
     </section>
 
     <section class="block fade d8">
-      <div class="section-label">Go deeper</div>
+      <h2 class="section-label">Go deeper</h2>
       <div class="links-row">
-        <div class="followup"><a href="/book/">Read the guide</a></div>
-        <div class="followup"><a href="https://github.com/uzyn/aimx" rel="noopener">Source on GitHub</a></div>
+        <div class="followup"><a href="/book/">Read the book</a></div>
+        <div class="followup"><a href="https://github.com/uzyn/aimx">Get the code</a></div>
       </div>
     </section>
 

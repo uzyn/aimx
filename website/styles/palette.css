@@ -3,13 +3,10 @@
    The three remaining slots (rust / navy / ayu) are mapped to sensible siblings
    rather than left as jarring defaults. Values from docs/branding.md §2.1. */
 
-:root {
-  color-scheme: light;
-}
-
 html.light,
 html.rust,
 html.ayu {
+  color-scheme: light;
   --bg: #F4EEE3;
   --fg: #151310;
 
@@ -50,8 +47,6 @@ html.ayu {
   --searchresults-li-bg: #EBE3D4;
   --search-mark-bg: #B9531C;
 
-  --color-scheme: light;
-
   --aimx-paper: #F4EEE3;
   --aimx-paper-2: #EBE3D4;
   --aimx-ink: #151310;
@@ -64,6 +59,7 @@ html.ayu {
 
 html.coal,
 html.navy {
+  color-scheme: dark;
   --bg: #1A1612;
   --fg: #EDE4D3;
 
@@ -103,8 +99,6 @@ html.navy {
   --searchresults-border-color: #2F2821;
   --searchresults-li-bg: #2F2821;
   --search-mark-bg: #D06B2E;
-
-  --color-scheme: dark;
 
   --aimx-paper: #1A1612;
   --aimx-paper-2: #231D17;
