@@ -67,10 +67,17 @@ pub fn create_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     }
 
     let mut config = config.clone();
+    // Per PRD §6.2 the mailbox `owner` field is required. Sprint 3's
+    // setup refactor introduces the interactive owner prompt; for now,
+    // default to the local part of the address so existing CLI flows
+    // (`aimx mailboxes create <name>`) keep working. Operators can edit
+    // `config.toml` or re-run with Sprint 3's flow to pick a different
+    // owner.
     config.mailboxes.insert(
         name.to_string(),
         MailboxConfig {
             address: format!("{name}@{}", config.domain),
+            owner: name.to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,
@@ -573,6 +580,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -644,7 +652,7 @@ mod tests {
         // Both `inbox/<name>/` and `sent/<name>/` exist.
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
-        let reloaded = Config::load_resolved().unwrap();
+        let reloaded = Config::load_resolved_ignore_warnings().unwrap();
         assert!(reloaded.mailboxes.contains_key("alice"));
         assert_eq!(reloaded.mailboxes["alice"].address, "alice@test.com");
     }
@@ -708,7 +716,7 @@ mod tests {
 
         // Registered mailbox: catchall + an `alice` we register.
         create_mailbox(&config, "alice").unwrap();
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         let inbox_alice = tmp.path().join("inbox").join("alice");
         std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
 
@@ -758,7 +766,7 @@ mod tests {
         let _guard = setup_config_file(tmp.path(), &config);
 
         create_mailbox(&config, "alice").unwrap();
-        let config = Config::load_resolved().unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
 
         delete_mailbox(&config, "alice").unwrap();
@@ -766,7 +774,7 @@ mod tests {
         // Both inbox and sent directories must be gone.
         assert!(!tmp.path().join("inbox").join("alice").exists());
         assert!(!tmp.path().join("sent").join("alice").exists());
-        let reloaded = Config::load_resolved().unwrap();
+        let reloaded = Config::load_resolved_ignore_warnings().unwrap();
         assert!(!reloaded.mailboxes.contains_key("alice"));
     }
 
@@ -998,6 +1006,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -1007,6 +1016,7 @@ mod tests {
             "support".to_string(),
             MailboxConfig {
                 address: "support@test.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![
                     crate::hook::Hook {
                         name: Some("inbound_urgent".into()),

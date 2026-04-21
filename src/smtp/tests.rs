@@ -60,6 +60,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         "catchall".to_string(),
         MailboxConfig {
             address: "*@test.local".to_string(),
+            owner: "aimx-catchall".to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,
@@ -69,6 +70,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         "alice".to_string(),
         MailboxConfig {
             address: "alice@test.local".to_string(),
+            owner: "root".to_string(),
             hooks: vec![],
             trust: None,
             trusted_senders: None,

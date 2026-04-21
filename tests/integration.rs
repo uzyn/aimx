@@ -14,7 +14,7 @@ static DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
     let cache = TempDir::new().expect("create DKIM cache tempdir");
     // dkim-keygen needs a parseable config.toml (it loads Config at startup).
     let config_content = format!(
-        "domain = \"cache.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@cache.example.com\"\n",
+        "domain = \"cache.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@cache.example.com\"\nowner = \"aimx-catchall\"\n",
         cache.path().display()
     );
     std::fs::write(cache.path().join("config.toml"), config_content)
@@ -52,7 +52,7 @@ fn install_cached_dkim_keys(tmp: &Path) {
 
 fn setup_test_env(tmp: &Path) -> String {
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"root\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -372,7 +372,7 @@ fn dkim_keygen_end_to_end() {
     // Write config.toml but skip DKIM key generation. The `dkim-keygen`
     // command itself is under test and must start from a clean slate.
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n",
         tmp.path().display()
     );
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
@@ -400,7 +400,7 @@ fn dkim_keygen_end_to_end() {
 fn dkim_keygen_no_overwrite() {
     let tmp = TempDir::new().unwrap();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n",
         tmp.path().display()
     );
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
@@ -426,7 +426,7 @@ fn dkim_keygen_no_overwrite() {
 fn dkim_keygen_force_overwrite() {
     let tmp = TempDir::new().unwrap();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n",
         tmp.path().display()
     );
     std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
@@ -470,7 +470,7 @@ fn dkim_keygen_permission_denied_error_mentions_path_and_override() {
     let config_dir = tmp.path().join("ro-config");
     std::fs::create_dir_all(&config_dir).unwrap();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n",
         tmp.path().display()
     );
     std::fs::write(config_dir.join("config.toml"), &config_content).unwrap();
@@ -1018,6 +1018,7 @@ data_dir = "{}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "catchalltrig"
@@ -1067,6 +1068,7 @@ data_dir = "{}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "failtrigger1"
@@ -1108,6 +1110,7 @@ data_dir = "{}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 trust = "verified"
 
 [[mailboxes.catchall.hooks]]
@@ -1153,6 +1156,7 @@ data_dir = "{}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 trust = "none"
 
 [[mailboxes.catchall.hooks]]
@@ -1208,6 +1212,7 @@ trusted_senders = ["*@example.com"]
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "inheritglobs"
@@ -1269,6 +1274,7 @@ trust = "verified"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 trust = "none"
 
 [[mailboxes.catchall.hooks]]
@@ -1358,6 +1364,7 @@ data_dir = "{}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 trust = "verified"
 trusted_senders = ["*@example.com"]
 
@@ -1409,6 +1416,7 @@ data_dir = "{data_dir}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 name = "recipehook01"
@@ -1881,7 +1889,7 @@ fn serve_e2e_connection_refused_after_shutdown() {
 
 fn setup_test_env_with_bob(tmp: &Path) -> String {
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"root\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\nowner = \"root\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -2715,9 +2723,11 @@ data_dir = "{data_dir}"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
+owner = "root"
 
 [[mailboxes.alice.hooks]]
 name = "aftersendhk1"
@@ -3867,9 +3877,11 @@ trust = "none"
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@agent.example.com"
+owner = "root"
 trust = "verified"
 trusted_senders = ["*@company.com", "boss@example.com"]
 
@@ -4337,6 +4349,12 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
 /// Like `setup_test_env`, but also registers a single `invoke-claude`
 /// template so the Sprint 5 MCP tool tests have something to bind to.
 fn setup_test_env_with_template(tmp: &Path) -> String {
+    // `run_as = "root"` is used here so the fixture loads on any CI
+    // host (Sprint 1 S1-2 retired the `aimx-hook` system user; `root`
+    // always resolves and is invariant-safe for any mailbox owner).
+    // Sprint 2 will introduce a real non-root test user and flip this
+    // back to exercise the orphan-tolerance path the earlier comment
+    // described.
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
          [[hook_template]]\n\
@@ -4345,13 +4363,15 @@ fn setup_test_env_with_template(tmp: &Path) -> String {
          cmd = [\"/usr/bin/true\", \"{{prompt}}\"]\n\
          params = [\"prompt\"]\n\
          stdin = \"email\"\n\
-         run_as = \"aimx-hook\"\n\
+         run_as = \"root\"\n\
          timeout_secs = 60\n\
          allowed_events = [\"on_receive\", \"after_send\"]\n\n\
          [mailboxes.catchall]\n\
-         address = \"*@agent.example.com\"\n\n\
+         address = \"*@agent.example.com\"\n\
+         owner = \"aimx-catchall\"\n\n\
          [mailboxes.alice]\n\
-         address = \"alice@agent.example.com\"\n",
+         address = \"alice@agent.example.com\"\n\
+         owner = \"root\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -4782,6 +4802,11 @@ fn hook_templates_end_to_end_mcp_to_sandbox() {
     // can't satisfy — see hook_substitute fuzz tests for substitution
     // edge cases that complement this end-to-end coverage).
     let webhook_url = "https://example.com/aimx-hook";
+    // Template + mailbox `run_as` / `owner` use `root` in this fixture
+    // so the CI runner (whose username isn't `aimx-hook` anymore, per
+    // Sprint 1 S1-2) still resolves the template to an active template
+    // and the alice mailbox to an active mailbox. The invariant check
+    // still holds: the `root` hook run_as is allowed for any owner.
     let config_content = format!(
         r#"domain = "agent.example.com"
 data_dir = "{data_dir}"
@@ -4792,15 +4817,17 @@ description = "POST the email as JSON to a URL"
 cmd = ["{mock}", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "{{url}}"]
 params = ["url"]
 stdin = "email_json"
-run_as = "aimx-hook"
+run_as = "root"
 timeout_secs = 30
 allowed_events = ["on_receive", "after_send"]
 
 [mailboxes.catchall]
 address = "*@agent.example.com"
+owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
+owner = "root"
 "#,
         data_dir = tmp.path().display(),
         mock = mock_curl_path.display(),
@@ -4905,18 +4932,19 @@ address = "alice@agent.example.com"
     client.shutdown();
     let daemon_stderr = stop_serve_capture_stderr(daemon);
 
-    // ----- Step 4b: structured hook-fire log line carries run_as = "aimx-hook"
-    // and template = "webhook". The fallback executor logs at info level via
-    // tracing, which `aimx serve` mirrors to stderr by default.
+    // ----- Step 4b: structured hook-fire log line carries run_as = "root"
+    // (Sprint 1 S1-2 retired the `aimx-hook` default; this fixture opts
+    // into `root` explicitly) and template = "webhook". The fallback
+    // executor logs at info level via tracing, which `aimx serve`
+    // mirrors to stderr by default.
     let log_plain = strip_ansi(&daemon_stderr);
     assert!(
         log_plain.contains("template=webhook"),
         "daemon stderr must include `template=webhook` log field; got: {log_plain}"
     );
     assert!(
-        log_plain.contains("run_as=aimx-hook"),
-        "daemon stderr must include `run_as=aimx-hook` log field even on non-root \
-         (the daemon attempts the drop and records the intent); got: {log_plain}"
+        log_plain.contains("run_as=root"),
+        "daemon stderr must include `run_as=root` log field; got: {log_plain}"
     );
 
     // ----- Step 5: inspect the captured argv + stdin from mock-curl.
@@ -4983,21 +5011,25 @@ address = "alice@agent.example.com"
     );
 
     // ----- Step 6: root-gated UID assertion (skipped on non-root CI).
-    // When the test runs as root, the sandbox actually drops to the
-    // `aimx-hook` UID; the mock-curl `id -u` output proves it. On
-    // non-root CI the executor falls back to the current user (logged
-    // as a WARN by `spawn_sandboxed`), and the assertion is skipped.
+    // This fixture uses `run_as = "root"` (see Sprint 1 S1-2 note at
+    // top of the test), so when the harness runs as root the hook's
+    // subprocess stays at uid 0 — no privilege drop required. The
+    // assertion covers the log-correctness path; the privilege-drop
+    // semantics are tested by the dedicated hook spawn unit tests.
     let is_root = unsafe { libc::geteuid() == 0 };
     if is_root {
         let uid_str = std::fs::read_to_string(&uid_log)
             .expect("mock-curl uid log must exist when running as root");
         let uid: u32 = uid_str.trim().parse().expect("uid log must be numeric");
-        // We don't hardcode the aimx-hook UID — the test box may have
-        // it provisioned at any system UID. We just assert it's not 0
-        // (root), proving the daemon's setuid drop fired.
-        assert_ne!(
+        // TODO(sprint-2): Sprint 2 creates a real non-root test user so
+        // this assertion can flip back to `uid != 0` — the original
+        // assertion that exercised the privilege-drop path. The current
+        // `uid == 0` form was a Sprint 1 concession: the fixture uses
+        // `run_as = "root"` because `aimx-hook` no longer exists, so
+        // there is no privilege drop to observe yet.
+        assert_eq!(
             uid, 0,
-            "subprocess must NOT run as root when daemon dropped privileges to aimx-hook"
+            "subprocess must run as root when template sets run_as = root"
         );
     } else {
         // Non-root path: the UID file should still exist (mock-curl ran),

@@ -6,7 +6,7 @@ description = "Pipe the received email into Claude Code with a custom prompt."
 cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
-run_as = "aimx-hook"
+run_as = "root"
 timeout_secs = 60
 allowed_events = ["on_receive", "after_send"]
 
@@ -26,9 +26,10 @@ cmd = [
 ]
 params = ["url"]
 stdin = "email_json"
-run_as = "aimx-hook"
+run_as = "root"
 timeout_secs = 30
 allowed_events = ["on_receive"]
 
 [mailboxes.catchall]
 address = "*@example.com"
+owner = "aimx-catchall"

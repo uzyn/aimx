@@ -1549,6 +1549,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -2053,6 +2054,7 @@ mod tests {
             "catchall".to_string(),
             crate::config::MailboxConfig {
                 address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -2062,6 +2064,7 @@ mod tests {
             "ops".to_string(),
             crate::config::MailboxConfig {
                 address: "ops@test.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![crate::hook::Hook {
                     name: Some("docthook".to_string()),
                     event: crate::hook::HookEvent::OnReceive,

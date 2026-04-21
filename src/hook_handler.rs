@@ -31,7 +31,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::config::{Config, HookTemplate, validate_hooks, validate_single_hook};
+use crate::config::{
+    Config, HookTemplate, OrphanSkipContext, validate_hooks, validate_single_hook,
+};
 use crate::hook::{Hook, HookEvent, HookOrigin, effective_hook_name, is_valid_hook_name};
 use crate::hook_substitute::{BuiltinContext, substitute_argv};
 use crate::mailbox_handler::{CONFIG_WRITE_LOCK, MailboxContext, write_config_atomic};
@@ -205,8 +207,12 @@ pub async fn handle_hook_create(
     }
 
     // Re-run the full load-time validator so the daemon refuses to write
-    // a config that would fail on next start.
-    if let Err(reason) = validate_hooks(&new_config) {
+    // a config that would fail on next start. UDS HOOK-CREATE is a fresh
+    // create path, not a migration load, so we pass the strict context:
+    // orphan-skip only applies when the daemon is booting an existing
+    // config with a now-missing user (PRD §6.1). Operators creating hooks
+    // through MCP/UDS must point at resolvable users.
+    if let Err(reason) = validate_hooks(&new_config, &OrphanSkipContext::strict()) {
         return AckResponse::Err {
             code: ErrCode::Validation,
             reason,
@@ -406,7 +412,10 @@ mod tests {
             cmd: vec!["/usr/bin/echo".into(), "{prompt}".into()],
             params: vec!["prompt".into()],
             stdin: HookTemplateStdin::Email,
-            run_as: "aimx-hook".into(),
+            // Sprint 1 S1-3 invariant: hook.run_as must equal
+            // mailbox.owner OR "root". The alice fixture is owned by
+            // `root`, so `root` satisfies the invariant on every host.
+            run_as: "root".into(),
             timeout_secs: 60,
             allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
         }
@@ -418,6 +427,7 @@ mod tests {
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@example.com".to_string(),
+                owner: "aimx-catchall".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -427,6 +437,7 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".to_string(),
+                owner: "root".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -492,7 +503,7 @@ mod tests {
         );
         assert_eq!(hooks[0].cmd, "");
 
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert_eq!(reloaded.mailboxes["alice"].hooks[0].origin, HookOrigin::Mcp);
     }
 
@@ -960,7 +971,7 @@ mod tests {
             assert!(matches!(h.await.unwrap(), AckResponse::Ok));
         }
 
-        let reloaded = Config::load(&mb_ctx.config_path).unwrap();
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         assert_eq!(reloaded.mailboxes["alice"].hooks.len(), 1);
         assert_eq!(reloaded.mailboxes["catchall"].hooks.len(), 1);
     }

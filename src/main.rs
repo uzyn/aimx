@@ -33,6 +33,7 @@ mod term;
 mod transport;
 mod trust;
 mod uninstall;
+mod user_resolver;
 
 use clap::Parser;
 use cli::{Cli, Command};
@@ -92,10 +93,27 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // read config.toml.
         Command::Logs { lines, follow } => logs::run(lines, follow),
         // Everything else loads Config once here and takes it by value.
+        // For long-lived processes (`aimx serve`, `aimx doctor`) we log
+        // startup warnings via `tracing` so orphan mailboxes / templates
+        // surface in journalctl. Short-lived CLI commands inherit the
+        // same logging but only a tracing subscriber is installed by
+        // `aimx serve` / `aimx doctor` themselves.
         other => {
-            let config = config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
+            let (config, warnings) =
+                config::Config::load_resolved_with_data_dir(cli.data_dir.as_deref())?;
+            emit_load_warnings(&warnings);
             dispatch_with_config(other, config)
         }
+    }
+}
+
+fn emit_load_warnings(warnings: &[config::LoadWarning]) {
+    for w in warnings {
+        tracing::warn!(
+            target: "aimx::config",
+            "{}",
+            w.message(),
+        );
     }
 }
 
@@ -134,7 +152,7 @@ fn dispatch_with_config(
 fn build_network_ops(
     cli_override: Option<&str>,
 ) -> Result<setup::RealNetworkOps, Box<dyn std::error::Error>> {
-    let config = config::Config::load_resolved().ok();
+    let config = config::Config::load_resolved_ignore_warnings().ok();
     let host =
         portcheck::resolve_verify_host(cli_override, config.as_ref(), setup::DEFAULT_VERIFY_HOST);
     setup::RealNetworkOps::from_verify_host(host)
