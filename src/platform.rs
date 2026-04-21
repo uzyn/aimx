@@ -272,8 +272,7 @@ fn spawn_via_fork_setuid(
     unsafe {
         cmd.pre_exec(|| {
             if libc::setsid() == -1 {
-                let errno = *libc::__errno_location();
-                return Err(std::io::Error::from_raw_os_error(errno));
+                return Err(std::io::Error::last_os_error());
             }
             Ok(())
         });
@@ -313,21 +312,21 @@ fn spawn_via_fork_setuid(
                 if libc::setgroups(0, std::ptr::null()) != 0 {
                     // Non-root callers will see EPERM here; that's OK
                     // in a dev / test path, fall through.
-                    let errno = *libc::__errno_location();
-                    if errno != libc::EPERM {
-                        return Err(std::io::Error::from_raw_os_error(errno));
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::EPERM) {
+                        return Err(err);
                     }
                 }
                 if libc::setgid(gid) != 0 {
-                    let errno = *libc::__errno_location();
-                    if errno != libc::EPERM {
-                        return Err(std::io::Error::from_raw_os_error(errno));
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::EPERM) {
+                        return Err(err);
                     }
                 }
                 if libc::setuid(uid) != 0 {
-                    let errno = *libc::__errno_location();
-                    if errno != libc::EPERM {
-                        return Err(std::io::Error::from_raw_os_error(errno));
+                    let err = std::io::Error::last_os_error();
+                    if err.raw_os_error() != Some(libc::EPERM) {
+                        return Err(err);
                     }
                 }
                 Ok(())
@@ -692,7 +691,9 @@ mod tests {
         // `aimx-hook`. The equivalent failure path when the caller IS
         // root is covered by the production code review, not a unit
         // test (CI runs non-root).
-        let argv = vec!["/bin/true".into()];
+        let tmp = tempfile::tempdir().unwrap();
+        let script = write_script(tmp.path(), "x.sh", "exit 0\n");
+        let argv = vec![script.to_string_lossy().into_owned()];
         let res = spawn_via_fork_setuid(
             &argv,
             SandboxStdin::None,

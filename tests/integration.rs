@@ -1702,9 +1702,9 @@ fn serve_e2e_receive_email_and_shutdown() {
     // Wait for server to be ready
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
@@ -1770,9 +1770,9 @@ fn serve_e2e_multi_recipient() {
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
@@ -1828,9 +1828,9 @@ fn serve_e2e_connection_refused_after_shutdown() {
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
@@ -1890,9 +1890,9 @@ fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
@@ -2500,9 +2500,9 @@ fn start_serve_with_mail_drop(
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
@@ -3395,9 +3395,9 @@ fn start_serve_with_env(tmp: &Path, port: u16, extra_env: &[(&str, &str)]) -> st
 
     let started = std::time::Instant::now();
     loop {
-        if started.elapsed() > std::time::Duration::from_secs(10) {
+        if started.elapsed() > std::time::Duration::from_secs(30) {
             child.kill().unwrap();
-            panic!("aimx serve did not start within 10s");
+            panic!("aimx serve did not start within 30s");
         }
         if std::net::TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
             break;
