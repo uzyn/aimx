@@ -55,8 +55,17 @@ jobs:
       # test is `#[ignore]` and also guarded by AIMX_INTEGRATION_SUDO=1
       # so a `cargo test` from a casual contributor does not try to
       # create system users.
+      #
+      # `sudo` on Ubuntu runners clears PATH via `secure_path`, which
+      # drops `$HOME/.cargo/bin` and makes `cargo` unresolvable inside
+      # the sudo environment. Resolve the toolchain cargo to an absolute
+      # path with `rustup which cargo` and invoke it directly so the
+      # isolation job actually runs the test body instead of exiting
+      # 127 on step invocation.
       - name: Run isolation integration test (root)
-        run: sudo -E env AIMX_INTEGRATION_SUDO=1 cargo test --test isolation -- --ignored
+        run: |
+          CARGO_BIN="$(rustup which cargo)"
+          sudo -E env AIMX_INTEGRATION_SUDO=1 "$CARGO_BIN" test --test isolation -- --ignored
 
   verifier-tests:
     runs-on: ubuntu-latest

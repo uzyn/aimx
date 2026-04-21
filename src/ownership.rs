@@ -91,6 +91,16 @@ mod tests {
     use crate::config::MailboxConfig;
     use crate::user_resolver::{ResolvedUser, set_test_resolver};
     use std::os::unix::fs::MetadataExt;
+    use std::sync::Mutex;
+
+    /// Process-wide serialization mutex for tests that mutate `umask`.
+    /// `umask(2)` is a thread-unsafe POSIX syscall — cargo runs unit
+    /// tests in parallel, so any test that temporarily changes the mask
+    /// must hold this lock for the read-modify-restore critical section.
+    /// Mirrors the pattern in `user_resolver::test_resolver::SERIALIZE`.
+    /// Every umask-touching test in this module (current and future)
+    /// must acquire this lock to keep the assertion deterministic.
+    static UMASK_SERIALIZE: Mutex<()> = Mutex::new(());
 
     fn mb_with_owner(owner: &str) -> MailboxConfig {
         MailboxConfig {
@@ -215,7 +225,14 @@ mod tests {
 
     #[test]
     fn set_process_umask_returns_previous_value() {
-        // Run with a fresh umask, capture prior, restore.
+        // umask is process-global, not thread-local. Cargo runs unit
+        // tests in parallel, so hold `UMASK_SERIALIZE` across the
+        // read-modify-restore so a concurrent umask-touching test can't
+        // race the "second call returns 0o077" assertion. Any future
+        // umask-mutating test must hold the same lock.
+        let _guard = UMASK_SERIALIZE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let prior = set_process_umask(0o077);
         let again = set_process_umask(prior);
         assert_eq!(again, 0o077);

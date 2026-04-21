@@ -44,7 +44,6 @@ use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MailboxCrudRequest};
 use crate::state_handler::StateContext;
-use crate::user_resolver::resolve_user;
 
 /// Process-wide mutex around the `config.toml` read-modify-write critical
 /// section. Symmetric in spirit to `send_handler::SENT_WRITE_LOCK`: a
@@ -120,17 +119,30 @@ pub async fn handle_mailbox_crud(
     }
 }
 
-/// Resolve `owner` via the Sprint-1 user resolver. Every name — reserved
-/// or otherwise — routes through [`resolve_user`] so the pluggable test
-/// seam stays hot (tests override via `set_test_resolver`). On a real
-/// Linux host `root` always resolves to uid 0 / gid 0; the reserved
-/// name has no other valid shape. Returns an `EINVAL`-ready message on
-/// miss so the caller maps it straight into `ErrCode::Validation`.
+/// Resolve `owner` via the same helpers Sprint 1 ships for `MailboxConfig`.
+/// Using [`MailboxConfig::owner_uid`] / [`MailboxConfig::owner_gid`] keeps
+/// the reserved-name short-circuits (`root` → uid 0 without hitting
+/// `getpwnam`, `aimx-catchall` → routed through the resolver) in one code
+/// path, so the validation rules the rest of the daemon trusts apply
+/// identically here. The regex gate from `validate_run_as` also rejects
+/// malformed inputs at this seam rather than at the `getpwnam` layer.
+/// Returns an `EINVAL`-ready message on miss so the caller maps it
+/// straight into `ErrCode::Validation`.
 fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
-    match resolve_user(owner) {
-        Some(u) => Ok((u.uid, u.gid)),
-        None => Err(format!("unknown owner '{owner}'")),
-    }
+    let mb = MailboxConfig {
+        address: String::new(),
+        owner: owner.to_string(),
+        hooks: vec![],
+        trust: None,
+        trusted_senders: None,
+    };
+    let uid = mb
+        .owner_uid()
+        .map_err(|_| format!("unknown owner '{owner}'"))?;
+    let gid = mb
+        .owner_gid()
+        .map_err(|_| format!("unknown owner '{owner}'"))?;
+    Ok((uid, gid))
 }
 
 fn handle_create(
@@ -165,6 +177,11 @@ fn handle_create(
     let inbox = data_dir.join("inbox").join(name);
     let sent = data_dir.join("sent").join(name);
 
+    // Track whether each dir existed before this call so the rollback
+    // branches below never `remove_dir` an operator-created directory.
+    let inbox_existed = inbox.exists();
+    let sent_existed = sent.exists();
+
     // Pre-existence check: if either dir already exists, the only safe
     // outcome is "already correct" (no-op) or "conflict" (wrong owner/
     // mode). A silent chown-over would mask an operator misconfig.
@@ -180,7 +197,10 @@ fn handle_create(
     }
     if let Err(e) = std::fs::create_dir_all(&sent) {
         // Roll back the inbox dir so we never leave half a mailbox behind.
-        let _ = std::fs::remove_dir(&inbox);
+        // Only remove if WE created it in this call.
+        if !inbox_existed {
+            let _ = std::fs::remove_dir(&inbox);
+        }
         return AckResponse::Err {
             code: ErrCode::Io,
             reason: format!("failed to create {}: {e}", sent.display()),
@@ -206,18 +226,19 @@ fn handle_create(
     // Chown + chmod the freshly-created dirs. Mode 0o700 means only
     // the owning user (and root) can traverse; this is the isolation
     // invariant from PRD §7.1. If either chown fails, roll back the
-    // dirs so we never leave half a mailbox with the wrong owner.
+    // dirs we just created so we never leave half a mailbox with the
+    // wrong owner. Dirs that existed before this call are left alone —
+    // the idempotent-matching-owner path reaches here too, and removing
+    // a pre-existing dir would delete an operator-created artifact.
     if let Err(e) = chown_as_owner(&inbox, &mb_cfg, 0o700) {
-        let _ = std::fs::remove_dir(&inbox);
-        let _ = std::fs::remove_dir(&sent);
+        rollback_self_created_dirs(&inbox, inbox_existed, &sent, sent_existed);
         return AckResponse::Err {
             code: ErrCode::Io,
             reason: format!("failed to chown {}: {e}", inbox.display()),
         };
     }
     if let Err(e) = chown_as_owner(&sent, &mb_cfg, 0o700) {
-        let _ = std::fs::remove_dir(&inbox);
-        let _ = std::fs::remove_dir(&sent);
+        rollback_self_created_dirs(&inbox, inbox_existed, &sent, sent_existed);
         return AckResponse::Err {
             code: ErrCode::Io,
             reason: format!("failed to chown {}: {e}", sent.display()),
@@ -228,9 +249,9 @@ fn handle_create(
         // Rename failed; leave the in-memory Config untouched so the
         // daemon continues running against the pre-call state on both
         // disk and memory. Best-effort clean up of the freshly-created
-        // directories so the operator can retry cleanly.
-        let _ = std::fs::remove_dir(&inbox);
-        let _ = std::fs::remove_dir(&sent);
+        // directories so the operator can retry cleanly. Dirs that
+        // pre-existed are preserved.
+        rollback_self_created_dirs(&inbox, inbox_existed, &sent, sent_existed);
         return AckResponse::Err {
             code: ErrCode::Io,
             reason: format!("failed to write {}: {e}", mb_ctx.config_path.display()),
@@ -239,6 +260,19 @@ fn handle_create(
 
     mb_ctx.config_handle.store(new_config);
     AckResponse::Ok
+}
+
+/// Best-effort removal of dirs the handler itself created in this call.
+/// Any dir that pre-existed (operator-created or left over from an
+/// earlier idempotent run) is left untouched — see the callers in the
+/// chown-failure and rename-failure rollback branches for the contract.
+fn rollback_self_created_dirs(inbox: &Path, inbox_existed: bool, sent: &Path, sent_existed: bool) {
+    if !inbox_existed {
+        let _ = std::fs::remove_dir(inbox);
+    }
+    if !sent_existed {
+        let _ = std::fs::remove_dir(sent);
+    }
 }
 
 /// Returns `Some(err)` if either directory pre-exists with a uid/gid or
@@ -1024,6 +1058,89 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn create_rollback_on_chown_failure_removes_only_self_created_dirs() {
+        // Sprint 2 S2-1: when the post-create chown fails the handler
+        // must roll back the directories IT created in this call, but
+        // must NOT remove directories that pre-existed. We simulate
+        // this by pre-creating `inbox/alice` (so the rollback must
+        // preserve it) while letting the handler create `sent/alice`
+        // fresh (so the rollback must remove it on chown failure).
+        //
+        // chown failure is triggered by resolving the owner to uid
+        // 65534 (nobody) on a non-root CI runner: `chown(nobody)` as
+        // unprivileged fails with EPERM, landing us in the rollback
+        // branch. Root runners skip the test since the chown succeeds.
+        let is_root = unsafe { libc::geteuid() == 0 };
+        if is_root {
+            return;
+        }
+        fn nobody(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "nobody" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "nobody".into(),
+                    uid: 65534,
+                    gid: 65534,
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(nobody);
+
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        // Pre-create ONLY `inbox/alice` so the rollback must preserve
+        // it. `sent/alice` does not exist and is created by the handler.
+        let inbox = tmp.path().join("inbox").join("alice");
+        let sent = tmp.path().join("sent").join("alice");
+        std::fs::create_dir_all(&inbox).unwrap();
+        // Seed an operator-authored file inside the pre-existing inbox
+        // dir so `remove_dir` (which only removes empty dirs) cannot
+        // touch it even if rollback *did* try to remove it.
+        std::fs::write(inbox.join("do-not-delete"), b"operator data").unwrap();
+
+        let req = MailboxCrudRequest {
+            name: "alice".into(),
+            create: true,
+            owner: Some("nobody".into()),
+        };
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+            AckResponse::Err { code, .. } => {
+                // Either Conflict (pre-existing dir owner mismatch) or
+                // Io (chown failed). Both are valid outcomes for the
+                // rollback invariant we're asserting — the stanza must
+                // not be in the in-memory config, and operator-created
+                // artifacts must survive.
+                assert!(
+                    matches!(code, ErrCode::Io | ErrCode::Conflict),
+                    "expected Io or Conflict, got {code:?}"
+                );
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+
+        // Operator's pre-existing inbox dir and sentinel file survive.
+        assert!(
+            inbox.join("do-not-delete").exists(),
+            "operator's data must survive rollback"
+        );
+        assert!(
+            inbox.is_dir(),
+            "pre-existing inbox dir must survive rollback"
+        );
+        // The handler-created sent dir was either never created (early
+        // Conflict return) or rolled back on chown failure. Either way,
+        // it must not exist now.
+        assert!(
+            !sent.exists(),
+            "handler-created sent dir must not survive after failure"
+        );
+        // Config stanza did not get written.
+        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
     }
 
     #[tokio::test]

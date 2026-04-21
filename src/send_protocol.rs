@@ -626,6 +626,16 @@ where
                 if value.is_empty() {
                     return Err(ParseError::Malformed("empty Owner value".into()));
                 }
+                // Shape-check the owner at parse time so malformed
+                // header values (embedded whitespace, colons, tabs,
+                // etc.) reject with a precise `Malformed` here rather
+                // than at the `getpwnam`/resolver layer further in.
+                // Mirrors the Sprint-1 `validate_run_as` regex gate.
+                if !crate::config::is_valid_system_username(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Owner value: {value:?} (must match [a-z_][a-z0-9_-]*[$]?)"
+                    )));
+                }
                 owner = Some(value);
             }
             "content-length" => {
@@ -1531,6 +1541,34 @@ mod tests {
         match err {
             ParseError::Malformed(m) => assert!(m.contains("empty Owner"), "{m}"),
             other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn mailbox_crud_malformed_owner_shape_is_malformed() {
+        // Values that fail the `is_valid_system_username` regex must
+        // reject at the parser layer, not the resolver. Covers shapes
+        // like uppercase letters, embedded colons, whitespace, leading
+        // digits, and Samba `$` suffix in the wrong position.
+        for bad in [
+            "Alice",         // uppercase
+            "alicé",         // unicode
+            "nobody: extra", // embedded colon+space
+            "nobody\textra", // embedded tab
+            "9bad",          // leading digit
+            "bad name",      // embedded space
+            "$bad",          // leading $
+        ] {
+            let input =
+                format!("AIMX/1 MAILBOX-CREATE\nName: alice\nOwner: {bad}\nContent-Length: 0\n\n");
+            let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+            match err {
+                ParseError::Malformed(m) => assert!(
+                    m.contains("invalid Owner value"),
+                    "for input {bad:?}, got: {m}"
+                ),
+                other => panic!("expected Malformed for {bad:?}, got {other:?}"),
+            }
         }
     }
 

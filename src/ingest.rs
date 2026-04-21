@@ -2405,4 +2405,109 @@ mod tests {
         assert!(result.is_err(), "empty input must propagate parse failure");
         assert!(logs_contain("Failed to parse email"));
     }
+
+    /// Sprint 2 S2-2: bundle-layout chown end-to-end. Ingests an email
+    /// that produces a Zola-style bundle directory and asserts:
+    ///
+    ///   - the bundle directory itself is mode `0o700`
+    ///   - the bundle `.md` is mode `0o600`
+    ///   - each attachment file is mode `0o600`
+    ///
+    /// The test resolver maps `testowner` to the current uid/gid so the
+    /// chown syscall is a no-op on non-root CI runners.
+    #[cfg(unix)]
+    #[test]
+    fn bundle_layout_chown_applies_mode_to_dir_md_and_attachments() {
+        use std::os::unix::fs::MetadataExt;
+
+        fn fake(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "testowner" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "testowner".into(),
+                    uid: unsafe { libc::geteuid() },
+                    gid: unsafe { libc::getegid() },
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(fake);
+
+        // Build a Config whose alice mailbox is owned by `testowner`
+        // (not `root`) so the chown lands without requiring privileges.
+        let tmp = TempDir::new().unwrap();
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        mailboxes.insert(
+            "alice".to_string(),
+            MailboxConfig {
+                address: "alice@test.com".to_string(),
+                owner: "testowner".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+            },
+        );
+        let config = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        };
+
+        ingest_email(
+            &config,
+            &test_locks(),
+            "alice@test.com",
+            multi_attachment_eml(),
+            sentinel_ip(),
+            None,
+        )
+        .unwrap();
+
+        let alice = inbox(tmp.path(), "alice");
+        let bundles: Vec<_> = std::fs::read_dir(&alice)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .collect();
+        assert_eq!(bundles.len(), 1, "expected exactly one bundle directory");
+        let bundle = bundles[0].path();
+
+        // Bundle directory: 0o700 after chown.
+        let dir_meta = std::fs::metadata(&bundle).unwrap();
+        assert_eq!(
+            dir_meta.mode() & 0o777,
+            0o700,
+            "bundle dir must be 0o700 after Sprint 2 chown"
+        );
+
+        // Every file inside the bundle: 0o600 (md + each attachment).
+        for entry in std::fs::read_dir(&bundle).unwrap().flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let meta = std::fs::metadata(&path).unwrap();
+                assert_eq!(
+                    meta.mode() & 0o777,
+                    0o600,
+                    "file {path:?} inside bundle must be 0o600; got {:o}",
+                    meta.mode() & 0o777
+                );
+            }
+        }
+    }
 }
