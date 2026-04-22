@@ -1329,12 +1329,19 @@ pub fn check_hook_invariants(config: &Config) -> Vec<DoctorFinding> {
     out
 }
 
-/// S7-3 part 2: when any mailbox is a catchall, verify the reserved
-/// `aimx-catchall` system user exists. Without it, catchall inbound
-/// ingest cannot chown mail into place.
+/// S7-3 part 2: when a catchall mailbox is owned by the reserved
+/// `aimx-catchall` user (the default from `aimx setup`), verify that
+/// user actually resolves. Without it, catchall inbound ingest cannot
+/// chown mail into place. If the operator has deliberately assigned a
+/// different owner to the catchall, ingest chowns as that owner
+/// instead, so the reserved user is not required and the check is a
+/// no-op.
 pub fn check_catchall_user(config: &Config) -> Vec<DoctorFinding> {
-    let has_catchall = config.mailboxes.values().any(|mb| mb.is_catchall(config));
-    if !has_catchall {
+    let needs_reserved_user = config
+        .mailboxes
+        .values()
+        .any(|mb| mb.is_catchall(config) && mb.owner == RESERVED_RUN_AS_CATCHALL);
+    if !needs_reserved_user {
         return Vec::new();
     }
     if resolve_user(RESERVED_RUN_AS_CATCHALL).is_some() {
@@ -1345,8 +1352,9 @@ pub fn check_catchall_user(config: &Config) -> Vec<DoctorFinding> {
             "CATCHALL-USER-MISSING",
             FindingSeverity::Fail,
             format!(
-                "catchall mailbox is configured but system user \
-                 '{RESERVED_RUN_AS_CATCHALL}' does not resolve",
+                "catchall mailbox is configured with owner \
+                 '{RESERVED_RUN_AS_CATCHALL}' but that system user does \
+                 not resolve",
             ),
         )
         .with_fix("re-run `sudo aimx setup` to create the catchall service user"),
@@ -3940,12 +3948,14 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
         let _guard = set_test_resolver(fake);
         let tmp = tempfile::TempDir::new().unwrap();
         let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
-        // Add a catchall mailbox whose address matches `*@ex.com`.
+        // Add a catchall mailbox owned by the reserved `aimx-catchall`
+        // user — the only configuration that actually requires the
+        // system user to resolve.
         config.mailboxes.insert(
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@ex.com".to_string(),
-                owner: "testowner".to_string(),
+                owner: RESERVED_RUN_AS_CATCHALL.to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
@@ -3963,7 +3973,50 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
     }
 
     #[test]
+    fn catchall_user_check_skips_when_catchall_owner_is_not_reserved() {
+        // When the operator opts out of the default by assigning a
+        // non-reserved owner to the catchall mailbox, ingest chowns as
+        // that owner and `aimx-catchall` is not required — even if
+        // that user does not resolve on the host.
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "testowner" || name == "root" {
+                let (uid, gid) = current_uid_gid();
+                Some(ResolvedUser {
+                    name: name.to_string(),
+                    uid,
+                    gid,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@ex.com".to_string(),
+                owner: "testowner".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+
+        let findings = check_catchall_user(&config);
+        assert!(
+            findings.is_empty(),
+            "non-reserved catchall owner → no CATCHALL-USER-MISSING finding, \
+             got: {findings:?}"
+        );
+    }
+
+    #[test]
     fn catchall_user_check_passes_when_user_exists() {
+        // Default setup path: catchall owned by the reserved user,
+        // and that user resolves → no finding.
         fn fake(name: &str) -> Option<ResolvedUser> {
             let (uid, gid) = current_uid_gid();
             if name == "testowner" || name == "root" || name == "aimx-catchall" {
@@ -3983,7 +4036,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
             "catchall".to_string(),
             MailboxConfig {
                 address: "*@ex.com".to_string(),
-                owner: "testowner".to_string(),
+                owner: RESERVED_RUN_AS_CATCHALL.to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
