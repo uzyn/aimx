@@ -41,7 +41,7 @@ use crate::send_protocol::{
     AckResponse, ErrCode, HookCreateRequest, HookDeleteRequest, HookTemplateCreateBody,
 };
 use crate::state_handler::StateContext;
-use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root, log_decision};
+use crate::uds_authz::{Caller, LogDecision, enforce_mailbox_owner_or_root, log_decision};
 
 /// Handle an `AIMX/1 HOOK-CREATE` request. Template-only. Takes the
 /// per-mailbox write lock for the addressed mailbox (outer) plus
@@ -106,7 +106,7 @@ pub async fn handle_hook_create(
                 "HOOK-CREATE",
                 caller,
                 Some(&req.mailbox),
-                "reject",
+                LogDecision::Reject,
                 Some("mailbox not found"),
             );
             return AckResponse::Err {
@@ -292,7 +292,7 @@ pub async fn handle_hook_delete(
                 "HOOK-DELETE",
                 caller,
                 None,
-                "reject",
+                LogDecision::Reject,
                 Some("hook not found"),
             );
             return AckResponse::Err {
@@ -305,10 +305,24 @@ pub async fn handle_hook_delete(
     // Sprint 4 §6.5: the caller must own the target mailbox OR be
     // root. Runs before the origin check so a non-owner never learns
     // whether the hook is MCP- or operator-origin.
-    if let Some(mailbox_cfg) = current.mailboxes.get(&owner)
-        && let Err(reject) =
-            enforce_mailbox_owner_or_root("HOOK-DELETE", caller, &owner, mailbox_cfg)
-    {
+    //
+    // `owner` came from the same `current.mailboxes` iteration above
+    // so the `None` branch is unreachable today. Handle it explicitly
+    // with `ENOENT` so authz can't be silently skipped if a future
+    // refactor separates the owner-scan and lookup steps.
+    let mailbox_cfg = match current.mailboxes.get(&owner) {
+        Some(m) => m,
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Enoent,
+                reason: format!(
+                    "mailbox '{owner}' resolved but not found in config \
+                     (race with concurrent MAILBOX-DELETE)"
+                ),
+            };
+        }
+    };
+    if let Err(reject) = enforce_mailbox_owner_or_root("HOOK-DELETE", caller, &owner, mailbox_cfg) {
         return AckResponse::Err {
             code: reject.code,
             reason: reject.reason,

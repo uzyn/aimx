@@ -65,7 +65,11 @@ impl Caller {
     }
 
     /// Construct an explicit caller (tests and internal dispatchers).
-    #[allow(dead_code)]
+    ///
+    /// Gated behind `#[cfg(test)]` because every production call site
+    /// uses [`Caller::from_ucred`] instead. Tests and integration
+    /// fixtures that synthesize a caller go through this constructor.
+    #[cfg(test)]
     pub fn new(uid: u32, gid: u32, pid: Option<i32>) -> Self {
         Self {
             uid,
@@ -79,7 +83,12 @@ impl Caller {
     /// the in-process inbound ingest path which never crosses the UDS.
     /// Also convenient for tests and harnesses that bypass the real
     /// SO_PEERCRED path.
-    #[allow(dead_code)]
+    ///
+    /// Gated behind `#[cfg(test)]`: production call sites either go
+    /// through [`Caller::from_ucred`] after a real `SO_PEERCRED`
+    /// handshake, or (for the in-process ingest path) synthesize a
+    /// caller via platform APIs rather than this helper.
+    #[cfg(test)]
     pub fn internal_root() -> Self {
         Self::new(0, 0, None)
     }
@@ -210,6 +219,27 @@ pub fn require_root(caller: &Caller) -> Result<AuthzDecision, AuthzReject> {
     }
 }
 
+/// Decision value passed to [`log_decision`]. Typed so the compiler —
+/// rather than a string-match wildcard — catches new variants: if a
+/// future caller invents a fourth outcome, it has to add an arm here
+/// instead of silently falling through to a "debug accept" line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogDecision {
+    Accept,
+    RootBypass,
+    Reject,
+}
+
+impl LogDecision {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LogDecision::Accept => "accept",
+            LogDecision::RootBypass => "root_bypass",
+            LogDecision::Reject => "reject",
+        }
+    }
+}
+
 /// Emit a structured tracing event under `aimx::uds` describing one
 /// authz decision. `verb` / `mailbox` / `decision` identify the event;
 /// `caller_uid` / `caller_username` identify the actor.
@@ -217,38 +247,39 @@ pub fn log_decision(
     verb: &str,
     caller: &Caller,
     mailbox: Option<&str>,
-    decision: &str,
+    decision: LogDecision,
     reason: Option<&str>,
 ) {
     let mailbox = mailbox.unwrap_or("");
     let reason = reason.unwrap_or("");
+    let decision_str = decision.as_str();
     match decision {
-        "reject" => tracing::warn!(
+        LogDecision::Reject => tracing::warn!(
             target: "aimx::uds",
             verb = verb,
             caller_uid = caller.uid,
             caller_username = caller.username_display(),
             mailbox = mailbox,
-            decision = decision,
+            decision = decision_str,
             reason = reason,
             "uds authz reject"
         ),
-        "root_bypass" => tracing::info!(
+        LogDecision::RootBypass => tracing::info!(
             target: "aimx::uds",
             verb = verb,
             caller_uid = caller.uid,
             caller_username = caller.username_display(),
             mailbox = mailbox,
-            decision = decision,
+            decision = decision_str,
             "uds authz root_bypass"
         ),
-        _ => tracing::debug!(
+        LogDecision::Accept => tracing::debug!(
             target: "aimx::uds",
             verb = verb,
             caller_uid = caller.uid,
             caller_username = caller.username_display(),
             mailbox = mailbox,
-            decision = decision,
+            decision = decision_str,
             "uds authz accept"
         ),
     }
@@ -265,11 +296,17 @@ pub fn enforce_mailbox_owner_or_root(
 ) -> Result<(), AuthzReject> {
     match require_mailbox_owner_or_root(caller, mailbox_name, mailbox) {
         Ok(AuthzDecision::Accept) => {
-            log_decision(verb, caller, Some(mailbox_name), "accept", None);
+            log_decision(verb, caller, Some(mailbox_name), LogDecision::Accept, None);
             Ok(())
         }
         Ok(AuthzDecision::RootBypass) => {
-            log_decision(verb, caller, Some(mailbox_name), "root_bypass", None);
+            log_decision(
+                verb,
+                caller,
+                Some(mailbox_name),
+                LogDecision::RootBypass,
+                None,
+            );
             Ok(())
         }
         Err(reject) => {
@@ -277,7 +314,7 @@ pub fn enforce_mailbox_owner_or_root(
                 verb,
                 caller,
                 Some(mailbox_name),
-                "reject",
+                LogDecision::Reject,
                 Some(&reject.reason),
             );
             Err(reject)
@@ -295,11 +332,17 @@ pub fn enforce_root(
 ) -> Result<(), AuthzReject> {
     match require_root(caller) {
         Ok(_) => {
-            log_decision(verb, caller, mailbox_hint, "accept", None);
+            log_decision(verb, caller, mailbox_hint, LogDecision::Accept, None);
             Ok(())
         }
         Err(reject) => {
-            log_decision(verb, caller, mailbox_hint, "reject", Some(&reject.reason));
+            log_decision(
+                verb,
+                caller,
+                mailbox_hint,
+                LogDecision::Reject,
+                Some(&reject.reason),
+            );
             Err(reject)
         }
     }
@@ -308,7 +351,6 @@ pub fn enforce_root(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn mb(owner: &str) -> MailboxConfig {
         MailboxConfig {
@@ -444,12 +486,5 @@ mod tests {
         assert_eq!(err.code, ErrCode::Eaccess);
         assert!(logs_contain("decision=\"reject\""));
         assert!(logs_contain("verb=\"MAILBOX-CREATE\""));
-    }
-
-    // Pull in HashMap just so the import isn't flagged unused if a
-    // follow-up test wants to simulate a Config lookup. Not material.
-    #[allow(dead_code)]
-    fn _hashmap_sanity() -> HashMap<&'static str, ()> {
-        HashMap::new()
     }
 }

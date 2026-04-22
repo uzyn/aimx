@@ -185,10 +185,25 @@ where
     // Sprint 4 §6.5: authorize the caller against the resolved
     // mailbox. Non-owners (other than root) get EACCES so a uid bound
     // to mailbox `bob` cannot spoof `From: alice@domain`.
-    if let Some(mailbox_cfg) = config.mailboxes.get(&from_mailbox)
-        && let Err(reject) =
-            enforce_mailbox_owner_or_root("SEND", caller, &from_mailbox, mailbox_cfg)
-    {
+    //
+    // `resolve_concrete_mailbox` above guarantees the mailbox exists
+    // in `config.mailboxes`, so the `None` branch is unreachable today.
+    // We handle it explicitly with `ENOENT` rather than letting authz
+    // be silently skipped if a future refactor splits the resolve /
+    // lookup pair.
+    let mailbox_cfg = match config.mailboxes.get(&from_mailbox) {
+        Some(m) => m,
+        None => {
+            return SendResponse::Err {
+                code: ErrCode::Mailbox,
+                reason: format!(
+                    "mailbox '{from_mailbox}' resolved but not found in config \
+                     (race with concurrent MAILBOX-DELETE)"
+                ),
+            };
+        }
+    };
+    if let Err(reject) = enforce_mailbox_owner_or_root("SEND", caller, &from_mailbox, mailbox_cfg) {
         return SendResponse::Err {
             code: reject.code,
             reason: reject.reason,

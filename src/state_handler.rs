@@ -134,17 +134,22 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     // is absent so the authz check itself cannot leak which mailboxes
     // exist. Once the mailbox resolves, the ownership check runs.
     let config_snapshot = ctx.config_handle.load();
-    if !config_snapshot.mailboxes.contains_key(&req.mailbox) {
-        return AckResponse::Err {
-            code: ErrCode::Enoent,
-            reason: format!("mailbox '{}' does not exist", req.mailbox),
-        };
-    }
-    let mailbox_cfg = config_snapshot.mailboxes.get(&req.mailbox).cloned();
+    // `contains_key` + `get` is split to keep the existence check out
+    // of the authz error path, but the `get` must succeed on the
+    // snapshot we just checked. We match explicitly on `None` and
+    // return `ENOENT` so authz can never be silently skipped if a
+    // future refactor drops the `contains_key` pre-check.
+    let mailbox_cfg = match config_snapshot.mailboxes.get(&req.mailbox) {
+        Some(m) => m.clone(),
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Enoent,
+                reason: format!("mailbox '{}' does not exist", req.mailbox),
+            };
+        }
+    };
     let verb = if req.read { "MARK-READ" } else { "MARK-UNREAD" };
-    if let Some(cfg) = &mailbox_cfg
-        && let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &req.mailbox, cfg)
-    {
+    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &req.mailbox, &mailbox_cfg) {
         return AckResponse::Err {
             code: reject.code,
             reason: reject.reason,
@@ -256,21 +261,19 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
             reason: format!("failed to write {}: {e}", tmp_path.display()),
         };
     }
-    if let Some(mb_cfg) = &mailbox_cfg {
-        // Chown + chmod BEFORE the rename publishes the new inode. A
-        // failure here is not fatal for the MARK operation (the
-        // containing dir is `0o700 <owner>:<owner>` so the file is
-        // still safe from non-owners even if ownership drifts) but we
-        // log so doctor can surface the drift.
-        if let Err(e) = chown_as_owner(&tmp_path, mb_cfg, 0o600) {
-            tracing::warn!(
-                target: "aimx::state",
-                "chown temp file failed mailbox={mailbox} path={path} err={err}",
-                mailbox = req.mailbox,
-                path = tmp_path.display(),
-                err = e,
-            );
-        }
+    // Chown + chmod BEFORE the rename publishes the new inode. A
+    // failure here is not fatal for the MARK operation (the
+    // containing dir is `0o700 <owner>:<owner>` so the file is
+    // still safe from non-owners even if ownership drifts) but we
+    // log so doctor can surface the drift.
+    if let Err(e) = chown_as_owner(&tmp_path, &mailbox_cfg, 0o600) {
+        tracing::warn!(
+            target: "aimx::state",
+            "chown temp file failed mailbox={mailbox} path={path} err={err}",
+            mailbox = req.mailbox,
+            path = tmp_path.display(),
+            err = e,
+        );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &filepath) {
         let _ = std::fs::remove_file(&tmp_path);

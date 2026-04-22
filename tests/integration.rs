@@ -3080,6 +3080,7 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3206,6 +3207,7 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3310,6 +3312,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3371,6 +3374,7 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3769,6 +3773,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
 
 #[cfg(unix)]
 #[test]
+#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     if skip_if_mailbox_crud_not_root() {
         return;

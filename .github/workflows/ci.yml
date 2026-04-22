@@ -76,6 +76,23 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test uds_authz -- --ignored
 
+      # Sprint 4 review NB-1: the five MAILBOX-CRUD UDS integration
+      # tests in `tests/integration.rs` are `#[ignore]`-gated because
+      # `MAILBOX-CREATE` / `MAILBOX-DELETE` are root-only (PRD §6.5)
+      # and the daemon chowns freshly-created mailbox dirs to the
+      # configured owner — a non-root `cargo test` cannot exercise the
+      # code path. This step runs them explicitly under sudo, one name
+      # per `--exact`, so any future skip regresses here rather than
+      # silently.
+      - name: Run MAILBOX-CRUD integration tests (root)
+        run: |
+          sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test integration -- --ignored --exact \
+            mailbox_create_via_uds_hotswaps_config_and_routes_new_mail \
+            mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup \
+            mailbox_delete_force_yes_wipes_contents_and_succeeds \
+            mailbox_delete_force_without_yes_prompts_and_aborts_on_n \
+            concurrent_mailbox_create_and_ingest_does_not_deadlock
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:
