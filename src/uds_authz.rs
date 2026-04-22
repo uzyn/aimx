@@ -93,6 +93,17 @@ impl Caller {
         Self::new(0, 0, None)
     }
 
+    /// Construct a caller with a pre-populated username cache. Tests
+    /// across the crate (not just `uds_authz`) use this to synthesize a
+    /// peer whose `getpwuid` lookup resolves to a known name without
+    /// touching the host's user database.
+    #[cfg(test)]
+    pub fn with_username(uid: u32, gid: u32, username: &str) -> Self {
+        let c = Self::new(uid, gid, None);
+        let _ = c.username_cache.set(Some(username.to_string()));
+        c
+    }
+
     /// Lazily resolve the caller's username via `getpwuid(3)`. Root is
     /// always `Some("root")`. Unknown uids return `None`.
     pub fn username(&self) -> Option<&str> {

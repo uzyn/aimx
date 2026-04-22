@@ -1090,6 +1090,21 @@ fn is_valid_template_name(s: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
+/// Public wrapper for [`is_valid_template_name`] exposed for the UDS
+/// `TEMPLATE-*` parsers. Mirrors the `[a-z0-9-]+` rule used by
+/// [`validate_hook_templates`].
+pub fn is_valid_template_name_str(s: &str) -> bool {
+    is_valid_template_name(s)
+}
+
+/// True if `cmd[0]` would fail the placeholder check in
+/// [`validate_hook_templates`]. Exposed for the UDS `TEMPLATE-*`
+/// parsers so they can reject obviously-malformed bodies before handler
+/// dispatch.
+pub fn cmd_zero_contains_placeholder(binary: &str) -> bool {
+    iter_placeholders(binary).next().is_some()
+}
+
 /// Charset predicate for `[[hook_template]].params` entries and the
 /// placeholder names surfaced by [`iter_placeholders`]. Kept in lockstep
 /// with the parser so operators get a precise "invalid param name" error

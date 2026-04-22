@@ -865,6 +865,24 @@ async fn handle_uds_connection_with_timeout(
                 ),
                 false,
             ),
+            Ok(Ok(Request::TemplateCreate(req))) => (
+                Reply::Ack(
+                    crate::hook_handler::handle_template_create(&mb_ctx, &req, &caller).await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::TemplateUpdate(req))) => (
+                Reply::Ack(
+                    crate::hook_handler::handle_template_update(&mb_ctx, &req, &caller).await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::TemplateDelete(req))) => (
+                Reply::Ack(
+                    crate::hook_handler::handle_template_delete(&mb_ctx, &req, &caller).await,
+                ),
+                false,
+            ),
             Ok(Err(ParseError::ClosedBeforeRequest)) => {
                 return;
             }
