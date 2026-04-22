@@ -1543,31 +1543,15 @@ mod tests {
 
     #[tokio::test]
     async fn template_create_rejects_when_validator_fails() {
-        // Invariant: validate_hook_templates runs on the full templates
-        // vec before any disk write. Seed the payload with a name that
-        // collides with a reserved-name rule caught only by the
-        // load-time validator (e.g. a duplicate name). Duplicate-name
-        // rejection lands as ECONFLICT earlier, so we use a payload
-        // that slips past parse-time shape checks but fails the deeper
-        // validator — here, a param that references an unknown
-        // placeholder.
+        // Invariant: `validate_hook_templates` runs on the full template
+        // vec before any disk write. Construct a payload that slips past
+        // the parse-time shape check but fails the deeper on-config
+        // validator: here, a declared param that collides with the
+        // `{mailbox}` builtin.
         let tmp = TempDir::new().unwrap();
         let (_s, mb_ctx) = contexts(&tmp);
 
-        // Build manually to bypass UdsTemplatePayload::validate shape
-        // rule that every declared param must appear in cmd. The deeper
-        // validator still catches the mismatch.
         let mut bad = payload("invoke-bad-sam", "sam");
-        bad.cmd = vec!["/usr/bin/echo".into(), "{unknown}".into()];
-        bad.params = vec!["prompt".into()];
-        // Skip the parse-time validate() (which would reject "unused
-        // param"); call the handler with this payload directly.
-        // Instead we exercise the on-config validator by using a
-        // scenario it catches but the parser allows.
-        // One such case: `allowed_events = []` — parse-time validate
-        // rejects it too. Instead, construct a scenario where the
-        // parser passes (param is referenced) but the on-config
-        // validator fails (declared param collides with a builtin).
         bad.cmd = vec!["/usr/bin/echo".into(), "{event}".into(), "{mailbox}".into()];
         bad.params = vec!["mailbox".into()];
 
@@ -1623,6 +1607,237 @@ mod tests {
                 .hook_templates
                 .iter()
                 .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let mut new_payload = payload("invoke-claude-sam", "sam");
+        new_payload.description = "rewritten-on-disk".into();
+        new_payload.cmd = vec!["/usr/local/bin/claude".into(), "{prompt}".into()];
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: new_payload,
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_update(&mb_ctx, &update, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        let t = reloaded
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-sam")
+            .expect("template still present after update");
+        assert_eq!(t.description, "rewritten-on-disk");
+        assert_eq!(t.cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[tokio::test]
+    async fn template_delete_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-foo-sam".into(),
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_delete(&mb_ctx, &del, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        assert!(
+            !reloaded
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam"),
+            "deleted template must not reappear on reload"
+        );
+    }
+
+    /// Rename round-trip: `payload.name` differs from the `Template-Name`
+    /// header. The handler treats this as a rename — the old entry at the
+    /// existing position is replaced with the new payload, the old name
+    /// disappears, the new name takes its place.
+    #[tokio::test]
+    async fn template_update_renames_when_body_name_differs_from_header() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        // Submit UPDATE with header = old name, body.name = new name.
+        let mut renamed = payload("invoke-claude-renamed-sam", "sam");
+        renamed.description = "renamed".into();
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: renamed,
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_update(&mb_ctx, &update, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        assert!(
+            !reloaded
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-claude-sam"),
+            "old name must be gone after rename"
+        );
+        let t = reloaded
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-renamed-sam")
+            .expect("new name must be present after rename");
+        assert_eq!(t.description, "renamed");
+    }
+
+    // ---- Negative: reject paths must leave disk untouched --------------
+
+    /// Helper: read the raw on-disk `config.toml` bytes so tests can
+    /// assert byte-for-byte equality across a rejected operation.
+    fn read_config_bytes(mb_ctx: &MailboxContext) -> Vec<u8> {
+        std::fs::read(&mb_ctx.config_path).expect("config.toml must exist")
+    }
+
+    #[tokio::test]
+    async fn template_create_conflict_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        // `invoke-claude` is seeded by `base_config`, so this is a dup.
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude", "sam"),
+        };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Conflict),
+            other => panic!("expected Err(ECONFLICT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ECONFLICT reject");
+    }
+
+    #[tokio::test]
+    async fn template_update_missing_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        let req = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-nope".into(),
+            payload: payload("invoke-nope", "sam"),
+        };
+        match handle_template_update(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ENOENT reject");
+    }
+
+    #[tokio::test]
+    async fn template_delete_missing_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-nope".into(),
+        };
+        match handle_template_delete(&mb_ctx, &del, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ENOENT reject");
+    }
+
+    #[tokio::test]
+    async fn template_update_unauthorized_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+        let before = read_config_bytes(&mb_ctx);
+
+        let mut tampered = payload("invoke-foo-sam", "eve");
+        tampered.description = "hijacked".into();
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-foo-sam".into(),
+            payload: tampered,
+        };
+        let caller = Caller::with_username(1002, 1002, "eve");
+        match handle_template_update(&mb_ctx, &update, &caller).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Eaccess),
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on EACCES reject");
+    }
+
+    #[tokio::test]
+    async fn template_create_validator_failure_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        // Same scenario as `template_create_rejects_when_validator_fails`:
+        // the parse-time shape check passes (the param is referenced in
+        // argv) but the on-config validator rejects because the declared
+        // param collides with the builtin `{mailbox}`.
+        let mut bad = payload("invoke-bad-sam", "sam");
+        bad.cmd = vec!["/usr/bin/echo".into(), "{event}".into(), "{mailbox}".into()];
+        bad.params = vec!["mailbox".into()];
+
+        let req = crate::send_protocol::TemplateCreateRequest { payload: bad };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(
+            before, after,
+            "disk must be untouched on validator-failure reject"
         );
     }
 

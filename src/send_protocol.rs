@@ -369,9 +369,20 @@ pub struct TemplateCreateRequest {
 }
 
 /// Decoded `AIMX/1 TEMPLATE-UPDATE` request. Carries a `Template-Name:`
-/// header identifying the template to replace plus a TOML body with the
-/// new fields. The handler validates that the header matches
-/// `payload.name`.
+/// header identifying the *existing* template to replace plus a TOML
+/// body describing its new fields.
+///
+/// `name` (from the header) and `payload.name` (from the body) are
+/// independent:
+/// - When they match, the handler performs an in-place update.
+/// - When they differ, the handler performs a rename — the entry at the
+///   position of the existing template is replaced with the new payload,
+///   whose `name` becomes the canonical identifier. `validate_hook_templates`
+///   catches any duplicate-name collision that this would introduce.
+///
+/// Both values are independently charset-validated (`[a-z0-9-]+`) at
+/// parse time, so a header or body name that fails the rule is rejected
+/// as `MALFORMED` before any handler dispatch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TemplateUpdateRequest {
     pub name: String,
@@ -1169,6 +1180,11 @@ where
                 if value.is_empty() {
                     return Err(ParseError::Malformed("empty Template-Name value".into()));
                 }
+                if !crate::config::is_valid_template_name_str(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Template-Name '{value}': must match [a-z0-9-]+"
+                    )));
+                }
                 template_name = Some(value);
             }
             "content-length" => {
@@ -1255,6 +1271,11 @@ where
                 }
                 if value.is_empty() {
                     return Err(ParseError::Malformed("empty Template-Name value".into()));
+                }
+                if !crate::config::is_valid_template_name_str(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Template-Name '{value}': must match [a-z0-9-]+"
+                    )));
                 }
                 template_name = Some(value);
             }
@@ -2865,6 +2886,41 @@ dangerously_support_untrusted = true
             .await
             .unwrap();
         assert!(buf.starts_with(b"AIMX/1 TEMPLATE-CREATE"));
+    }
+
+    #[tokio::test]
+    async fn template_update_invalid_template_name_header_is_malformed() {
+        // The header carries the identifier of the existing template and
+        // must pass the same `[a-z0-9-]+` charset check used by
+        // `derive_template_name`. An out-of-charset header would fall
+        // through to ENOENT on lookup; rejecting it at parse time is the
+        // tidier thing to do.
+        let body = toml::to_string_pretty(&example_payload("invoke-x", "sam")).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-UPDATE\nTemplate-Name: Invoke_Bad\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("invalid Template-Name"), "{m}");
+                assert!(m.contains("Invoke_Bad"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_invalid_template_name_header_is_malformed() {
+        let input = b"AIMX/1 TEMPLATE-DELETE\nTemplate-Name: Invoke_Bad\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("invalid Template-Name"), "{m}");
+                assert!(m.contains("Invoke_Bad"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
