@@ -1,9 +1,14 @@
-use crate::config::Config;
+use crate::config::{
+    Config, LoadWarning, MailboxConfig, RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT,
+    check_hook_owner_invariant,
+};
 use crate::frontmatter::InboundFrontmatter;
+use crate::hook::effective_hook_name;
 use crate::setup::{
     self, DnsRecord, DnsVerifyResult, NetworkOps, RealNetworkOps, RealSystemOps, SystemOps,
 };
 use crate::term;
+use crate::user_resolver::resolve_user;
 use std::net::IpAddr;
 use std::path::Path;
 
@@ -912,9 +917,787 @@ fn render_hook_templates_table(section: &HookTemplatesSection) -> String {
     out
 }
 
+/// Severity of a [`DoctorFinding`]. `Pass` findings are emitted by
+/// checks that want to show a green PASS line (e.g. "mailbox dirs
+/// chowned correctly"); most checks simply return no finding on the
+/// happy path. `Info` is reserved for advisory notes (legacy
+/// `aimx-hook` user present). `Warn` and `Fail` drive the summary
+/// counts printed at the end of the Checks section; `Fail` additionally
+/// makes `aimx doctor` exit non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingSeverity {
+    /// Reserved for checks that want to emit a positive PASS line in
+    /// the rendered Checks section. Current Sprint 7 checks stay
+    /// silent on success; retained so future checks (e.g. a
+    /// "mailbox storage chowned correctly" PASS banner) can opt in
+    /// without widening the enum.
+    #[allow(dead_code)]
+    Pass,
+    Info,
+    Warn,
+    Fail,
+}
+
+impl FindingSeverity {
+    fn badge(self) -> colored::ColoredString {
+        match self {
+            FindingSeverity::Pass => term::pass_badge(),
+            FindingSeverity::Info => term::info("INFO"),
+            FindingSeverity::Warn => term::warn_badge(),
+            FindingSeverity::Fail => term::fail_badge(),
+        }
+    }
+}
+
+/// A single Checks-section line. `check` is a stable short ID used by
+/// `aimx hooks prune --orphans` to decide whether the config has
+/// non-orphan failures worth blocking the prune on. `message` is the
+/// human-readable one-liner; `fix` is an optional remediation hint
+/// rendered on the following line under `term::dim`.
+#[derive(Debug, Clone)]
+pub struct DoctorFinding {
+    pub check: &'static str,
+    pub severity: FindingSeverity,
+    pub message: String,
+    pub fix: Option<String>,
+}
+
+impl DoctorFinding {
+    fn new(check: &'static str, severity: FindingSeverity, message: impl Into<String>) -> Self {
+        Self {
+            check,
+            severity,
+            message: message.into(),
+            fix: None,
+        }
+    }
+
+    fn with_fix(mut self, fix: impl Into<String>) -> Self {
+        self.fix = Some(fix.into());
+        self
+    }
+}
+
+/// Stable check IDs used to discriminate orphan-cleanup failures from
+/// genuine configuration errors in `aimx hooks prune --orphans`. The
+/// prune command refuses to write when any `Fail`-severity finding's
+/// `check` is not in this set.
+pub const ORPHAN_CHECK_IDS: &[&str] = &[
+    "ORPHAN-STORAGE",
+    "ORPHAN-CONFIG",
+    "ORPHAN-TEMPLATE-RUN_AS",
+    "ORPHAN-HOOK-RUN_AS",
+];
+
+/// Run every Sprint 7 doctor check against `config`, merging in
+/// `load_warnings` returned by [`Config::load`]. The returned vector is
+/// in deterministic section order (mailbox ownership → templates →
+/// hook invariants → catchall presence → load warnings → legacy user).
+pub fn run_checks(config: &Config, load_warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
+    run_checks_with_runner(config, load_warnings, &RealAccessRunner)
+}
+
+fn run_checks_with_runner(
+    config: &Config,
+    load_warnings: &[LoadWarning],
+    runner: &dyn AccessRunner,
+) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+    out.extend(check_mailbox_ownership(config));
+    out.extend(check_templates_with_runner(config, runner));
+    out.extend(check_hook_invariants(config));
+    out.extend(check_catchall_user(config));
+    out.extend(translate_load_warnings(load_warnings));
+    out.extend(check_legacy_aimx_hook_user());
+    out
+}
+
+/// S7-1: validate that every mailbox owner resolves and its storage
+/// directories exist + are chowned `owner:owner` mode `0700`.
+pub fn check_mailbox_ownership(config: &Config) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+
+    // (a) `getpwnam(owner)` succeeds for every mailbox. Orphans get a
+    // Warn finding (PRD §6.1 keeps the daemon up on user deletion).
+    // (b) `inbox/<name>/` and `sent/<name>/` exist, are chowned
+    //     `owner:owner`, and have mode `0700`.
+    let mut configured_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (name, mb) in &config.mailboxes {
+        configured_names.insert(name.clone());
+
+        let resolved = resolve_owner(mb);
+        let Some((uid, gid)) = resolved else {
+            out.push(
+                DoctorFinding::new(
+                    "MAILBOX-OWNER-ORPHAN",
+                    FindingSeverity::Warn,
+                    format!(
+                        "mailbox '{name}' owner '{owner}' does not resolve via getpwnam",
+                        owner = mb.owner,
+                    ),
+                )
+                .with_fix(
+                    "create the user or run `sudo aimx hooks prune --orphans` \
+                     to remove the residue from config.toml",
+                ),
+            );
+            continue;
+        };
+
+        for (label, dir) in [
+            ("inbox", config.inbox_dir(name)),
+            ("sent", config.sent_dir(name)),
+        ] {
+            match dir_ownership(&dir) {
+                DirOwnership::Missing => out.push(
+                    DoctorFinding::new(
+                        "MAILBOX-DIR-MISSING",
+                        FindingSeverity::Fail,
+                        format!(
+                            "mailbox '{name}' {label} directory is missing: {}",
+                            dir.display()
+                        ),
+                    )
+                    .with_fix(
+                        "re-run `sudo aimx setup` to re-create mailbox \
+                         storage directories",
+                    ),
+                ),
+                DirOwnership::NotADir => out.push(DoctorFinding::new(
+                    "MAILBOX-DIR-NOT-DIR",
+                    FindingSeverity::Fail,
+                    format!(
+                        "mailbox '{name}' {label} path is not a directory: {}",
+                        dir.display()
+                    ),
+                )),
+                DirOwnership::Ok {
+                    owner_uid,
+                    owner_gid,
+                    mode,
+                } => {
+                    if owner_uid != uid {
+                        out.push(
+                            DoctorFinding::new(
+                                "MAILBOX-DIR-OWNER-DRIFT",
+                                FindingSeverity::Fail,
+                                format!(
+                                    "mailbox '{name}' {label} dir is owned by uid {owner_uid} but \
+                                     config owner '{}' resolves to uid {uid}",
+                                    mb.owner
+                                ),
+                            )
+                            .with_fix(format!(
+                                "chown the directory: `sudo chown -R {owner}:{owner} {}`",
+                                dir.display(),
+                                owner = mb.owner,
+                            )),
+                        );
+                    } else if owner_gid != gid {
+                        out.push(
+                            DoctorFinding::new(
+                                "MAILBOX-DIR-GROUP-DRIFT",
+                                FindingSeverity::Warn,
+                                format!(
+                                    "mailbox '{name}' {label} dir group gid {owner_gid} does not \
+                                     match owner '{}' primary gid {gid}",
+                                    mb.owner
+                                ),
+                            )
+                            .with_fix(format!(
+                                "chgrp the directory: `sudo chgrp -R {} {}`",
+                                mb.owner,
+                                dir.display(),
+                            )),
+                        );
+                    }
+                    if mode & 0o777 != 0o700 {
+                        out.push(
+                            DoctorFinding::new(
+                                "MAILBOX-DIR-MODE-DRIFT",
+                                FindingSeverity::Warn,
+                                format!(
+                                    "mailbox '{name}' {label} dir mode is {:#o}, expected 0700",
+                                    mode & 0o777,
+                                ),
+                            )
+                            .with_fix(format!(
+                                "tighten permissions: `sudo chmod 0700 {}`",
+                                dir.display(),
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Orphan-storage findings: directories under `inbox/` / `sent/`
+    // with no matching config entry (left behind by a removed mailbox).
+    for root in ["inbox", "sent"] {
+        let root_dir = config.data_dir.join(root);
+        let Ok(entries) = std::fs::read_dir(&root_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_dir() {
+                continue;
+            }
+            let name = match entry.file_name().into_string() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            if configured_names.contains(&name) {
+                continue;
+            }
+            out.push(
+                DoctorFinding::new(
+                    "ORPHAN-STORAGE",
+                    FindingSeverity::Warn,
+                    format!(
+                        "storage directory `{root}/{name}/` has no matching \
+                         mailbox in config.toml"
+                    ),
+                )
+                .with_fix(format!(
+                    "remove the stale directory or add a matching `[mailboxes.{name}]` \
+                     block to config.toml",
+                )),
+            );
+        }
+    }
+
+    // ORPHAN-CONFIG: config mailboxes with no storage dirs at all
+    // (both `inbox/<name>/` and `sent/<name>/` missing). This is distinct
+    // from the per-dir MAILBOX-DIR-MISSING finding above: we only flag
+    // the mailbox as a whole ORPHAN-CONFIG when *both* dirs are absent,
+    // which typically indicates the operator added the mailbox stanza
+    // by hand without running `aimx mailboxes create`.
+    for name in config.mailboxes.keys() {
+        let inbox = config.inbox_dir(name);
+        let sent = config.sent_dir(name);
+        if !inbox.exists() && !sent.exists() {
+            out.push(
+                DoctorFinding::new(
+                    "ORPHAN-CONFIG",
+                    FindingSeverity::Warn,
+                    format!(
+                        "mailbox '{name}' has a config entry but no storage directories \
+                         (inbox/sent both missing)"
+                    ),
+                )
+                .with_fix(format!(
+                    "run `sudo aimx mailboxes create {name}` to provision storage, \
+                     or remove the stanza from config.toml",
+                )),
+            );
+        }
+    }
+
+    out
+}
+
+/// S7-2: validate every `[[hook_template]]`: `run_as` resolves, `cmd[0]`
+/// exists + is executable, and the `run_as` user can `access(X_OK)` it.
+///
+/// Production callers go through [`run_checks`] / [`run_checks_with_runner`],
+/// which inject the [`AccessRunner`] seam. The private
+/// [`check_templates_with_runner`] below is the implementation; tests
+/// call it directly with a mock runner.
+fn check_templates_with_runner(config: &Config, runner: &dyn AccessRunner) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+    for tmpl in &config.hook_templates {
+        // (a) run_as resolves (reserved names short-circuit).
+        let run_as_ok = is_reserved_run_as(&tmpl.run_as) || resolve_user(&tmpl.run_as).is_some();
+        if !run_as_ok {
+            out.push(
+                DoctorFinding::new(
+                    "ORPHAN-TEMPLATE-RUN_AS",
+                    FindingSeverity::Warn,
+                    format!(
+                        "template '{}' run_as='{}' does not resolve via getpwnam",
+                        tmpl.name, tmpl.run_as,
+                    ),
+                )
+                .with_fix(
+                    "create the user, or run `sudo aimx hooks prune --orphans` to \
+                     remove the template",
+                ),
+            );
+            // Skip the cmd[0] checks when the run_as user is orphan;
+            // `access(X_OK)` as the target user is undefined.
+            continue;
+        }
+
+        // (b) cmd[0] exists + is executable by the current process.
+        let Some(cmd0) = tmpl.cmd.first() else {
+            out.push(DoctorFinding::new(
+                "TEMPLATE-CMD-EMPTY",
+                FindingSeverity::Fail,
+                format!("template '{}' has an empty cmd array", tmpl.name),
+            ));
+            continue;
+        };
+        if !is_executable(Path::new(cmd0)) {
+            out.push(
+                DoctorFinding::new(
+                    "TEMPLATE-CMD-NOT-EXECUTABLE",
+                    FindingSeverity::Fail,
+                    format!(
+                        "template '{}' cmd[0] `{cmd0}` is missing or not executable",
+                        tmpl.name,
+                    ),
+                )
+                .with_fix(
+                    "run `aimx agent-setup <agent> --redetect` to re-probe $PATH, \
+                     or fix the binary path in `/etc/aimx/config.toml`",
+                ),
+            );
+            continue;
+        }
+
+        // (c) `access(X_OK)` as the run_as user. Reserved `root` always
+        // can; `aimx-catchall` and regular users need a subprocess
+        // check. This catches the case where cmd[0] is +x for root but
+        // not the service user.
+        if tmpl.run_as == RESERVED_RUN_AS_ROOT {
+            continue;
+        }
+        match runner.access_x_ok_as(&tmpl.run_as, cmd0) {
+            AccessResult::Allowed => {}
+            AccessResult::Denied => {
+                out.push(
+                    DoctorFinding::new(
+                        "TEMPLATE-CMD-NOT-EXECUTABLE-BY-RUN_AS",
+                        FindingSeverity::Fail,
+                        format!(
+                            "template '{}' cmd[0] `{cmd0}` is not executable \
+                             by run_as user '{}'",
+                            tmpl.name, tmpl.run_as,
+                        ),
+                    )
+                    .with_fix(format!(
+                        "chmod the binary (`sudo chmod o+rx {cmd0}`) or re-run \
+                         `aimx agent-setup <agent> --redetect` to pick a \
+                         run_as-readable path"
+                    )),
+                );
+            }
+            AccessResult::Unknown => {
+                // Neither `runuser` nor the seteuid fallback worked —
+                // emit an info note so the operator knows the check was
+                // inconclusive rather than silently skipped.
+                out.push(DoctorFinding::new(
+                    "TEMPLATE-CMD-ACCESS-UNKNOWN",
+                    FindingSeverity::Info,
+                    format!(
+                        "template '{}' cmd[0] executable-by-run_as check skipped: \
+                         no `runuser` on PATH and not running as root",
+                        tmpl.name,
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// S7-3 part 1: re-run the hook/owner invariant against every hook in
+/// `config`. This is a safety net against hand-edits to `config.toml`
+/// that bypass `validate_hooks` (e.g. orphan downgrades at load time).
+pub fn check_hook_invariants(config: &Config) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+    for (mailbox_name, mb) in &config.mailboxes {
+        for hook in &mb.hooks {
+            if let Err(reason) = check_hook_owner_invariant(config, mailbox_name, mb, hook) {
+                let hook_name = effective_hook_name(hook);
+                out.push(
+                    DoctorFinding::new(
+                        "HOOK-INVARIANT",
+                        FindingSeverity::Fail,
+                        format!("hook '{hook_name}' on mailbox '{mailbox_name}': {reason}"),
+                    )
+                    .with_fix(
+                        "align the hook's run_as with the mailbox owner (or set \
+                         run_as='root') in config.toml",
+                    ),
+                );
+            }
+        }
+    }
+    out
+}
+
+/// S7-3 part 2: when any mailbox is a catchall, verify the reserved
+/// `aimx-catchall` system user exists. Without it, catchall inbound
+/// ingest cannot chown mail into place.
+pub fn check_catchall_user(config: &Config) -> Vec<DoctorFinding> {
+    let has_catchall = config.mailboxes.values().any(|mb| mb.is_catchall(config));
+    if !has_catchall {
+        return Vec::new();
+    }
+    if resolve_user(RESERVED_RUN_AS_CATCHALL).is_some() {
+        return Vec::new();
+    }
+    vec![
+        DoctorFinding::new(
+            "CATCHALL-USER-MISSING",
+            FindingSeverity::Fail,
+            format!(
+                "catchall mailbox is configured but system user \
+                 '{RESERVED_RUN_AS_CATCHALL}' does not resolve",
+            ),
+        )
+        .with_fix("re-run `sudo aimx setup` to create the catchall service user"),
+    ]
+}
+
+/// S7-3 part 3: surface `LoadWarning`s from `Config::load` as doctor
+/// findings so warnings the daemon logged on start-up are visible
+/// without scraping the journal.
+pub fn translate_load_warnings(warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
+    let mut out = Vec::new();
+    for w in warnings {
+        match w {
+            LoadWarning::OrphanMailboxOwner { mailbox, owner } => {
+                out.push(
+                    DoctorFinding::new(
+                        "ORPHAN-MAILBOX-OWNER",
+                        FindingSeverity::Warn,
+                        format!("config load: mailbox '{mailbox}' owner '{owner}' is orphan"),
+                    )
+                    .with_fix("create the user or run `sudo aimx hooks prune --orphans`"),
+                );
+            }
+            LoadWarning::OrphanHookRunAs {
+                mailbox,
+                hook_name,
+                run_as,
+            } => {
+                out.push(
+                    DoctorFinding::new(
+                        "ORPHAN-HOOK-RUN_AS",
+                        FindingSeverity::Warn,
+                        format!(
+                            "config load: hook '{hook_name}' on '{mailbox}' has \
+                             run_as='{run_as}' which is orphan"
+                        ),
+                    )
+                    .with_fix("run `sudo aimx hooks prune --orphans`"),
+                );
+            }
+            LoadWarning::OrphanTemplateRunAs { template, run_as } => {
+                out.push(
+                    DoctorFinding::new(
+                        "ORPHAN-TEMPLATE-RUN_AS",
+                        FindingSeverity::Warn,
+                        format!("config load: template '{template}' run_as='{run_as}' is orphan"),
+                    )
+                    .with_fix("run `sudo aimx hooks prune --orphans`"),
+                );
+            }
+            LoadWarning::HookInvariantSkippedDueToOrphan {
+                mailbox,
+                hook_name,
+                reason,
+            } => {
+                out.push(DoctorFinding::new(
+                    "HOOK-INVARIANT-SKIPPED",
+                    FindingSeverity::Info,
+                    format!(
+                        "hook '{hook_name}' on '{mailbox}': invariant skipped at load — {reason}"
+                    ),
+                ));
+            }
+            LoadWarning::LegacyAimxHookUser => {
+                // Translated separately in `check_legacy_aimx_hook_user`
+                // so the doctor output is consistent regardless of
+                // whether `load` surfaced the warning yet.
+            }
+            LoadWarning::RootCatchallAccepted { mailbox } => {
+                out.push(DoctorFinding::new(
+                    "ROOT-CATCHALL-ACCEPTED",
+                    FindingSeverity::Info,
+                    format!(
+                        "catchall '{mailbox}' is running with owner='root' + \
+                         allow_root_catchall=true (escape hatch)"
+                    ),
+                ));
+            }
+        }
+    }
+    out
+}
+
+/// S7-3 part 4: emit an `info` note when the legacy `aimx-hook` system
+/// user is still present. aimx no longer creates this user; doctor just
+/// reminds the operator it can be removed.
+pub fn check_legacy_aimx_hook_user() -> Vec<DoctorFinding> {
+    if resolve_user("aimx-hook").is_some() {
+        vec![
+            DoctorFinding::new(
+                "LEGACY-AIMX-HOOK-USER",
+                FindingSeverity::Info,
+                "legacy 'aimx-hook' system user present; aimx no longer manages it",
+            )
+            .with_fix("remove via `sudo userdel aimx-hook` when safe"),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
+fn resolve_owner(mb: &MailboxConfig) -> Option<(u32, u32)> {
+    if mb.owner == RESERVED_RUN_AS_ROOT {
+        return Some((0, 0));
+    }
+    resolve_user(&mb.owner).map(|u| (u.uid, u.gid))
+}
+
+fn is_reserved_run_as(name: &str) -> bool {
+    name == RESERVED_RUN_AS_ROOT || name == RESERVED_RUN_AS_CATCHALL
+}
+
+/// Result of inspecting a mailbox storage directory for ownership +
+/// permission drift. `Missing` is a `Fail` upstream; `NotADir` signals
+/// someone stomped a file into the expected location.
+enum DirOwnership {
+    Missing,
+    NotADir,
+    Ok {
+        owner_uid: u32,
+        owner_gid: u32,
+        mode: u32,
+    },
+}
+
+fn dir_ownership(path: &Path) -> DirOwnership {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let meta = match std::fs::metadata(path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return DirOwnership::Missing,
+            Err(_) => return DirOwnership::Missing,
+        };
+        if !meta.is_dir() {
+            return DirOwnership::NotADir;
+        }
+        DirOwnership::Ok {
+            owner_uid: meta.uid(),
+            owner_gid: meta.gid(),
+            mode: meta.permissions().mode(),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if !path.exists() {
+            DirOwnership::Missing
+        } else if !path.is_dir() {
+            DirOwnership::NotADir
+        } else {
+            DirOwnership::Ok {
+                owner_uid: 0,
+                owner_gid: 0,
+                mode: 0o700,
+            }
+        }
+    }
+}
+
+/// Outcome of `access(X_OK)` evaluated as a target user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AccessResult {
+    Allowed,
+    Denied,
+    /// The runner could not evaluate the check (e.g. `runuser` not on
+    /// PATH and not running as root). Surfaced as `Info` in doctor
+    /// output so the operator knows the check was skipped.
+    Unknown,
+}
+
+/// Injectable seam for the `access(X_OK)`-as-user probe. Production
+/// uses [`RealAccessRunner`] (runuser first, then fork+seteuid when
+/// root). Tests implement this trait to bypass the subprocess spawn.
+trait AccessRunner {
+    fn access_x_ok_as(&self, user: &str, path: &str) -> AccessResult;
+}
+
+struct RealAccessRunner;
+
+impl AccessRunner for RealAccessRunner {
+    fn access_x_ok_as(&self, user: &str, path: &str) -> AccessResult {
+        // First try `runuser -u <user> -- test -x <path>`. `runuser`
+        // requires root but sidesteps PAM, making it safer than `su` in
+        // non-interactive contexts. When `runuser` is absent we fall
+        // back to a fork + `seteuid` + `access(path, X_OK)` probe —
+        // only viable as root, since `seteuid` to another user requires
+        // CAP_SETUID. Non-root doctor runs that fail both paths return
+        // `Unknown`; the doctor renderer surfaces that as an `INFO`
+        // finding so operators know the check was inconclusive.
+        match run_runuser(user, path) {
+            Some(r) => r,
+            None => run_fork_seteuid(user, path),
+        }
+    }
+}
+
+fn run_runuser(user: &str, path: &str) -> Option<AccessResult> {
+    let output = std::process::Command::new("runuser")
+        .args(["-u", user, "--", "test", "-x", path])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                Some(AccessResult::Allowed)
+            } else {
+                match out.status.code() {
+                    // `test -x` returns 1 on "not executable". Higher
+                    // codes mean runuser itself failed (user unknown,
+                    // PAM error) — treat those as Unknown.
+                    Some(1) => Some(AccessResult::Denied),
+                    Some(_) => None,
+                    None => None,
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => None,
+    }
+}
+
+fn run_fork_seteuid(user: &str, path: &str) -> AccessResult {
+    #[cfg(unix)]
+    {
+        // `seteuid` on Linux requires CAP_SETUID. A non-root doctor
+        // invocation cannot drop euid to another user, so bail out
+        // with `Unknown` — the renderer translates that into an INFO
+        // finding explaining the check was skipped.
+        // SAFETY: `geteuid` is async-signal-safe.
+        let effective_uid = unsafe { libc::geteuid() };
+        if effective_uid != 0 {
+            return AccessResult::Unknown;
+        }
+        let Some(resolved) = resolve_user(user) else {
+            return AccessResult::Unknown;
+        };
+        let path_c = match std::ffi::CString::new(path) {
+            Ok(c) => c,
+            Err(_) => return AccessResult::Unknown,
+        };
+        // SAFETY: fork() is defined on POSIX; we only touch
+        // async-signal-safe functions in the child. We do not call
+        // any Rust destructors between fork and _exit.
+        let pid = unsafe { libc::fork() };
+        if pid < 0 {
+            return AccessResult::Unknown;
+        }
+        if pid == 0 {
+            // Child: drop to the target user and probe access(X_OK).
+            // Any failure reports code 2 so the parent can map to
+            // Unknown; code 1 is Denied, code 0 is Allowed.
+            let setgid_rc = unsafe { libc::setegid(resolved.gid) };
+            if setgid_rc != 0 {
+                unsafe { libc::_exit(2) };
+            }
+            let setuid_rc = unsafe { libc::seteuid(resolved.uid) };
+            if setuid_rc != 0 {
+                unsafe { libc::_exit(2) };
+            }
+            let rc = unsafe { libc::access(path_c.as_ptr(), libc::X_OK) };
+            if rc == 0 {
+                unsafe { libc::_exit(0) };
+            } else {
+                unsafe { libc::_exit(1) };
+            }
+        }
+        // Parent: waitpid and interpret the exit status.
+        let mut status: libc::c_int = 0;
+        let rc = unsafe { libc::waitpid(pid, &mut status, 0) };
+        if rc < 0 {
+            return AccessResult::Unknown;
+        }
+        if libc::WIFEXITED(status) {
+            match libc::WEXITSTATUS(status) {
+                0 => AccessResult::Allowed,
+                1 => AccessResult::Denied,
+                _ => AccessResult::Unknown,
+            }
+        } else {
+            AccessResult::Unknown
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (user, path);
+        AccessResult::Unknown
+    }
+}
+
+/// Format the Checks section of `aimx doctor`. Groups findings by
+/// severity (Fail, Warn, Info, Pass) and prints a summary footer.
+pub fn format_checks(findings: &[DoctorFinding]) -> String {
+    let mut out = String::new();
+    out.push_str(&format!("{}\n", term::header("Checks")));
+    if findings.is_empty() {
+        out.push_str(&format!("  {}\n", term::success("All checks passed."),));
+        return out;
+    }
+
+    for f in findings {
+        out.push_str(&format!("  [{}] {}\n", f.severity.badge(), f.message));
+        if let Some(fix) = &f.fix {
+            out.push_str(&format!("        {} {}\n", term::dim("→"), term::dim(fix)));
+        }
+    }
+
+    let fails = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Fail)
+        .count();
+    let warns = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Warn)
+        .count();
+    let infos = findings
+        .iter()
+        .filter(|f| f.severity == FindingSeverity::Info)
+        .count();
+    out.push_str(&format!(
+        "\n  Summary: {} fail, {} warn, {} info\n",
+        fails, warns, infos,
+    ));
+    out
+}
+
 pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    // Re-run `Config::load` so doctor sees the same warnings the daemon
+    // would on startup (orphan mailbox owners, orphan run_as users,
+    // etc.). If the reload errors — e.g. the config was removed
+    // between the main-dispatch load and this call — fall back to an
+    // empty warning list so we still print the rest of the report.
+    let load_warnings = match crate::config::Config::load_resolved() {
+        Ok((_, w)) => w,
+        Err(_) => Vec::new(),
+    };
+
     let info = gather_status(&config);
     print!("{}", format_status(&info));
+
+    let findings = run_checks(&config, &load_warnings);
+    println!();
+    print!("{}", format_checks(&findings));
+
+    let any_fail = findings.iter().any(|f| f.severity == FindingSeverity::Fail);
+    if any_fail {
+        // `main.rs` converts any `Err` from this function into a
+        // non-zero exit. The error message is deliberately short; the
+        // Checks section above already listed each failure.
+        return Err("aimx doctor found failing checks (see Checks section above)".into());
+    }
     Ok(())
 }
 
@@ -2502,5 +3285,669 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
             }
         }
         out
+    }
+
+    // -------------------- Sprint 7 checks --------------------
+    //
+    // The checks below use `user_resolver::set_test_resolver` to drop in a
+    // fake `getpwnam` so tests don't depend on the running host's
+    // `/etc/passwd`. Every test installs its own resolver for the
+    // duration of the test; the guard serializes across tests.
+
+    use crate::config::{HookTemplate, HookTemplateStdin, MailboxConfig};
+    use crate::hook::{Hook, HookEvent};
+    use crate::user_resolver::{ResolvedUser, set_test_resolver};
+    use std::collections::BTreeMap;
+
+    /// Mock AccessRunner that records calls and returns a canned result.
+    struct MockRunner {
+        result: AccessResult,
+        calls: std::cell::Cell<u32>,
+    }
+
+    impl MockRunner {
+        fn new(result: AccessResult) -> Self {
+            Self {
+                result,
+                calls: std::cell::Cell::new(0),
+            }
+        }
+    }
+
+    impl AccessRunner for MockRunner {
+        fn access_x_ok_as(&self, _user: &str, _path: &str) -> AccessResult {
+            self.calls.set(self.calls.get() + 1);
+            self.result
+        }
+    }
+
+    fn s7_config_with_mailbox(data_dir: &Path, owner: &str) -> Config {
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            MailboxConfig {
+                address: "alice@ex.com".to_string(),
+                owner: owner.to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        Config {
+            domain: "ex.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    fn current_uid_gid() -> (u32, u32) {
+        #[cfg(unix)]
+        {
+            // SAFETY: async-signal-safe on POSIX.
+            unsafe { (libc::geteuid(), libc::getegid()) }
+        }
+        #[cfg(not(unix))]
+        {
+            (0, 0)
+        }
+    }
+
+    fn resolver_current_user(name: &str) -> Option<ResolvedUser> {
+        if name == "testowner" || name == "root" {
+            let (uid, gid) = current_uid_gid();
+            Some(ResolvedUser {
+                name: name.to_string(),
+                uid,
+                gid,
+            })
+        } else {
+            None
+        }
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    #[test]
+    fn mailbox_ownership_passes_with_correct_dirs() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        // Create the required dirs with the right uid+mode.
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&tmp.path().join("inbox/alice"), 0o700);
+            chmod(&tmp.path().join("sent/alice"), 0o700);
+        }
+
+        let findings = check_mailbox_ownership(&config);
+        // The running uid owns the tempdir dirs (we created them), and
+        // `testowner` resolves to that uid via the mock resolver, so
+        // there should be no ownership findings. Group drift is
+        // possible if the process's primary gid differs from default,
+        // but our resolver mirrors both uid + gid to the current
+        // process, so the check passes fully.
+        assert!(
+            findings.is_empty(),
+            "expected clean ownership checks, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_missing_owner_as_orphan() {
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "root" {
+                Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                })
+            } else {
+                None // alice's owner does not resolve.
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "ghost-user");
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+
+        let findings = check_mailbox_ownership(&config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "MAILBOX-OWNER-ORPHAN" && f.message.contains("alice")),
+            "expected MAILBOX-OWNER-ORPHAN, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_missing_storage_dir() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        // Create ONLY inbox, not sent — the per-dir check fires for
+        // the missing sent dir.
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        #[cfg(unix)]
+        chmod(&tmp.path().join("inbox/alice"), 0o700);
+
+        let findings = check_mailbox_ownership(&config);
+        assert!(
+            findings.iter().any(|f| f.check == "MAILBOX-DIR-MISSING"
+                && f.severity == FindingSeverity::Fail
+                && f.message.contains("sent")),
+            "expected MAILBOX-DIR-MISSING for sent dir, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_mode_drift() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&tmp.path().join("inbox/alice"), 0o755);
+            chmod(&tmp.path().join("sent/alice"), 0o700);
+        }
+
+        let findings = check_mailbox_ownership(&config);
+        #[cfg(unix)]
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "MAILBOX-DIR-MODE-DRIFT"
+                    && f.severity == FindingSeverity::Warn),
+            "expected MAILBOX-DIR-MODE-DRIFT, got: {findings:?}"
+        );
+        #[cfg(not(unix))]
+        let _ = findings;
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_orphan_storage_dir() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        // Stale dir for a mailbox that doesn't exist in config.
+        std::fs::create_dir_all(tmp.path().join("inbox/ghost")).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&tmp.path().join("inbox/alice"), 0o700);
+            chmod(&tmp.path().join("sent/alice"), 0o700);
+        }
+
+        let findings = check_mailbox_ownership(&config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ORPHAN-STORAGE" && f.message.contains("ghost")),
+            "expected ORPHAN-STORAGE for ghost dir, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_orphan_config_when_dirs_missing() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        // Config declares alice but neither inbox nor sent dirs exist.
+
+        let findings = check_mailbox_ownership(&config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ORPHAN-CONFIG" && f.message.contains("alice")),
+            "expected ORPHAN-CONFIG for alice, got: {findings:?}"
+        );
+    }
+
+    fn s7_template(name: &str, run_as: &str, cmd: Vec<&str>) -> HookTemplate {
+        HookTemplate {
+            name: name.into(),
+            description: "test".into(),
+            cmd: cmd.into_iter().map(String::from).collect(),
+            params: vec![],
+            stdin: HookTemplateStdin::Email,
+            run_as: run_as.into(),
+            timeout_secs: 60,
+            allowed_events: vec![HookEvent::OnReceive],
+        }
+    }
+
+    #[test]
+    fn templates_pass_when_everything_resolves() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("agent");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        chmod(&bin, 0o755);
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "testowner",
+            vec![bin.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Allowed);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings.is_empty(),
+            "expected no template findings, got: {findings:?}"
+        );
+        assert_eq!(
+            runner.calls.get(),
+            1,
+            "expected one access-check for a non-reserved run_as user"
+        );
+    }
+
+    #[test]
+    fn templates_flag_orphan_run_as() {
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "root" {
+                Some(ResolvedUser {
+                    name: "root".into(),
+                    uid: 0,
+                    gid: 0,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("agent");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        chmod(&bin, 0o755);
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "root");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "ghost-user",
+            vec![bin.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Allowed);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings.iter().any(|f| f.check == "ORPHAN-TEMPLATE-RUN_AS"),
+            "expected ORPHAN-TEMPLATE-RUN_AS, got: {findings:?}"
+        );
+        assert_eq!(
+            runner.calls.get(),
+            0,
+            "access check must be skipped when run_as is orphan"
+        );
+    }
+
+    #[test]
+    fn templates_flag_missing_cmd_binary() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "testowner",
+            vec![missing.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Allowed);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "TEMPLATE-CMD-NOT-EXECUTABLE"),
+            "expected TEMPLATE-CMD-NOT-EXECUTABLE, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn templates_flag_access_denied_by_run_as() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("agent");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        chmod(&bin, 0o755);
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "testowner",
+            vec![bin.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Denied);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "TEMPLATE-CMD-NOT-EXECUTABLE-BY-RUN_AS"),
+            "expected TEMPLATE-CMD-NOT-EXECUTABLE-BY-RUN_AS, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn templates_emit_info_when_access_check_unknown() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("agent");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        chmod(&bin, 0o755);
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "testowner",
+            vec![bin.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Unknown);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "TEMPLATE-CMD-ACCESS-UNKNOWN"
+                    && f.severity == FindingSeverity::Info),
+            "expected TEMPLATE-CMD-ACCESS-UNKNOWN info finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn templates_skip_access_check_when_run_as_is_root() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("agent");
+        std::fs::write(&bin, "#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        chmod(&bin, 0o755);
+
+        let mut config = s7_config_with_mailbox(tmp.path(), "root");
+        config.hook_templates = vec![s7_template(
+            "invoke-foo",
+            "root",
+            vec![bin.to_str().unwrap()],
+        )];
+
+        let runner = MockRunner::new(AccessResult::Denied);
+        let findings = check_templates_with_runner(&config, &runner);
+        assert!(
+            findings.is_empty(),
+            "root run_as must skip access check, got: {findings:?}"
+        );
+        assert_eq!(
+            runner.calls.get(),
+            0,
+            "root run_as must not invoke the access runner"
+        );
+    }
+
+    fn s7_hook(mailbox: &str, run_as: &str) -> Hook {
+        let _ = mailbox;
+        Hook {
+            name: Some(format!("test-hook-{run_as}")),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo hi".into(),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: BTreeMap::new(),
+            run_as: Some(run_as.to_string()),
+        }
+    }
+
+    #[test]
+    fn hook_invariant_flags_mismatched_run_as() {
+        // Alice's mailbox is owned by testowner, but the hook runs as
+        // bob. That's a PRD §6.3 violation (run_as must equal owner or
+        // be root).
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config
+            .mailboxes
+            .get_mut("alice")
+            .unwrap()
+            .hooks
+            .push(s7_hook("alice", "bob"));
+
+        let findings = check_hook_invariants(&config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "HOOK-INVARIANT" && f.severity == FindingSeverity::Fail),
+            "expected HOOK-INVARIANT Fail, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn hook_invariant_passes_when_run_as_matches_owner() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config
+            .mailboxes
+            .get_mut("alice")
+            .unwrap()
+            .hooks
+            .push(s7_hook("alice", "testowner"));
+
+        let findings = check_hook_invariants(&config);
+        assert!(
+            findings.is_empty(),
+            "expected no hook invariant findings, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn catchall_user_check_passes_without_catchall() {
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        let findings = check_catchall_user(&config);
+        assert!(
+            findings.is_empty(),
+            "no catchall mailbox → no finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn catchall_user_check_fails_when_user_missing() {
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "testowner" || name == "root" {
+                let (uid, gid) = current_uid_gid();
+                Some(ResolvedUser {
+                    name: name.to_string(),
+                    uid,
+                    gid,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        // Add a catchall mailbox whose address matches `*@ex.com`.
+        config.mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@ex.com".to_string(),
+                owner: "testowner".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+
+        let findings = check_catchall_user(&config);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "CATCHALL-USER-MISSING" && f.severity == FindingSeverity::Fail),
+            "expected CATCHALL-USER-MISSING, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn catchall_user_check_passes_when_user_exists() {
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            let (uid, gid) = current_uid_gid();
+            if name == "testowner" || name == "root" || name == "aimx-catchall" {
+                Some(ResolvedUser {
+                    name: name.to_string(),
+                    uid,
+                    gid,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut config = s7_config_with_mailbox(tmp.path(), "testowner");
+        config.mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@ex.com".to_string(),
+                owner: "testowner".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+
+        let findings = check_catchall_user(&config);
+        assert!(
+            findings.is_empty(),
+            "catchall user resolvable → no finding, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn load_warnings_translate_to_findings() {
+        let warnings = vec![
+            LoadWarning::OrphanMailboxOwner {
+                mailbox: "alice".into(),
+                owner: "ghost".into(),
+            },
+            LoadWarning::OrphanTemplateRunAs {
+                template: "invoke-foo".into(),
+                run_as: "ghost".into(),
+            },
+            LoadWarning::OrphanHookRunAs {
+                mailbox: "alice".into(),
+                hook_name: "h1".into(),
+                run_as: "ghost".into(),
+            },
+            LoadWarning::LegacyAimxHookUser,
+            LoadWarning::RootCatchallAccepted {
+                mailbox: "catchall".into(),
+            },
+        ];
+        let findings = translate_load_warnings(&warnings);
+        // LegacyAimxHookUser is handled separately in
+        // check_legacy_aimx_hook_user, so it should not produce a
+        // finding here.
+        assert!(
+            !findings.iter().any(|f| f.check == "LEGACY-AIMX-HOOK-USER"),
+            "LoadWarning::LegacyAimxHookUser should NOT produce a finding in translate_load_warnings"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ORPHAN-MAILBOX-OWNER" && f.severity == FindingSeverity::Warn),
+            "expected ORPHAN-MAILBOX-OWNER Warn, got: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ORPHAN-TEMPLATE-RUN_AS"
+                    && f.severity == FindingSeverity::Warn),
+            "expected ORPHAN-TEMPLATE-RUN_AS Warn, got: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ORPHAN-HOOK-RUN_AS" && f.severity == FindingSeverity::Warn),
+            "expected ORPHAN-HOOK-RUN_AS Warn, got: {findings:?}"
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.check == "ROOT-CATCHALL-ACCEPTED"
+                    && f.severity == FindingSeverity::Info),
+            "expected ROOT-CATCHALL-ACCEPTED Info, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn format_checks_empty_says_all_passed() {
+        let out = format_checks(&[]);
+        assert!(out.contains("All checks passed"), "got: {out}");
+    }
+
+    #[test]
+    fn format_checks_summary_counts_by_severity() {
+        let findings = vec![
+            DoctorFinding::new("A", FindingSeverity::Fail, "bad"),
+            DoctorFinding::new("B", FindingSeverity::Warn, "uh"),
+            DoctorFinding::new("C", FindingSeverity::Warn, "hmm"),
+            DoctorFinding::new("D", FindingSeverity::Info, "fyi"),
+        ];
+        let out = format_checks(&findings);
+        assert!(out.contains("1 fail"), "{out}");
+        assert!(out.contains("2 warn"), "{out}");
+        assert!(out.contains("1 info"), "{out}");
+    }
+
+    #[test]
+    fn orphan_check_ids_covers_expected_set() {
+        // `hooks prune --orphans` uses this set to decide which Fail
+        // findings to skip in its pre-flight. This test guards the
+        // contract: every orphan-related check ID here must also be
+        // the canonical ID emitted by a check. If a check renames its
+        // ID, this test fails and forces the operator to decide
+        // whether the new ID should still be in the orphan set.
+        let expected = [
+            "ORPHAN-STORAGE",
+            "ORPHAN-CONFIG",
+            "ORPHAN-TEMPLATE-RUN_AS",
+            "ORPHAN-HOOK-RUN_AS",
+        ];
+        for id in &expected {
+            assert!(
+                ORPHAN_CHECK_IDS.contains(id),
+                "expected {id} to be in ORPHAN_CHECK_IDS"
+            );
+        }
     }
 }

@@ -1569,16 +1569,35 @@ fn doctor_shows_domain_and_mailboxes() {
         .assert()
         .success();
 
-    aimx_cmd(tmp.path())
+    // Sprint 7: `aimx doctor` now exits non-zero when the Checks
+    // section surfaces any `FAIL`-severity finding. The integration
+    // fixture chowns storage dirs to the test runner's uid but
+    // `setup_test_env` declares `aimx-catchall` as the catchall
+    // owner, which is a genuine ownership mismatch worth flagging.
+    // Assert on stdout content (doctor still prints the full report
+    // before exiting) rather than on the exit status.
+    let assert = aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("doctor")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("agent.example.com"))
-        .stdout(predicate::str::contains("catchall"))
-        .stdout(predicate::str::contains("alice"))
-        .stdout(predicate::str::contains("Mailbox"));
+        .assert();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("agent.example.com"),
+        "doctor output must contain domain, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("catchall"),
+        "doctor output must contain catchall mailbox, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("alice"),
+        "doctor output must contain alice mailbox, got:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("Mailbox"),
+        "doctor output must contain Mailbox header, got:\n{stdout}"
+    );
 }
 
 #[test]
@@ -1610,12 +1629,14 @@ fn doctor_renders_logs_pointer_section() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
+    // Sprint 7: doctor may exit non-zero on the fixture host due to
+    // storage-dir ownership drift; the Logs section still renders
+    // before the Checks section runs, so inspect stdout directly.
     let assert = aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("doctor")
-        .assert()
-        .success();
+        .assert();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
         stdout.contains("Logs"),
@@ -5242,4 +5263,155 @@ fn ingest_succeeds_and_chown_failure_is_nonfatal() {
     // The test only asserts success (no panic) on the non-root path;
     // the real isolation assertion lives in tests/isolation.rs which
     // creates real users for both alice and bob.
+}
+
+/// Sprint 7 S7-4: `aimx hooks prune --orphans --dry-run` surfaces the
+/// proposed diff without mutating `config.toml`, and a second pass
+/// actually rewrites the file atomically.
+///
+/// Root check is bypassed via `AIMX_TEST_SKIP_ROOT_CHECK=1`; doctor's
+/// pre-flight runs against a minimal fixture whose only `Fail`
+/// findings are the orphan-cleanup kind, so prune proceeds.
+#[test]
+fn hooks_prune_orphans_dry_run_then_apply() {
+    let tmp = TempDir::new().unwrap();
+    let owner = current_username();
+    // Config has one orphan template + one hook referencing it. The
+    // mailbox owner is the current user so non-orphan MAILBOX-OWNER
+    // checks stay clean.
+    let config = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{dir}\"\n\n\
+         [[hook_template]]\n\
+         name = \"invoke-foo\"\n\
+         description = \"orphan\"\n\
+         cmd = [\"/bin/true\"]\n\
+         run_as = \"aimxghost\"\n\
+         timeout_secs = 60\n\
+         allowed_events = [\"on_receive\"]\n\n\
+         [mailboxes.alice]\n\
+         address = \"alice@agent.example.com\"\n\
+         owner = \"{owner}\"\n",
+        dir = tmp.path().display(),
+    );
+    std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+    std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            tmp.path().join("inbox/alice"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            tmp.path().join("sent/alice"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+    }
+    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
+    install_cached_dkim_keys(tmp.path());
+
+    // Dry run.
+    let dry = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "prune", "--orphans", "--dry-run"])
+        .assert()
+        .success();
+    let dry_stdout = String::from_utf8_lossy(&dry.get_output().stdout).to_string();
+    assert!(
+        dry_stdout.contains("invoke-foo"),
+        "dry-run must mention the orphan template, got:\n{dry_stdout}"
+    );
+    assert!(
+        dry_stdout.contains("dry-run"),
+        "dry-run must say so, got:\n{dry_stdout}"
+    );
+    // Config file should be unchanged.
+    let after_dry = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        after_dry.contains("invoke-foo"),
+        "dry-run must not rewrite config.toml"
+    );
+
+    // Apply.
+    let apply = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "prune", "--orphans"])
+        .assert()
+        .success();
+    let apply_stdout = String::from_utf8_lossy(&apply.get_output().stdout).to_string();
+    assert!(
+        apply_stdout.contains("Pruned:"),
+        "apply must print Pruned: summary, got:\n{apply_stdout}"
+    );
+
+    // Config file must no longer reference the orphan template.
+    let after_apply = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        !after_apply.contains("invoke-foo"),
+        "applied prune must remove the orphan template, got:\n{after_apply}"
+    );
+
+    // Second apply is idempotent: no orphans left → "No orphan ... to prune."
+    let second = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "prune", "--orphans"])
+        .assert()
+        .success();
+    let second_stdout = String::from_utf8_lossy(&second.get_output().stdout).to_string();
+    assert!(
+        second_stdout.contains("No orphan"),
+        "second pass must report no orphans, got:\n{second_stdout}"
+    );
+}
+
+/// Sprint 7 S7-4: `aimx hooks prune --orphans` without the flag fails
+/// fast, and without root (and without the skip-root env var) it
+/// refuses.
+#[test]
+fn hooks_prune_requires_orphans_and_root() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    // Missing --orphans: hard error.
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "prune"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--orphans"));
+
+    // No skip-root env: refuses with "requires root" when euid != 0.
+    // Skip this assertion when running the tests as root (CI tier 1
+    // runs as root in containers) since the command would actually
+    // proceed.
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if !is_root {
+        Command::cargo_bin("aimx")
+            .unwrap()
+            .env("AIMX_CONFIG_DIR", tmp.path())
+            .arg("--data-dir")
+            .arg(tmp.path())
+            .args(["hooks", "prune", "--orphans"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("requires root"));
+    }
 }

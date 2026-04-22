@@ -43,6 +43,7 @@ pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::E
         HookCommand::Create(args) => create(&config, args),
         HookCommand::Delete { name, yes } => delete(&config, &name, yes),
         HookCommand::Templates => list_templates(&config, &mut io::stdout()),
+        HookCommand::Prune { orphans, dry_run } => prune(&config, orphans, dry_run),
     }
 }
 
@@ -434,6 +435,253 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
         Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
+}
+
+/// `aimx hooks prune --orphans` — remove templates and hooks whose
+/// `run_as` user no longer resolves on this host. Root-only. Refuses
+/// when `aimx doctor` reports any non-orphan `Fail` finding so the
+/// operator fixes the underlying breakage before pruning.
+fn prune(config: &Config, orphans: bool, dry_run: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if !orphans {
+        return Err(
+            "`aimx hooks prune` currently requires `--orphans` to be set explicitly; \
+             no other prune scopes are implemented yet"
+                .into(),
+        );
+    }
+
+    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    if !skip_root_check && !crate::platform::is_root() {
+        return Err("hooks prune --orphans requires root: run again with \
+             `sudo aimx hooks prune --orphans`"
+            .into());
+    }
+
+    // Pre-flight: run the doctor checks and refuse when any Fail
+    // finding is outside the orphan-cleanup set. The operator has to
+    // fix the underlying error first because a bad hook invariant or
+    // missing dir indicates config or filesystem damage that the prune
+    // command has no business silently rewriting around.
+    let load_warnings = match crate::config::Config::load_resolved() {
+        Ok((_, w)) => w,
+        Err(_) => Vec::new(),
+    };
+    let findings = crate::doctor::run_checks(config, &load_warnings);
+    let non_orphan_fails: Vec<&crate::doctor::DoctorFinding> = findings
+        .iter()
+        .filter(|f| f.severity == crate::doctor::FindingSeverity::Fail)
+        .filter(|f| !crate::doctor::ORPHAN_CHECK_IDS.contains(&f.check))
+        .collect();
+    if !non_orphan_fails.is_empty() {
+        let mut msg =
+            String::from("Config has non-orphan failures. Fix those first, then re-run prune.\n");
+        for f in &non_orphan_fails {
+            msg.push_str(&format!("  - [{}] {}\n", f.check, f.message));
+        }
+        return Err(msg.into());
+    }
+
+    let plan = build_prune_plan(config);
+    if plan.is_empty() {
+        println!(
+            "{}",
+            term::success("No orphan templates or hooks to prune.")
+        );
+        return Ok(());
+    }
+
+    print_prune_plan(&plan);
+
+    if dry_run {
+        println!(
+            "{} dry-run only; config.toml not modified.",
+            term::info("Note:"),
+        );
+        return Ok(());
+    }
+
+    // Apply. Writes a temp file in the config's parent, fsyncs, then
+    // renames over the target. ConfigHandle::store is the daemon's
+    // in-memory view; the CLI only owns a snapshot, so we emit a
+    // restart/SIGHUP hint so operators know how to activate the new
+    // config without bouncing the whole service.
+    let mut new_config = config.clone();
+    apply_prune_plan(&mut new_config, &plan);
+
+    let path = crate::config::config_path();
+    crate::mailbox_handler::write_config_atomic(&path, &new_config).map_err(
+        |e| -> Box<dyn std::error::Error> { format!("failed to rewrite config.toml: {e}").into() },
+    )?;
+
+    println!(
+        "{} {}",
+        term::success("Pruned:"),
+        format_prune_summary(&plan),
+    );
+
+    match crate::serve::sighup_running_daemon() {
+        crate::serve::SighupOutcome::Sent(pid) => {
+            println!(
+                "{} SIGHUP sent to aimx serve (pid {pid}); change is live.",
+                term::info("Reload:")
+            );
+        }
+        _ => print_restart_hint(),
+    }
+    Ok(())
+}
+
+/// Deterministic, sorted description of what `prune --orphans` will
+/// remove. The `template_names` vector lists orphan template names;
+/// `hooks_by_mailbox` is a sorted list of (mailbox, Vec<hook_name>).
+#[derive(Debug, Default)]
+struct PrunePlan {
+    template_names: Vec<String>,
+    hooks_by_mailbox: Vec<(String, Vec<String>)>,
+}
+
+impl PrunePlan {
+    fn is_empty(&self) -> bool {
+        self.template_names.is_empty() && self.hooks_by_mailbox.is_empty()
+    }
+
+    fn total_hooks(&self) -> usize {
+        self.hooks_by_mailbox
+            .iter()
+            .map(|(_, hooks)| hooks.len())
+            .sum()
+    }
+}
+
+fn build_prune_plan(config: &Config) -> PrunePlan {
+    use crate::config::{RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT};
+    use crate::user_resolver::resolve_user;
+
+    // Sorted for deterministic output in both diff preview and tests.
+    let mut orphan_templates: Vec<String> = config
+        .hook_templates
+        .iter()
+        .filter(|t| {
+            t.run_as != RESERVED_RUN_AS_ROOT
+                && t.run_as != RESERVED_RUN_AS_CATCHALL
+                && resolve_user(&t.run_as).is_none()
+        })
+        .map(|t| t.name.clone())
+        .collect();
+    orphan_templates.sort();
+    orphan_templates.dedup();
+
+    let orphan_template_set: std::collections::HashSet<&str> =
+        orphan_templates.iter().map(String::as_str).collect();
+
+    let mut hooks_by_mailbox: Vec<(String, Vec<String>)> = Vec::new();
+    let mut mailbox_names: Vec<&String> = config.mailboxes.keys().collect();
+    mailbox_names.sort();
+    for mb_name in mailbox_names {
+        let mb = &config.mailboxes[mb_name];
+        let mut orphan_hook_names: Vec<String> = Vec::new();
+        for hook in &mb.hooks {
+            let effective = effective_hook_name(hook);
+            let template_orphaned = hook
+                .template
+                .as_ref()
+                .is_some_and(|t| orphan_template_set.contains(t.as_str()));
+            let run_as_orphaned = hook_run_as_is_orphan(config, hook);
+            if template_orphaned || run_as_orphaned {
+                orphan_hook_names.push(effective);
+            }
+        }
+        orphan_hook_names.sort();
+        if !orphan_hook_names.is_empty() {
+            hooks_by_mailbox.push((mb_name.clone(), orphan_hook_names));
+        }
+    }
+
+    PrunePlan {
+        template_names: orphan_templates,
+        hooks_by_mailbox,
+    }
+}
+
+/// True when the hook's effective `run_as` (explicit or inherited from
+/// its template) does not resolve via `getpwnam`. Reserved values
+/// (`root`, `aimx-catchall`) always resolve for prune's purposes.
+fn hook_run_as_is_orphan(config: &Config, hook: &crate::hook::Hook) -> bool {
+    use crate::config::{RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT};
+    use crate::user_resolver::resolve_user;
+
+    let explicit = hook.run_as.clone();
+    let inherited = hook.template.as_ref().and_then(|tmpl_name| {
+        config
+            .hook_templates
+            .iter()
+            .find(|t| &t.name == tmpl_name)
+            .map(|t| t.run_as.clone())
+    });
+    let effective = explicit.or(inherited);
+    let Some(name) = effective else {
+        return false;
+    };
+    if name == RESERVED_RUN_AS_ROOT || name == RESERVED_RUN_AS_CATCHALL {
+        return false;
+    }
+    resolve_user(&name).is_none()
+}
+
+fn apply_prune_plan(config: &mut Config, plan: &PrunePlan) {
+    let template_set: std::collections::HashSet<&str> =
+        plan.template_names.iter().map(String::as_str).collect();
+    config
+        .hook_templates
+        .retain(|t| !template_set.contains(t.name.as_str()));
+
+    for (mb_name, hook_names) in &plan.hooks_by_mailbox {
+        let hook_set: std::collections::HashSet<&str> =
+            hook_names.iter().map(String::as_str).collect();
+        if let Some(mb) = config.mailboxes.get_mut(mb_name) {
+            mb.hooks
+                .retain(|h| !hook_set.contains(effective_hook_name(h).as_str()));
+        }
+    }
+}
+
+fn print_prune_plan(plan: &PrunePlan) {
+    println!(
+        "{} proposed prune diff:",
+        term::header("aimx hooks prune --orphans"),
+    );
+    if !plan.template_names.is_empty() {
+        println!("  {}", term::warn("Templates to remove:"));
+        for name in &plan.template_names {
+            println!("    - {}", term::highlight(name));
+        }
+    }
+    if !plan.hooks_by_mailbox.is_empty() {
+        println!("  {}", term::warn("Hooks to remove:"));
+        for (mb, names) in &plan.hooks_by_mailbox {
+            for name in names {
+                println!("    - {}.{}", term::dim(mb), term::highlight(name));
+            }
+        }
+    }
+}
+
+fn format_prune_summary(plan: &PrunePlan) -> String {
+    let templates_phrase = if plan.template_names.is_empty() {
+        "0 templates".to_string()
+    } else {
+        format!(
+            "{} templates ({})",
+            plan.template_names.len(),
+            plan.template_names.join(", "),
+        )
+    };
+    format!(
+        "Removed {} and {} hooks from {} mailboxes",
+        templates_phrase,
+        plan.total_hooks(),
+        plan.hooks_by_mailbox.len(),
+    )
 }
 
 /// Common pre-submission validation shared between the template and
@@ -938,5 +1186,189 @@ mod tests {
         assert!(find_hook_by_effective_name(&cfg, "explicit_one").is_some());
         assert!(find_hook_by_effective_name(&cfg, &anon_derived).is_some());
         assert!(find_hook_by_effective_name(&cfg, "not_there").is_none());
+    }
+
+    // -------------------- Sprint 7: hooks prune --orphans --------------------
+
+    use crate::user_resolver::{ResolvedUser, set_test_resolver};
+
+    fn current_uid_gid() -> (u32, u32) {
+        #[cfg(unix)]
+        unsafe {
+            (libc::geteuid(), libc::getegid())
+        }
+        #[cfg(not(unix))]
+        {
+            (0, 0)
+        }
+    }
+
+    fn prune_test_config() -> Config {
+        let mut cfg = base_config();
+        // alice is owned by "root" in base_config; switch to "testowner"
+        // so mock resolver hits a single canonical name.
+        cfg.mailboxes.get_mut("alice").unwrap().owner = "testowner".into();
+        // Add a second mailbox owned by the to-be-deleted user "bob".
+        cfg.mailboxes.insert(
+            "bob".into(),
+            MailboxConfig {
+                address: "bob@test.com".into(),
+                owner: "bob".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        // Template whose run_as is bob (orphan after userdel).
+        cfg.hook_templates.push(HookTemplate {
+            name: "invoke-codex-bob".into(),
+            description: "bob's codex".into(),
+            cmd: vec!["/usr/local/bin/codex".into(), "{prompt}".into()],
+            params: vec!["prompt".into()],
+            stdin: HookTemplateStdin::Email,
+            run_as: "bob".into(),
+            timeout_secs: 60,
+            allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
+        });
+        // Hook on bob's mailbox bound to the bob template.
+        let mut params = BTreeMap::new();
+        params.insert("prompt".into(), "hello".into());
+        cfg.mailboxes.get_mut("bob").unwrap().hooks.push(Hook {
+            name: Some("bob-on-receive".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: String::new(),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: Some("invoke-codex-bob".into()),
+            params,
+            run_as: None,
+        });
+        // Hook on alice's mailbox with explicit run_as = bob (also orphan).
+        cfg.mailboxes.get_mut("alice").unwrap().hooks.push(Hook {
+            name: Some("alice-via-bob".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo hi".into(),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: BTreeMap::new(),
+            run_as: Some("bob".into()),
+        });
+        cfg
+    }
+
+    fn resolver_without_bob(name: &str) -> Option<ResolvedUser> {
+        let (uid, gid) = current_uid_gid();
+        match name {
+            "testowner" | "root" | "aimx-catchall" | "aimx-hook" => Some(ResolvedUser {
+                name: name.to_string(),
+                uid,
+                gid,
+            }),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn build_prune_plan_finds_orphan_templates_and_hooks() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let cfg = prune_test_config();
+        let plan = super::build_prune_plan(&cfg);
+        assert_eq!(plan.template_names, vec!["invoke-codex-bob".to_string()]);
+        assert!(plan.hooks_by_mailbox.iter().any(|(mb, _)| mb == "bob"));
+        assert!(plan.hooks_by_mailbox.iter().any(|(mb, _)| mb == "alice"));
+        assert_eq!(plan.total_hooks(), 2);
+    }
+
+    #[test]
+    fn build_prune_plan_empty_when_nothing_is_orphan() {
+        fn all_resolve(name: &str) -> Option<ResolvedUser> {
+            let (uid, gid) = current_uid_gid();
+            Some(ResolvedUser {
+                name: name.to_string(),
+                uid,
+                gid,
+            })
+        }
+        let _g = set_test_resolver(all_resolve);
+        let cfg = prune_test_config();
+        let plan = super::build_prune_plan(&cfg);
+        assert!(plan.is_empty(), "no orphans → empty plan, got: {plan:?}");
+    }
+
+    #[test]
+    fn apply_prune_plan_removes_templates_and_hooks() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let mut cfg = prune_test_config();
+        let plan = super::build_prune_plan(&cfg);
+        super::apply_prune_plan(&mut cfg, &plan);
+        assert!(
+            cfg.hook_templates
+                .iter()
+                .all(|t| t.name != "invoke-codex-bob"),
+            "bob's template must be removed"
+        );
+        assert!(
+            cfg.mailboxes.get("bob").unwrap().hooks.is_empty(),
+            "bob's hook must be removed"
+        );
+        assert!(
+            cfg.mailboxes.get("alice").unwrap().hooks.is_empty(),
+            "alice's bob-run_as hook must be removed"
+        );
+    }
+
+    #[test]
+    fn apply_prune_plan_is_idempotent() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let mut cfg = prune_test_config();
+        let plan = super::build_prune_plan(&cfg);
+        super::apply_prune_plan(&mut cfg, &plan);
+        // Rebuild plan off the pruned config; should be empty.
+        let plan2 = super::build_prune_plan(&cfg);
+        assert!(plan2.is_empty(), "second prune is a no-op, got: {plan2:?}");
+    }
+
+    #[test]
+    fn format_prune_summary_reports_counts() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let cfg = prune_test_config();
+        let plan = super::build_prune_plan(&cfg);
+        let out = super::format_prune_summary(&plan);
+        assert!(out.contains("Removed 1 templates"), "{out}");
+        assert!(out.contains("invoke-codex-bob"), "{out}");
+        assert!(out.contains("2 hooks"), "{out}");
+        assert!(out.contains("2 mailboxes"), "{out}");
+    }
+
+    #[test]
+    fn hook_run_as_is_orphan_respects_reserved_names() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let cfg = prune_test_config();
+        // A hook running as root is never orphan.
+        let h = Hook {
+            name: Some("h".into()),
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: "echo".into(),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: BTreeMap::new(),
+            run_as: Some("root".into()),
+        };
+        assert!(!super::hook_run_as_is_orphan(&cfg, &h));
+        // A hook running as bob (missing user) is orphan.
+        let h2 = Hook {
+            run_as: Some("bob".into()),
+            ..h.clone()
+        };
+        assert!(super::hook_run_as_is_orphan(&cfg, &h2));
+        // A hook with no run_as and no template is not orphan.
+        let h3 = Hook { run_as: None, ..h };
+        assert!(!super::hook_run_as_is_orphan(&cfg, &h3));
     }
 }
