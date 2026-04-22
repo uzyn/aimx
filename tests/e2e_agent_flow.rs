@@ -644,13 +644,19 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         !post_cleanup.status.success(),
         "template should be gone after cleanup; hook_create unexpectedly succeeded"
     );
-    // Assert the specific daemon error code so a future typo in
-    // `template_name` (or a regression that accepts unknown templates)
-    // is caught here instead of silently passing on any non-zero exit.
+    // Assert the specific "unknown template" rejection so a future
+    // typo in `template_name` (or a regression that accepts unknown
+    // templates) is caught here instead of silently passing on any
+    // non-zero exit. Both the CLI-local validator (`hooks.rs`,
+    // `unknown template '...'`) and the daemon-side validator
+    // (`hook_handler.rs`, `unknown-template '...'`) use the same
+    // stem, so a lowercase `unknown template`/`unknown-template`
+    // check catches either layer rejecting.
     let post_cleanup_stderr = String::from_utf8_lossy(&post_cleanup.stderr);
     assert!(
-        post_cleanup_stderr.contains("unknown-template"),
-        "expected `unknown-template` error after cleanup, got stderr={post_cleanup_stderr:?}"
+        post_cleanup_stderr.contains("unknown template")
+            || post_cleanup_stderr.contains("unknown-template"),
+        "expected an `unknown template` error after cleanup, got stderr={post_cleanup_stderr:?}"
     );
 
     drop(daemon_handle);
