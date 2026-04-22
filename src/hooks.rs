@@ -851,7 +851,7 @@ mod tests {
     use super::*;
     use crate::config::{HookTemplate, HookTemplateStdin, MailboxConfig};
     use std::collections::HashMap;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn base_config() -> Config {
         let mut mailboxes = HashMap::new();
@@ -1381,5 +1381,120 @@ mod tests {
         // A hook with no run_as and no template is not orphan.
         let h3 = Hook { run_as: None, ..h };
         assert!(!super::hook_run_as_is_orphan(&cfg, &h3));
+    }
+
+    // -------------------- prune_preflight_check unit tests --------------------
+
+    /// Build a `Config` whose mailbox storage dirs are populated on disk
+    /// and whose owner resolves via the mock resolver, so
+    /// `run_checks` returns no non-orphan Fail findings. Tests mutate
+    /// the returned `(Config, TempDir)` to induce specific failures.
+    fn preflight_clean_config(data_dir: &Path) -> Config {
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            MailboxConfig {
+                address: "alice@test.com".to_string(),
+                owner: "testowner".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        Config {
+            domain: "test.com".to_string(),
+            data_dir: data_dir.to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+        }
+    }
+
+    #[cfg(unix)]
+    fn chmod(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(mode);
+        std::fs::set_permissions(path, perms).unwrap();
+    }
+
+    fn create_mailbox_dirs(data_dir: &Path, mailbox: &str) {
+        let inbox = data_dir.join("inbox").join(mailbox);
+        let sent = data_dir.join("sent").join(mailbox);
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&sent).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&inbox, 0o700);
+            chmod(&sent, 0o700);
+        }
+    }
+
+    #[test]
+    fn prune_preflight_check_passes_on_clean_config() {
+        let _g = set_test_resolver(resolver_without_bob);
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_mailbox_dirs(tmp.path(), "alice");
+        let cfg = preflight_clean_config(tmp.path());
+        super::prune_preflight_check(&cfg).expect("clean config should pass preflight");
+    }
+
+    #[test]
+    fn prune_preflight_check_refuses_on_non_orphan_fail() {
+        // Mailbox dirs are deliberately NOT created, so
+        // `check_mailbox_ownership` emits a `MAILBOX-DIR-MISSING` Fail
+        // finding for 'alice'. That check ID is not in
+        // `ORPHAN_CHECK_IDS`, so preflight must refuse.
+        let _g = set_test_resolver(resolver_without_bob);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = preflight_clean_config(tmp.path());
+        let err =
+            super::prune_preflight_check(&cfg).expect_err("missing storage dir must block prune");
+        assert!(
+            err.message.contains("MAILBOX-DIR-MISSING"),
+            "refusal must name the offending check ID, got: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("alice"),
+            "refusal must name the offending mailbox, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn prune_preflight_check_ignores_orphan_only_findings() {
+        // Add an orphan template (`run_as = "bob"`, and the mock
+        // resolver does not know "bob") alongside a clean mailbox.
+        // `run_checks` emits `ORPHAN-TEMPLATE-RUN_AS` at Warn severity
+        // — which is exactly what `hooks prune --orphans` is here to
+        // clean up. Preflight must permit the prune rather than block
+        // it on the very finding being pruned.
+        let _g = set_test_resolver(resolver_without_bob);
+        let tmp = tempfile::TempDir::new().unwrap();
+        create_mailbox_dirs(tmp.path(), "alice");
+        let mut cfg = preflight_clean_config(tmp.path());
+        cfg.hook_templates.push(HookTemplate {
+            name: "invoke-codex-bob".into(),
+            description: "bob's codex".into(),
+            cmd: vec!["/usr/local/bin/codex".into(), "{prompt}".into()],
+            params: vec!["prompt".into()],
+            stdin: HookTemplateStdin::Email,
+            run_as: "bob".into(),
+            timeout_secs: 60,
+            allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
+        });
+        // Sanity-check that the config actually produces an orphan
+        // finding — otherwise the test would pass vacuously.
+        let findings = crate::doctor::run_checks(&cfg, &[]);
+        assert!(
+            findings.iter().any(|f| f.check == "ORPHAN-TEMPLATE-RUN_AS"),
+            "expected ORPHAN-TEMPLATE-RUN_AS in findings, got: {findings:?}"
+        );
+        super::prune_preflight_check(&cfg).expect("orphan-only findings must not block prune");
     }
 }
