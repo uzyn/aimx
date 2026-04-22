@@ -46,6 +46,25 @@
 //!   Content-Length: 0\n
 //!   \n
 //!
+//! Client → Server (TEMPLATE-CREATE):
+//!   AIMX/1 TEMPLATE-CREATE\n
+//!   Content-Length: <n>\n
+//!   \n
+//!   <n bytes of TOML: UdsTemplatePayload fields>
+//!
+//! Client → Server (TEMPLATE-UPDATE):
+//!   AIMX/1 TEMPLATE-UPDATE\n
+//!   Template-Name: <name>\n
+//!   Content-Length: <n>\n
+//!   \n
+//!   <n bytes of TOML: UdsTemplatePayload fields>
+//!
+//! Client → Server (TEMPLATE-DELETE):
+//!   AIMX/1 TEMPLATE-DELETE\n
+//!   Template-Name: <name>\n
+//!   Content-Length: 0\n
+//!   \n
+//!
 //! Server → Client:
 //!   AIMX/1 OK [<message-id>]\n
 //! or
@@ -209,14 +228,187 @@ pub struct HookDeleteRequest {
     pub name: String,
 }
 
-/// One decoded `AIMX/1` request, tagged by verb.
+/// Safe, UDS-exposed subset of [`crate::config::HookTemplate`] used by
+/// `TEMPLATE-CREATE` and `TEMPLATE-UPDATE` (Sprint 5 §6.6). Every field
+/// is whitelisted; anything else in the submitted body is rejected by
+/// `deny_unknown_fields` with the offending key named in the TOML parser
+/// error (propagated to the caller as `MALFORMED <reason>`).
+///
+/// Reserved `run_as` values (`"root"`, `"aimx-catchall"`) are rejected
+/// at parse time so they cannot land via UDS even if the body is
+/// otherwise shape-correct. That check plus the `cmd[0]` placeholder
+/// rejection mirror the load-time guarantees of
+/// [`crate::config::validate_hook_templates`] — §6.6 says the UDS
+/// "never accepts raw `cmd` or `run_as = root` / `aimx-catchall`".
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UdsTemplatePayload {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub cmd: Vec<String>,
+    #[serde(default)]
+    pub params: Vec<String>,
+    #[serde(default)]
+    pub stdin: crate::config::HookTemplateStdin,
+    pub run_as: String,
+    #[serde(default = "default_uds_template_timeout_secs")]
+    pub timeout_secs: u32,
+    #[serde(default = "default_uds_template_allowed_events")]
+    pub allowed_events: Vec<crate::hook::HookEvent>,
+}
+
+fn default_uds_template_timeout_secs() -> u32 {
+    60
+}
+
+fn default_uds_template_allowed_events() -> Vec<crate::hook::HookEvent> {
+    vec![
+        crate::hook::HookEvent::OnReceive,
+        crate::hook::HookEvent::AfterSend,
+    ]
+}
+
+impl UdsTemplatePayload {
+    /// Light-weight, shape-only validation the parser runs before handing
+    /// the request to the verb dispatcher. Every rule here mirrors a
+    /// subset of [`crate::config::validate_hook_templates`] so the final
+    /// on-config validator is the single source of truth; the parser
+    /// catches the obvious bad-shape cases early so the handler doesn't
+    /// have to hunt them down and so the error name landing on the wire
+    /// is precise.
+    ///
+    /// Per PRD §6.6:
+    /// - `cmd` must be non-empty
+    /// - `cmd[0]` must not contain a `{placeholder}`
+    /// - `run_as` must not be the reserved `root` / `aimx-catchall`
+    ///   (those templates can only be authored by an explicit root edit
+    ///   of `config.toml`)
+    /// - `timeout_secs` must be within `[1, HOOK_TEMPLATE_TIMEOUT_SECS_MAX]`
+    /// - every declared `params` entry must be referenced somewhere in
+    ///   `cmd` (any slot after `cmd[0]`)
+    pub fn validate(&self) -> Result<(), String> {
+        if !crate::config::is_valid_template_name_str(&self.name) {
+            return Err(format!(
+                "invalid template name '{}': must match [a-z0-9-]+",
+                self.name
+            ));
+        }
+        if self.cmd.is_empty() {
+            return Err("cmd is empty; must be a non-empty argv".into());
+        }
+        if crate::config::cmd_zero_contains_placeholder(&self.cmd[0]) {
+            return Err(format!(
+                "cmd[0] '{}' contains a placeholder; the binary path must be a literal",
+                self.cmd[0]
+            ));
+        }
+        if self.run_as == crate::config::RESERVED_RUN_AS_ROOT
+            || self.run_as == crate::config::RESERVED_RUN_AS_CATCHALL
+        {
+            return Err(format!(
+                "run_as '{}' can only be set via direct config edit",
+                self.run_as
+            ));
+        }
+        if self.timeout_secs == 0
+            || self.timeout_secs > crate::config::HOOK_TEMPLATE_TIMEOUT_SECS_MAX
+        {
+            return Err(format!(
+                "timeout_secs = {} is out of range [1, {}]",
+                self.timeout_secs,
+                crate::config::HOOK_TEMPLATE_TIMEOUT_SECS_MAX
+            ));
+        }
+        if self.allowed_events.is_empty() {
+            return Err("allowed_events is empty: at least one event must be listed".into());
+        }
+        // Every declared param must appear somewhere in argv past cmd[0].
+        // Full placeholder validity (charset, unknown references, etc.)
+        // is left to `validate_hook_templates`; this catches the common
+        // "declared but unused" case at the parser so the error names
+        // the offending param.
+        for p in &self.params {
+            let referenced = self.cmd.iter().skip(1).any(|slot| {
+                let needle = format!("{{{p}}}");
+                slot.contains(&needle)
+            });
+            if !referenced {
+                return Err(format!(
+                    "param '{p}' is declared but never referenced in cmd"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Convert to a full [`crate::config::HookTemplate`] after validation
+    /// has succeeded. The handler runs the load-time validator on the
+    /// resulting config before persisting.
+    pub fn into_hook_template(self) -> crate::config::HookTemplate {
+        crate::config::HookTemplate {
+            name: self.name,
+            description: self.description,
+            cmd: self.cmd,
+            params: self.params,
+            stdin: self.stdin,
+            run_as: self.run_as,
+            timeout_secs: self.timeout_secs,
+            allowed_events: self.allowed_events,
+        }
+    }
+}
+
+/// Decoded `AIMX/1 TEMPLATE-CREATE` request. Body is a TOML fragment
+/// deserialized into [`UdsTemplatePayload`]; the `name` travels inside
+/// the body so the parser can return a precise error when the operator
+/// mis-spells it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateCreateRequest {
+    pub payload: UdsTemplatePayload,
+}
+
+/// Decoded `AIMX/1 TEMPLATE-UPDATE` request. Carries a `Template-Name:`
+/// header identifying the *existing* template to replace plus a TOML
+/// body describing its new fields.
+///
+/// `name` (from the header) and `payload.name` (from the body) are
+/// independent:
+/// - When they match, the handler performs an in-place update.
+/// - When they differ, the handler performs a rename — the entry at the
+///   position of the existing template is replaced with the new payload,
+///   whose `name` becomes the canonical identifier. `validate_hook_templates`
+///   catches any duplicate-name collision that this would introduce.
+///
+/// Both values are independently charset-validated (`[a-z0-9-]+`) at
+/// parse time, so a header or body name that fails the rule is rejected
+/// as `MALFORMED` before any handler dispatch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TemplateUpdateRequest {
+    pub name: String,
+    pub payload: UdsTemplatePayload,
+}
+
+/// Decoded `AIMX/1 TEMPLATE-DELETE` request. `Template-Name:` header,
+/// empty body. The handler enforces the authz rule that
+/// `caller.username == template.run_as` (or root bypass) before
+/// deleting.
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TemplateDeleteRequest {
+    pub name: String,
+}
+
+/// One decoded `AIMX/1` request, tagged by verb.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Request {
     Send(SendRequest),
     Mark(MarkRequest),
     MailboxCrud(MailboxCrudRequest),
     HookCreate(HookCreateRequest),
     HookDelete(HookDeleteRequest),
+    TemplateCreate(TemplateCreateRequest),
+    TemplateUpdate(TemplateUpdateRequest),
+    TemplateDelete(TemplateDeleteRequest),
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -416,6 +608,15 @@ where
         "HOOK-DELETE" => parse_hook_delete_headers(reader)
             .await
             .map(Request::HookDelete),
+        "TEMPLATE-CREATE" => parse_template_create_headers_and_body(reader, max_body)
+            .await
+            .map(Request::TemplateCreate),
+        "TEMPLATE-UPDATE" => parse_template_update_headers_and_body(reader, max_body)
+            .await
+            .map(Request::TemplateUpdate),
+        "TEMPLATE-DELETE" => parse_template_delete_headers(reader)
+            .await
+            .map(Request::TemplateDelete),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -442,6 +643,11 @@ where
         Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
             "expected SEND verb, got HOOK-*".to_string(),
         )),
+        Request::TemplateCreate(_) | Request::TemplateUpdate(_) | Request::TemplateDelete(_) => {
+            Err(ParseError::Malformed(
+                "expected SEND verb, got TEMPLATE-*".to_string(),
+            ))
+        }
     }
 }
 
@@ -904,6 +1110,228 @@ where
     Ok(HookDeleteRequest { name })
 }
 
+async fn parse_template_create_headers_and_body<R>(
+    reader: &mut R,
+    max_body: usize,
+) -> Result<TemplateCreateRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let body =
+        read_template_headers_and_body(reader, max_body, /* expect_name_header */ false)
+            .await?
+            .body;
+    let payload = parse_template_payload(&body)?;
+    Ok(TemplateCreateRequest { payload })
+}
+
+async fn parse_template_update_headers_and_body<R>(
+    reader: &mut R,
+    max_body: usize,
+) -> Result<TemplateUpdateRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let parsed = read_template_headers_and_body(reader, max_body, true).await?;
+    let name = parsed
+        .template_name
+        .ok_or_else(|| ParseError::Malformed("missing required header: Template-Name".into()))?;
+    let payload = parse_template_payload(&parsed.body)?;
+    Ok(TemplateUpdateRequest { name, payload })
+}
+
+async fn parse_template_delete_headers<R>(
+    reader: &mut R,
+) -> Result<TemplateDeleteRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut template_name: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let header_name = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match header_name.as_str() {
+            "template-name" => {
+                if template_name.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Template-Name header".into(),
+                    ));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Template-Name value".into()));
+                }
+                if !crate::config::is_valid_template_name_str(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Template-Name '{value}': must match [a-z0-9-]+"
+                    )));
+                }
+                template_name = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n != 0 {
+                    return Err(ParseError::Malformed(format!(
+                        "TEMPLATE-DELETE must have Content-Length: 0, got {n}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers are ignored.
+            }
+        }
+    }
+
+    let name = template_name
+        .ok_or_else(|| ParseError::Malformed("missing required header: Template-Name".into()))?;
+    let _ = content_length;
+    Ok(TemplateDeleteRequest { name })
+}
+
+/// Shared header/body reader for `TEMPLATE-CREATE` and `TEMPLATE-UPDATE`.
+/// `expect_name_header` selects whether `Template-Name:` is parsed (UPDATE
+/// requires it; CREATE carries the name in the body). Content-Length is
+/// required in both cases.
+struct TemplateHeadersAndBody {
+    body: Vec<u8>,
+    template_name: Option<String>,
+}
+
+async fn read_template_headers_and_body<R>(
+    reader: &mut R,
+    max_body: usize,
+    expect_name_header: bool,
+) -> Result<TemplateHeadersAndBody, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut template_name: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let header_name = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match header_name.as_str() {
+            "template-name" => {
+                if !expect_name_header {
+                    // Ignore on CREATE; the name of record is the body's
+                    // `name` field. Do not reject, so future clients that
+                    // set it redundantly keep working.
+                    continue;
+                }
+                if template_name.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Template-Name header".into(),
+                    ));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Template-Name value".into()));
+                }
+                if !crate::config::is_valid_template_name_str(&value) {
+                    return Err(ParseError::Malformed(format!(
+                        "invalid Template-Name '{value}': must match [a-z0-9-]+"
+                    )));
+                }
+                template_name = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n > max_body {
+                    return Err(ParseError::Malformed(format!(
+                        "Content-Length {n} exceeds cap {max_body}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers are ignored.
+            }
+        }
+    }
+
+    let content_length = content_length
+        .ok_or_else(|| ParseError::Malformed("missing required header: Content-Length".into()))?;
+
+    let mut body = vec![0u8; content_length];
+    reader.read_exact(&mut body).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            ParseError::Malformed(format!("body truncated: expected {content_length} bytes"))
+        } else {
+            ParseError::Io(e.to_string())
+        }
+    })?;
+
+    Ok(TemplateHeadersAndBody {
+        body,
+        template_name,
+    })
+}
+
+/// Parse the TOML body into a `UdsTemplatePayload` and run the
+/// parse-time shape check. Rejections surface as `ParseError::Malformed`
+/// so the dispatcher can uniformly map them to `ERR MALFORMED <reason>`
+/// on the wire before the handler runs any authz logic (PRD §6.6).
+fn parse_template_payload(body: &[u8]) -> Result<UdsTemplatePayload, ParseError> {
+    let text = std::str::from_utf8(body)
+        .map_err(|_| ParseError::Malformed("TEMPLATE body is not valid UTF-8".into()))?;
+    let payload: UdsTemplatePayload = toml::from_str(text)
+        .map_err(|e| ParseError::Malformed(format!("malformed TEMPLATE body: {e}")))?;
+    payload.validate().map_err(ParseError::Malformed)?;
+    Ok(payload)
+}
+
 /// Read a single `\n`-terminated line from `reader`, returning it without the
 /// trailing `\n`. Returns `Ok(None)` when the stream ends cleanly before any
 /// byte arrives. Enforces [`MAX_HEADER_LINE`] to bound memory on garbage
@@ -1112,6 +1540,77 @@ where
 {
     let header = format!(
         "AIMX/1 HOOK-DELETE\nHook-Name: {}\nContent-Length: 0\n\n",
+        sanitize_inline(&request.name),
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Render a `UdsTemplatePayload` as a TOML body suitable for wire
+/// submission. Separate helper so client code and tests share one
+/// serialization.
+// Consumed by Sprint 6 client code and by the tests below. `pub` so the
+// future CLI can import it; `#[allow(dead_code)]` silences the binary's
+// dead-code lint until the wiring lands.
+#[allow(dead_code)]
+pub fn render_template_payload(payload: &UdsTemplatePayload) -> Result<String, std::io::Error> {
+    toml::to_string_pretty(payload)
+        .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))
+}
+
+/// Write an `AIMX/1 TEMPLATE-CREATE` request frame. Body is the payload
+/// serialized as TOML.
+#[allow(dead_code)]
+pub async fn write_template_create_request<W>(
+    writer: &mut W,
+    request: &TemplateCreateRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = render_template_payload(&request.payload)?;
+    let header = format!("AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 TEMPLATE-UPDATE` request frame. Header carries the
+/// `Template-Name:` of the template to replace; body is the new payload.
+#[allow(dead_code)]
+pub async fn write_template_update_request<W>(
+    writer: &mut W,
+    request: &TemplateUpdateRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = render_template_payload(&request.payload)?;
+    let header = format!(
+        "AIMX/1 TEMPLATE-UPDATE\nTemplate-Name: {}\nContent-Length: {}\n\n",
+        sanitize_inline(&request.name),
+        body.len()
+    );
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(body.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 TEMPLATE-DELETE` request frame. Empty body; the
+/// `Template-Name:` header identifies the target.
+#[allow(dead_code)]
+pub async fn write_template_delete_request<W>(
+    writer: &mut W,
+    request: &TemplateDeleteRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let header = format!(
+        "AIMX/1 TEMPLATE-DELETE\nTemplate-Name: {}\nContent-Length: 0\n\n",
         sanitize_inline(&request.name),
     );
     writer.write_all(header.as_bytes()).await?;
@@ -2107,6 +2606,337 @@ mod tests {
         match parsed {
             Request::HookCreate(r) => assert_eq!(r.body, body),
             other => panic!("expected HookCreate, got {other:?}"),
+        }
+    }
+
+    // ----- TEMPLATE-CREATE / UPDATE / DELETE verbs --------------------
+
+    fn example_payload(name: &str, run_as: &str) -> UdsTemplatePayload {
+        UdsTemplatePayload {
+            name: name.to_string(),
+            description: "example".into(),
+            cmd: vec!["/usr/bin/echo".into(), "{prompt}".into()],
+            params: vec!["prompt".into()],
+            stdin: crate::config::HookTemplateStdin::Email,
+            run_as: run_as.to_string(),
+            timeout_secs: 60,
+            allowed_events: vec![
+                crate::hook::HookEvent::OnReceive,
+                crate::hook::HookEvent::AfterSend,
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_roundtrip() {
+        let req = TemplateCreateRequest {
+            payload: example_payload("invoke-claude-sam", "sam"),
+        };
+        let (mut client, mut server) = duplex(4096);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_template_create_request(&mut client, &req)
+                    .await
+                    .unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::TemplateCreate(r) => {
+                assert_eq!(r.payload.name, "invoke-claude-sam");
+                assert_eq!(r.payload.run_as, "sam");
+                assert_eq!(r.payload.cmd, vec!["/usr/bin/echo", "{prompt}"]);
+            }
+            other => panic!("expected TemplateCreate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_update_roundtrip_carries_name_header() {
+        let req = TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: example_payload("invoke-claude-sam", "sam"),
+        };
+        let (mut client, mut server) = duplex(4096);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_template_update_request(&mut client, &req)
+                    .await
+                    .unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::TemplateUpdate(r) => {
+                assert_eq!(r.name, "invoke-claude-sam");
+                assert_eq!(r.payload.name, "invoke-claude-sam");
+            }
+            other => panic!("expected TemplateUpdate, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_roundtrip() {
+        let req = TemplateDeleteRequest {
+            name: "invoke-claude-sam".into(),
+        };
+        let (mut client, mut server) = duplex(1024);
+        let w = {
+            let req = req.clone();
+            tokio::spawn(async move {
+                write_template_delete_request(&mut client, &req)
+                    .await
+                    .unwrap();
+            })
+        };
+        let parsed = parse_request(&mut server).await.unwrap();
+        w.await.unwrap();
+        match parsed {
+            Request::TemplateDelete(r) => assert_eq!(r.name, "invoke-claude-sam"),
+            other => panic!("expected TemplateDelete, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_reserved_run_as_root() {
+        let body = toml::to_string_pretty(&example_payload("invoke-x", "root")).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("run_as 'root'"), "{m}");
+                assert!(m.contains("direct config edit"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_reserved_run_as_catchall() {
+        let body = toml::to_string_pretty(&example_payload("invoke-x", "aimx-catchall")).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("aimx-catchall"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_placeholder_in_cmd0() {
+        let mut payload = example_payload("invoke-x", "sam");
+        payload.cmd = vec!["{binary}".into(), "{prompt}".into()];
+        let body = toml::to_string_pretty(&payload).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("placeholder"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_empty_cmd() {
+        let mut payload = example_payload("invoke-x", "sam");
+        payload.cmd = vec![];
+        payload.params = vec![];
+        let body = toml::to_string_pretty(&payload).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("cmd is empty"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_out_of_range_timeout() {
+        let mut payload = example_payload("invoke-x", "sam");
+        payload.timeout_secs = 0;
+        let body = toml::to_string_pretty(&payload).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("timeout_secs"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_unreferenced_param() {
+        let mut payload = example_payload("invoke-x", "sam");
+        payload.params = vec!["prompt".into(), "unused".into()];
+        let body = toml::to_string_pretty(&payload).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("unused"), "{m}");
+                assert!(m.contains("never referenced"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_unknown_field_in_body() {
+        // `deny_unknown_fields` guarantees any stray key is named in the
+        // TOML deserializer error. `dangerously_support_untrusted` is
+        // the canonical "smuggled in a disallowed property" case.
+        let body = r#"
+name = "invoke-x"
+cmd = ["/usr/bin/echo"]
+run_as = "sam"
+dangerously_support_untrusted = true
+"#;
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(
+                m.contains("dangerously_support_untrusted") || m.contains("unknown field"),
+                "{m}"
+            ),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_update_missing_name_header_is_malformed() {
+        let body = toml::to_string_pretty(&example_payload("invoke-x", "sam")).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-UPDATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Template-Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_missing_name_header_is_malformed() {
+        let input = b"AIMX/1 TEMPLATE-DELETE\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Template-Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_empty_name_header_is_malformed() {
+        let input = b"AIMX/1 TEMPLATE-DELETE\nTemplate-Name: \nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("empty Template-Name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_nonzero_content_length_is_malformed() {
+        let input = b"AIMX/1 TEMPLATE-DELETE\nTemplate-Name: x\nContent-Length: 5\n\nhello";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("Content-Length: 0"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_verb_selection_in_wire_format() {
+        let req = TemplateCreateRequest {
+            payload: example_payload("invoke-claude-sam", "sam"),
+        };
+        let (mut client, mut server) = duplex(4096);
+        write_template_create_request(&mut client, &req)
+            .await
+            .unwrap();
+        drop(client);
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
+            .await
+            .unwrap();
+        assert!(buf.starts_with(b"AIMX/1 TEMPLATE-CREATE"));
+    }
+
+    #[tokio::test]
+    async fn template_update_invalid_template_name_header_is_malformed() {
+        // The header carries the identifier of the existing template and
+        // must pass the same `[a-z0-9-]+` charset check used by
+        // `derive_template_name`. An out-of-charset header would fall
+        // through to ENOENT on lookup; rejecting it at parse time is the
+        // tidier thing to do.
+        let body = toml::to_string_pretty(&example_payload("invoke-x", "sam")).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-UPDATE\nTemplate-Name: Invoke_Bad\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("invalid Template-Name"), "{m}");
+                assert!(m.contains("Invoke_Bad"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_invalid_template_name_header_is_malformed() {
+        let input = b"AIMX/1 TEMPLATE-DELETE\nTemplate-Name: Invoke_Bad\nContent-Length: 0\n\n";
+        let err = parse_any_from_bytes(input).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => {
+                assert!(m.contains("invalid Template-Name"), "{m}");
+                assert!(m.contains("Invoke_Bad"), "{m}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_body_invalid_template_name_is_malformed() {
+        let mut payload = example_payload("Invoke-Bad", "sam");
+        payload.params = vec![];
+        payload.cmd = vec!["/usr/bin/echo".into()];
+        let body = toml::to_string_pretty(&payload).unwrap();
+        let input = format!(
+            "AIMX/1 TEMPLATE-CREATE\nContent-Length: {}\n\n{body}",
+            body.len()
+        );
+        let err = parse_any_from_bytes(input.as_bytes()).await.unwrap_err();
+        match err {
+            ParseError::Malformed(m) => assert!(m.contains("invalid template name"), "{m}"),
+            other => panic!("expected Malformed, got {other:?}"),
         }
     }
 }

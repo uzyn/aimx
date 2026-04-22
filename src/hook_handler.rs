@@ -32,13 +32,15 @@
 use std::collections::BTreeMap;
 
 use crate::config::{
-    Config, HookTemplate, OrphanSkipContext, validate_hooks, validate_single_hook,
+    Config, HookTemplate, OrphanSkipContext, RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT,
+    validate_hook_templates, validate_hooks, validate_single_hook,
 };
 use crate::hook::{Hook, HookEvent, HookOrigin, effective_hook_name, is_valid_hook_name};
 use crate::hook_substitute::{BuiltinContext, substitute_argv};
 use crate::mailbox_handler::{CONFIG_WRITE_LOCK, MailboxContext, write_config_atomic};
 use crate::send_protocol::{
     AckResponse, ErrCode, HookCreateRequest, HookDeleteRequest, HookTemplateCreateBody,
+    TemplateCreateRequest, TemplateDeleteRequest, TemplateUpdateRequest,
 };
 use crate::state_handler::StateContext;
 use crate::uds_authz::{Caller, LogDecision, enforce_mailbox_owner_or_root, log_decision};
@@ -413,6 +415,296 @@ pub async fn handle_hook_delete(
         };
     }
 
+    mb_ctx.config_handle.store(new_config);
+    AckResponse::Ok
+}
+
+/// Handle an `AIMX/1 TEMPLATE-CREATE` request. The caller's username
+/// (from `SO_PEERCRED`) must equal the submitted `run_as`, or be root
+/// (logged as `root_bypass`). Atomic write-through: validate + stage a
+/// new `Config`, write-temp-then-rename `config.toml`, then swap the
+/// in-memory handle. Duplicate-name submissions return `ECONFLICT`.
+pub async fn handle_template_create(
+    mb_ctx: &MailboxContext,
+    req: &TemplateCreateRequest,
+    caller: &Caller,
+) -> AckResponse {
+    if let Err(reply) = enforce_run_as_matches_caller(
+        "TEMPLATE-CREATE",
+        caller,
+        &req.payload.run_as,
+        Some(&req.payload.name),
+    ) {
+        return reply;
+    }
+
+    let _config_guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let current = mb_ctx.config_handle.load();
+    if current
+        .hook_templates
+        .iter()
+        .any(|t| t.name == req.payload.name)
+    {
+        return AckResponse::Err {
+            code: ErrCode::Conflict,
+            reason: format!("template '{}' already exists", req.payload.name),
+        };
+    }
+
+    let template: HookTemplate = req.payload.clone().into_hook_template();
+    let mut new_config: Config = (*current).clone();
+    new_config.hook_templates.push(template);
+
+    if let Err(reason) = validate_hook_templates(&new_config.hook_templates) {
+        return AckResponse::Err {
+            code: ErrCode::Validation,
+            reason,
+        };
+    }
+
+    // Re-run the hook invariant pass: if an existing hook binds this
+    // template, adding it via UDS must not create an invariant violation.
+    // This mirrors the path `Config::load` takes.
+    if let Err(reason) = validate_hooks(&new_config, &OrphanSkipContext::strict()) {
+        return AckResponse::Err {
+            code: ErrCode::Validation,
+            reason,
+        };
+    }
+
+    commit_config(mb_ctx, new_config)
+}
+
+/// Handle an `AIMX/1 TEMPLATE-UPDATE` request. Replaces an existing
+/// template (located via the `Template-Name:` header) with the submitted
+/// payload. Authz rule matches CREATE: the caller's username must equal
+/// the submitted `run_as`, or be root.
+pub async fn handle_template_update(
+    mb_ctx: &MailboxContext,
+    req: &TemplateUpdateRequest,
+    caller: &Caller,
+) -> AckResponse {
+    if let Err(reply) = enforce_run_as_matches_caller(
+        "TEMPLATE-UPDATE",
+        caller,
+        &req.payload.run_as,
+        Some(&req.name),
+    ) {
+        return reply;
+    }
+
+    // When the header name differs from the body name we treat the
+    // submission as a rename: remove the old entry, insert the new. The
+    // load-time validator catches duplicate-name collisions below.
+    let _config_guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let current = mb_ctx.config_handle.load();
+    let Some(existing_idx) = current
+        .hook_templates
+        .iter()
+        .position(|t| t.name == req.name)
+    else {
+        return AckResponse::Err {
+            code: ErrCode::Enoent,
+            reason: format!("template '{}' does not exist", req.name),
+        };
+    };
+
+    let existing = &current.hook_templates[existing_idx];
+
+    // Authz check against the *existing* run_as so a caller cannot sneak
+    // a template from someone else into their name. Root bypass above
+    // already cleared them; non-root callers land here only if they own
+    // the submitted `run_as`, which must also match the on-disk one.
+    if !caller.is_root() {
+        let caller_name = caller.username().unwrap_or("");
+        if existing.run_as != caller_name {
+            log_decision(
+                "TEMPLATE-UPDATE",
+                caller,
+                Some(&req.name),
+                LogDecision::Reject,
+                Some("existing template run_as mismatch"),
+            );
+            return AckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: format!(
+                    "caller '{caller_name}' is not authorized to update template '{}' (run_as: '{}')",
+                    req.name, existing.run_as
+                ),
+            };
+        }
+    }
+
+    let template: HookTemplate = req.payload.clone().into_hook_template();
+    let mut new_config: Config = (*current).clone();
+    new_config.hook_templates[existing_idx] = template;
+
+    if let Err(reason) = validate_hook_templates(&new_config.hook_templates) {
+        return AckResponse::Err {
+            code: ErrCode::Validation,
+            reason,
+        };
+    }
+
+    if let Err(reason) = validate_hooks(&new_config, &OrphanSkipContext::strict()) {
+        return AckResponse::Err {
+            code: ErrCode::Validation,
+            reason,
+        };
+    }
+
+    commit_config(mb_ctx, new_config)
+}
+
+/// Handle an `AIMX/1 TEMPLATE-DELETE` request. Removes the template
+/// addressed by `Template-Name:`. Authz rule: caller's username must
+/// equal the template's `run_as`, or be root.
+pub async fn handle_template_delete(
+    mb_ctx: &MailboxContext,
+    req: &TemplateDeleteRequest,
+    caller: &Caller,
+) -> AckResponse {
+    let _config_guard = CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    let current = mb_ctx.config_handle.load();
+    let Some(existing_idx) = current
+        .hook_templates
+        .iter()
+        .position(|t| t.name == req.name)
+    else {
+        log_decision(
+            "TEMPLATE-DELETE",
+            caller,
+            Some(&req.name),
+            LogDecision::Reject,
+            Some("template not found"),
+        );
+        return AckResponse::Err {
+            code: ErrCode::Enoent,
+            reason: format!("template '{}' does not exist", req.name),
+        };
+    };
+
+    let existing = &current.hook_templates[existing_idx];
+    if let Err(reply) =
+        enforce_run_as_matches_caller("TEMPLATE-DELETE", caller, &existing.run_as, Some(&req.name))
+    {
+        return reply;
+    }
+
+    let mut new_config: Config = (*current).clone();
+    new_config.hook_templates.remove(existing_idx);
+
+    // Re-run validation. A template removed while a hook still binds to
+    // it would leave the config in an inconsistent state; the hook
+    // validator catches this and returns the fix hint.
+    if let Err(reason) = validate_hooks(&new_config, &OrphanSkipContext::strict()) {
+        return AckResponse::Err {
+            code: ErrCode::Validation,
+            reason,
+        };
+    }
+
+    commit_config(mb_ctx, new_config)
+}
+
+/// PRD §6.5 authz rule for TEMPLATE-*: the submitted / existing `run_as`
+/// must equal the caller's resolved username, or the caller must be
+/// root (logged as `root_bypass`). Reserved names (`root` /
+/// `aimx-catchall`) are rejected at parse time; they should never
+/// arrive here, but if they do we reject with `EACCES` for safety.
+fn enforce_run_as_matches_caller(
+    verb: &'static str,
+    caller: &Caller,
+    submitted_run_as: &str,
+    template_name: Option<&str>,
+) -> Result<(), AckResponse> {
+    if caller.is_root() {
+        log_decision(verb, caller, template_name, LogDecision::RootBypass, None);
+        return Ok(());
+    }
+
+    if submitted_run_as == RESERVED_RUN_AS_ROOT || submitted_run_as == RESERVED_RUN_AS_CATCHALL {
+        log_decision(
+            verb,
+            caller,
+            template_name,
+            LogDecision::Reject,
+            Some("reserved run_as"),
+        );
+        return Err(AckResponse::Err {
+            code: ErrCode::Eaccess,
+            reason: format!(
+                "run_as '{submitted_run_as}' is reserved and can only be set via \
+                 direct config edit"
+            ),
+        });
+    }
+
+    let caller_name = match caller.username() {
+        Some(n) => n,
+        None => {
+            log_decision(
+                verb,
+                caller,
+                template_name,
+                LogDecision::Reject,
+                Some("caller username unresolved"),
+            );
+            return Err(AckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: format!(
+                    "caller uid {} has no resolvable username; cannot authorize \
+                     template action",
+                    caller.uid
+                ),
+            });
+        }
+    };
+
+    if caller_name != submitted_run_as {
+        log_decision(
+            verb,
+            caller,
+            template_name,
+            LogDecision::Reject,
+            Some("caller != run_as"),
+        );
+        return Err(AckResponse::Err {
+            code: ErrCode::Eaccess,
+            reason: format!(
+                "caller '{caller_name}' is not authorized to manage template with \
+                 run_as '{submitted_run_as}'"
+            ),
+        });
+    }
+
+    log_decision(verb, caller, template_name, LogDecision::Accept, None);
+    Ok(())
+}
+
+/// Finalize a pending `Config` mutation: atomically rewrite `config.toml`
+/// (disk rename first) and swap the in-memory handle. A failure during
+/// rename leaves the handle untouched so the daemon continues against
+/// the pre-call snapshot. A swap cannot fail in the present
+/// implementation (the handle's `store` is infallible), but the
+/// semantics documented in Sprint 5 require a loud failure path here
+/// should it ever become fallible — keep the panic-free surface.
+fn commit_config(mb_ctx: &MailboxContext, new_config: Config) -> AckResponse {
+    if let Err(e) = write_config_atomic(&mb_ctx.config_path, &new_config) {
+        return AckResponse::Err {
+            code: ErrCode::Io,
+            reason: format!("failed to write {}: {e}", mb_ctx.config_path.display()),
+        };
+    }
     mb_ctx.config_handle.store(new_config);
     AckResponse::Ok
 }
@@ -997,6 +1289,556 @@ mod tests {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
             other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
+    }
+
+    // ---- TEMPLATE-CREATE / UPDATE / DELETE -------------------------
+
+    use crate::send_protocol::UdsTemplatePayload;
+
+    fn payload(name: &str, run_as: &str) -> UdsTemplatePayload {
+        UdsTemplatePayload {
+            name: name.to_string(),
+            description: "test".into(),
+            cmd: vec!["/usr/bin/echo".into(), "{prompt}".into()],
+            params: vec!["prompt".into()],
+            stdin: crate::config::HookTemplateStdin::Email,
+            run_as: run_as.to_string(),
+            timeout_secs: 60,
+            allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_root_bypass_succeeds() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Ok => {}
+            other => panic!("expected Ok, got {other:?}"),
+        }
+        let live = mb_ctx.config_handle.load();
+        assert!(
+            live.hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_requires_caller_matches_run_as() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        let caller = Caller::with_username(1001, 1001, "eve");
+        match handle_template_create(&mb_ctx, &req, &caller).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Eaccess);
+                assert!(reason.contains("eve"), "{reason}");
+            }
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+        let live = mb_ctx.config_handle.load();
+        assert!(
+            !live
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_accepts_matching_caller() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &req, &caller).await,
+            AckResponse::Ok
+        ));
+    }
+
+    #[tokio::test]
+    async fn template_create_duplicate_name_is_conflict() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude", "sam"),
+        };
+        // `base_config` already ships `invoke-claude`, so this is a dup.
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Conflict);
+                assert!(reason.contains("invoke-claude"), "{reason}");
+            }
+            other => panic!("expected Err(ECONFLICT), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_update_missing_name_returns_enoent() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-nope".into(),
+            payload: payload("invoke-nope", "sam"),
+        };
+        match handle_template_update(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Enoent);
+                assert!(reason.contains("invoke-nope"), "{reason}");
+            }
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_update_replaces_existing() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        // Seed a template owned by `sam` so the non-root caller path
+        // can be exercised.
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let mut new_payload = payload("invoke-claude-sam", "sam");
+        new_payload.description = "rewritten".into();
+        new_payload.cmd = vec!["/usr/local/bin/claude".into(), "{prompt}".into()];
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: new_payload,
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_update(&mb_ctx, &update, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let live = mb_ctx.config_handle.load();
+        let t = live
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-sam")
+            .unwrap();
+        assert_eq!(t.description, "rewritten");
+        assert_eq!(t.cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[tokio::test]
+    async fn template_update_rejects_non_owner_caller() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let mut tampered = payload("invoke-claude-sam", "eve");
+        tampered.description = "hijacked".into();
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: tampered,
+        };
+        let caller = Caller::with_username(1002, 1002, "eve");
+        match handle_template_update(&mb_ctx, &update, &caller).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Eaccess),
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+
+        let live = mb_ctx.config_handle.load();
+        let t = live
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-sam")
+            .unwrap();
+        assert_ne!(t.description, "hijacked");
+    }
+
+    #[tokio::test]
+    async fn template_delete_removes_template() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-foo-sam".into(),
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_delete(&mb_ctx, &del, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let live = mb_ctx.config_handle.load();
+        assert!(
+            !live
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_delete_missing_returns_enoent() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-nope".into(),
+        };
+        match handle_template_delete(&mb_ctx, &del, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_non_owner_is_eaccess() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-foo-sam".into(),
+        };
+        let caller = Caller::with_username(1002, 1002, "eve");
+        match handle_template_delete(&mb_ctx, &del, &caller).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Eaccess),
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+
+        let live = mb_ctx.config_handle.load();
+        assert!(
+            live.hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_create_rejects_when_validator_fails() {
+        // Invariant: `validate_hook_templates` runs on the full template
+        // vec before any disk write. Construct a payload that slips past
+        // the parse-time shape check but fails the deeper on-config
+        // validator: here, a declared param that collides with the
+        // `{mailbox}` builtin.
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+
+        let mut bad = payload("invoke-bad-sam", "sam");
+        bad.cmd = vec!["/usr/bin/echo".into(), "{event}".into(), "{mailbox}".into()];
+        bad.params = vec!["mailbox".into()];
+
+        let req = crate::send_protocol::TemplateCreateRequest { payload: bad };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason: _ } => assert_eq!(code, ErrCode::Validation),
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_delete_rejects_when_hook_still_bound() {
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        // Wire a hook against the seeded invoke-claude template so
+        // deletion leaves a dangling hook — the validator must reject.
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            template: "invoke-claude".into(),
+            name: Some("bound_hook".into()),
+            body: body(&[("prompt", "hi")]),
+        };
+        assert!(matches!(
+            handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-claude".into(),
+        };
+        match handle_template_delete(&mb_ctx, &del, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn template_create_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        assert!(
+            reloaded
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam")
+        );
+    }
+
+    #[tokio::test]
+    async fn template_update_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let mut new_payload = payload("invoke-claude-sam", "sam");
+        new_payload.description = "rewritten-on-disk".into();
+        new_payload.cmd = vec!["/usr/local/bin/claude".into(), "{prompt}".into()];
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: new_payload,
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_update(&mb_ctx, &update, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        let t = reloaded
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-sam")
+            .expect("template still present after update");
+        assert_eq!(t.description, "rewritten-on-disk");
+        assert_eq!(t.cmd[0], "/usr/local/bin/claude");
+    }
+
+    #[tokio::test]
+    async fn template_delete_persists_to_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-foo-sam".into(),
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_delete(&mb_ctx, &del, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        assert!(
+            !reloaded
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-foo-sam"),
+            "deleted template must not reappear on reload"
+        );
+    }
+
+    /// Rename round-trip: `payload.name` differs from the `Template-Name`
+    /// header. The handler treats this as a rename — the old entry at the
+    /// existing position is replaced with the new payload, the old name
+    /// disappears, the new name takes its place.
+    #[tokio::test]
+    async fn template_update_renames_when_body_name_differs_from_header() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        // Submit UPDATE with header = old name, body.name = new name.
+        let mut renamed = payload("invoke-claude-renamed-sam", "sam");
+        renamed.description = "renamed".into();
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-claude-sam".into(),
+            payload: renamed,
+        };
+        let caller = Caller::with_username(1001, 1001, "sam");
+        assert!(matches!(
+            handle_template_update(&mb_ctx, &update, &caller).await,
+            AckResponse::Ok
+        ));
+
+        let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
+        assert!(
+            !reloaded
+                .hook_templates
+                .iter()
+                .any(|t| t.name == "invoke-claude-sam"),
+            "old name must be gone after rename"
+        );
+        let t = reloaded
+            .hook_templates
+            .iter()
+            .find(|t| t.name == "invoke-claude-renamed-sam")
+            .expect("new name must be present after rename");
+        assert_eq!(t.description, "renamed");
+    }
+
+    // ---- Negative: reject paths must leave disk untouched --------------
+
+    /// Helper: read the raw on-disk `config.toml` bytes so tests can
+    /// assert byte-for-byte equality across a rejected operation.
+    fn read_config_bytes(mb_ctx: &MailboxContext) -> Vec<u8> {
+        std::fs::read(&mb_ctx.config_path).expect("config.toml must exist")
+    }
+
+    #[tokio::test]
+    async fn template_create_conflict_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        // `invoke-claude` is seeded by `base_config`, so this is a dup.
+        let req = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-claude", "sam"),
+        };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Conflict),
+            other => panic!("expected Err(ECONFLICT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ECONFLICT reject");
+    }
+
+    #[tokio::test]
+    async fn template_update_missing_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        let req = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-nope".into(),
+            payload: payload("invoke-nope", "sam"),
+        };
+        match handle_template_update(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ENOENT reject");
+    }
+
+    #[tokio::test]
+    async fn template_delete_missing_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        let del = crate::send_protocol::TemplateDeleteRequest {
+            name: "invoke-nope".into(),
+        };
+        match handle_template_delete(&mb_ctx, &del, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on ENOENT reject");
+    }
+
+    #[tokio::test]
+    async fn template_update_unauthorized_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let create = crate::send_protocol::TemplateCreateRequest {
+            payload: payload("invoke-foo-sam", "sam"),
+        };
+        assert!(matches!(
+            handle_template_create(&mb_ctx, &create, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+        let before = read_config_bytes(&mb_ctx);
+
+        let mut tampered = payload("invoke-foo-sam", "eve");
+        tampered.description = "hijacked".into();
+        let update = crate::send_protocol::TemplateUpdateRequest {
+            name: "invoke-foo-sam".into(),
+            payload: tampered,
+        };
+        let caller = Caller::with_username(1002, 1002, "eve");
+        match handle_template_update(&mb_ctx, &update, &caller).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Eaccess),
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(before, after, "disk must be untouched on EACCES reject");
+    }
+
+    #[tokio::test]
+    async fn template_create_validator_failure_does_not_mutate_disk() {
+        let tmp = TempDir::new().unwrap();
+        let (_s, mb_ctx) = contexts(&tmp);
+        let before = read_config_bytes(&mb_ctx);
+
+        // Same scenario as `template_create_rejects_when_validator_fails`:
+        // the parse-time shape check passes (the param is referenced in
+        // argv) but the on-config validator rejects because the declared
+        // param collides with the builtin `{mailbox}`.
+        let mut bad = payload("invoke-bad-sam", "sam");
+        bad.cmd = vec!["/usr/bin/echo".into(), "{event}".into(), "{mailbox}".into()];
+        bad.params = vec!["mailbox".into()];
+
+        let req = crate::send_protocol::TemplateCreateRequest { payload: bad };
+        match handle_template_create(&mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
+        }
+
+        let after = read_config_bytes(&mb_ctx);
+        assert_eq!(
+            before, after,
+            "disk must be untouched on validator-failure reject"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

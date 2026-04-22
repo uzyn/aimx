@@ -366,6 +366,82 @@ pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
     registry().iter().find(|a| a.name == name)
 }
 
+/// Reasons `derive_template_name` refuses an input.
+///
+/// Sprint 5 §6.1 / §8.2: both parts of `invoke-<agent>-<username>` must
+/// match `[a-z0-9-]+` because the template-name validator used by
+/// `Config::load` rejects anything else. Usernames that fall outside the
+/// charset can still own mailboxes (operators can hand-author templates
+/// in `config.toml`), but they cannot use `agent-setup`'s template
+/// registration because the derived name would fail validation.
+// Callers land in Sprint 6 (`aimx agent-setup` TEMPLATE-CREATE wiring);
+// the type is already `pub` so the binary dead-code lint for an unused
+// but public API must be silenced here.
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemplateNameError {
+    EmptyAgentSlug,
+    EmptyUsername,
+    InvalidAgentSlug(String),
+    InvalidUsername(String),
+}
+
+impl std::fmt::Display for TemplateNameError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TemplateNameError::EmptyAgentSlug => write!(f, "agent slug is empty"),
+            TemplateNameError::EmptyUsername => write!(f, "username is empty"),
+            TemplateNameError::InvalidAgentSlug(s) => write!(
+                f,
+                "agent slug '{s}' is not a valid template name component (must match [a-z0-9-]+)"
+            ),
+            TemplateNameError::InvalidUsername(s) => write!(
+                f,
+                "username '{s}' contains characters not valid for template names. \
+                 Hand-author a template in config.toml."
+            ),
+        }
+    }
+}
+
+impl std::error::Error for TemplateNameError {}
+
+/// Derive the canonical template name `invoke-<agent>-<username>` per
+/// PRD §6.6. Both parts must match `[a-z0-9-]+`. Rejects empty
+/// components, uppercase letters, underscores, and non-ASCII characters.
+///
+/// `agent-setup` uses this helper both when registering a new template
+/// (`TEMPLATE-CREATE`) and when re-detecting the binary path
+/// (`TEMPLATE-UPDATE` on `--redetect`). Keeping one derivation
+/// guarantees idempotence: re-running the command always targets the
+/// same name.
+// Consumed by Sprint 6 (`aimx agent-setup` TEMPLATE-CREATE wiring). The
+// fn is already `pub` for that future call site; silence the binary
+// dead-code lint until the wiring lands.
+#[allow(dead_code)]
+pub fn derive_template_name(agent_slug: &str, username: &str) -> Result<String, TemplateNameError> {
+    if agent_slug.is_empty() {
+        return Err(TemplateNameError::EmptyAgentSlug);
+    }
+    if username.is_empty() {
+        return Err(TemplateNameError::EmptyUsername);
+    }
+    if !is_valid_template_name_component(agent_slug) {
+        return Err(TemplateNameError::InvalidAgentSlug(agent_slug.to_string()));
+    }
+    if !is_valid_template_name_component(username) {
+        return Err(TemplateNameError::InvalidUsername(username.to_string()));
+    }
+    Ok(format!("invoke-{agent_slug}-{username}"))
+}
+
+#[allow(dead_code)]
+fn is_valid_template_name_component(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+}
+
 /// Trait used to make installs testable without touching the real `$HOME`
 /// or real uid.
 pub trait AgentEnv {
@@ -1028,6 +1104,55 @@ mod tests {
         fn read_line(&self) -> io::Result<String> {
             Ok(self.responses.borrow_mut().remove(0))
         }
+    }
+
+    #[test]
+    fn derive_template_name_happy_path() {
+        assert_eq!(
+            derive_template_name("claude-code", "sam").unwrap(),
+            "invoke-claude-code-sam"
+        );
+        assert_eq!(
+            derive_template_name("codex", "alice").unwrap(),
+            "invoke-codex-alice"
+        );
+    }
+
+    #[test]
+    fn derive_template_name_rejects_uppercase_username() {
+        let err = derive_template_name("claude-code", "Sam").unwrap_err();
+        assert!(matches!(err, TemplateNameError::InvalidUsername(ref s) if s == "Sam"));
+        assert!(err.to_string().contains("Hand-author"));
+    }
+
+    #[test]
+    fn derive_template_name_rejects_underscore_in_username() {
+        let err = derive_template_name("claude-code", "deploy_user").unwrap_err();
+        assert!(matches!(err, TemplateNameError::InvalidUsername(_)));
+    }
+
+    #[test]
+    fn derive_template_name_rejects_empty_username() {
+        let err = derive_template_name("claude-code", "").unwrap_err();
+        assert_eq!(err, TemplateNameError::EmptyUsername);
+    }
+
+    #[test]
+    fn derive_template_name_rejects_empty_agent_slug() {
+        let err = derive_template_name("", "sam").unwrap_err();
+        assert_eq!(err, TemplateNameError::EmptyAgentSlug);
+    }
+
+    #[test]
+    fn derive_template_name_rejects_invalid_agent_slug() {
+        let err = derive_template_name("Claude_Code", "sam").unwrap_err();
+        assert!(matches!(err, TemplateNameError::InvalidAgentSlug(_)));
+    }
+
+    #[test]
+    fn derive_template_name_rejects_non_ascii_username() {
+        let err = derive_template_name("claude-code", "samé").unwrap_err();
+        assert!(matches!(err, TemplateNameError::InvalidUsername(_)));
     }
 
     #[test]
