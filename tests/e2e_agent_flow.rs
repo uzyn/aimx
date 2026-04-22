@@ -71,6 +71,20 @@ fn aimx_binary_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_aimx"))
 }
 
+/// Locate `runuser` absolutely. CI invokes this test via
+/// `sudo -E env "PATH=$PATH" ...`, and on some Ubuntu runners the
+/// propagated `$PATH` does not include `/usr/sbin` where `runuser`
+/// lives. Probe the well-known locations instead of relying on `$PATH`.
+fn runuser_path() -> PathBuf {
+    for candidate in ["/usr/sbin/runuser", "/usr/bin/runuser", "/sbin/runuser"] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return p;
+        }
+    }
+    panic!("runuser not found in /usr/sbin, /usr/bin, or /sbin");
+}
+
 fn chown(path: &Path, uid: u32, gid: u32) {
     unsafe {
         let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
@@ -239,24 +253,9 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         l.local_addr().unwrap().port()
     };
-    let mut daemon = Command::new(aimx_binary_path())
-        .env("AIMX_CONFIG_DIR", &config_dir)
-        .env("AIMX_DATA_DIR", &data_dir)
-        .env("AIMX_RUNTIME_DIR", &runtime_dir)
-        .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
-        .arg("--data-dir")
-        .arg(&data_dir)
-        .arg("serve")
-        .arg("--bind")
-        .arg(format!("127.0.0.1:{port}"))
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("failed to spawn aimx serve");
-
-    let sock = runtime_dir.join("aimx.sock");
-    wait_for_socket(&sock, Duration::from_secs(30));
-
     // Cleanup runs both daemon stop + tempdir removal on scope exit.
+    // Declared before the daemon spawn so the guard is in place even if
+    // `wait_for_socket` panics — otherwise the daemon child would leak.
     struct Teardown(std::process::Child, PathBuf);
     impl Drop for Teardown {
         fn drop(&mut self) {
@@ -267,15 +266,31 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
             let _ = std::fs::remove_dir_all(&self.1);
         }
     }
+
     let daemon_handle = Teardown(
-        std::mem::replace(&mut daemon, Command::new("true").spawn().unwrap()),
+        Command::new(aimx_binary_path())
+            .env("AIMX_CONFIG_DIR", &config_dir)
+            .env("AIMX_DATA_DIR", &data_dir)
+            .env("AIMX_RUNTIME_DIR", &runtime_dir)
+            .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("serve")
+            .arg("--bind")
+            .arg(format!("127.0.0.1:{port}"))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn aimx serve"),
         tmp_root.clone(),
     );
+
+    let sock = runtime_dir.join("aimx.sock");
+    wait_for_socket(&sock, Duration::from_secs(30));
 
     // Run `aimx agent-setup claude-code` as the test user. Feed it a
     // curated `$PATH` containing only the fake claude so the probe
     // resolves deterministically, and a `$HOME` under tmp.
-    let agent_setup_out = Command::new("runuser")
+    let agent_setup_out = Command::new(runuser_path())
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -297,7 +312,9 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         String::from_utf8_lossy(&agent_setup_out.stderr)
     );
     let setup_stdout = String::from_utf8_lossy(&agent_setup_out.stdout);
-    let template_name = format!("invoke-claude-{USER}");
+    // `derive_template_name("claude-code", USER)` returns
+    // `invoke-claude-code-<USER>` (agent_slug is the full spec.name).
+    let template_name = format!("invoke-claude-code-{USER}");
     assert!(
         setup_stdout.contains(&template_name),
         "agent-setup stdout should mention {template_name}: {setup_stdout}"
@@ -315,7 +332,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Goes through the daemon UDS (`HOOK-CREATE`); the template is
     // registered and the mailbox is owned by the caller, so the
     // authz check passes.
-    let hook_create_out = Command::new("runuser")
+    let hook_create_out = Command::new(runuser_path())
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -403,7 +420,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Now run `aimx agent-cleanup claude-code --full --yes` as the
     // test user. Should remove the template via UDS and the plugin
     // dir under $HOME.
-    let cleanup_out = Command::new("runuser")
+    let cleanup_out = Command::new(runuser_path())
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -434,7 +451,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Template should be gone from the daemon's in-memory config. Try
     // re-creating a hook against it; the daemon should refuse with
     // `unknown-template`.
-    let post_cleanup = Command::new("runuser")
+    let post_cleanup = Command::new(runuser_path())
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -459,6 +476,14 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     assert!(
         !post_cleanup.status.success(),
         "template should be gone after cleanup; hook_create unexpectedly succeeded"
+    );
+    // Assert the specific daemon error code so a future typo in
+    // `template_name` (or a regression that accepts unknown templates)
+    // is caught here instead of silently passing on any non-zero exit.
+    let post_cleanup_stderr = String::from_utf8_lossy(&post_cleanup.stderr);
+    assert!(
+        post_cleanup_stderr.contains("unknown-template"),
+        "expected `unknown-template` error after cleanup, got stderr={post_cleanup_stderr:?}"
     );
 
     drop(daemon_handle);

@@ -149,11 +149,11 @@ Look at the `dkim` and `spf` fields. They should show `pass` for properly authen
 
 ## Hook templates
 
-### `aimx-hook` user missing
+### Hook `run_as` user missing
 
-Symptom: `aimx doctor` shows `aimx-hook user: missing`, or journalctl shows hook fires warning with `user-not-found: aimx-hook`.
+Symptom: `aimx doctor` lists a hook under `orphan hooks` with `reason = "run_as_missing"`, or journalctl shows a WARN for a hook fire with `user-not-found`.
 
-Fix: re-run `sudo aimx setup`. The setup step creates the user idempotently via `useradd --system --no-create-home --shell /usr/sbin/nologin aimx-hook` (or the BusyBox `adduser` equivalent on Alpine) and chowns the mailbox directories so the hook user can read piped email content.
+Fix: a hook's `run_as` points at a Linux user that has been removed (for example `userdel alice` after an agent cleanup). The daemon soft-skips the hook rather than falling back to a different uid. Either recreate the missing user with `sudo useradd --system --no-create-home --shell /usr/sbin/nologin <name>` and fix up the mailbox ownership, or run `sudo aimx hooks prune --orphans` to drop the stale hook entries. The legacy shared `aimx-hook` user has been retired and `aimx setup` no longer creates it.
 
 ### MCP `hook_create` returns `Unknown template`
 
@@ -186,14 +186,14 @@ If it reads `trusted = "false"` or `trusted = "none"`, the hook gate blocks it. 
 
 Symptom: hook logs show `exit_code != 0` and stderr tail like `cat: '/var/lib/aimx/inbox/...': Permission denied`.
 
-Fix: the `aimx-hook` user doesn't have group-read on the mailbox directories. `aimx setup` normally fixes this. To apply manually:
+Fix: the hook's `run_as` user does not match the mailbox's owner. Each mailbox is chowned to `<owner>:<owner>` at mode `0700`, so only that owner (and root) can read the piped email content. Either fix the hook's `run_as` to equal the mailbox `owner` (the CLI/UDS verbs enforce this; a hand-edited `config.toml` can desync), or reassign the mailbox:
 
 ```bash
-sudo chown -R root:aimx-hook /var/lib/aimx/inbox /var/lib/aimx/sent
-sudo chmod -R g+rX /var/lib/aimx/inbox /var/lib/aimx/sent
+sudo chown -R <owner>:<owner> /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
+sudo chmod -R u+rwX,go-rwx /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
 ```
 
-`aimx doctor` surfaces a WARN line when this is misconfigured.
+`aimx doctor` surfaces a WARN line when mailbox ownership has drifted from the configured `owner`.
 
 ### SIGHUP reload failed
 

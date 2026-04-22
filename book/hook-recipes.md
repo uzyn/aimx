@@ -38,7 +38,7 @@ The agent equivalent over MCP looks like:
 }}
 ```
 
-Template hooks run sandboxed as `aimx-hook` and can't be abused by prompt injection — see [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended).
+Template hooks run sandboxed under the template's `run_as` user (the registering mailbox owner, never root) and can't be abused by prompt injection — see [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended).
 
 The raw-cmd recipes below are the **power-user path**: use them when you need a shell pipeline, an exit-code check, multiple output sinks, or a flag the template doesn't expose.
 

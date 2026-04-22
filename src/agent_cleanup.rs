@@ -13,7 +13,7 @@
 use crate::agent_setup::{
     AgentEnv, AgentSpec, RealAgentEnv, derive_template_name, find_agent, resolve_dest,
 };
-use crate::hook_client::{TemplateCrudFallback, submit_template_delete_via_daemon};
+use crate::hook_client::TemplateCrudFallback;
 use crate::send_protocol::TemplateDeleteRequest;
 use crate::term;
 use std::io::{self, Write};
@@ -82,7 +82,7 @@ pub(crate) fn run_with_env(
     let request = TemplateDeleteRequest {
         name: template_name.clone(),
     };
-    let template_result = submit_template_delete_via_daemon(&request);
+    let template_result = env.submit_template_delete(&request);
 
     let mut daemon_unreachable = false;
 
@@ -124,6 +124,12 @@ pub(crate) fn run_with_env(
             }
         }
         Err(TemplateCrudFallback::Local(msg)) => {
+            writeln!(
+                out,
+                "{} failed to remove template {}: {msg}",
+                term::error("Error:"),
+                term::highlight(&template_name),
+            )?;
             return Err(msg.into());
         }
     }
@@ -232,6 +238,12 @@ mod tests {
         is_root: bool,
         is_tty: bool,
         scripted_input: RefCell<Vec<String>>,
+        /// Canned result for `submit_template_delete`. Default is `Ok(())`
+        /// so tests that don't care about the daemon path stay concise.
+        template_delete_result: RefCell<Result<(), TemplateCrudFallback>>,
+        /// Captured delete-request names so tests can assert we asked for
+        /// the right template without peeking into private fields.
+        delete_calls: RefCell<Vec<String>>,
     }
 
     impl AgentEnv for TestEnv {
@@ -272,6 +284,27 @@ mod tests {
                 "not used in cleanup tests".into(),
             ))
         }
+        fn submit_template_delete(
+            &self,
+            request: &TemplateDeleteRequest,
+        ) -> Result<(), TemplateCrudFallback> {
+            self.delete_calls.borrow_mut().push(request.name.clone());
+            match &*self.template_delete_result.borrow() {
+                Ok(()) => Ok(()),
+                Err(TemplateCrudFallback::SocketMissing) => {
+                    Err(TemplateCrudFallback::SocketMissing)
+                }
+                Err(TemplateCrudFallback::Daemon { code, reason }) => {
+                    Err(TemplateCrudFallback::Daemon {
+                        code: code.clone(),
+                        reason: reason.clone(),
+                    })
+                }
+                Err(TemplateCrudFallback::Local(msg)) => {
+                    Err(TemplateCrudFallback::Local(msg.clone()))
+                }
+            }
+        }
     }
 
     impl TestEnv {
@@ -282,7 +315,14 @@ mod tests {
                 is_root: false,
                 is_tty: false,
                 scripted_input: RefCell::new(Vec::new()),
+                template_delete_result: RefCell::new(Ok(())),
+                delete_calls: RefCell::new(Vec::new()),
             }
+        }
+
+        fn with_delete_result(self, result: Result<(), TemplateCrudFallback>) -> Self {
+            *self.template_delete_result.borrow_mut() = result;
+            self
         }
     }
 
@@ -333,5 +373,74 @@ mod tests {
         let (desc, target) = plugin_removal_target(spec, &root);
         assert_eq!(target, root.join("aimx.yaml"));
         assert!(desc.ends_with("/aimx.yaml"));
+    }
+
+    /// Review NB-3: daemon socket missing must map to
+    /// `CleanupOutcome::DaemonUnreachable` and surface a Warning banner,
+    /// not a hard error. Plugin files are not touched without `--full`.
+    #[test]
+    fn socket_missing_maps_to_daemon_unreachable_outcome() {
+        let tmp = TempDir::new().unwrap();
+        let env = TestEnv::new(tmp.path().to_path_buf(), "alice")
+            .with_delete_result(Err(TemplateCrudFallback::SocketMissing));
+
+        let opts = RunOpts {
+            agent: "claude-code".to_string(),
+            full: false,
+            yes: false,
+        };
+        let mut out = Vec::new();
+        let outcome = run_with_env(opts, &env, &mut out).expect("should not be a hard error");
+        assert_eq!(outcome, CleanupOutcome::DaemonUnreachable);
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(
+            stdout.contains("aimx serve is not running"),
+            "expected socket-missing warning, got: {stdout}"
+        );
+        assert!(
+            stdout.contains("prune --orphans"),
+            "expected recovery hint, got: {stdout}"
+        );
+
+        // And the right template was asked about.
+        assert_eq!(
+            env.delete_calls.borrow().as_slice(),
+            &["invoke-claude-code-alice".to_string()]
+        );
+    }
+
+    /// Review NB-3: daemon returning `NOTFOUND` for a template that was
+    /// never registered on this box is a benign no-op — the command
+    /// succeeds and the user sees an informational "nothing to do" line,
+    /// not an error.
+    #[test]
+    fn daemon_notfound_is_benign_no_op() {
+        let tmp = TempDir::new().unwrap();
+        let env = TestEnv::new(tmp.path().to_path_buf(), "alice").with_delete_result(Err(
+            TemplateCrudFallback::Daemon {
+                code: "NOTFOUND".to_string(),
+                reason: "template not found".to_string(),
+            },
+        ));
+
+        let opts = RunOpts {
+            agent: "claude-code".to_string(),
+            full: false,
+            yes: false,
+        };
+        let mut out = Vec::new();
+        let outcome = run_with_env(opts, &env, &mut out).expect("NOTFOUND must not be an error");
+        assert_eq!(outcome, CleanupOutcome::Ok);
+
+        let stdout = String::from_utf8(out).unwrap();
+        assert!(
+            stdout.contains("not registered"),
+            "expected 'not registered' info line, got: {stdout}"
+        );
+        assert!(
+            stdout.contains("invoke-claude-code-alice"),
+            "expected template name in output, got: {stdout}"
+        );
     }
 }
