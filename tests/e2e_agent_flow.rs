@@ -103,6 +103,17 @@ fn chmod(path: &Path, mode: u32) {
     std::fs::set_permissions(path, perms).unwrap();
 }
 
+/// Re-apply 0644 mode to `config.toml`. The daemon runs with
+/// umask 0o077 (production security invariant in `serve::run_serve`),
+/// so every atomic config rewrite from the daemon side (TEMPLATE-CREATE,
+/// HOOK-CREATE, etc.) clamps the mode back to 0600 via
+/// `File::create` + `rename`. That is correct for production but
+/// breaks the unprivileged CLI readers this test exercises, so we
+/// restore 0644 before each test-user `aimx hooks ...` invocation.
+fn ensure_config_readable(config_path: &Path) {
+    chmod(config_path, 0o644);
+}
+
 fn wait_for_socket(path: &Path, timeout: Duration) {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -187,18 +198,11 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // root-adjacent subcommands load the config for in-process
     // validation before submitting over UDS). Relax to 0644 so the
     // test-user-initiated CLI reads succeed without having to create
-    // an `aimx-hook`-style shared group.
-    //
-    // The daemon re-writes `config.toml` atomically on every
-    // TEMPLATE-CREATE / HOOK-CREATE, using `File::create` which
-    // inherits the process's umask. CI runs as root with umask 0077,
-    // so without intervention every daemon-side rewrite would clamp
-    // the file back to 0600 and break the next test-user read. Force
-    // a 0022 umask for the whole test so `File::create`-written
-    // `config.toml` stays group/world-readable.
-    unsafe {
-        libc::umask(0o022);
-    }
+    // an `aimx-hook`-style shared group. Note: the daemon clamps its
+    // own umask to 0o077 at startup (`serve.rs`, Sprint 2 S2-2), so
+    // every atomic `config.toml` rewrite from the daemon resets this
+    // back to 0600 — `ensure_config_readable()` re-applies 0644
+    // before each test-user CLI invocation that needs to read it.
     chmod(&config_path, 0o644);
 
     // Catchall user must exist for Config::load to not warn (it's
@@ -387,6 +391,12 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Goes through the daemon UDS (`HOOK-CREATE`); the template is
     // registered and the mailbox is owned by the caller, so the
     // authz check passes.
+    //
+    // Agent-setup's TEMPLATE-CREATE just rewrote `config.toml` via
+    // the daemon's umask-0o077 write path, so re-apply 0644 here so
+    // the unprivileged `aimx hooks create` process-wide config load
+    // can read it.
+    ensure_config_readable(&config_path);
     let hook_create_out = Command::new(runuser_path())
         .arg("-m")
         .arg("-u")
@@ -529,6 +539,11 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Template should be gone from the daemon's in-memory config. Try
     // re-creating a hook against it; the daemon should refuse with
     // `unknown-template`.
+    //
+    // The preceding `agent-cleanup` / hook fire rewrote `config.toml`
+    // via the daemon, clamping the mode back to 0600. Restore 0644
+    // so this unprivileged CLI invocation can still read the file.
+    ensure_config_readable(&config_path);
     let post_cleanup = Command::new(runuser_path())
         .arg("-m")
         .arg("-u")
