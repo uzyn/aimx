@@ -77,10 +77,11 @@ When run without a domain argument, setup will prompt you to enter the domain an
 3. **Domain prompt**: asks for domain if not provided as argument
 4. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`
 5. **DKIM key generation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
-6. **Config creation**: writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with a catchall mailbox
-7. **Hook user + hook templates**: creates the unprivileged `aimx-hook` system user (no login shell, no home directory) and shows a checkbox UI to pick which hook templates to enable on this box
-8. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
-9. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
+6. **Config creation**: writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with any mailboxes you configure
+7. **Mailbox owners**: prompts for the Linux user who should own each mailbox (default = the address's local part if that user exists on the host). The daemon chowns each mailbox's `inbox/<mailbox>/` and `sent/<mailbox>/` to `<owner>:<owner>` mode `0700`.
+8. **Catchall user (on demand)**: when you configure a catchall mailbox, setup creates the unprivileged `aimx-catchall` system user (no login shell, no home directory) and chowns the catchall mailbox to it. No `aimx-catchall` is created if you skip the catchall — and no `aimx-hook` group is ever touched; that legacy shared-group model has been retired.
+9. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
+10. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
 
 After initial setup, the wizard displays three clearly labeled sections:
 
@@ -88,36 +89,34 @@ After initial setup, the wizard displays three clearly labeled sections:
 - **[MCP]**: configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
 - **[Deliverability Improvement (Optional)]**: Gmail filter/whitelist instructions
 
-### Hook templates step
+### Mailbox-owner prompt
 
-Step 7 creates the `aimx-hook` unprivileged user and asks which hook templates to enable:
+For every mailbox you configure, setup asks which Linux user should own it:
 
 ```text
-[User]
-  Created system user aimx-hook
-
-[Hook Templates]
-Hook templates let your agents create their own on_receive / after_send
-automations via MCP, safely. Each template is a pre-vetted command shape;
-agents can only fill declared parameters. Hook commands run as the
-unprivileged 'aimx-hook' user, never as root.
-
-Which templates should I enable? (space to toggle, enter to confirm)
- [ ] invoke-claude     Pipe email into Claude Code with a prompt
- [ ] invoke-codex      Pipe email into Codex CLI with a prompt
- [ ] invoke-opencode   Pipe email into OpenCode with a prompt
- [ ] invoke-gemini     Pipe email into Gemini CLI with a prompt
- [ ] invoke-goose      Pipe email into a Goose recipe
- [ ] invoke-openclaw   Pipe email into OpenClaw with a prompt
- [ ] invoke-hermes     Pipe email into Hermes with a prompt
- [ ] webhook           POST the email as JSON to a URL
+[Mailboxes]
+Which Linux user should own `alice@agent.yourdomain.com`? [alice]
 ```
 
-No templates are selected by default — you opt in explicitly. Re-running `aimx setup` shows the same picker with your current selection pre-ticked; templates you untick are removed from `config.toml` idempotently.
+- The default (in brackets) is the address's local part if that user exists on the host. Press Enter to accept.
+- If the default user does not exist, setup requires explicit input and rejects unknown usernames with a hint to `useradd` first.
+- The catchall mailbox (if any) is always owned by the reserved `aimx-catchall` system user.
 
-The `aimx-hook` user is created via `useradd --system --no-create-home --shell /usr/sbin/nologin` (or the BusyBox `adduser` equivalent on Alpine). `aimx setup` also recursively `chown`s `/var/lib/aimx/{inbox,sent}` to `root:aimx-hook` and adds group-read so template hooks with `stdin = "email"` can actually read the piped email content at fire time.
+The daemon chowns `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` to `<owner>:<owner>` mode `0700` at create time and keeps ownership consistent through every subsequent write (ingest, send, mark-read). Only the owner and root can read a mailbox's contents — there is no shared `aimx-hook` group in the new model.
 
-When stdin is not a TTY (CI runs, scripted installs), the picker is skipped and a warning is logged. You can either enable templates later by re-running `aimx setup` interactively, or hand-append `[[hook_template]]` blocks to `config.toml` and SIGHUP the daemon. See [Configuration § Default hook templates](configuration.md#default-hook-templates) for the shipped catalog.
+### Catchall user (created on demand)
+
+When you configure a catchall mailbox, setup creates the `aimx-catchall` system user via `useradd --system --no-create-home --shell /usr/sbin/nologin` (or the BusyBox `adduser` equivalent on Alpine) and chowns the catchall mailbox to it. If you skip the catchall, no `aimx-catchall` user is created. The legacy `aimx-hook` shared-group model has been retired; setup does not create or chown against `aimx-hook` under any flow.
+
+### Registering agent templates
+
+Per-agent hook templates (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, etc.) are no longer ticked from a checkbox during setup. Instead, each Linux user who wants an agent runs one command **without sudo** after setup:
+
+```bash
+aimx agent-setup claude-code
+```
+
+`aimx agent-setup` lays down the plugin files under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching `invoke-<agent>-<username>` template over the UDS. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
 
 ### Re-running setup
 

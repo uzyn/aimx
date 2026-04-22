@@ -103,6 +103,14 @@ trusted_senders = ["*@company.com", "alice@gmail.com"]
 | `read_at`| datetime| optional | RFC 3339 UTC timestamp set by `email_mark_read` (mirrors the `MARK-READ` UDS verb). Removed entirely by `email_mark_unread`. Reflects the most recent read. Re-marking read overwrites the previous value rather than preserving "first read". Omitted when absent |
 | `labels` | string[]| optional | Empty by default. Omitted when empty |
 
+Every mailbox in `config.toml` has an `owner` field naming the Linux
+user who owns it. The storage directory (`inbox/<mailbox>/` and
+`sent/<mailbox>/`) is chowned `<owner>:<owner>` mode `0700` and the
+daemon only accepts MCP / UDS requests against a mailbox from that
+owner's uid (or root). `mailbox` in this frontmatter block therefore
+tells you both which mailbox the email belongs to and (via
+`config.toml`) who the email is readable by.
+
 ---
 
 ## Outbound frontmatter

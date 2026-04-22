@@ -9,21 +9,25 @@ Hooks are shell commands the aimx daemon fires on mail events:
 - `after_send`: an outbound email has resolved (delivered, deferred,
   or failed). Fires on every send regardless of trust.
 
-You do not ship arbitrary shell. You pick a **template** the operator
-has pre-vetted and fill its declared parameters. The daemon substitutes
-your values into the template's argv, drops privileges to the
-`aimx-hook` user, and spawns the child with a per-hook timeout. The
-local operator is the only party who can install raw-cmd hooks (via
+You do not ship arbitrary shell. You pick a **template** (either the
+bundled `webhook`, or an `invoke-<agent>-<username>` template the
+caller — you, effectively — registered via `aimx agent-setup <agent>`)
+and fill its declared parameters. The daemon substitutes your values
+into the template's argv, drops privileges to the template's `run_as`
+user, and spawns the child with a per-hook timeout. The local
+operator is the only party who can install raw-cmd hooks (via
 `sudo aimx hooks create --cmd "..."` on the host).
 
 ## The four MCP hook tools
 
 ### `hook_list_templates`
 
-List every hook template enabled on this aimx install. Call this first,
-always, before `hook_create`. The list is empty until the operator has
-ticked templates during `aimx setup` — if it is empty, tell the user to
-run `sudo aimx setup` on the host.
+List every hook template visible to the caller's Linux user. A
+template is visible when its `run_as` equals the caller's username, or
+when `run_as` is a reserved sentinel (`aimx-catchall` or `root`). Call
+this first, always, before `hook_create`. The list is empty until the
+caller has run `aimx agent-setup <agent>` (no sudo) to register their
+`invoke-<agent>-<username>` template.
 
 **Parameters:** none.
 
@@ -31,7 +35,7 @@ run `sudo aimx setup` on the host.
 
 ```json
 {
-  "name": "invoke-claude",
+  "name": "invoke-claude-alice",
   "description": "Pipe the received/sent email into Claude Code with a custom prompt.",
   "params": ["prompt"],
   "allowed_events": ["on_receive", "after_send"]
@@ -62,7 +66,7 @@ argv so you can confirm the wiring in your reply to the user:
 ```json
 {
   "effective_name": "mcp_test_hook",
-  "substituted_argv": ["/usr/local/bin/claude", "-p", "You are an assistant"]
+  "substituted_argv": ["/home/alice/.local/bin/claude", "-p", "You are an assistant"]
 }
 ```
 
@@ -101,7 +105,7 @@ CLI `--template` invocation) expose full details:
   "mailbox": "alice",
   "event": "on_receive",
   "origin": "mcp",
-  "template": "invoke-claude",
+  "template": "invoke-claude-alice",
   "params": {"prompt": "You are an assistant"}
 }
 ```
@@ -158,12 +162,12 @@ A template is one `[[hook_template]]` block the operator installed in
 
 ```toml
 [[hook_template]]
-name = "invoke-claude"
+name = "invoke-claude-alice"
 description = "Pipe the email into Claude Code with a custom prompt."
-cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+cmd = ["/home/alice/.local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
-run_as = "aimx-hook"
+run_as = "alice"
 timeout_secs = 60
 allowed_events = ["on_receive", "after_send"]
 ```
@@ -182,9 +186,13 @@ Key facts for agents:
 - `stdin = "email"` pipes the raw Markdown (frontmatter + body) of the
   email to the hook's child process on stdin. `"email_json"` wraps it
   in `{frontmatter, body}` JSON. `"none"` closes stdin.
-- `run_as = "aimx-hook"` means the child runs as an unprivileged
-  service user with read-only access to mailbox contents and no access
-  to `/etc/aimx/dkim/` or `/etc/aimx/tls/`.
+- `run_as` is a Linux username. `aimx agent-setup` sets it to the
+  caller's username so each user's hooks drop into that user's uid.
+  The reserved values are `aimx-catchall` (for catchall-mailbox
+  templates) and `root` (rare, operator-only). The daemon enforces
+  `hook.run_as == mailbox.owner OR hook.run_as == "root"` at every
+  write (catchall allows `aimx-catchall`), so your agent reads exactly
+  the files its matching mailbox owner can read.
 - `timeout_secs` is a hard ceiling; SIGTERM at `timeout_secs`, SIGKILL
   at `+5s`.
 
@@ -193,10 +201,12 @@ Key facts for agents:
 A user says: *"When I get an email from my bank, file it and reply
 with the current balance."*
 
-1. `hook_list_templates()` → verify `invoke-claude` (or your agent's
-   matching `invoke-…` template) is enabled.
+1. `hook_list_templates()` → verify `invoke-claude-<username>` (or
+   your agent's matching `invoke-<agent>-<username>` template) is
+   visible. If not, tell the user to run
+   `aimx agent-setup <agent>` (no sudo) first.
 2. `hook_create(mailbox: "accounts", event: "on_receive", template:
-   "invoke-claude", params: {prompt: "You are the accounts agent.
+   "invoke-claude-alice", params: {prompt: "You are the accounts agent.
    Read the email on stdin. If it is from the bank, file it via
    email_mark_read and reply with email_reply including the current
    balance from the local ledger. Otherwise mark it read and do
@@ -242,10 +252,11 @@ email:
 
 ### "hook_create returned `Unknown template`."
 
-Call `hook_list_templates` again — the operator may have disabled the
-template, or your template name is misspelled. The list is the
-authoritative source; never assume a template exists from a past
-install.
+Call `hook_list_templates` again — the owning user may not have run
+`aimx agent-setup <agent>` yet, or your template name is misspelled
+(remember: `invoke-<agent>-<username>`, not the bare `invoke-<agent>`).
+The list is the authoritative source; never assume a template exists
+from a past install.
 
 ### "hook_create returned `Mailbox '…' does not exist`."
 

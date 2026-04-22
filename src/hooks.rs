@@ -1121,11 +1121,16 @@ mod tests {
     }
 
     #[test]
-    fn list_templates_all_eight_defaults_render() {
+    fn list_templates_bundled_defaults_render() {
+        // Sprint 8 S8-1 stripped every `invoke-*` block from
+        // `hook-templates/defaults.toml`; only `webhook` remains
+        // pre-bundled. Per-agent templates are registered on demand
+        // by `aimx agent-setup`.
         let mut cfg = base_config();
         cfg.hook_templates = crate::hook_templates_defaults::default_templates();
         let out = capture_list_templates(&cfg);
-        for name in [
+        assert!(out.contains("webhook"), "missing webhook in output: {out}");
+        for legacy in [
             "invoke-claude",
             "invoke-codex",
             "invoke-opencode",
@@ -1133,9 +1138,11 @@ mod tests {
             "invoke-goose",
             "invoke-openclaw",
             "invoke-hermes",
-            "webhook",
         ] {
-            assert!(out.contains(name), "missing {name} in output: {out}");
+            assert!(
+                !out.contains(legacy),
+                "bundled defaults should no longer ship {legacy}: {out}"
+            );
         }
     }
 

@@ -133,6 +133,20 @@ pub enum Command {
         redetect: bool,
     },
 
+    /// Inverse of agent-setup: remove the invoke-<agent>-<username> template, optionally the plugin files too
+    AgentCleanup {
+        /// Agent short name (e.g. claude-code)
+        agent: String,
+
+        /// Also remove plugin files under $HOME laid down by agent-setup
+        #[arg(long)]
+        full: bool,
+
+        /// Skip the interactive prompt when --full removes plugin files
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
     /// Generate DKIM keypair for email signing
     DkimKeygen {
         /// DKIM selector name

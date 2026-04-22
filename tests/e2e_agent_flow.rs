@@ -1,0 +1,663 @@
+//! Sprint 8 S8-4: end-to-end happy path for the agent flow.
+//!
+//! Runs the full `aimx setup` (non-interactive, via direct config
+//! layout) → `aimx agent-setup` (with a fake `claude` binary on a
+//! controlled `$PATH`) → ingest of a trusted `.eml` → assertion that
+//! the hook fired under the matching uid (via a sentinel file the
+//! fake binary writes) → `aimx agent-cleanup --full` → assertion that
+//! plugin files and the registered template are gone.
+//!
+//! Gated on `AIMX_INTEGRATION_SUDO=1` + root, matching `isolation.rs`.
+//! A dedicated `aimx-it-agentflow` system user is created up front and
+//! torn down via a `Drop` guard. CI runs this under sudo; developer
+//! machines skip it by default.
+//!
+//! The fake `claude` is a tiny shell script written into a per-test
+//! `PATH` dir; it writes its own uid and the incoming stdin to a
+//! sentinel file under the tempdir so the test can assert the hook
+//! fired under the expected user.
+
+#![cfg(unix)]
+
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
+
+const USER: &str = "aimx-it-agentflow";
+
+struct UserTeardown;
+
+impl Drop for UserTeardown {
+    fn drop(&mut self) {
+        let _ = Command::new("userdel").arg(USER).status();
+    }
+}
+
+fn useradd_system(name: &str) {
+    let status = Command::new("useradd")
+        .arg("--system")
+        .arg("--no-create-home")
+        .arg("--shell")
+        .arg("/usr/sbin/nologin")
+        .arg(name)
+        .status()
+        .expect("failed to spawn useradd");
+    assert!(
+        status.success() || {
+            let check = Command::new("id").arg(name).status().ok();
+            matches!(check, Some(s) if s.success())
+        },
+        "useradd failed for {name}"
+    );
+}
+
+fn uid_of(name: &str) -> u32 {
+    let output = Command::new("id")
+        .arg("-u")
+        .arg(name)
+        .output()
+        .expect("failed to run id -u");
+    assert!(output.status.success());
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .expect("uid must parse")
+}
+
+fn aimx_binary_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_BIN_EXE_aimx"))
+}
+
+/// Locate `runuser` absolutely. CI invokes this test via
+/// `sudo -E env "PATH=$PATH" ...`, and on some Ubuntu runners the
+/// propagated `$PATH` does not include `/usr/sbin` where `runuser`
+/// lives. Probe the well-known locations instead of relying on `$PATH`.
+fn runuser_path() -> PathBuf {
+    for candidate in ["/usr/sbin/runuser", "/usr/bin/runuser", "/sbin/runuser"] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return p;
+        }
+    }
+    panic!("runuser not found in /usr/sbin, /usr/bin, or /sbin");
+}
+
+fn chown(path: &Path, uid: u32, gid: u32) {
+    unsafe {
+        let c = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+        let rc = libc::chown(c.as_ptr(), uid, gid);
+        assert!(
+            rc == 0,
+            "chown({}) failed: {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+}
+
+fn chmod(path: &Path, mode: u32) {
+    let perms = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(path, perms).unwrap();
+}
+
+/// Re-apply 0644 mode to `config.toml`. The daemon runs with
+/// umask 0o077 (production security invariant in `serve::run_serve`),
+/// so every atomic config rewrite from the daemon side (TEMPLATE-CREATE,
+/// HOOK-CREATE, etc.) clamps the mode back to 0600 via
+/// `File::create` + `rename`. That is correct for production but
+/// breaks the unprivileged CLI readers this test exercises, so we
+/// restore 0644 before each test-user `aimx hooks ...` invocation.
+fn ensure_config_readable(config_path: &Path) {
+    chmod(config_path, 0o644);
+}
+
+fn wait_for_socket(path: &Path, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if UnixStream::connect(path).is_ok() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "aimx.sock did not appear / connect at {} within {:?}",
+        path.display(),
+        timeout
+    );
+}
+
+#[test]
+#[ignore]
+fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
+    if std::env::var_os("AIMX_INTEGRATION_SUDO").is_none() {
+        eprintln!("AIMX_INTEGRATION_SUDO is not set; skipping (requires root + useradd).");
+        return;
+    }
+    assert_eq!(
+        unsafe { libc::geteuid() },
+        0,
+        "e2e_agent_flow must run as root"
+    );
+
+    let _guard = UserTeardown;
+    useradd_system(USER);
+    let user_uid = uid_of(USER);
+    let user_gid = user_uid;
+
+    // Fresh tempdir datadir + config dir. Parent must be 0755 so the
+    // test user can traverse.
+    let tmp_root = std::env::temp_dir().join(format!("aimx-it-agentflow-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_root);
+    std::fs::create_dir_all(&tmp_root).unwrap();
+    chmod(&tmp_root, 0o755);
+
+    let config_dir = tmp_root.join("etc");
+    let data_dir = tmp_root.join("data");
+    let runtime_dir = tmp_root.join("run");
+    let home_dir = tmp_root.join("home");
+    let path_dir = tmp_root.join("bin");
+    let sentinel_dir = tmp_root.join("sentinel");
+
+    for d in [
+        &config_dir,
+        &data_dir,
+        &runtime_dir,
+        &home_dir,
+        &path_dir,
+        &sentinel_dir,
+    ] {
+        std::fs::create_dir_all(d).unwrap();
+        chmod(d, 0o755);
+    }
+
+    // Sentinel dir needs to be writable by the test user since the fake
+    // `claude` binary drops privilege to $USER before running.
+    chown(&sentinel_dir, user_uid, user_gid);
+    chmod(&sentinel_dir, 0o755);
+
+    // Write minimal config: one mailbox owned by our test user, plus the
+    // required catchall so Config::load validates.
+    let config_path = config_dir.join("config.toml");
+    let config_content = format!(
+        "domain = \"it.example.com\"\n\
+         trust = \"verified\"\n\
+         trusted_senders = [\"*@example.com\"]\n\n\
+         [mailboxes.catchall]\n\
+         address = \"*@it.example.com\"\n\
+         owner = \"aimx-catchall\"\n\n\
+         [mailboxes.{USER}]\n\
+         address = \"{USER}@it.example.com\"\n\
+         owner = \"{USER}\"\n",
+    );
+    std::fs::write(&config_path, &config_content).unwrap();
+    // Production uses 0640 root:root, but the test user needs to read
+    // config.toml from the `aimx hooks create` CLI path (short-lived
+    // root-adjacent subcommands load the config for in-process
+    // validation before submitting over UDS). Relax to 0644 so the
+    // test-user-initiated CLI reads succeed without having to create
+    // an `aimx-hook`-style shared group. Note: the daemon clamps its
+    // own umask to 0o077 at startup (`serve.rs`, Sprint 2 S2-2), so
+    // every atomic `config.toml` rewrite from the daemon resets this
+    // back to 0600 — `ensure_config_readable()` re-applies 0644
+    // before each test-user CLI invocation that needs to read it.
+    chmod(&config_path, 0o644);
+
+    // Catchall user must exist for Config::load to not warn (it's
+    // a reserved name so `getpwnam` isn't actually required, but
+    // ingest writes will fail if the user is missing — create it if
+    // absent, leave it alone if it already exists).
+    let _ = Command::new("useradd")
+        .arg("--system")
+        .arg("--no-create-home")
+        .arg("--shell")
+        .arg("/usr/sbin/nologin")
+        .arg("aimx-catchall")
+        .status();
+
+    // DKIM keypair.
+    let keygen_status = Command::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .arg("dkim-keygen")
+        .arg("--force")
+        .status()
+        .expect("dkim-keygen failed to spawn");
+    assert!(keygen_status.success(), "dkim-keygen failed");
+
+    // Pre-create the mailbox storage dirs with the correct ownership so
+    // ingest can write immediately.
+    let inbox_mbx = data_dir.join("inbox").join(USER);
+    let sent_mbx = data_dir.join("sent").join(USER);
+    std::fs::create_dir_all(&inbox_mbx).unwrap();
+    std::fs::create_dir_all(&sent_mbx).unwrap();
+    chown(&inbox_mbx, user_uid, user_gid);
+    chown(&sent_mbx, user_uid, user_gid);
+    chmod(&inbox_mbx, 0o700);
+    chmod(&sent_mbx, 0o700);
+
+    let inbox_catchall = data_dir.join("inbox").join("catchall");
+    std::fs::create_dir_all(&inbox_catchall).unwrap();
+    let catchall_uid = uid_of("aimx-catchall");
+    chown(&inbox_catchall, catchall_uid, catchall_uid);
+    chmod(&inbox_catchall, 0o700);
+
+    // Copy the `aimx` binary into our world-traversable `path_dir`.
+    // Cargo places the test binary under `target/debug/aimx`, which in
+    // GitHub Actions lives inside `/home/runner/...` — a path the
+    // freshly-created unprivileged `USER` cannot traverse. runuser's
+    // `exec` then fails with EACCES even though the target binary is
+    // marked 0755. Copying to a 0755-traversable tmp location is the
+    // simplest fix; the binary is tiny and the copy is one-shot.
+    let runnable_aimx = path_dir.join("aimx");
+    std::fs::copy(aimx_binary_path(), &runnable_aimx)
+        .expect("failed to copy aimx binary into world-traversable path_dir");
+    chmod(&runnable_aimx, 0o755);
+
+    // Fake `claude` binary. Writes its uid + stdin to the sentinel
+    // file. Using $USER ensures only our test user can rewrite the
+    // sentinel after privilege drop.
+    let fake_claude = path_dir.join("claude");
+    let sentinel = sentinel_dir.join("hook-fired.txt");
+    let script = format!(
+        "#!/bin/sh\n\
+         echo \"uid=$(id -u) args=$*\" > {sentinel}\n\
+         cat >> {sentinel}\n",
+        sentinel = sentinel.display()
+    );
+    std::fs::write(&fake_claude, script).unwrap();
+    chmod(&fake_claude, 0o755);
+    // Make the fake binary + its parent traversable by the test user.
+    chmod(&path_dir, 0o755);
+
+    // The user's $HOME (used by `agent-setup` for plugin install).
+    let user_home = home_dir.join(USER);
+    std::fs::create_dir_all(&user_home).unwrap();
+    chown(&user_home, user_uid, user_gid);
+    chmod(&user_home, 0o755);
+
+    // Point the user's /etc/passwd home at `user_home`. We pass `-m`
+    // to our `runuser` invocations to preserve the parent `HOME` env,
+    // but PAM's session management can still overwrite HOME from the
+    // passwd entry, so set both sources to the same path to be safe.
+    // Without this, `runuser -u aimx-it-agentflow` inherits the
+    // default `/home/aimx-it-agentflow/` (which doesn't exist because
+    // we `useradd --no-create-home`), and `agent-setup` then fails
+    // with EACCES trying to `mkdir $HOME/.claude/plugins/...`.
+    let usermod_status = Command::new("usermod")
+        .arg("-d")
+        .arg(&user_home)
+        .arg(USER)
+        .status()
+        .expect("failed to spawn usermod");
+    assert!(
+        usermod_status.success(),
+        "usermod -d {} {USER} failed",
+        user_home.display()
+    );
+
+    // Start the daemon. Bind to a random port to avoid clashing with a
+    // locally running aimx. `AIMX_SANDBOX_FORCE_FALLBACK=1` skips
+    // systemd-run and uses the direct setresuid fallback so this test
+    // works on minimal CI images.
+    let port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+    // Cleanup runs both daemon stop + tempdir removal on scope exit.
+    // Declared before the daemon spawn so the guard is in place even if
+    // `wait_for_socket` panics — otherwise the daemon child would leak.
+    struct Teardown(std::process::Child, PathBuf);
+    impl Drop for Teardown {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0.id() as libc::pid_t, libc::SIGTERM);
+            }
+            let _ = self.0.wait();
+            let _ = std::fs::remove_dir_all(&self.1);
+        }
+    }
+
+    let daemon_handle = Teardown(
+        Command::new(aimx_binary_path())
+            .env("AIMX_CONFIG_DIR", &config_dir)
+            .env("AIMX_DATA_DIR", &data_dir)
+            .env("AIMX_RUNTIME_DIR", &runtime_dir)
+            .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
+            .arg("--data-dir")
+            .arg(&data_dir)
+            .arg("serve")
+            .arg("--bind")
+            .arg(format!("127.0.0.1:{port}"))
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("failed to spawn aimx serve"),
+        tmp_root.clone(),
+    );
+
+    let sock = runtime_dir.join("aimx.sock");
+    wait_for_socket(&sock, Duration::from_secs(30));
+
+    // Run `aimx agent-setup claude-code` as the test user. Feed it a
+    // curated `$PATH` containing only the fake claude so the probe
+    // resolves deterministically, and a `$HOME` under tmp.
+    let agent_setup_out = Command::new(runuser_path())
+        // `-m` preserves HOME/SHELL/USER/LOGNAME from the parent env —
+        // without it, runuser+PAM resets HOME to the target user's
+        // `/etc/passwd` entry (which doesn't exist because we
+        // `useradd --no-create-home`) and `agent-setup` then fails with
+        // EACCES trying to `mkdir /home/<USER>/.claude/...`.
+        .arg("-m")
+        .arg("-u")
+        .arg(USER)
+        .arg("--")
+        .arg(&runnable_aimx)
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .env("AIMX_RUNTIME_DIR", &runtime_dir)
+        .env("HOME", &user_home)
+        .env("PATH", &path_dir)
+        .arg("agent-setup")
+        .arg("claude-code")
+        .arg("--force")
+        .output()
+        .expect("failed to run aimx agent-setup");
+    assert!(
+        agent_setup_out.status.success(),
+        "agent-setup failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&agent_setup_out.stdout),
+        String::from_utf8_lossy(&agent_setup_out.stderr)
+    );
+    let setup_stdout = String::from_utf8_lossy(&agent_setup_out.stdout);
+    // `derive_template_name("claude-code", USER)` returns
+    // `invoke-claude-code-<USER>` (agent_slug is the full spec.name).
+    let template_name = format!("invoke-claude-code-{USER}");
+    assert!(
+        setup_stdout.contains(&template_name),
+        "agent-setup stdout should mention {template_name}: {setup_stdout}"
+    );
+
+    // Plugin files landed under $HOME/.claude/plugins/aimx.
+    let plugin_dir = user_home.join(".claude/plugins/aimx");
+    assert!(
+        plugin_dir.exists(),
+        "plugin dir {} should exist after agent-setup",
+        plugin_dir.display()
+    );
+
+    // Wire an on_receive hook binding the template to our mailbox.
+    // Goes through the daemon UDS (`HOOK-CREATE`); the template is
+    // registered and the mailbox is owned by the caller, so the
+    // authz check passes.
+    //
+    // Agent-setup's TEMPLATE-CREATE just rewrote `config.toml` via
+    // the daemon's umask-0o077 write path, so re-apply 0644 here so
+    // the unprivileged `aimx hooks create` process-wide config load
+    // can read it.
+    ensure_config_readable(&config_path);
+    // The `claude-code` agent template (see `agent_setup::registry()`)
+    // declares `params: &[]` — it feeds the raw email into the binary
+    // via stdin rather than taking any operator-supplied placeholder.
+    // So `hooks create` must not carry any `--param K=V`.
+    let hook_create_out = Command::new(runuser_path())
+        .arg("-m")
+        .arg("-u")
+        .arg(USER)
+        .arg("--")
+        .arg(&runnable_aimx)
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .env("AIMX_RUNTIME_DIR", &runtime_dir)
+        .arg("hooks")
+        .arg("create")
+        .arg("--mailbox")
+        .arg(USER)
+        .arg("--event")
+        .arg("on_receive")
+        .arg("--template")
+        .arg(&template_name)
+        .output()
+        .expect("failed to run aimx hooks create");
+    // Diagnostic: on failure, dump socket + config.toml metadata so we can
+    // see what the unprivileged caller actually had access to on the CI
+    // runner. Without this, a generic EACCES bubble comes out nameless
+    // (the raw `io::Error` Display) and we have no leverage.
+    if !hook_create_out.status.success() {
+        let sock_meta = std::fs::metadata(&sock);
+        let cfg_meta = std::fs::metadata(&config_path);
+        let rt_meta = std::fs::metadata(&runtime_dir);
+        let tmp_meta = std::fs::metadata(&tmp_root);
+        eprintln!(
+            "diagnostic:\n  sock={}: {:?}\n  config={}: {:?}\n  runtime_dir={}: {:?}\n  tmp_root={}: {:?}",
+            sock.display(),
+            sock_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            config_path.display(),
+            cfg_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            runtime_dir.display(),
+            rt_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            tmp_root.display(),
+            tmp_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+        );
+    }
+    assert!(
+        hook_create_out.status.success(),
+        "hooks create failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&hook_create_out.stdout),
+        String::from_utf8_lossy(&hook_create_out.stderr)
+    );
+
+    // Our synthetic `.eml` has no DKIM signature, so `trust.rs` will
+    // evaluate to `TrustedValue::False` even though the sender matches
+    // the allowlist — and MCP-origin template hooks (the only kind the
+    // daemon allows via UDS) cannot carry `dangerously_support_untrusted`
+    // (config-load rejects the combination). To make the hook fire
+    // end-to-end in CI without baking a real DKIM signer into the
+    // harness, we as-root rewrite `config.toml` and flip both the
+    // freshly-created hook's `origin` to `operator` and set its
+    // `dangerously_support_untrusted = true`, then SIGHUP the daemon.
+    // This is a test-only escape hatch — production never writes this
+    // combination via UDS.
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    let hook_header = format!("[[mailboxes.{USER}.hooks]]");
+    let header_pos = config_text.find(&hook_header).unwrap_or_else(|| {
+        panic!(
+            "expected `{hook_header}` header in config.toml after hooks create. \
+             config.toml:\n{config_text}"
+        )
+    });
+    let newline_after_header = config_text[header_pos..]
+        .find('\n')
+        .map(|n| header_pos + n)
+        .unwrap_or(header_pos);
+    // Rebuild the config with two new lines inserted right under the
+    // hook's header, and with the existing `origin = "mcp"` line
+    // rewritten to `operator` (if present; absent means the hook was
+    // stamped MCP-origin elsewhere in the block — but the splice above
+    // happens first, so we can just do a string replace on the remainder).
+    let mut patched = String::with_capacity(config_text.len() + 96);
+    patched.push_str(&config_text[..=newline_after_header]);
+    patched.push_str("dangerously_support_untrusted = true\n");
+    patched.push_str(&config_text[newline_after_header + 1..]);
+    let patched = patched.replace("origin = \"mcp\"", "origin = \"operator\"");
+    std::fs::write(&config_path, patched).unwrap();
+    // Re-apply 0644 for the next test-user read, and SIGHUP the daemon
+    // so the in-memory `Arc<Config>` swaps to the patched flag.
+    ensure_config_readable(&config_path);
+    unsafe {
+        libc::kill(daemon_handle.0.id() as libc::pid_t, libc::SIGHUP);
+    }
+    // Give the daemon a beat to reload before firing the ingest.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Ingest the `.eml` — with the dangerously-support-untrusted flag
+    // now set, the hook fires regardless of DKIM result.
+    let eml = format!(
+        "From: sender@example.com\r\n\
+         To: {USER}@it.example.com\r\n\
+         Subject: hi\r\n\
+         Message-ID: <e2e-agent-flow@example.com>\r\n\
+         Date: Thu, 01 Jan 2026 12:00:00 +0000\r\n\
+         \r\n\
+         body\r\n"
+    );
+    let mut ingest = Command::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .env("AIMX_RUNTIME_DIR", &runtime_dir)
+        .env("AIMX_SANDBOX_FORCE_FALLBACK", "1")
+        .arg("--data-dir")
+        .arg(&data_dir)
+        .arg("ingest")
+        .arg(format!("{USER}@it.example.com"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn aimx ingest");
+    ingest
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(eml.as_bytes())
+        .unwrap();
+    let ingest_status = ingest.wait_with_output().expect("ingest wait failed");
+    assert!(
+        ingest_status.status.success(),
+        "ingest failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&ingest_status.stdout),
+        String::from_utf8_lossy(&ingest_status.stderr)
+    );
+
+    // Wait for the sentinel file to appear (the hook spawns detached).
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while Instant::now() < deadline {
+        if sentinel.exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(
+        sentinel.exists(),
+        "hook sentinel never appeared at {}",
+        sentinel.display()
+    );
+    let sentinel_body = std::fs::read_to_string(&sentinel).unwrap();
+    assert!(
+        sentinel_body.contains(&format!("uid={user_uid}")),
+        "hook did not fire under uid {user_uid}: {sentinel_body}"
+    );
+
+    // Before `agent-cleanup` runs TEMPLATE-DELETE over UDS, the daemon's
+    // hook-invariant validator would reject the delete because our
+    // template is still bound by the hook we hand-patched above. A
+    // production operator would use `sudo aimx hooks delete <name>`
+    // first; we do the equivalent here by rewriting `config.toml` to
+    // drop the mailbox's `hooks` array, then SIGHUP the daemon to
+    // reload.
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    let hook_header = format!("[[mailboxes.{USER}.hooks]]");
+    let patched = if let Some(header_pos) = config_text.find(&hook_header) {
+        // Find the start of the next section (`\n[` at column 0) or EOF.
+        let after = &config_text[header_pos..];
+        let next_section = after[1..]
+            .find("\n[")
+            .map(|n| header_pos + 1 + n + 1)
+            .unwrap_or(config_text.len());
+        let mut p = String::with_capacity(config_text.len());
+        p.push_str(&config_text[..header_pos]);
+        p.push_str(&config_text[next_section..]);
+        p
+    } else {
+        config_text.clone()
+    };
+    std::fs::write(&config_path, patched).unwrap();
+    ensure_config_readable(&config_path);
+    unsafe {
+        libc::kill(daemon_handle.0.id() as libc::pid_t, libc::SIGHUP);
+    }
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Now run `aimx agent-cleanup claude-code --full --yes` as the
+    // test user. Should remove the template via UDS and the plugin
+    // dir under $HOME.
+    let cleanup_out = Command::new(runuser_path())
+        .arg("-m")
+        .arg("-u")
+        .arg(USER)
+        .arg("--")
+        .arg(&runnable_aimx)
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .env("AIMX_RUNTIME_DIR", &runtime_dir)
+        .env("HOME", &user_home)
+        .arg("agent-cleanup")
+        .arg("claude-code")
+        .arg("--full")
+        .arg("--yes")
+        .output()
+        .expect("failed to run aimx agent-cleanup");
+    assert!(
+        cleanup_out.status.success(),
+        "agent-cleanup failed: stdout={:?} stderr={:?}",
+        String::from_utf8_lossy(&cleanup_out.stdout),
+        String::from_utf8_lossy(&cleanup_out.stderr)
+    );
+
+    assert!(
+        !plugin_dir.exists(),
+        "plugin dir {} should be gone after --full cleanup",
+        plugin_dir.display()
+    );
+
+    // Template should be gone from the daemon's in-memory config. Try
+    // re-creating a hook against it; the daemon should refuse with
+    // `unknown-template`.
+    //
+    // The preceding `agent-cleanup` / hook fire rewrote `config.toml`
+    // via the daemon, clamping the mode back to 0600. Restore 0644
+    // so this unprivileged CLI invocation can still read the file.
+    ensure_config_readable(&config_path);
+    let post_cleanup = Command::new(runuser_path())
+        .arg("-m")
+        .arg("-u")
+        .arg(USER)
+        .arg("--")
+        .arg(&runnable_aimx)
+        .env("AIMX_CONFIG_DIR", &config_dir)
+        .env("AIMX_DATA_DIR", &data_dir)
+        .env("AIMX_RUNTIME_DIR", &runtime_dir)
+        .arg("hooks")
+        .arg("create")
+        .arg("--mailbox")
+        .arg(USER)
+        .arg("--event")
+        .arg("on_receive")
+        .arg("--template")
+        .arg(&template_name)
+        .arg("--name")
+        .arg("post-cleanup-check")
+        .output()
+        .expect("failed to run hooks create for post-cleanup check");
+    assert!(
+        !post_cleanup.status.success(),
+        "template should be gone after cleanup; hook_create unexpectedly succeeded"
+    );
+    // Assert the specific "unknown template" rejection so a future
+    // typo in `template_name` (or a regression that accepts unknown
+    // templates) is caught here instead of silently passing on any
+    // non-zero exit. Both the CLI-local validator (`hooks.rs`,
+    // `unknown template '...'`) and the daemon-side validator
+    // (`hook_handler.rs`, `unknown-template '...'`) use the same
+    // stem, so a lowercase `unknown template`/`unknown-template`
+    // check catches either layer rejecting.
+    let post_cleanup_stderr = String::from_utf8_lossy(&post_cleanup.stderr);
+    assert!(
+        post_cleanup_stderr.contains("unknown template")
+            || post_cleanup_stderr.contains("unknown-template"),
+        "expected an `unknown template` error after cleanup, got stderr={post_cleanup_stderr:?}"
+    );
+
+    drop(daemon_handle);
+}
