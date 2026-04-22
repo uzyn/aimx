@@ -16,6 +16,14 @@ use crate::user_resolver::{ResolvedUser, resolve_user};
 pub const RESERVED_RUN_AS_ROOT: &str = "root";
 pub const RESERVED_RUN_AS_CATCHALL: &str = "aimx-catchall";
 
+/// True when `name` is one of the reserved `run_as` sentinels
+/// (`root` or `aimx-catchall`). Used by orphan-detection paths to
+/// short-circuit `getpwnam` lookups against names that the config
+/// schema accepts unconditionally.
+pub fn is_reserved_run_as(name: &str) -> bool {
+    name == RESERVED_RUN_AS_ROOT || name == RESERVED_RUN_AS_CATCHALL
+}
+
 /// `useradd`-style valid Linux username regex subset used by
 /// [`validate_run_as`]. The full POSIX grammar is `[a-z_][a-z0-9_-]*[$]?`;
 /// we hand-roll the predicate here to avoid pulling in a regex crate for
