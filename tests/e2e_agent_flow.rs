@@ -223,6 +223,18 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     chown(&inbox_catchall, catchall_uid, catchall_uid);
     chmod(&inbox_catchall, 0o700);
 
+    // Copy the `aimx` binary into our world-traversable `path_dir`.
+    // Cargo places the test binary under `target/debug/aimx`, which in
+    // GitHub Actions lives inside `/home/runner/...` — a path the
+    // freshly-created unprivileged `USER` cannot traverse. runuser's
+    // `exec` then fails with EACCES even though the target binary is
+    // marked 0755. Copying to a 0755-traversable tmp location is the
+    // simplest fix; the binary is tiny and the copy is one-shot.
+    let runnable_aimx = path_dir.join("aimx");
+    std::fs::copy(aimx_binary_path(), &runnable_aimx)
+        .expect("failed to copy aimx binary into world-traversable path_dir");
+    chmod(&runnable_aimx, 0o755);
+
     // Fake `claude` binary. Writes its uid + stdin to the sentinel
     // file. Using $USER ensures only our test user can rewrite the
     // sentinel after privilege drop.
@@ -294,7 +306,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("-u")
         .arg(USER)
         .arg("--")
-        .arg(aimx_binary_path())
+        .arg(&runnable_aimx)
         .env("AIMX_CONFIG_DIR", &config_dir)
         .env("AIMX_DATA_DIR", &data_dir)
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
@@ -336,7 +348,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("-u")
         .arg(USER)
         .arg("--")
-        .arg(aimx_binary_path())
+        .arg(&runnable_aimx)
         .env("AIMX_CONFIG_DIR", &config_dir)
         .env("AIMX_DATA_DIR", &data_dir)
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
@@ -424,7 +436,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("-u")
         .arg(USER)
         .arg("--")
-        .arg(aimx_binary_path())
+        .arg(&runnable_aimx)
         .env("AIMX_CONFIG_DIR", &config_dir)
         .env("AIMX_DATA_DIR", &data_dir)
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
@@ -455,7 +467,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("-u")
         .arg(USER)
         .arg("--")
-        .arg(aimx_binary_path())
+        .arg(&runnable_aimx)
         .env("AIMX_CONFIG_DIR", &config_dir)
         .env("AIMX_DATA_DIR", &data_dir)
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
