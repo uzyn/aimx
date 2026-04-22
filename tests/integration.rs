@@ -52,7 +52,7 @@ fn install_cached_dkim_keys(tmp: &Path) {
 
 fn setup_test_env(tmp: &Path) -> String {
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"root\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"ops\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -1906,7 +1906,7 @@ fn serve_e2e_connection_refused_after_shutdown() {
 
 fn setup_test_env_with_bob(tmp: &Path) -> String {
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"root\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\nowner = \"root\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"ops\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\nowner = \"ops\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -2744,7 +2744,7 @@ owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.alice.hooks]]
 name = "aftersendhk1"
@@ -3910,7 +3910,7 @@ owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@agent.example.com"
-owner = "root"
+owner = "ops"
 trust = "verified"
 trusted_senders = ["*@company.com", "boss@example.com"]
 
@@ -4400,7 +4400,7 @@ fn setup_test_env_with_template(tmp: &Path) -> String {
          owner = \"aimx-catchall\"\n\n\
          [mailboxes.alice]\n\
          address = \"alice@agent.example.com\"\n\
-         owner = \"root\"\n",
+         owner = \"ops\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -4856,7 +4856,7 @@ owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
-owner = "root"
+owner = "ops"
 "#,
         data_dir = tmp.path().display(),
         mock = mock_curl_path.display(),
@@ -5089,7 +5089,7 @@ owner = "root"
 /// runs as root (CI `integration-isolation` job or local sudo run), the
 /// chown+chmod land cleanly and the file's mode is asserted to be
 /// `0o600`. When the ingest runs as a regular user and the configured
-/// `owner = "root"` doesn't match, `chown_as_owner` fails with
+/// `owner = "ops"` doesn't match, `chown_as_owner` fails with
 /// PermissionDenied; the warning is logged but the file still exists
 /// (and inherits umask) — this test only validates that the ingest
 /// itself succeeds end-to-end even when chown fails, so the failure

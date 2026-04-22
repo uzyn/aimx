@@ -327,6 +327,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         let config = crate::config::Config {
@@ -697,6 +698,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         let config = crate::config::Config {
@@ -786,6 +788,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         let config = crate::config::Config {

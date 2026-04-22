@@ -108,6 +108,10 @@ Alias: `aimx mailbox` works identically to `aimx mailboxes`.
 
 Create a mailbox registering `<name>@<domain>` and directories under `inbox/<name>/` and `sent/<name>/`. Hot-reloaded by the daemon; no restart needed.
 
+| Flag | Description |
+|------|-------------|
+| `--owner <user>` | Linux user that owns the mailbox's storage. When omitted, the CLI prompts (defaulting to `<name>` if a user with that name already exists). Under `AIMX_NONINTERACTIVE=1` the default is accepted when available, otherwise the command errors hard so scripted installs fail fast. |
+
 ### `aimx mailboxes list`
 
 List all mailboxes with addresses, total count, and unread count.

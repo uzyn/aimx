@@ -194,7 +194,11 @@ pub fn gather_status_with_ops<S: SystemOps>(
 /// All three lookups are best-effort and never fail the overall doctor
 /// report; an unhealthy box should still get a snapshot.
 fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> HookTemplatesSection {
-    use crate::setup::HOOK_SERVICE_USER;
+    // Legacy doctor note: surface any lingering `aimx-hook` service
+    // user (PRD §6.9 "aimx-hook presence info note only"). `aimx setup`
+    // no longer creates this user — see [`crate::setup::CATCHALL_SERVICE_USER`]
+    // for the current equivalent.
+    const LEGACY_HOOK_USER: &str = "aimx-hook";
 
     let log_text = if config.hook_templates.is_empty() {
         // No templates → no point shelling out to journalctl. The empty
@@ -234,9 +238,9 @@ fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> Hook
         })
         .collect();
 
-    let user_exists = sys.user_exists(HOOK_SERVICE_USER);
+    let user_exists = sys.user_exists(LEGACY_HOOK_USER);
     let uid_gid = if user_exists {
-        sys.lookup_user_uid_gid(HOOK_SERVICE_USER)
+        sys.lookup_user_uid_gid(LEGACY_HOOK_USER)
     } else {
         None
     };
@@ -249,7 +253,7 @@ fn gather_hook_templates_section<S: SystemOps>(config: &Config, sys: &S) -> Hook
     HookTemplatesSection {
         templates,
         hook_user: HookUserStatus {
-            user: HOOK_SERVICE_USER.to_string(),
+            user: LEGACY_HOOK_USER.to_string(),
             user_exists,
             uid_gid,
             datadir_readable,
@@ -760,9 +764,7 @@ fn format_hook_templates_section(section: &HookTemplatesSection) -> String {
     if section.templates.is_empty() {
         out.push_str(&format!(
             "  {}\n",
-            term::dim(
-                "No hook templates enabled. Run `sudo aimx setup` and tick the templates you need."
-            ),
+            term::dim("No hook templates enabled. Run `aimx agent-setup <agent>` to install one."),
         ));
         return out;
     }
@@ -1553,6 +1555,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
 
@@ -2058,6 +2061,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
@@ -2078,6 +2082,7 @@ mod tests {
                 }],
                 trust: Some("verified".to_string()),
                 trusted_senders: Some(vec!["alice@example.com".to_string()]),
+                allow_root_catchall: false,
             },
         );
 

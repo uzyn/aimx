@@ -183,10 +183,12 @@ pub enum MailboxCommand {
         /// Mailbox name (local part of email address)
         name: String,
 
-        /// Linux user that owns the mailbox's storage. Defaults to the
-        /// local part of the address if a user with that name already
-        /// exists on the host; otherwise required. The owner must
-        /// resolve via `getpwnam` at daemon load time.
+        /// Linux user that owns the mailbox's storage. When omitted,
+        /// the CLI prompts (defaulting to the local part of the
+        /// address when a user with that name already exists on the
+        /// host). Under `AIMX_NONINTERACTIVE=1` the default is
+        /// accepted when available, or the command errors hard. The
+        /// owner must resolve via `getpwnam` at daemon load time.
         #[arg(long)]
         owner: Option<String>,
     },

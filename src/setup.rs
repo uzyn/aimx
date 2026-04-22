@@ -74,7 +74,7 @@ pub trait SystemOps {
 
     /// True iff a user named `user` exists on the local system (resolves via
     /// `id <user>` / `getent passwd <user>`). Used by
-    /// [`ensure_hook_user`] to skip creation on re-runs.
+    /// [`ensure_catchall_user`] to skip creation on re-runs.
     fn user_exists(&self, user: &str) -> bool {
         std::process::Command::new("id")
             .arg(user)
@@ -87,8 +87,8 @@ pub trait SystemOps {
     /// Resolve a system user name to its `(uid, gid)` via `getpwnam`.
     /// Returns `None` when the user does not exist on this host. Wired
     /// behind `SystemOps` so doctor's hook-templates section can be
-    /// unit-tested without requiring `aimx-hook` to be present in the
-    /// test environment's `/etc/passwd`.
+    /// unit-tested without requiring `aimx-catchall` to be present in
+    /// the test environment's `/etc/passwd`.
     fn lookup_user_uid_gid(&self, user: &str) -> Option<(u32, u32)> {
         #[cfg(unix)]
         {
@@ -112,10 +112,20 @@ pub trait SystemOps {
     }
 
     /// Idempotently create a system user (+ matching primary group) with
-    /// no login shell and no home directory. Returns `Ok(true)` when the
-    /// user was newly created, `Ok(false)` when the user already existed,
-    /// and `Err` when the creation command failed.
-    fn create_system_user(&self, user: &str) -> Result<bool, Box<dyn std::error::Error>> {
+    /// no login shell, home directory `home`, and explicit `useradd`
+    /// flags matching PRD §6.4 (`--system`, `/usr/sbin/nologin`). The
+    /// home directory is created + chowned by the caller; `useradd` is
+    /// invoked with `--no-create-home` so this helper stays focused on
+    /// the user/group stanza.
+    ///
+    /// Returns `Ok(true)` when the user was newly created, `Ok(false)`
+    /// when the user already existed, and `Err` when the creation
+    /// command failed.
+    fn create_system_user(
+        &self,
+        user: &str,
+        home: &Path,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
         if self.user_exists(user) {
             return Ok(false);
         }
@@ -125,10 +135,13 @@ pub trait SystemOps {
         // denied spawning it, etc.) is propagated as-is so the operator
         // sees the real cause rather than a confusing "adduser failed"
         // downstream.
+        let home_str = home.to_string_lossy().into_owned();
         match std::process::Command::new("useradd")
             .args([
                 "--system",
                 "--no-create-home",
+                "--home-dir",
+                &home_str,
                 "--shell",
                 "/usr/sbin/nologin",
                 "--user-group",
@@ -145,7 +158,7 @@ pub trait SystemOps {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Fall back to the Alpine / BusyBox `adduser` flags.
                 let s = std::process::Command::new("adduser")
-                    .args(["-S", "-H", "-s", "/sbin/nologin", user])
+                    .args(["-S", "-H", "-h", &home_str, "-s", "/sbin/nologin", user])
                     .stdout(std::process::Stdio::null())
                     .stderr(std::process::Stdio::null())
                     .status()?;
@@ -158,290 +171,92 @@ pub trait SystemOps {
         }
     }
 
-    /// Recursively `chown <owner>:<group>` and chmod `g+rX` on `path`. Used
-    /// to give `aimx-hook` group-read access to mailbox dirs so hook
-    /// processes can pipe `stdin = "email"` legitimately.
-    fn chown_group_readable(
+    /// Create `path` as a directory, chown it to `owner:group`, and
+    /// chmod to `mode`. Used by [`ensure_catchall_user`] to provision
+    /// `/var/lib/aimx-catchall` as `aimx-catchall:aimx-catchall` mode
+    /// `0700` without the daemon needing to reach into the rest of the
+    /// datadir.
+    fn ensure_owned_directory(
         &self,
         path: &Path,
         owner: &str,
         group: &str,
+        mode: u32,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(path)?;
         let chown = std::process::Command::new("chown")
-            .args(["-R", &format!("{owner}:{group}")])
+            .args([&format!("{owner}:{group}")])
             .arg(path)
             .status()?;
         if !chown.success() {
             return Err(format!("Failed to chown {} to {owner}:{group}", path.display()).into());
         }
         let chmod = std::process::Command::new("chmod")
-            .args(["-R", "g+rX"])
+            .args([&format!("{mode:o}")])
             .arg(path)
             .status()?;
         if !chmod.success() {
-            return Err(format!("Failed to chmod g+rX {}", path.display()).into());
+            return Err(format!("Failed to chmod {} on {}", mode, path.display()).into());
         }
         Ok(())
     }
-
-    /// True iff the process's stdin is attached to a real TTY. The
-    /// `aimx setup` hook-template picker refuses to draw a dialoguer
-    /// widget when stdin is piped (CI, scripted installs) and instead
-    /// skips the prompt with an informational warning.
-    ///
-    /// Default impl inspects the real stdin. `MockSystemOps` overrides
-    /// this to a scripted boolean so unit tests can exercise both the
-    /// TTY and non-TTY paths without spawning subprocesses.
-    fn is_stdin_tty(&self) -> bool {
-        use std::io::IsTerminal;
-        io::stdin().is_terminal()
-    }
-
-    /// Render the interactive hook-template checkbox list (PRD §6.3).
-    ///
-    /// `available` is the ordered list of bundled template names;
-    /// `preselected` is the subset currently enabled in `config.toml`
-    /// (empty on fresh installs, populated on re-runs).
-    ///
-    /// Returns the operator's selection. The default impl uses
-    /// `dialoguer::MultiSelect`; tests override with a scripted
-    /// selection so they don't need a real terminal.
-    fn prompt_hook_template_selection(
-        &self,
-        available: &[HookTemplateChoice],
-        preselected: &[String],
-    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        use dialoguer::MultiSelect;
-        use dialoguer::theme::ColorfulTheme;
-
-        let defaults: Vec<bool> = available
-            .iter()
-            .map(|t| preselected.iter().any(|p| p == &t.name))
-            .collect();
-        let items: Vec<String> = available
-            .iter()
-            .map(|t| format!("{:<18} {}", t.name, t.description))
-            .collect();
-        let chosen = MultiSelect::with_theme(&ColorfulTheme::default())
-            .with_prompt("Which templates should I enable? (space to toggle, enter to confirm)")
-            .items(&items)
-            .defaults(&defaults)
-            .interact()?;
-        Ok(chosen
-            .into_iter()
-            .map(|i| available[i].name.clone())
-            .collect())
-    }
 }
 
-/// Compact descriptor of a bundled hook template, passed to
-/// [`SystemOps::prompt_hook_template_selection`]. Decoupled from
-/// [`crate::config::HookTemplate`] so the trait method doesn't leak the
-/// full schema into the prompt UI.
-#[derive(Debug, Clone, PartialEq)]
-pub struct HookTemplateChoice {
-    pub name: String,
-    pub description: String,
-}
+/// Fixed name of the unprivileged Unix user that runs hook subprocesses
+/// for the **catchall** mailbox (PRD §6.4). Created by [`aimx setup`]
+/// only when the operator configures a catchall mailbox — no
+/// speculative user creation on a setup that never configures one.
+/// Regular mailbox owners are real Linux users picked by the operator
+/// (Sprint 3 S3-2); `aimx-catchall` exists purely so the catchall has
+/// a privilege-dropped uid that still lets hooks read its mail.
+pub const CATCHALL_SERVICE_USER: &str = "aimx-catchall";
 
-/// Fixed name of the unprivileged Unix user hook subprocesses run as.
-/// Created idempotently by `aimx setup` per PRD §6.3. Sprint 1 only
-/// creates the user + chowns the datadir; wiring the daemon to drop
-/// privileges before `exec` is Sprint 2's job.
-pub const HOOK_SERVICE_USER: &str = "aimx-hook";
+/// Home directory of the `aimx-catchall` system user. Lives outside
+/// `/var/lib/aimx/` so the mailbox datadir layout stays independent of
+/// the service user's filesystem footprint. Owned
+/// `aimx-catchall:aimx-catchall` mode `0700` — the user has no shell
+/// and no login, so the home dir is a formality, but keeping it mode
+/// `0700` avoids any chance of `aimx-catchall` becoming a world-readable
+/// landing zone if an operator later points a hook's cwd at it.
+pub const CATCHALL_HOME_DIR: &str = "/var/lib/aimx-catchall";
 
-/// Ensure the `aimx-hook` service user + matching group exist and the
-/// mailbox directories are readable by that group. Called from
-/// [`run_setup`] after the config is written and before the systemd /
-/// OpenRC service file is installed (so the unit can reference the user
-/// if needed).
+/// Ensure the `aimx-catchall` service user + matching group exist and
+/// its home directory is provisioned. Called from [`run_setup`] **only
+/// when the operator's config includes a catchall mailbox** — skipped
+/// otherwise so `/etc/passwd` stays clean on installs that never
+/// configure a catchall.
 ///
-/// Idempotent: re-running on a box that already has the user is a no-op
-/// beyond the chown/chmod pass, which may be no-ops themselves if
-/// permissions are already correct.
-pub(crate) fn ensure_hook_user(
-    sys: &dyn SystemOps,
-    data_dir: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n{}", term::header("[User]"));
-    let created = sys.create_system_user(HOOK_SERVICE_USER)?;
+/// Idempotent: re-running on a box that already has the user skips
+/// creation but still re-asserts the `0700 aimx-catchall:aimx-catchall`
+/// invariant on `/var/lib/aimx-catchall/` so permissions drift is
+/// corrected on every setup pass.
+pub(crate) fn ensure_catchall_user(sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Error>> {
+    println!("\n{}", term::header("[Catchall]"));
+    let home = Path::new(CATCHALL_HOME_DIR);
+    let created = sys.create_system_user(CATCHALL_SERVICE_USER, home)?;
     if created {
         println!(
             "  {} {}",
             term::success("Created system user"),
-            term::highlight(HOOK_SERVICE_USER)
+            term::highlight(CATCHALL_SERVICE_USER)
         );
     } else {
         println!(
             "  {} {}",
-            term::info(&format!("System user {HOOK_SERVICE_USER} already present")),
+            term::info(&format!(
+                "System user {CATCHALL_SERVICE_USER} already present"
+            )),
             term::dim("(skipping creation)")
         );
     }
 
-    chown_datadir_for_hook_user(data_dir, sys)?;
-    Ok(())
-}
-
-/// Chown `<data_dir>/inbox` and `<data_dir>/sent` to `root:aimx-hook` and
-/// chmod them `g+rX` recursively. Creates the directories first if
-/// missing so a fresh install doesn't trip over "no such file or
-/// directory" on the chown.
-pub(crate) fn chown_datadir_for_hook_user(
-    data_dir: &Path,
-    sys: &dyn SystemOps,
-) -> Result<(), Box<dyn std::error::Error>> {
-    for subdir in ["inbox", "sent"] {
-        let target = data_dir.join(subdir);
-        std::fs::create_dir_all(&target)?;
-        sys.chown_group_readable(&target, "root", HOOK_SERVICE_USER)?;
-    }
+    sys.ensure_owned_directory(home, CATCHALL_SERVICE_USER, CATCHALL_SERVICE_USER, 0o700)?;
     println!(
-        "  {} {} / {}",
-        term::success("Datadir readable by"),
-        term::highlight(HOOK_SERVICE_USER),
-        term::dim(&data_dir.display().to_string()),
+        "  {} {} {}",
+        term::success("Home directory"),
+        term::highlight(CATCHALL_HOME_DIR),
+        term::dim("(0700)"),
     );
-    Ok(())
-}
-
-/// Run the Sprint 4 hook-template checkbox phase (PRD §6.3).
-///
-/// - On a real TTY (and when `non_interactive == false`), prompts the
-///   operator with a multi-select of the eight bundled templates.
-/// - Non-interactive path (explicit `--non-interactive` or piped stdin)
-///   skips the prompt entirely and installs nothing.
-///
-/// On re-runs, templates currently present in `config.toml` are
-/// pre-ticked so deselecting a template uninstalls it. The final
-/// selection is written back to `config.toml` via
-/// [`apply_selected_templates`] — idempotent in both directions.
-///
-/// Returns the final set of enabled template names so callers (tests,
-/// future doctor extensions) can assert on it.
-pub(crate) fn configure_hook_templates(
-    config_path: &Path,
-    non_interactive: bool,
-    sys: &dyn SystemOps,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Skip the prompt when explicit non-interactive, or stdin is piped.
-    // Suppress the intro block on the skip path so CI logs stay quiet.
-    if non_interactive || !sys.is_stdin_tty() {
-        return Ok(current_hook_templates(config_path));
-    }
-
-    println!("\n{}", term::header("[Hook Templates]"));
-    println!(
-        "Hook templates let your agents create their own on_receive / after_send\n\
-         automations via MCP, safely. Each template is a pre-vetted command shape;\n\
-         agents can only fill declared parameters. Hook commands run as the\n\
-         unprivileged '{HOOK_SERVICE_USER}' user, never as root.\n",
-    );
-
-    let bundled = crate::hook_templates_defaults::default_templates();
-    let choices: Vec<HookTemplateChoice> = bundled
-        .iter()
-        .map(|t| HookTemplateChoice {
-            name: t.name.clone(),
-            description: t.description.clone(),
-        })
-        .collect();
-
-    // Only pre-tick bundled names on re-runs. Operator-authored custom
-    // templates stored in `config.toml` are preserved by
-    // `apply_selected_templates` regardless of what the prompt returns,
-    // so feeding them to the real `dialoguer::MultiSelect` (which would
-    // silently drop them) would just diverge from the mock's behavior.
-    let bundled_names: std::collections::HashSet<&str> =
-        bundled.iter().map(|t| t.name.as_str()).collect();
-    let preselected: Vec<String> = current_hook_templates(config_path)
-        .into_iter()
-        .filter(|n| bundled_names.contains(n.as_str()))
-        .collect();
-
-    let selected = sys.prompt_hook_template_selection(&choices, &preselected)?;
-
-    apply_selected_templates(config_path, &bundled, &selected)?;
-
-    if selected.is_empty() {
-        println!(
-            "  {} {}",
-            term::info("No templates enabled."),
-            term::dim("Re-run `aimx setup` to change this."),
-        );
-    } else {
-        println!(
-            "  {} {}",
-            term::success("Templates enabled:"),
-            term::highlight(&selected.join(", ")),
-        );
-    }
-
-    Ok(selected)
-}
-
-/// Read the current set of enabled template names from `config.toml`.
-/// Returns an empty vec on fresh installs (file missing or config is
-/// malformed) so a new install never treats a bad edit as "already
-/// has templates".
-fn current_hook_templates(config_path: &Path) -> Vec<String> {
-    if !config_path.exists() {
-        return Vec::new();
-    }
-    match Config::load_ignore_warnings(config_path) {
-        Ok(cfg) => cfg.hook_templates.into_iter().map(|t| t.name).collect(),
-        Err(_) => Vec::new(),
-    }
-}
-
-/// Merge `selected` template names back into `config.toml`. Any bundled
-/// template whose name is in `selected` is appended (or replaces its
-/// same-name entry); unselected bundled templates are dropped. Non-
-/// bundled `[[hook_template]]` entries (operator-authored, currently
-/// undocumented but schema-accepted) are preserved untouched.
-fn apply_selected_templates(
-    config_path: &Path,
-    bundled: &[crate::config::HookTemplate],
-    selected: &[String],
-) -> Result<(), Box<dyn std::error::Error>> {
-    if !config_path.exists() {
-        return Err(format!(
-            "config file missing at {}: `configure_hook_templates` must run after `finalize_setup`",
-            config_path.display()
-        )
-        .into());
-    }
-    let mut cfg = Config::load_ignore_warnings(config_path)?;
-
-    let bundled_names: std::collections::HashSet<&str> =
-        bundled.iter().map(|t| t.name.as_str()).collect();
-
-    // Drop every bundled template from the existing list; keep anything
-    // else (operator-authored custom templates) intact.
-    cfg.hook_templates
-        .retain(|t| !bundled_names.contains(t.name.as_str()));
-
-    // Append the user's current selection, in the bundled order, so
-    // reruns produce deterministic config.toml diffs.
-    for tmpl in bundled {
-        if selected.iter().any(|n| n == &tmpl.name) {
-            cfg.hook_templates.push(tmpl.clone());
-        }
-    }
-
-    // Route through the shared atomic temp-then-rename helper that the
-    // daemon uses for mailbox + hook CRUD so a crash mid-write can't
-    // leave `config.toml` torn. `install_config_file` only gets the
-    // atomic guarantee on the fresh-file path (`create_new`); the
-    // rewrite branch drops to `Config::save` which is a plain
-    // `std::fs::write`. `apply_selected_templates` runs on the rewrite
-    // path by construction (`finalize_setup` installs `config.toml`
-    // first), so we skip `install_config_file` here and re-apply
-    // `0o640` explicitly when running as root.
-    crate::mailbox_handler::write_config_atomic(config_path, &cfg)?;
-    if is_root() {
-        apply_config_file_mode(config_path)?;
-    }
     Ok(())
 }
 
@@ -1578,6 +1393,7 @@ pub fn finalize_setup(
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
+                    allow_root_catchall: false,
                 },
             );
             install_config_file(&cfg, &config_path)?;
@@ -1595,6 +1411,7 @@ pub fn finalize_setup(
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         let cfg = Config {
@@ -1813,6 +1630,139 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
     Ok(domain)
 }
 
+/// True iff the on-disk `config.toml` has a mailbox whose address is
+/// the wildcard catchall for its domain. Used by [`run_setup`] to gate
+/// `aimx-catchall` system-user creation — no catchall mailbox means no
+/// speculative user/home-dir provisioning (PRD §6.4 / S3-1). Returns
+/// `false` if `config.toml` is missing or unreadable so fresh installs
+/// skip the user-create step until `finalize_setup` has written the
+/// file (in practice `finalize_setup` always runs first, but the
+/// conservative default keeps this helper safe to call earlier).
+fn config_has_catchall(config_path: &Path) -> bool {
+    if !config_path.exists() {
+        return false;
+    }
+    let Ok(cfg) = Config::load_ignore_warnings(config_path) else {
+        return false;
+    };
+    cfg.mailboxes.values().any(|mb| mb.is_catchall(&cfg))
+}
+
+/// Upper bound on re-prompt attempts inside [`prompt_mailbox_owner`].
+/// Protects tests (and any CI capturing stdin from a script) from
+/// spinning forever when the scripted input never resolves to a real
+/// user. Five attempts is comfortable for an operator fat-fingering the
+/// username without turning an unattended CI into an infinite loop.
+pub(crate) const MAX_OWNER_PROMPT_ATTEMPTS: usize = 5;
+
+/// Name of the env var that forces [`prompt_mailbox_owner`] into its
+/// non-interactive branch: if set to a truthy value the helper accepts
+/// the local-part default when it resolves, or errors hard when no
+/// default is available. Mirrors the convention used by other scripted
+/// installer paths (CI, OS image builders) in the aimx codebase.
+pub(crate) const NONINTERACTIVE_ENV: &str = "AIMX_NONINTERACTIVE";
+
+pub(crate) fn is_noninteractive_env() -> bool {
+    matches!(
+        std::env::var(NONINTERACTIVE_ENV).ok().as_deref(),
+        Some("1") | Some("true") | Some("yes"),
+    )
+}
+
+/// Prompt the operator for the Linux user that should own mail for
+/// `address` (S3-2). Default = local-part of the address when
+/// `getpwnam(local_part)` resolves on the host; otherwise no default
+/// and explicit input is required.
+///
+/// Unknown users re-prompt with an actionable `useradd` hint up to
+/// [`MAX_OWNER_PROMPT_ATTEMPTS`] times before giving up. Under
+/// `AIMX_NONINTERACTIVE=1` the helper accepts the local-part default
+/// when available, or errors hard when the local part doesn't resolve
+/// — scripted installs never block on a prompt.
+///
+/// The catchall mailbox never goes through this helper; its owner is
+/// hard-coded to `aimx-catchall` by [`finalize_setup`] (S3-2 AC).
+///
+/// Live caller: `aimx mailboxes create` invokes this when the operator
+/// omits `--owner` (see `mailbox::resolve_create_owner`). Sprints 6+ will
+/// share the same seam from `aimx agent-setup`.
+pub fn prompt_mailbox_owner(
+    address: &str,
+    sys: &dyn SystemOps,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let local_part = address.split('@').next().unwrap_or("").trim().to_string();
+    let default_candidate = if local_part.is_empty() {
+        None
+    } else if crate::user_resolver::resolve_user(&local_part).is_some() {
+        Some(local_part.clone())
+    } else {
+        None
+    };
+
+    if is_noninteractive_env() {
+        return default_candidate.ok_or_else(|| {
+            format!(
+                "AIMX_NONINTERACTIVE=1 requires a resolvable default owner for \
+                 mailbox '{address}'; local part '{local_part}' does not resolve \
+                 via getpwnam. Create the user with `useradd --system {local_part}` \
+                 or unset AIMX_NONINTERACTIVE and re-run setup."
+            )
+            .into()
+        });
+    }
+
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    for attempt in 0..MAX_OWNER_PROMPT_ATTEMPTS {
+        match &default_candidate {
+            Some(def) => print!("Which Linux user should own `{address}`? [{def}]: "),
+            None => print!(
+                "Which Linux user should own `{address}`? (no default, \
+                 explicit input required): "
+            ),
+        }
+        io::stdout().flush()?;
+
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let entered = line.trim().to_string();
+
+        let candidate = if entered.is_empty() {
+            match &default_candidate {
+                Some(def) => def.clone(),
+                None => {
+                    println!(
+                        "  {} {}",
+                        term::warn("No default available."),
+                        term::dim("Type a valid Linux username and press Enter.")
+                    );
+                    continue;
+                }
+            }
+        } else {
+            entered
+        };
+
+        if sys.user_exists(&candidate) {
+            return Ok(candidate);
+        }
+
+        eprintln!(
+            "  {} User '{candidate}' does not exist. Create it with \
+             `useradd {candidate}` and re-enter, or type an existing \
+             Linux username. ({remaining} attempt(s) remaining)",
+            term::warn("!"),
+            remaining = MAX_OWNER_PROMPT_ATTEMPTS - attempt - 1,
+        );
+    }
+    Err(format!(
+        "could not resolve an owner for mailbox '{address}' after \
+         {MAX_OWNER_PROMPT_ATTEMPTS} attempts; create the intended Linux \
+         user with `useradd <name>` and re-run setup"
+    )
+    .into())
+}
+
 pub fn is_already_configured(sys: &dyn SystemOps, _data_dir: &Path) -> bool {
     let tls_cert = Path::new("/etc/ssl/aimx/cert.pem");
     let dkim_key = crate::config::dkim_dir().join("private.key");
@@ -1937,18 +1887,20 @@ pub fn run_setup(
     // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
-    // Step 4b: Create `aimx-hook` system user and chown mailbox dirs so
-    // hook processes can drop privileges before `exec` (Sprint 2). Runs
-    // before the service install so the unit file can reference the user
-    // if a future revision chooses to.
-    ensure_hook_user(sys, data_dir)?;
+    // Silence the `non_interactive` unused-var warning until a future
+    // sprint reintroduces an interactive prompt phase. Kept on the
+    // signature so callers don't have to change when that lands.
+    let _ = non_interactive;
 
-    // Step 4c: Interactive hook-template selection (Sprint 4, PRD §6.3).
-    // Sits after user creation (the templates only matter once hooks can
-    // drop privileges) and before the DNS retry loop so the operator
-    // isn't stuck at a DNS prompt before the checkbox UI. Reuses the
-    // `config_path` binding computed at the top of `run_setup`.
-    configure_hook_templates(&config_path, non_interactive, sys)?;
+    // Step 4b: Create `aimx-catchall` service user (PRD §6.4, S3-1) —
+    // but only when the operator's configured mailboxes include a
+    // catchall, so installs that skip the catchall don't bloat
+    // `/etc/passwd` with a service user they'll never use. Re-entrant
+    // setup passes through the same guard so a host that once had a
+    // catchall and removed it won't re-create the user.
+    if config_has_catchall(&config_path) {
+        ensure_catchall_user(sys)?;
+    }
 
     // Step 6: DNS guidance and verification (section [DNS])
     // Single `hostname -I` invocation (S32-4): derive both families from one call.
@@ -2188,22 +2140,16 @@ mod tests {
         /// Set of existing users (for `user_exists`) — mutable to simulate
         /// a `create_system_user` call creating the user.
         existing_users: RefCell<std::collections::HashSet<String>>,
-        /// Ordered list of user names passed to `create_system_user`.
-        created_users: RefCell<Vec<String>>,
-        /// Ordered list of `(path, owner, group)` tuples passed to
-        /// `chown_group_readable`. Lets tests assert the chown fires on
-        /// the right paths in the right order.
-        chown_calls: RefCell<Vec<(PathBuf, String, String)>>,
-        /// Sprint 4: scripted return from `is_stdin_tty` so tests exercise
-        /// the prompt-shown vs prompt-skipped paths without a real terminal.
-        stdin_is_tty: bool,
-        /// Sprint 4: scripted return from `prompt_hook_template_selection`.
-        /// Tests populate this to simulate the operator's checkbox choices.
-        scripted_template_selection: RefCell<Option<Vec<String>>>,
-        /// Sprint 4: records every
-        /// `(available, preselected)` tuple passed to the prompt so tests
-        /// can assert the UI saw the right set and pre-ticks.
-        template_prompt_calls: RefCell<Vec<(Vec<HookTemplateChoice>, Vec<String>)>>,
+        /// Ordered list of `(user, home)` pairs passed to
+        /// `create_system_user`. Sprint 3 renames the helper's caller
+        /// from `ensure_hook_user` to `ensure_catchall_user`; tests
+        /// assert both the user name AND its home-dir arg.
+        created_users: RefCell<Vec<(String, PathBuf)>>,
+        /// Ordered list of `(path, owner, group, mode)` tuples passed to
+        /// `ensure_owned_directory`. Sprint 3 replaces the recursive
+        /// `chown_group_readable` with a single-path, explicit-mode
+        /// helper scoped to the `aimx-catchall` home dir.
+        owned_dirs: RefCell<Vec<(PathBuf, String, String, u32)>>,
     }
 
     impl Default for MockSystemOps {
@@ -2220,10 +2166,7 @@ mod tests {
                 wait_for_ready_calls: RefCell::new(0),
                 existing_users: RefCell::new(std::collections::HashSet::new()),
                 created_users: RefCell::new(vec![]),
-                chown_calls: RefCell::new(vec![]),
-                stdin_is_tty: true,
-                scripted_template_selection: RefCell::new(None),
-                template_prompt_calls: RefCell::new(vec![]),
+                owned_dirs: RefCell::new(vec![]),
             }
         }
     }
@@ -2289,310 +2232,240 @@ mod tests {
         fn user_exists(&self, user: &str) -> bool {
             self.existing_users.borrow().contains(user)
         }
-        fn create_system_user(&self, user: &str) -> Result<bool, Box<dyn std::error::Error>> {
-            self.created_users.borrow_mut().push(user.to_string());
+        fn create_system_user(
+            &self,
+            user: &str,
+            home: &Path,
+        ) -> Result<bool, Box<dyn std::error::Error>> {
+            self.created_users
+                .borrow_mut()
+                .push((user.to_string(), home.to_path_buf()));
             let newly = self.existing_users.borrow_mut().insert(user.to_string());
             Ok(newly)
         }
-        fn chown_group_readable(
+        fn ensure_owned_directory(
             &self,
             path: &Path,
             owner: &str,
             group: &str,
+            mode: u32,
         ) -> Result<(), Box<dyn std::error::Error>> {
-            self.chown_calls.borrow_mut().push((
+            // Record the call without touching the real filesystem —
+            // `ensure_catchall_user`'s target path (`/var/lib/aimx-catchall`)
+            // is outside any tempdir, and we don't need a real inode for
+            // tests. Assertions compare against the recorded tuple, not
+            // against directory existence.
+            self.owned_dirs.borrow_mut().push((
                 path.to_path_buf(),
                 owner.to_string(),
                 group.to_string(),
+                mode,
             ));
             Ok(())
         }
-        fn is_stdin_tty(&self) -> bool {
-            self.stdin_is_tty
-        }
-        fn prompt_hook_template_selection(
-            &self,
-            available: &[HookTemplateChoice],
-            preselected: &[String],
-        ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-            self.template_prompt_calls
-                .borrow_mut()
-                .push((available.to_vec(), preselected.to_vec()));
-            // Default: keep the pre-selected set (mirrors "operator hits
-            // enter without touching anything" on a re-run).
-            let scripted = self
-                .scripted_template_selection
-                .borrow_mut()
-                .take()
-                .unwrap_or_else(|| preselected.to_vec());
-            Ok(scripted)
-        }
     }
 
-    // ----- Sprint 4 S4-2: hook-template configure phase ------------------
-
-    /// Write a minimal but valid `config.toml` under `AIMX_CONFIG_DIR`
-    /// so `configure_hook_templates` can load/save it. Returns the
-    /// temp dir guard so the caller can use `.path()` and cleanup
-    /// happens on drop.
-    fn scratch_config_dir() -> (tempfile::TempDir, PathBuf) {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let cfg_path = tmp.path().join("config.toml");
-        let body = r#"domain = "test.example"
-
-[mailboxes.catchall]
-address = "*@test.example"
-owner = "aimx-catchall"
-"#;
-        std::fs::write(&cfg_path, body).unwrap();
-        (tmp, cfg_path)
-    }
+    // ----- Sprint 3 S3-1: ensure_catchall_user ---------------------------
 
     #[test]
-    fn configure_hook_templates_skips_when_non_interactive() {
+    fn ensure_catchall_user_creates_user_when_absent() {
         let sys = MockSystemOps::default();
-        let (_tmp, cfg_path) = scratch_config_dir();
-
-        let selected =
-            super::configure_hook_templates(&cfg_path, true, &sys).expect("non-interactive path");
-        assert!(
-            selected.is_empty(),
-            "non-interactive setup must install zero templates by default"
-        );
-
-        assert!(
-            sys.template_prompt_calls.borrow().is_empty(),
-            "prompt must not render when --non-interactive is passed"
-        );
-
-        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
-        assert!(
-            cfg.hook_templates.is_empty(),
-            "config.toml should have no hook_templates after non-interactive setup"
-        );
-    }
-
-    #[test]
-    fn configure_hook_templates_skips_when_stdin_not_tty() {
-        let sys = MockSystemOps {
-            stdin_is_tty: false,
-            ..MockSystemOps::default()
-        };
-        let (_tmp, cfg_path) = scratch_config_dir();
-
-        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-        assert!(selected.is_empty());
-        assert!(sys.template_prompt_calls.borrow().is_empty());
-    }
-
-    #[test]
-    fn configure_hook_templates_non_interactive_rerun_preserves_existing() {
-        // Exercises the function doc claim that a `--non-interactive`
-        // re-run preserves whatever templates are already enabled in
-        // `config.toml`. The first run (interactive) installs
-        // invoke-claude; the second run (non-interactive) must leave
-        // it intact and return it as the current selection without
-        // ever invoking the prompt.
-        let sys = MockSystemOps::default();
-        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
-        let (_tmp, cfg_path) = scratch_config_dir();
-
-        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-        assert_eq!(sys.template_prompt_calls.borrow().len(), 1);
-
-        // Second run: `--non-interactive` — prompt must not render,
-        // and `invoke-claude` must still be on disk afterwards.
-        let selected = super::configure_hook_templates(&cfg_path, true, &sys).unwrap();
-        assert_eq!(
-            selected,
-            vec!["invoke-claude"],
-            "non-interactive re-run must return the current on-disk selection"
-        );
-        assert_eq!(
-            sys.template_prompt_calls.borrow().len(),
-            1,
-            "non-interactive re-run must not invoke the prompt"
-        );
-
-        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
-        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
-        assert_eq!(
-            names,
-            vec!["invoke-claude"],
-            "non-interactive re-run must preserve existing templates on disk"
-        );
-    }
-
-    #[test]
-    fn configure_hook_templates_writes_fresh_selection() {
-        let sys = MockSystemOps::default();
-        *sys.scripted_template_selection.borrow_mut() =
-            Some(vec!["invoke-claude".into(), "webhook".into()]);
-        let (_tmp, cfg_path) = scratch_config_dir();
-
-        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-        assert_eq!(selected, vec!["invoke-claude", "webhook"]);
-
-        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
-        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
-        assert_eq!(names, vec!["invoke-claude", "webhook"]);
-
-        // Prompt was shown with no pre-selection (fresh install).
-        let calls = sys.template_prompt_calls.borrow();
-        assert_eq!(calls.len(), 1);
-        assert_eq!(calls[0].0.len(), 8, "all 8 defaults must be shown");
-        assert!(
-            calls[0].1.is_empty(),
-            "fresh install must render with nothing pre-selected"
-        );
-    }
-
-    #[test]
-    fn configure_hook_templates_is_idempotent_on_rerun() {
-        let sys = MockSystemOps::default();
-        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
-        let (_tmp, cfg_path) = scratch_config_dir();
-
-        // First run: install invoke-claude.
-        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-
-        // Second run: operator hits enter without toggling anything —
-        // scripted_template_selection falls back to the `preselected`
-        // list (the MockSystemOps default behavior).
-        let selected = super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-        assert_eq!(
-            selected,
-            vec!["invoke-claude"],
-            "re-run must preserve the current selection when the operator doesn't change it"
-        );
-
-        let calls = sys.template_prompt_calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(
-            calls[1].1,
-            vec!["invoke-claude"],
-            "re-run must pre-tick invoke-claude"
-        );
-    }
-
-    #[test]
-    fn configure_hook_templates_deselection_removes_template() {
-        let sys = MockSystemOps::default();
-        // First selection: enable two.
-        *sys.scripted_template_selection.borrow_mut() =
-            Some(vec!["invoke-claude".into(), "webhook".into()]);
-        let (_tmp, cfg_path) = scratch_config_dir();
-        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-
-        // Second run: user unticks webhook.
-        *sys.scripted_template_selection.borrow_mut() = Some(vec!["invoke-claude".into()]);
-        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-
-        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
-        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
-        assert_eq!(
-            names,
-            vec!["invoke-claude"],
-            "deselected template must be dropped from config.toml"
-        );
-    }
-
-    #[test]
-    fn configure_hook_templates_preserves_custom_template_entries() {
-        // Simulates an operator who hand-edited config.toml to add a
-        // custom non-bundled template. The bundled-defaults pass must
-        // not clobber it.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let cfg_path = tmp.path().join("config.toml");
-        let body = r#"domain = "test.example"
-
-[[hook_template]]
-name = "custom-one"
-description = "Operator's own template."
-cmd = ["/opt/custom/bin", "{url}"]
-params = ["url"]
-stdin = "email"
-run_as = "aimx-hook"
-timeout_secs = 30
-allowed_events = ["on_receive"]
-
-[mailboxes.catchall]
-address = "*@test.example"
-owner = "aimx-catchall"
-"#;
-        std::fs::write(&cfg_path, body).unwrap();
-
-        let sys = MockSystemOps::default();
-        *sys.scripted_template_selection.borrow_mut() = Some(vec!["webhook".into()]);
-
-        super::configure_hook_templates(&cfg_path, false, &sys).unwrap();
-
-        let cfg = Config::load_ignore_warnings(&cfg_path).unwrap();
-        let names: Vec<String> = cfg.hook_templates.iter().map(|t| t.name.clone()).collect();
-        assert!(
-            names.contains(&"custom-one".to_string()),
-            "custom template must survive the bundle-write pass; got {names:?}"
-        );
-        assert!(
-            names.contains(&"webhook".to_string()),
-            "selected bundled template must be written; got {names:?}"
-        );
-    }
-
-    // ----- Sprint 1 S1-4: aimx-hook user + datadir chown ------------------
-
-    #[test]
-    fn ensure_hook_user_creates_user_when_absent() {
-        let sys = MockSystemOps::default();
-        let tmp = tempfile::TempDir::new().unwrap();
-        super::ensure_hook_user(&sys, tmp.path()).unwrap();
+        super::ensure_catchall_user(&sys).unwrap();
         let created = sys.created_users.borrow();
         assert_eq!(
-            created.as_slice(),
-            &[HOOK_SERVICE_USER.to_string()],
-            "ensure_hook_user must call create_system_user for aimx-hook"
+            created.len(),
+            1,
+            "ensure_catchall_user must call create_system_user once: {created:?}"
         );
-        // Datadir chown fires for inbox and sent.
-        let chowns = sys.chown_calls.borrow();
         assert_eq!(
-            chowns.len(),
-            2,
-            "expected chown on inbox and sent: {chowns:?}"
+            created[0].0,
+            super::CATCHALL_SERVICE_USER,
+            "must create the aimx-catchall user"
         );
-        assert_eq!(chowns[0].1, "root");
-        assert_eq!(chowns[0].2, HOOK_SERVICE_USER);
-        assert_eq!(chowns[1].1, "root");
-        assert_eq!(chowns[1].2, HOOK_SERVICE_USER);
-        let paths: Vec<&Path> = chowns.iter().map(|(p, _, _)| p.as_path()).collect();
-        assert!(paths.iter().any(|p| p.ends_with("inbox")));
-        assert!(paths.iter().any(|p| p.ends_with("sent")));
+        assert_eq!(
+            created[0].1,
+            Path::new(super::CATCHALL_HOME_DIR),
+            "home dir arg must match CATCHALL_HOME_DIR (PRD §6.4)"
+        );
+        // Home dir was provisioned with the expected (owner, group, mode)
+        // triple so aimx-catchall can read its own home but nobody else.
+        let owned = sys.owned_dirs.borrow();
+        assert_eq!(owned.len(), 1, "home dir must be chowned once: {owned:?}");
+        assert_eq!(owned[0].0, Path::new(super::CATCHALL_HOME_DIR));
+        assert_eq!(owned[0].1, super::CATCHALL_SERVICE_USER);
+        assert_eq!(owned[0].2, super::CATCHALL_SERVICE_USER);
+        assert_eq!(owned[0].3, 0o700);
     }
 
     #[test]
-    fn ensure_hook_user_is_idempotent_when_user_exists() {
+    fn ensure_catchall_user_is_idempotent_when_user_exists() {
         let sys = MockSystemOps::default();
         sys.existing_users
             .borrow_mut()
-            .insert(HOOK_SERVICE_USER.to_string());
-        let tmp = tempfile::TempDir::new().unwrap();
-        super::ensure_hook_user(&sys, tmp.path()).unwrap();
-        // create_system_user still gets called — the mock returns false
-        // (meaning "not newly created") when the user is pre-existing.
+            .insert(super::CATCHALL_SERVICE_USER.to_string());
+        super::ensure_catchall_user(&sys).unwrap();
         let created = sys.created_users.borrow();
+        // `create_system_user` is still called once — the mock returns
+        // `false` (meaning "not newly created") when the user is
+        // pre-existing — so the helper short-circuits the useradd
+        // invocation but still re-asserts the home-dir invariant.
         assert_eq!(created.len(), 1);
-        // Datadir chown still fires: permissions may need re-asserting.
-        assert_eq!(sys.chown_calls.borrow().len(), 2);
+        assert_eq!(
+            sys.owned_dirs.borrow().len(),
+            1,
+            "home dir permissions re-asserted on every run so drift heals"
+        );
     }
 
     #[test]
-    fn chown_datadir_for_hook_user_creates_missing_subdirs() {
-        let sys = MockSystemOps::default();
+    fn run_setup_skips_catchall_user_when_no_catchall_configured() {
+        // S3-1 AC: `ensure_catchall_user` is gated on whether the
+        // on-disk config contains a catchall mailbox. A synthetic
+        // config with only a named (non-wildcard) mailbox must not
+        // trigger user creation.
         let tmp = tempfile::TempDir::new().unwrap();
-        // Directory is empty — helper must create `inbox/` and `sent/` so
-        // the chown has something to target on a fresh install.
-        super::chown_datadir_for_hook_user(tmp.path(), &sys).unwrap();
-        assert!(tmp.path().join("inbox").is_dir());
-        assert!(tmp.path().join("sent").is_dir());
+        let cfg_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"domain = "test.example"
+
+[mailboxes.ops]
+address = "ops@test.example"
+owner = "ops"
+"#,
+        )
+        .unwrap();
+        // The `ops` mailbox is a named (non-wildcard) address with an
+        // orphan owner; `Config::load_ignore_warnings` happily loads it
+        // (orphan-owner is a warning, not an error) and
+        // `config_has_catchall` then inspects the mailbox map and
+        // returns `false` because no entry is `*@<domain>`. That is the
+        // correct "don't create the catchall user" branch.
+        assert!(!super::config_has_catchall(&cfg_path));
+    }
+
+    #[test]
+    fn run_setup_detects_catchall_when_wildcard_mailbox_present() {
+        // Companion to the test above: when the config does carry a
+        // wildcard mailbox, `config_has_catchall` returns `true` so
+        // run_setup will invoke ensure_catchall_user.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg_path = tmp.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"domain = "test.example"
+
+[mailboxes.catchall]
+address = "*@test.example"
+owner = "aimx-catchall"
+"#,
+        )
+        .unwrap();
+        assert!(super::config_has_catchall(&cfg_path));
+    }
+
+    // ----- Sprint 3 S3-2: prompt_mailbox_owner ---------------------------
+
+    /// Serialize `AIMX_NONINTERACTIVE` env-var mutations across tests
+    /// that toggle it; cargo runs tests in parallel threads and env is
+    /// process-global so concurrent mutation would cross-contaminate.
+    static NONINT_ENV_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn prompt_mailbox_owner_noninteractive_uses_local_part_default() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            if name == "alice" {
+                Some(ResolvedUser {
+                    name: "alice".into(),
+                    uid: 1001,
+                    gid: 1001,
+                })
+            } else {
+                None
+            }
+        }
+        let _r = set_test_resolver(resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // SAFETY: the serialize mutex above keeps concurrent tests from
+        // racing on the process-global env block.
+        unsafe { std::env::set_var(super::NONINTERACTIVE_ENV, "1") };
+        let sys = MockSystemOps::default();
+        let owner = super::prompt_mailbox_owner("alice@example.com", &sys).unwrap();
+        unsafe { std::env::remove_var(super::NONINTERACTIVE_ENV) };
+        assert_eq!(owner, "alice");
+    }
+
+    #[test]
+    fn prompt_mailbox_owner_noninteractive_errors_when_no_default() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn empty_resolver(_name: &str) -> Option<ResolvedUser> {
+            None
+        }
+        let _r = set_test_resolver(empty_resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::set_var(super::NONINTERACTIVE_ENV, "1") };
+        let sys = MockSystemOps::default();
+        let err = super::prompt_mailbox_owner("ghost@example.com", &sys)
+            .unwrap_err()
+            .to_string();
+        unsafe { std::env::remove_var(super::NONINTERACTIVE_ENV) };
+        assert!(
+            err.contains("AIMX_NONINTERACTIVE") && err.contains("ghost") && err.contains("useradd"),
+            "non-interactive-no-default must point at useradd: {err}"
+        );
+    }
+
+    #[test]
+    fn prompt_mailbox_owner_max_attempts_is_bounded() {
+        // Defence-in-depth: the constant exists and is small enough to
+        // avoid hanging tests that happen to hit the re-prompt path.
+        // Evaluated at compile time so clippy's
+        // `assertions_on_constants` lint stays quiet (the wrapper
+        // `const _` pattern below is the canonical fix).
+        const _: () = assert!(
+            MAX_OWNER_PROMPT_ATTEMPTS >= 1 && MAX_OWNER_PROMPT_ATTEMPTS <= 10,
+            "sensible re-prompt ceiling expected"
+        );
+    }
+
+    // ----- Sprint 3 S3-3: legacy-template-phase removal regression ------
+
+    #[test]
+    fn legacy_template_phase_is_absent_from_setup() {
+        // Regression guard: the Sprint 3 grep-based AC checks that
+        // setup no longer carries the legacy hook-template wiring.
+        // The check targets pub(crate)-fn definitions only — rendering
+        // the needles with a runtime-built string keeps this test's
+        // own body from tripping its own assertion when it loads its
+        // own source.
+        let source = include_str!("setup.rs");
+        let fn_kw = "pub(crate) fn ";
+        let retired = [
+            "apply_selected_templates",
+            "current_hook_templates",
+            "ensure_hook_user",
+            "chown_datadir_for_hook_user",
+        ];
+        for name in retired {
+            let needle = format!("{fn_kw}{name}");
+            assert!(
+                !source.contains(&needle),
+                "{needle} must stay retired — agent-setup owns template wiring now"
+            );
+        }
+        // Separately assert no `configure_hook_*` helper exists (the
+        // interactive-checkbox phase is gone). Target the `pub(crate)`
+        // signature specifically so the test's own body doesn't match.
+        let banned_prefix = format!("{fn_kw}configure_hook");
+        assert!(
+            !source.contains(&banned_prefix),
+            "{banned_prefix}* helpers were removed in Sprint 3 S3-3"
+        );
     }
 
     #[test]
@@ -3451,7 +3324,7 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        mailbox::create_mailbox(&config, "alice", "root").unwrap();
+        mailbox::create_mailbox(&config, "alice", "ops").unwrap();
 
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 

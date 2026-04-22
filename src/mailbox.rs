@@ -79,6 +79,7 @@ pub fn create_mailbox(
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         },
     );
 
@@ -210,11 +211,13 @@ fn create(
     owner: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the effective owner: explicit `--owner`, else fall back
-    // to the local-part-as-owner convention when that user exists,
-    // else error out. Sprint 3 introduces an interactive prompt; for
-    // the CLI-only path in Sprint 2 the resolve-or-error shape is the
-    // minimum needed to avoid creating a mailbox with a bogus owner.
-    let owner = resolve_create_owner(name, owner)?;
+    // to the shared `prompt_mailbox_owner` seam (Sprint 3). Under a TTY
+    // the operator sees a prompt defaulted to the local part; under
+    // `AIMX_NONINTERACTIVE=1` the helper accepts that default when it
+    // resolves or errors hard so scripted runs fail fast instead of
+    // blocking on stdin.
+    let sys = crate::setup::RealSystemOps;
+    let owner = resolve_create_owner(config, name, owner, &sys)?;
     // Try the UDS path first so the daemon hot-swaps its in-memory
     // Config. On socket-missing (daemon stopped, fresh install), fall
     // back to direct on-disk edit + the restart-hint banner. When UDS
@@ -242,13 +245,17 @@ fn create(
 }
 
 /// Resolve the owner value for `mailbox create`. Explicit `--owner`
-/// wins; otherwise the local-part convention kicks in but only if a
-/// Linux user with that name already exists. Missing user + no flag
-/// prints an actionable error so operators know which `useradd`
-/// command to run.
+/// wins; otherwise the shared `setup::prompt_mailbox_owner` seam is
+/// invoked so operators get the same default-and-prompt UX here as in
+/// the setup wizard (PRD §6.8). Under `AIMX_NONINTERACTIVE=1` the
+/// helper accepts the local-part default when that user resolves via
+/// `getpwnam`, or errors hard with an actionable `useradd` hint so
+/// scripted callers fail fast rather than blocking on stdin.
 fn resolve_create_owner(
+    config: &Config,
     name: &str,
     explicit: Option<&str>,
+    sys: &dyn crate::setup::SystemOps,
 ) -> Result<String, Box<dyn std::error::Error>> {
     if let Some(o) = explicit {
         if o.is_empty() {
@@ -256,15 +263,8 @@ fn resolve_create_owner(
         }
         return Ok(o.to_string());
     }
-    if crate::user_resolver::resolve_user(name).is_some() {
-        return Ok(name.to_string());
-    }
-    Err(format!(
-        "Linux user '{name}' does not exist and no --owner was supplied. \
-         Either `useradd --system {name}` first, or pass --owner <existing-user> \
-         to create the mailbox owned by a different Linux user."
-    )
-    .into())
+    let address = format!("{name}@{domain}", domain = config.domain);
+    crate::setup::prompt_mailbox_owner(&address, sys)
 }
 
 fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -624,6 +624,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {
@@ -681,13 +682,88 @@ mod tests {
         assert!(validate_mailbox_name("a.b_c-1").is_ok());
     }
 
+    /// Serialize `AIMX_NONINTERACTIVE` env mutations across the tests
+    /// below: cargo runs tests in parallel threads and env is
+    /// process-global, so concurrent toggles would cross-contaminate.
+    static NONINT_ENV_SERIALIZE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn resolve_create_owner_explicit_wins() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let sys = crate::setup::RealSystemOps;
+        let owner = super::resolve_create_owner(&config, "alice", Some("ops"), &sys).unwrap();
+        assert_eq!(owner, "ops");
+    }
+
+    #[test]
+    fn resolve_create_owner_explicit_empty_errors() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let sys = crate::setup::RealSystemOps;
+        let err = super::resolve_create_owner(&config, "alice", Some(""), &sys).unwrap_err();
+        assert!(err.to_string().contains("--owner value cannot be empty"));
+    }
+
+    #[test]
+    fn resolve_create_owner_noninteractive_uses_local_part_default() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            if name == "alice" {
+                Some(ResolvedUser {
+                    name: "alice".into(),
+                    uid: 1001,
+                    gid: 1001,
+                })
+            } else {
+                None
+            }
+        }
+        let _r = set_test_resolver(resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // SAFETY: the serialize mutex above keeps concurrent tests from
+        // racing on the process-global env block.
+        unsafe { std::env::set_var(crate::setup::NONINTERACTIVE_ENV, "1") };
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let sys = crate::setup::RealSystemOps;
+        let owner = super::resolve_create_owner(&config, "alice", None, &sys).unwrap();
+        unsafe { std::env::remove_var(crate::setup::NONINTERACTIVE_ENV) };
+        assert_eq!(owner, "alice");
+    }
+
+    #[test]
+    fn resolve_create_owner_noninteractive_errors_when_no_default() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(_name: &str) -> Option<ResolvedUser> {
+            None
+        }
+        let _r = set_test_resolver(resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        // SAFETY: the serialize mutex above keeps concurrent tests from
+        // racing on the process-global env block.
+        unsafe { std::env::set_var(crate::setup::NONINTERACTIVE_ENV, "1") };
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let sys = crate::setup::RealSystemOps;
+        let err = super::resolve_create_owner(&config, "ghost", None, &sys).unwrap_err();
+        unsafe { std::env::remove_var(crate::setup::NONINTERACTIVE_ENV) };
+        let msg = err.to_string();
+        assert!(msg.contains("AIMX_NONINTERACTIVE=1"));
+        assert!(msg.contains("useradd"));
+    }
+
     #[test]
     fn create_new_mailbox() {
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
 
         // Both `inbox/<name>/` and `sent/<name>/` exist.
         assert!(tmp.path().join("inbox").join("alice").is_dir());
@@ -707,11 +783,11 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         // Re-creating via a fresh Config (as if registration rolled back)
         // must not error; dir creation is idempotent.
         let fresh = test_config(tmp.path());
-        create_mailbox(&fresh, "alice", "root").unwrap();
+        create_mailbox(&fresh, "alice", "ops").unwrap();
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
     }
@@ -755,7 +831,7 @@ mod tests {
         let _guard = setup_config_file(tmp.path(), &config);
 
         // Registered mailbox: catchall + an `alice` we register.
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         let inbox_alice = tmp.path().join("inbox").join("alice");
         std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
@@ -805,7 +881,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
 
@@ -1050,6 +1126,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
@@ -1083,6 +1160,7 @@ mod tests {
                 ],
                 trust: Some("verified".into()),
                 trusted_senders: Some(vec!["*@company.com".into(), "boss@example.com".into()]),
+                allow_root_catchall: false,
             },
         );
         Config {

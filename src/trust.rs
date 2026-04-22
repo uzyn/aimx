@@ -185,6 +185,7 @@ mod tests {
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
             hooks: vec![],
+            allow_root_catchall: false,
         }
     }
 
@@ -195,6 +196,7 @@ mod tests {
             trust: Some("verified".to_string()),
             trusted_senders: Some(trusted_senders),
             hooks: vec![],
+            allow_root_catchall: false,
         }
     }
 
@@ -298,6 +300,7 @@ mod tests {
             trust: Some("typo".to_string()),
             trusted_senders: Some(vec![]),
             hooks: vec![],
+            allow_root_catchall: false,
         };
         let result = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
         assert_eq!(result, TrustedValue::False);
@@ -315,6 +318,7 @@ mod tests {
             trust: None,
             trusted_senders: None,
             hooks: vec![],
+            allow_root_catchall: false,
         };
 
         let t = evaluate_trust(&cfg, &mb, &auth("pass"), "alice@gmail.com");
@@ -336,6 +340,7 @@ mod tests {
             trust: Some("none".to_string()),
             trusted_senders: None,
             hooks: vec![],
+            allow_root_catchall: false,
         };
 
         let t = evaluate_trust(&cfg, &mb, &auth("fail"), "alice@gmail.com");
@@ -354,6 +359,7 @@ mod tests {
             trust: None,
             trusted_senders: Some(vec!["boss@company.com".to_string()]),
             hooks: vec![],
+            allow_root_catchall: false,
         };
 
         // Global says gmail is trusted; mailbox replaces that list, so an

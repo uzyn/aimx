@@ -431,16 +431,18 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".to_string(),
-                owner: "root".to_string(),
+                owner: "ops".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {

@@ -5,13 +5,13 @@
 //! definitions without digging through Rust struct literals. The file
 //! is embedded via `include_str!` and parsed on demand.
 //!
-//! Callers:
-//!
-//! - [`crate::setup::configure_hook_templates`] uses
-//!   [`default_templates`] to drive the interactive checkbox list.
-//! - Unit tests round-trip the embedded TOML through
-//!   [`crate::config::validate_hook_templates`] so any malformed
-//!   default caught at code-review time becomes a build-time failure.
+//! Sprint 3 (S3-3) retired the interactive setup checkbox that used to
+//! drive template selection off this module. Sprint 8 will strip the
+//! `invoke-*` blocks from the embedded TOML entirely. For now the
+//! module still compile-time-validates the bundled file so a malformed
+//! edit is caught at build time, but nothing in the runtime setup
+//! flow reads the parsed templates.
+#![allow(dead_code)]
 
 use crate::config::{HookTemplate, validate_hook_templates};
 use serde::Deserialize;
@@ -44,8 +44,8 @@ pub fn default_templates() -> Vec<HookTemplate> {
 }
 
 /// Names of all default templates, in the order they appear in the
-/// embedded TOML. Used by the `aimx setup` checkbox UI so the order
-/// matches PRD §6.3.
+/// embedded TOML. Retained as a test helper; see the module-level note
+/// on Sprint 3 retiring the interactive consumer of this list.
 #[cfg(test)]
 fn default_template_names() -> Vec<String> {
     default_templates().into_iter().map(|t| t.name).collect()

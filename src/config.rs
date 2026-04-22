@@ -79,7 +79,7 @@ pub struct Config {
 
     /// Installed hook templates. Each entry is a pre-vetted command shape
     /// an agent can reference via MCP `hook_create`. Populated by
-    /// `aimx setup`'s interactive checkbox list. Validated at load time.
+    /// `aimx agent-setup <agent>` (Sprint 3+). Validated at load time.
     ///
     /// Serialized as `[[hook_template]]` blocks (singular) to match the
     /// PRD wording and the usual TOML convention for array-of-tables.
@@ -305,6 +305,17 @@ pub struct MailboxConfig {
     /// [`MailboxConfig::effective_trusted_senders`] to resolve.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trusted_senders: Option<Vec<String>>,
+
+    /// Escape hatch for running a catchall mailbox with `owner = "root"`
+    /// (PRD §6.2). Default `false`; only honoured when the mailbox is a
+    /// catchall AND `owner = "root"`. `Config::load` rejects the flag on
+    /// any non-catchall mailbox and emits a `LoadWarning` when it is set
+    /// alongside `owner = "root"` on a catchall so operators see the
+    /// escape-hatch acknowledgement in `aimx logs`. Omitted from the
+    /// serialized `config.toml` when false so standard configs stay
+    /// minimal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub allow_root_catchall: bool,
 }
 
 impl MailboxConfig {
@@ -418,6 +429,10 @@ pub enum LoadWarning {
     /// operator can clean up.
     #[allow(dead_code)]
     LegacyAimxHookUser,
+    /// Catchall mailbox is configured with `owner = "root"` and the
+    /// `allow_root_catchall = true` escape hatch (PRD §6.2). Logged at
+    /// WARN so the audit trail records the elevation.
+    RootCatchallAccepted { mailbox: String },
 }
 
 impl LoadWarning {
@@ -455,6 +470,11 @@ impl LoadWarning {
                  manages it — remove via 'userdel aimx-hook' when safe"
                     .to_string()
             }
+            LoadWarning::RootCatchallAccepted { mailbox } => format!(
+                "catchall mailbox '{mailbox}' is running with owner='root' \
+                 and allow_root_catchall=true; this is a documented escape \
+                 hatch (PRD §6.2) — mail lands owned by uid 0"
+            ),
         }
     }
 }
@@ -1084,9 +1104,17 @@ fn is_valid_placeholder_name(s: &str) -> bool {
 /// failures hard-reject (symmetric with [`validate_hook_run_as`] — per
 /// PRD §6.1 a regex-invalid owner can never resolve, so it is treated
 /// as a config typo rather than an orphan). `getpwnam` misses surface
-/// as [`LoadWarning::OrphanMailboxOwner`] (PRD §6.2). Reserved names
-/// (`root`, `aimx-catchall`) pass silently — the extra rules around
-/// root / catchall owners land in Sprint 3's S3-4 check.
+/// as [`LoadWarning::OrphanMailboxOwner`] (PRD §6.2).
+///
+/// S3-4 (PRD §6.2): `owner = "root"` is rejected on any non-catchall
+/// mailbox. On a catchall it is accepted only when
+/// `allow_root_catchall = true` — the escape hatch — and that
+/// acceptance surfaces as a [`LoadWarning::RootCatchallAccepted`] so
+/// the elevation is logged. `allow_root_catchall = true` on any
+/// non-catchall mailbox is rejected hard. On a catchall whose owner is
+/// not `root` (for example the default `aimx-catchall`), the flag is a
+/// no-op — it only gates the root escape hatch — and is silently
+/// accepted.
 fn validate_mailbox_owners(config: &Config) -> Result<Vec<LoadWarning>, String> {
     let mut warnings = Vec::new();
     for (name, mb) in &config.mailboxes {
@@ -1106,6 +1134,39 @@ fn validate_mailbox_owners(config: &Config) -> Result<Vec<LoadWarning>, String> 
                     owner: mb.owner.clone(),
                 });
             }
+        }
+
+        let is_catchall = mb.is_catchall(config);
+        let owner_is_root = mb.owner == RESERVED_RUN_AS_ROOT;
+
+        if mb.allow_root_catchall && !is_catchall {
+            return Err(format!(
+                "mailbox '{name}' sets allow_root_catchall=true but is not a \
+                 catchall (*@{domain}); remove the flag or change the address",
+                domain = config.domain,
+            ));
+        }
+
+        if owner_is_root && !is_catchall {
+            return Err(format!(
+                "mailbox '{name}' cannot be owned by root; use a regular \
+                 Linux user or set 'allow_root_catchall = true' on a \
+                 catchall mailbox"
+            ));
+        }
+
+        if is_catchall && owner_is_root {
+            if !mb.allow_root_catchall {
+                return Err(format!(
+                    "catchall mailbox '{name}' has owner='root' but \
+                     allow_root_catchall=false; set allow_root_catchall=true \
+                     to opt into the root-catchall escape hatch, or change \
+                     owner to 'aimx-catchall' (the default)"
+                ));
+            }
+            warnings.push(LoadWarning::RootCatchallAccepted {
+                mailbox: name.clone(),
+            });
         }
     }
     Ok(warnings)
@@ -1444,7 +1505,7 @@ owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@agent.example.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "support_inbound"
@@ -1492,7 +1553,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 trust = "strict"
 "#,
         )
@@ -1525,7 +1586,7 @@ owner = "aimx-catchall"
 
 [mailboxes.public]
 address = "hello@test.com"
-owner = "root"
+owner = "ops"
 trust = "none"
 "#,
         )
@@ -1568,7 +1629,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "support_env"
@@ -1594,7 +1655,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -1625,7 +1686,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -1652,7 +1713,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
@@ -1679,7 +1740,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.one.hooks]]
 event = "on_receive"
@@ -1687,7 +1748,7 @@ cmd = "echo same"
 
 [mailboxes.two]
 address = "two@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.two.hooks]]
 event = "on_receive"
@@ -1717,7 +1778,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.one.hooks]]
 event = "on_receive"
@@ -1725,7 +1786,7 @@ cmd = "echo collide"
 
 [mailboxes.two]
 address = "two@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.two.hooks]]
 name = "{derived}"
@@ -1752,7 +1813,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.on_receive]]
 type = "cmd"
@@ -1790,7 +1851,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "support_legacy"
@@ -1820,7 +1881,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1846,7 +1907,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1874,7 +1935,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "bad name!"
@@ -1901,7 +1962,7 @@ domain = "test.com"
 
 [mailboxes.one]
 address = "one@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.one.hooks]]
 name = "same_name"
@@ -1910,7 +1971,7 @@ cmd = "echo one"
 
 [mailboxes.two]
 address = "two@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.two.hooks]]
 name = "same_name"
@@ -1941,7 +2002,7 @@ domain = "test.com"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.support.hooks]]
 name = "h1"
@@ -1991,6 +2052,7 @@ dangerously_support_untrusted = true
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
 
@@ -2030,7 +2092,7 @@ domain = "test.com"
 
 [mailboxes.secure]
 address = "secure@test.com"
-owner = "root"
+owner = "ops"
 trust = "verified"
 trusted_senders = ["*@company.com", "boss@gmail.com"]
 "#;
@@ -2095,7 +2157,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.public]
 address = "hello@test.com"
-owner = "root"
+owner = "ops"
 trust = "none"
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -2117,7 +2179,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.strict]
 address = "strict@test.com"
-owner = "root"
+owner = "ops"
 trusted_senders = ["boss@gmail.com"]
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -2139,7 +2201,7 @@ trusted_senders = ["*@company.com"]
 
 [mailboxes.sealed]
 address = "sealed@test.com"
-owner = "root"
+owner = "ops"
 trusted_senders = []
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
@@ -2189,6 +2251,7 @@ trusted_senders = []
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         let config = Config {
@@ -2846,7 +2909,7 @@ run_as = "root"
 
 [mailboxes.accounts]
 address = "accounts@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.accounts.hooks]]
 name = "ar"
@@ -2887,7 +2950,7 @@ domain = "test.com"
 
 [mailboxes.accounts]
 address = "accounts@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.accounts.hooks]]
 name = "mcp_raw_danger"
@@ -2931,7 +2994,11 @@ dangerously_support_untrusted = true
     // ----- Sprint 1 S1-1: MailboxConfig.owner ---------------------------
 
     #[test]
-    fn load_accepts_mailbox_with_owner_root() {
+    fn load_rejects_non_catchall_owner_root() {
+        // S3-4: `owner = "root"` on a non-catchall mailbox is rejected
+        // (PRD §6.2) with an actionable suggestion pointing operators at
+        // either a regular user or the `allow_root_catchall` escape
+        // hatch on a catchall mailbox.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -2945,11 +3012,14 @@ owner = "root"
 "#,
         )
         .unwrap();
-        let (cfg, warnings) = Config::load(&path).unwrap();
-        assert_eq!(cfg.mailboxes["support"].owner, "root");
+        let err = Config::load(&path).unwrap_err().to_string();
         assert!(
-            warnings.is_empty(),
-            "root owner must not warn: {warnings:?}"
+            err.contains("cannot be owned by root"),
+            "non-catchall root owner must reject: {err}"
+        );
+        assert!(
+            err.contains("allow_root_catchall"),
+            "error must mention the escape-hatch flag: {err}"
         );
     }
 
@@ -3040,6 +3110,23 @@ owner = "deleted-user"
 
     #[test]
     fn load_mailbox_owner_roundtrip_preserved() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                "alice" => Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 1001,
+                    gid: 1001,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(resolver);
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -3053,7 +3140,7 @@ owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "alice"
 "#,
         )
         .unwrap();
@@ -3062,8 +3149,167 @@ owner = "root"
         cfg.save(&path2).unwrap();
         let (cfg2, _) = Config::load(&path2).unwrap();
         assert_eq!(cfg, cfg2);
-        assert_eq!(cfg2.mailboxes["support"].owner, "root");
+        assert_eq!(cfg2.mailboxes["support"].owner, "alice");
         assert_eq!(cfg2.mailboxes["catchall"].owner, "aimx-catchall");
+    }
+
+    // ----- Sprint 3 S3-4: owner="root" rules + allow_root_catchall ------
+
+    #[test]
+    fn load_accepts_catchall_with_default_aimx_catchall_owner() {
+        // S3-4 AC: catchall with the default `owner = "aimx-catchall"`
+        // still loads clean, without the allow_root_catchall flag.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "aimx-catchall"
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes["catchall"].owner, "aimx-catchall");
+        assert!(
+            warnings.is_empty(),
+            "default catchall must not warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_root_catchall_without_allow_flag() {
+        // S3-4 AC: catchall with owner="root" but allow_root_catchall=false
+        // (or omitted) rejects at load with a pointer to the opt-in flag.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "root"
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("catchall") && err.contains("allow_root_catchall"),
+            "catchall root without flag must hint at the escape hatch: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_root_catchall_with_allow_flag_and_warns() {
+        // S3-4 AC: catchall with owner="root" + allow_root_catchall=true
+        // loads successfully and surfaces a RootCatchallAccepted warning
+        // so the elevation is audit-logged.
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.catchall]
+address = "*@test.com"
+owner = "root"
+allow_root_catchall = true
+"#,
+        )
+        .unwrap();
+        let (cfg, warnings) = Config::load(&path).unwrap();
+        assert_eq!(cfg.mailboxes["catchall"].owner, "root");
+        assert!(cfg.mailboxes["catchall"].allow_root_catchall);
+        let has_warning = warnings.iter().any(
+            |w| matches!(w, LoadWarning::RootCatchallAccepted { mailbox } if mailbox == "catchall"),
+        );
+        assert!(
+            has_warning,
+            "root-catchall escape hatch must warn: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_allow_root_catchall_on_non_catchall_mailbox() {
+        // S3-4 AC: allow_root_catchall on any non-catchall mailbox is a
+        // config-structure error regardless of owner value — the flag
+        // only has meaning for the wildcard mailbox.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            if name == "alice" {
+                Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 1001,
+                    gid: 1001,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(resolver);
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.alice]
+address = "alice@test.com"
+owner = "alice"
+allow_root_catchall = true
+"#,
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("allow_root_catchall") && err.contains("not a catchall"),
+            "allow_root_catchall on non-catchall must reject: {err}"
+        );
+    }
+
+    #[test]
+    fn allow_root_catchall_default_false_omitted_from_serialized_toml() {
+        // Regression guard: `#[serde(skip_serializing_if)]` on the bool
+        // keeps standard catchall-owned-by-aimx-catchall configs minimal
+        // in the serialized form, so upgrades don't rewrite live configs
+        // with a surprising `allow_root_catchall = false` line.
+        let cfg = Config {
+            domain: "test.com".to_string(),
+            data_dir: PathBuf::from("/var/lib/aimx"),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "catchall".to_string(),
+                    MailboxConfig {
+                        address: "*@test.com".to_string(),
+                        owner: "aimx-catchall".to_string(),
+                        hooks: vec![],
+                        trust: None,
+                        trusted_senders: None,
+                        allow_root_catchall: false,
+                    },
+                );
+                m
+            },
+            verify_host: None,
+            enable_ipv6: false,
+        };
+        let toml_str = toml::to_string_pretty(&cfg).unwrap();
+        assert!(
+            !toml_str.contains("allow_root_catchall"),
+            "default false must not serialize: {toml_str}"
+        );
     }
 
     // ----- Sprint 1 S1-2: validate_run_as -------------------------------
@@ -3151,6 +3397,7 @@ owner = "root"
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         }
     }
 
@@ -3269,6 +3516,11 @@ owner = "root"
                     uid: 999,
                     gid: 999,
                 }),
+                "ops" => Some(ResolvedUser {
+                    name: "ops".into(),
+                    uid: 1000,
+                    gid: 1000,
+                }),
                 "someoneelse" => Some(ResolvedUser {
                     name: "someoneelse".into(),
                     uid: 1234,
@@ -3287,7 +3539,7 @@ domain = "test.com"
 
 [mailboxes.alice]
 address = "alice@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.alice.hooks]]
 name = "mismatch"
@@ -3308,6 +3560,23 @@ run_as = "someoneelse"
 
     #[test]
     fn load_valid_config_produces_empty_warning_vec() {
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn resolver(name: &str) -> Option<ResolvedUser> {
+            match name {
+                "aimx-catchall" => Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 999,
+                    gid: 999,
+                }),
+                "ops" => Some(ResolvedUser {
+                    name: name.into(),
+                    uid: 1000,
+                    gid: 1000,
+                }),
+                _ => None,
+            }
+        }
+        let _guard = set_test_resolver(resolver);
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -3321,7 +3590,7 @@ owner = "aimx-catchall"
 
 [mailboxes.support]
 address = "support@test.com"
-owner = "root"
+owner = "ops"
 "#,
         )
         .unwrap();
@@ -3550,7 +3819,7 @@ run_as = "totally-missing-user"
 
 [mailboxes.alice]
 address = "alice@test.com"
-owner = "root"
+owner = "ops"
 
 [[mailboxes.alice.hooks]]
 name = "uses-t1"

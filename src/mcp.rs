@@ -1344,6 +1344,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
@@ -1354,6 +1355,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {

@@ -135,6 +135,7 @@ fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
         hooks: vec![],
         trust: None,
         trusted_senders: None,
+        allow_root_catchall: false,
     };
     let uid = mb
         .owner_uid()
@@ -218,6 +219,7 @@ fn handle_create(
         hooks: vec![],
         trust: None,
         trusted_senders: None,
+        allow_root_catchall: false,
     };
     new_config
         .mailboxes
@@ -446,6 +448,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {
@@ -800,10 +803,11 @@ mod tests {
             "alice".to_string(),
             MailboxConfig {
                 address: "alice@example.com".into(),
-                owner: "root".into(),
+                owner: "ops".into(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         write_config_atomic(&path, &c2).unwrap();
