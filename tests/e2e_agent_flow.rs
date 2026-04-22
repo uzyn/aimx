@@ -188,6 +188,17 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // validation before submitting over UDS). Relax to 0644 so the
     // test-user-initiated CLI reads succeed without having to create
     // an `aimx-hook`-style shared group.
+    //
+    // The daemon re-writes `config.toml` atomically on every
+    // TEMPLATE-CREATE / HOOK-CREATE, using `File::create` which
+    // inherits the process's umask. CI runs as root with umask 0077,
+    // so without intervention every daemon-side rewrite would clamp
+    // the file back to 0600 and break the next test-user read. Force
+    // a 0022 umask for the whole test so `File::create`-written
+    // `config.toml` stays group/world-readable.
+    unsafe {
+        libc::umask(0o022);
+    }
     chmod(&config_path, 0o644);
 
     // Catchall user must exist for Config::load to not warn (it's
