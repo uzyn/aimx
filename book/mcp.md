@@ -22,6 +22,21 @@ The server runs in stdio mode. It reads from stdin and writes to stdout. It is l
 
 See [Agent Integration](agent-integration.md) for one-line `aimx agent-setup <agent>` installers and the manual MCP wiring pattern for clients not yet in the registry.
 
+## Per-user visibility
+
+The MCP server inherits the uid of the user that launched the client (stdio transport — there is no server process doing multi-user auth). The daemon applies `SO_PEERCRED` on every UDS request made by the MCP server and enforces per-mailbox ownership:
+
+- `mailbox_list` returns only mailboxes whose `owner` equals the caller's username. The catchall mailbox is visible because its owner is the reserved `aimx-catchall` user (visible to MCP clients regardless of caller).
+- `email_list`, `email_read`, `email_send`, `email_reply`, `email_mark_read`, `email_mark_unread` all reject with `EACCES` when the target mailbox is owned by another user.
+- `hook_list_templates` returns templates whose `run_as` equals the caller's username, plus reserved templates (`run_as = "aimx-catchall"` or `"root"`).
+- `hook_create` and `hook_delete` operate only on mailboxes the caller owns. The daemon also enforces `hook.run_as == mailbox.owner OR hook.run_as == "root"` (catchall exception: `aimx-catchall`) on every write.
+
+Filesystem enforcement backs this up: every mailbox directory is `0700 <owner>:<owner>`, so even direct `.md` reads only succeed for the mailbox's owner. On a single-user box the rules are invisible (one user owns everything); on a multi-user box they give real isolation between alice and bob.
+
+Root running the MCP server bypasses mailbox-ownership checks (and is logged at info level). Non-root callers see only their own world.
+
+See [Hooks § UDS authorization (`SO_PEERCRED`)](hooks.md#uds-authorization-so_peercred) for the full per-verb authz table and the reserved `run_as` values.
+
 ## MCP tools
 
 aimx exposes 13 MCP tools organized into mailbox management, email operations, and hook templates.
@@ -165,14 +180,14 @@ Enumerate hook templates enabled on this install.
 
 **Parameters:** none
 
-**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are enabled — the operator must install them via `sudo aimx setup`.
+**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are visible — for per-agent templates the caller should run `aimx agent-setup <agent>` (no sudo) to register `invoke-<agent>-<username>`. Templates are filtered to the caller's visibility: only `run_as = <caller_username>` and reserved-`run_as` templates are returned.
 
-Example:
+Example (for alice, after running `aimx agent-setup claude-code`):
 
 ```json
 [
   {
-    "name": "invoke-claude",
+    "name": "invoke-claude-alice",
     "description": "Pipe email into Claude Code with a prompt",
     "params": ["prompt"],
     "allowed_events": ["on_receive", "after_send"]
@@ -225,7 +240,7 @@ List hooks visible to MCP across all (or one) mailbox.
 
 ```json
 [
-  {"name": "accounts-auto-reply", "mailbox": "accounts", "event": "on_receive", "origin": "mcp", "template": "invoke-claude", "params": {"prompt": "..."}},
+  {"name": "accounts-auto-reply", "mailbox": "accounts", "event": "on_receive", "origin": "mcp", "template": "invoke-claude-alice", "params": {"prompt": "..."}},
   {"name": "op_audit", "mailbox": "accounts", "event": "on_receive", "origin": "operator"}
 ]
 ```

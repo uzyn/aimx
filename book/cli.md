@@ -204,16 +204,28 @@ No flags. See [MCP Server](mcp.md).
 
 ### `aimx agent-setup [agent]`
 
-Install the aimx plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
+Install the aimx plugin / skill for a supported agent into the current user's config directory, probe `$PATH` for the agent binary, and register an `invoke-<agent>-<username>` hook template over the daemon's UDS. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
 
 | Flag | Description |
 |------|-------------|
 | `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit to print the registry. |
 | `--list` | Print the registry: agent name, destination path, activation hint. Equivalent to running with no positional argument. |
 | `--force` | Overwrite existing destination files without prompting. |
-| `--print` | Print the plugin contents to stdout instead of writing to disk. |
+| `--print` | Print the plugin contents and the template that would be registered to stdout instead of writing to disk. |
+| `--no-template` | Install plugin files only; skip the `$PATH` probe and `TEMPLATE-CREATE` over UDS. |
+| `--redetect` | Re-probe `$PATH` and update the existing `invoke-<agent>-<username>` template's `cmd[0]` (for when the agent binary moved). |
 
 See [Agent Integration](agent-integration.md) for per-agent activation steps.
+
+### `aimx agent-cleanup <agent>`
+
+Inverse of `agent-setup`. Submits `TEMPLATE-DELETE` for `invoke-<agent>-<caller_username>` to the daemon. With `--full`, also removes the plugin files under `$HOME` that `agent-setup` laid down. Refuses to run as root. When the daemon is unreachable, plugin files (if `--full`) are still removed and the command exits `2` with a pointer to `sudo aimx hooks prune --orphans`.
+
+| Flag | Description |
+|------|-------------|
+| `<agent>` (positional) | Short name; must match the agent previously passed to `agent-setup`. |
+| `--full` | Also remove plugin files under `$HOME`. |
+| `-y`, `--yes` | Skip the interactive prompt when `--full` removes plugin files. |
 
 ## Utilities
 

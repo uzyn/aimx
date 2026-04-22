@@ -4,6 +4,31 @@ All tools are served by the `aimx` binary over stdio (MCP transport). They
 return strings on success and error strings on failure. The MCP server is
 launched on-demand by your MCP client. It is not a long-running process.
 
+## Per-user visibility
+
+The MCP server inherits the uid of the user that launched the client.
+All tool calls that touch a mailbox consult the daemon over the world-
+writable UDS; the daemon reads `SO_PEERCRED` from the socket and
+rejects any request whose caller uid does not own the target mailbox
+(root is the only bypass). Effectively:
+
+- `mailbox_list` returns only mailboxes whose `owner` equals the
+  caller's username (plus the catchall, which is owned by
+  `aimx-catchall`).
+- `email_list`, `email_read`, `email_send`, `email_reply`,
+  `email_mark_read`, `email_mark_unread` reject `EACCES` for any
+  mailbox the caller does not own.
+- `hook_list_templates` returns templates whose `run_as` equals the
+  caller's username, plus reserved templates (`run_as =
+  "aimx-catchall"` or `"root"`).
+- `hook_create` / `hook_delete` operate only on mailboxes the caller
+  owns. The constraint `hook.run_as == mailbox.owner OR hook.run_as ==
+  "root"` (exception: catchall allows `aimx-catchall`) is enforced at
+  every write.
+
+On a single-user box the caller always owns everything and the rules
+are invisible. On a multi-user box they give real isolation.
+
 ## Mailbox tools
 
 ### `mailbox_create`
@@ -304,9 +329,11 @@ troubleshooting.
 
 ### `hook_list_templates`
 
-List hook templates enabled on this install. Call this first — the
-list is empty until the operator has enabled templates during
-`aimx setup`.
+List hook templates visible to the caller. A template is visible when
+its `run_as` equals the caller's username, or when `run_as` is a
+reserved sentinel (`aimx-catchall` or `root`). Per-agent templates
+follow the naming scheme `invoke-<agent>-<username>` and are created
+by `aimx agent-setup <agent>` (run without sudo by the owning user).
 
 **Parameters:** None.
 
@@ -314,11 +341,13 @@ list is empty until the operator has enabled templates during
 `params` (string array of declared parameter names), `allowed_events`
 (subset of `["on_receive", "after_send"]`).
 
-**Example:**
+**Example, visible to alice after she runs `aimx agent-setup claude-code`:**
 ```
 hook_list_templates()
-→ [{"name":"invoke-claude","description":"Pipe email into Claude with a prompt.",
-    "params":["prompt"],"allowed_events":["on_receive","after_send"]}]
+→ [{"name":"invoke-claude-alice","description":"Pipe email into Claude with a prompt.",
+    "params":["prompt"],"allowed_events":["on_receive","after_send"]},
+   {"name":"webhook","description":"POST the email as JSON to a URL",
+    "params":["url"],"allowed_events":["on_receive","after_send"]}]
 ```
 
 ---
@@ -345,11 +374,11 @@ the resulting hook, and writes it to `config.toml`.
 hook_create(
   mailbox: "agent",
   event: "on_receive",
-  template: "invoke-claude",
+  template: "invoke-claude-alice",
   params: {"prompt": "You are an assistant."}
 )
 → {"effective_name":"a1b2c3d4e5f6",
-   "substituted_argv":["/usr/local/bin/claude","-p","You are an assistant."]}
+   "substituted_argv":["/home/alice/.local/bin/claude","-p","You are an assistant."]}
 ```
 
 **Errors:**
@@ -381,7 +410,7 @@ shape of each origin variant.
 hook_list()
 → [{"name":"daily-report","mailbox":"agent","event":"after_send","origin":"operator"},
    {"name":"mcp_hook","mailbox":"agent","event":"on_receive","origin":"mcp",
-    "template":"invoke-claude","params":{"prompt":"…"}}]
+    "template":"invoke-claude-alice","params":{"prompt":"…"}}]
 ```
 
 ---

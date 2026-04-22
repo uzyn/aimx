@@ -5,12 +5,13 @@
 //! definitions without digging through Rust struct literals. The file
 //! is embedded via `include_str!` and parsed on demand.
 //!
-//! Sprint 3 (S3-3) retired the interactive setup checkbox that used to
-//! drive template selection off this module. Sprint 8 will strip the
-//! `invoke-*` blocks from the embedded TOML entirely. For now the
-//! module still compile-time-validates the bundled file so a malformed
-//! edit is caught at build time, but nothing in the runtime setup
-//! flow reads the parsed templates.
+//! Sprint 8 (S8-1) stripped every `invoke-<agent>` block from the
+//! bundled TOML — per-agent templates are now created on demand by
+//! `aimx agent-setup` so they bind to the caller's `$PATH` and uid
+//! rather than a hardcoded path. Only the agent-neutral `webhook`
+//! template remains pre-bundled. The module still compile-time-
+//! validates the bundled file so a malformed edit is caught at
+//! build time.
 #![allow(dead_code)]
 
 use crate::config::{HookTemplate, validate_hook_templates};
@@ -65,16 +66,17 @@ mod tests {
         let templates = default_templates();
         assert_eq!(
             templates.len(),
-            8,
-            "expected 8 default templates per PRD §6.2, got {}",
+            1,
+            "expected 1 default template (webhook) per PRD §6.7, got {}",
             templates.len()
         );
     }
 
-    /// PRD §6.2 pins the exact argv shape and stdin mode for each
-    /// default template. This test is a forcing function: drift in
-    /// `defaults.toml` must be an explicit update to the PRD, not a
-    /// silent change in the shipped binary.
+    /// PRD §6.7 pins the exact argv shape and stdin mode for the
+    /// `webhook` template — the only default template bundled after
+    /// Sprint 8 stripped the per-agent `invoke-*` blocks. This test is
+    /// a forcing function: drift in `defaults.toml` must be an explicit
+    /// update to the PRD, not a silent change in the shipped binary.
     #[test]
     fn default_templates_match_prd_spec() {
         let templates = default_templates();
@@ -86,64 +88,6 @@ mod tests {
                 .cloned()
                 .unwrap_or_else(|| panic!("template '{n}' missing from defaults"))
         };
-
-        let invoke_claude = by_name("invoke-claude");
-        assert_eq!(
-            invoke_claude.cmd,
-            vec!["/usr/local/bin/claude", "-p", "{prompt}"],
-        );
-        assert_eq!(invoke_claude.params, vec!["prompt"]);
-        assert_eq!(invoke_claude.stdin, HookTemplateStdin::Email);
-
-        let invoke_codex = by_name("invoke-codex");
-        assert_eq!(
-            invoke_codex.cmd,
-            vec!["/usr/local/bin/codex", "-p", "{prompt}"],
-        );
-        assert_eq!(invoke_codex.params, vec!["prompt"]);
-        assert_eq!(invoke_codex.stdin, HookTemplateStdin::Email);
-
-        let invoke_opencode = by_name("invoke-opencode");
-        assert_eq!(
-            invoke_opencode.cmd,
-            vec!["/usr/local/bin/opencode", "run", "{prompt}"],
-        );
-        assert_eq!(invoke_opencode.params, vec!["prompt"]);
-        assert_eq!(invoke_opencode.stdin, HookTemplateStdin::Email);
-
-        let invoke_gemini = by_name("invoke-gemini");
-        assert_eq!(
-            invoke_gemini.cmd,
-            vec!["/usr/local/bin/gemini", "-p", "{prompt}"],
-        );
-        assert_eq!(invoke_gemini.params, vec!["prompt"]);
-        assert_eq!(invoke_gemini.stdin, HookTemplateStdin::Email);
-
-        let invoke_goose = by_name("invoke-goose");
-        assert_eq!(
-            invoke_goose.cmd,
-            vec!["/usr/local/bin/goose", "run", "--recipe", "{recipe}"],
-        );
-        assert_eq!(invoke_goose.params, vec!["recipe"]);
-        // PRD §11 Q3: shipping with `stdin = "email"`; revisit if Goose
-        // recipes prove to need a `email_yaml` encoding.
-        assert_eq!(invoke_goose.stdin, HookTemplateStdin::Email);
-
-        let invoke_openclaw = by_name("invoke-openclaw");
-        assert_eq!(
-            invoke_openclaw.cmd,
-            vec!["/usr/local/bin/openclaw", "run", "{prompt}"],
-        );
-        assert_eq!(invoke_openclaw.params, vec!["prompt"]);
-        assert_eq!(invoke_openclaw.stdin, HookTemplateStdin::Email);
-
-        let invoke_hermes = by_name("invoke-hermes");
-        assert_eq!(
-            invoke_hermes.cmd,
-            vec!["/usr/local/bin/hermes", "run", "{prompt}"],
-        );
-        assert_eq!(invoke_hermes.params, vec!["prompt"]);
-        assert_eq!(invoke_hermes.stdin, HookTemplateStdin::Email);
 
         let webhook = by_name("webhook");
         assert_eq!(
@@ -164,17 +108,19 @@ mod tests {
         assert_eq!(webhook.stdin, HookTemplateStdin::EmailJson);
     }
 
-    /// Every default template runs as `aimx-hook` (never root) and
-    /// allows both events unless an explicit override is added later.
-    /// This test pins the defaults so a sloppy edit that sets
-    /// `run_as = "root"` on a default template fails the suite loudly.
+    /// The bundled `webhook` template must never run as root and must
+    /// allow both events so operators can bind it to `on_receive` or
+    /// `after_send` without further tweaks. `aimx-catchall` is the
+    /// safe default `run_as`: the reserved catchall service user is
+    /// created on demand by `aimx setup` when the operator configures
+    /// a catchall mailbox.
     #[test]
     fn default_templates_all_unprivileged_and_dual_event() {
         for t in default_templates() {
-            assert_eq!(
-                t.run_as, "aimx-hook",
-                "default template '{}' must run as aimx-hook, got '{}'",
-                t.name, t.run_as,
+            assert_ne!(
+                t.run_as, "root",
+                "default template '{}' must not run as root",
+                t.name,
             );
             assert_eq!(
                 t.timeout_secs, 60,
@@ -196,17 +142,21 @@ mod tests {
         let names = default_template_names();
         assert_eq!(
             names,
-            vec![
-                "invoke-claude",
-                "invoke-codex",
-                "invoke-opencode",
-                "invoke-gemini",
-                "invoke-goose",
-                "invoke-openclaw",
-                "invoke-hermes",
-                "webhook",
-            ],
-            "default template ordering must match PRD §6.3 checkbox list",
+            vec!["webhook"],
+            "default template ordering must match PRD §6.7 (webhook only after Sprint 8)",
         );
+    }
+
+    /// Regression guard for Sprint 8 S8-1: no `invoke-*` blocks should
+    /// ever re-enter the bundled defaults. Per-agent templates belong
+    /// to `aimx agent-setup`, which registers them on demand.
+    #[test]
+    fn defaults_toml_has_no_invoke_templates() {
+        for name in default_template_names() {
+            assert!(
+                !name.starts_with("invoke-"),
+                "bundled default '{name}' must not begin with 'invoke-' (PRD §6.7)",
+            );
+        }
     }
 }

@@ -93,6 +93,17 @@ jobs:
             mailbox_delete_force_without_yes_prompts_and_aborts_on_n \
             concurrent_mailbox_create_and_ingest_does_not_deadlock
 
+      # Sprint 8 S8-4: end-to-end agent flow test. Creates a real
+      # system user, runs `aimx setup`-style config + DKIM keys, then
+      # `aimx agent-setup claude-code` with a fake `claude` binary,
+      # ingests a trusted `.eml`, and asserts the hook fired under the
+      # matching uid via a sentinel file. Finishes with
+      # `aimx agent-cleanup --full` and asserts the plugin files +
+      # template are gone.
+      - name: Run agent-flow end-to-end test (root)
+        run: |
+          sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test e2e_agent_flow -- --ignored
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:

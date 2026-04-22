@@ -19,7 +19,7 @@ use crate::hook::HookEvent;
 use crate::mcp::{MarkOutcome, is_socket_missing, parse_ack_response};
 use crate::send_protocol::{
     self, HookCreateRequest, HookDeleteRequest, HookTemplateCreateBody, TemplateCreateRequest,
-    TemplateUpdateRequest,
+    TemplateDeleteRequest, TemplateUpdateRequest,
 };
 
 /// Outcome of a hook CRUD submission that didn't succeed via UDS. Tracks
@@ -210,6 +210,20 @@ pub(crate) fn submit_template_update_via_daemon(
     map_template_outcome(io_result, &socket)
 }
 
+/// Submit an `AIMX/1 TEMPLATE-DELETE` request over UDS. Used by
+/// `aimx agent-cleanup <agent>` to drop the caller's
+/// `invoke-<agent>-<username>` template when the operator uninstalls
+/// the agent. The daemon enforces caller-uid = template.run_as so
+/// each user can only delete their own templates.
+pub(crate) fn submit_template_delete_via_daemon(
+    request: &TemplateDeleteRequest,
+) -> Result<(), TemplateCrudFallback> {
+    let socket = crate::serve::aimx_socket_path();
+    let io_result: Result<MarkOutcome, std::io::Error> =
+        run_on_runtime(|| async { submit_template_delete_request(&socket, request).await })?;
+    map_template_outcome(io_result, &socket)
+}
+
 fn run_on_runtime<F, Fut>(
     make_fut: F,
 ) -> Result<Result<MarkOutcome, std::io::Error>, TemplateCrudFallback>
@@ -285,6 +299,24 @@ async fn submit_template_update_request(
     let (mut reader, mut writer) = stream.into_split();
 
     send_protocol::write_template_update_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+async fn submit_template_delete_request(
+    socket_path: &std::path::Path,
+    request: &TemplateDeleteRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_template_delete_request(&mut writer, request).await?;
     writer.shutdown().await.ok();
 
     let mut buf = Vec::with_capacity(128);

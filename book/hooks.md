@@ -7,8 +7,8 @@ Hooks trigger commands on specific email events. Two events are supported today:
 
 aimx supports two hook flavours:
 
-1. **Template hooks (recommended).** The operator installs a small set of pre-vetted command shapes once; agents then pick a template and fill declared parameters via MCP. Template hooks run sandboxed as the unprivileged `aimx-hook` user and can be created without a shell.
-2. **Raw-cmd hooks (power user).** The operator hand-writes a shell command in `config.toml` or via `aimx hooks create --cmd`. Raw-cmd hooks also run sandboxed as `aimx-hook` by default.
+1. **Template hooks (recommended).** Per-agent templates are registered by each user who runs `aimx agent-setup <agent>` (no sudo); an agent-neutral `webhook` template ships pre-bundled. Agents then pick a template and fill declared parameters via MCP. Each template's `run_as` equals the registering user's Linux username, so hook children drop into that user's uid before exec.
+2. **Raw-cmd hooks (power user).** The operator hand-writes a shell command in `config.toml` or via `sudo aimx hooks create --cmd`. Raw-cmd hooks carry an explicit `run_as` username (any existing Linux user, or the reserved `aimx-catchall` / `root`).
 
 Combined with the mailbox-level `trust` policy, hooks gate shell-side automation on DKIM-verified inbound mail and on outbound delivery outcomes.
 
@@ -21,34 +21,22 @@ Templates are the agent-native way to wire up hooks. They enable the "chat with 
 ### Why templates?
 
 - **No shell injection surface.** An agent that can create arbitrary `cmd` strings can escalate to local RCE. A template exposes only declared `{placeholder}` slots; parameter values substitute into argv entries but can never introduce new arguments or escape their slot (no shell is ever invoked).
-- **Sandboxed by default.** Every template hook runs as `aimx-hook` (non-root, no login shell, no access to `/etc/aimx/dkim/`). On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`.
-- **Agent-friendly discovery.** MCP exposes `hook_list_templates` so an agent can enumerate what it can wire up before asking.
+- **Sandboxed by default.** Every template hook drops to the template's `run_as` user before exec (non-root, no login shell, no access to `/etc/aimx/dkim/`). On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`.
+- **Agent-friendly discovery.** MCP exposes `hook_list_templates` (filtered to the caller's visibility) so an agent can enumerate what it can wire up before asking.
 
-### Install templates with `aimx setup`
+### Install templates
 
-During the interactive setup flow, aimx asks which templates to enable:
+Per-agent templates are registered on demand by the user who wants them:
 
-```text
-[Hook Templates]
-Hook templates let your agents create their own on_receive / after_send
-automations via MCP, safely. Each template is a pre-vetted command shape;
-agents can only fill declared parameters. Hook commands run as the
-unprivileged 'aimx-hook' user, never as root.
-
-Which templates should I enable? (space to toggle, enter to confirm)
- [ ] invoke-claude     Pipe email into Claude Code with a prompt
- [ ] invoke-codex      Pipe email into Codex CLI with a prompt
- [ ] invoke-opencode   Pipe email into OpenCode with a prompt
- [ ] invoke-gemini     Pipe email into Gemini CLI with a prompt
- [ ] invoke-goose      Pipe email into a Goose recipe
- [ ] invoke-openclaw   Pipe email into OpenClaw with a prompt
- [ ] invoke-hermes     Pipe email into Hermes with a prompt
- [x] webhook           POST the email as JSON to a URL
+```bash
+aimx agent-setup claude-code      # runs as the user, no sudo
 ```
 
-Re-run `aimx setup` any time to toggle which templates are enabled; your current selection is pre-ticked. Use `aimx hooks templates` to list enabled templates without opening `config.toml`.
+This probes `$PATH` for the agent binary, submits `TEMPLATE-CREATE` over the UDS, and lands a template named `invoke-<agent>-<username>` (for example `invoke-claude-alice`). The daemon hot-swaps its in-memory config so the template is live immediately — no SIGHUP, no restart. See [Agent integration](agent-integration.md) for the full flow.
 
-See the [default template catalog](configuration.md#default-hook-templates) for the exact `cmd` shapes and parameter lists each template declares.
+Only the agent-neutral `webhook` template ships pre-bundled. All other templates are user-registered.
+
+Use `aimx hooks templates` to list the templates visible on your box. An operator can always drop a `[[hook_template]]` block into `config.toml` by hand for a hand-built template — the UDS verb only accepts templates whose `run_as` matches the caller's uid, but root's `config.toml` edit can install anything (for example `run_as = "aimx-catchall"` for a catchall-bound template, or `run_as = "root"` for a rare privileged handler).
 
 ### Create a template hook via MCP
 
@@ -62,7 +50,7 @@ An agent in an `aimx mcp` session discovers and creates hooks like this (see [MC
 {"name": "hook_create", "arguments": {
   "mailbox": "accounts",
   "event": "on_receive",
-  "template": "invoke-claude",
+  "template": "invoke-claude-alice",
   "params": {"prompt": "You are the accounts agent. File this email and draft a reply with the current balance."}
 }}
 ```
@@ -77,7 +65,7 @@ Operators can create template hooks from the shell too:
 sudo aimx hooks create \
   --mailbox accounts \
   --event on_receive \
-  --template invoke-claude \
+  --template invoke-claude-alice \
   --param prompt="You are the accounts agent..."
 ```
 
@@ -85,7 +73,7 @@ The CLI sends the request over the same UDS verb MCP uses, so the hook ends up w
 
 ## Raw-cmd hooks (power user)
 
-Raw-cmd hooks let the operator drop an arbitrary shell string directly into `config.toml`. The command is wrapped in `/bin/sh -c` and executed inside the same `aimx-hook` sandbox as template hooks. The operator can opt a raw-cmd hook back to `run_as = "root"` by hand-editing `config.toml` — this is intentionally not reachable from the CLI or MCP.
+Raw-cmd hooks let the operator drop an arbitrary shell string directly into `config.toml`. The command is wrapped in `/bin/sh -c` and executed inside the same privilege-dropped sandbox as template hooks. Hook `run_as` defaults to the mailbox's `owner`; the operator can elevate to `run_as = "root"` by hand-editing `config.toml` — this is intentionally not reachable from the CLI or MCP. The reserved `aimx-catchall` value is allowed on hooks attached to the catchall mailbox.
 
 ```toml
 [[mailboxes.support.hooks]]
@@ -131,7 +119,7 @@ Raw-cmd hook creation requires `sudo` because it writes `/etc/aimx/config.toml` 
 | `template` | string | conditional | Template name from `[[hook_template]]`. Forbidden for raw-cmd hooks. |
 | `params` | table | no | Bound parameter values for template hooks. Keys must match the template's declared `params`. |
 | `dangerously_support_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. Rejected on MCP-origin hooks. |
-| `run_as` | string | no | `"aimx-hook"` (default) or `"root"`. Settable only via hand-edit of `config.toml` — not via CLI or MCP. |
+| `run_as` | string | no | Any existing Linux username, plus the reserved `"aimx-catchall"` and `"root"`. Must equal the mailbox's `owner` (catchall exception: `"aimx-catchall"`) or `"root"`. `"root"` is settable only via hand-edit of `config.toml` — not via CLI or MCP. |
 | `origin` | string | no | `"operator"` (default) or `"mcp"`. Stamped automatically; lets `hook_delete` distinguish submission channels. |
 
 Multiple hooks can be defined per mailbox; each is evaluated independently. Unknown fields on a hook table are rejected at config load.
@@ -144,7 +132,7 @@ When an email is ingested or sent:
 2. aimx walks the mailbox's `hooks` array, picking entries whose `event` matches.
 3. For `on_receive`, the trust gate is applied: the hook fires iff `trusted == "true"` on the email, OR the hook sets `dangerously_support_untrusted = true`.
 4. For template hooks, the daemon looks up the matching `[[hook_template]]`, substitutes declared `params` + built-in placeholders into the argv, and launches the command via `spawn_sandboxed`. For raw-cmd hooks, `/bin/sh -c <cmd>` is spawned the same way.
-5. On systemd the subprocess runs under `systemd-run` with `--uid=aimx-hook`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, and `RuntimeMaxSec=<timeout_secs>`. On OpenRC the daemon `fork+exec`s with `setgid/setuid` to `aimx-hook` plus a manual timeout.
+5. On systemd the subprocess runs under `systemd-run` with `--uid=<run_as>`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, and `RuntimeMaxSec=<timeout_secs>`. On OpenRC the daemon `fork+exec`s with `setresgid/setresuid` to `<run_as>` plus a manual timeout.
 6. stdout and stderr are captured and truncated at 64 KiB each; the daemon awaits the subprocess for predictable timing.
 7. Hook failures (non-zero exit, timeout) are logged at `warn` but **never block delivery**.
 
@@ -200,11 +188,38 @@ The tag is stamped by the daemon based on submission channel, not by the author 
 
 MCP `hook_list` shows all hooks but **masks `cmd` / `params` on operator-origin entries** so agents can avoid duplicates without snooping on operator logic.
 
+## UDS authorization (`SO_PEERCRED`)
+
+`/run/aimx/aimx.sock` is world-writable (`0666`). Every UDS request is authorized by reading the caller's uid via `SO_PEERCRED` and applying per-verb rules. Filesystem permissions are not the security boundary on the socket — the kernel-enforced peer uid is.
+
+| Verb | Authorization |
+|------|---------------|
+| `SEND` | Caller uid must own the mailbox resolved from the `From:` local part, OR be root. |
+| `MARK-READ` / `MARK-UNREAD` | Caller uid must own the target mailbox, OR be root. |
+| `MAILBOX-CREATE` / `MAILBOX-DELETE` | Root only. |
+| `HOOK-CREATE` | Caller uid must own the target mailbox (so alice cannot attach hooks to bob's mailbox). |
+| `HOOK-DELETE` | Caller uid must own the target mailbox. Origin-protection rules (operator-origin hooks are CLI-only to remove) still apply. |
+| `TEMPLATE-CREATE` | Caller's username must equal the submitted `run_as`. `root` and `aimx-catchall` templates can only be created by a root-executed `config.toml` edit; the UDS verb rejects those values regardless of caller. |
+| `TEMPLATE-DELETE` | Caller can delete only templates whose `run_as` equals their username. |
+
+Rejected requests return an `AIMX/1 ERR` response with `code = "EACCES"` and a human-readable reason. Caller uid 0 (root) bypasses all mailbox-ownership checks and is logged at info level so `aimx logs` shows the escalation.
+
+### Reserved `run_as` values
+
+Two usernames are reserved and accepted even on hosts where no matching Linux account exists:
+
+| Reserved value | Purpose | Who can set it |
+|----------------|---------|----------------|
+| `aimx-catchall` | System user for catchall-mailbox hooks and templates. Created on demand by `aimx setup` when the operator configures a catchall mailbox. | Anyone editing `config.toml` as root; never accepted via UDS `TEMPLATE-CREATE`. |
+| `root` | Unusual: hooks that need root privileges (rare). | Operator only, via hand-edit of `config.toml`; never accepted via UDS. |
+
+All other `run_as` values must resolve via `getpwnam(3)` at `Config::load`. Unresolvable usernames are retained as orphan-flagged in the in-memory config (the daemon stays up) and soft-skipped at fire time; `aimx doctor` surfaces them.
+
 ## Trust gate (`on_receive` only)
 
 > An `on_receive` hook fires iff `email.trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`.
 
-MCP-origin hooks cannot set `dangerously_support_untrusted` — if an agent could opt itself into firing on untrusted mail, the template sandbox is the only thing standing between a spoofed email and an `aimx-hook`-level subprocess. The field is only settable on operator-origin hooks in `config.toml`.
+MCP-origin hooks cannot set `dangerously_support_untrusted` — if an agent could opt itself into firing on untrusted mail, the template sandbox is the only thing standing between a spoofed email and a subprocess running as the template's `run_as`. The field is only settable on operator-origin hooks in `config.toml`.
 
 `email.trusted` is computed from the mailbox's `trust` + `trusted_senders` policy and written to frontmatter at ingest:
 
@@ -262,7 +277,7 @@ Prints a table (`NAME`, `MAILBOX`, `EVENT`, `ORIGIN`, `CMD`). The `CMD` column i
 aimx hooks templates
 ```
 
-Prints a table of enabled templates (`NAME`, `DESCRIPTION`, `PARAMS`, `EVENTS`). Empty output means no templates are enabled — re-run `sudo aimx setup` and tick the ones you need.
+Prints a table of enabled templates (`NAME`, `DESCRIPTION`, `PARAMS`, `EVENTS`, `RUN_AS`). Empty output means no per-agent templates are registered for your user yet — run `aimx agent-setup <agent>` (no sudo) for the agent you want.
 
 ### Delete a hook
 
@@ -273,15 +288,25 @@ aimx hooks delete support_notify --yes   # scripted
 
 `delete` accepts either an explicit name or a derived one. Operator-origin hooks require `sudo`; MCP-origin hooks can be deleted without privilege via the UDS.
 
+### Prune orphaned templates and hooks
+
+```bash
+sudo aimx hooks prune --orphans          # print diff, ask to confirm
+sudo aimx hooks prune --orphans --yes    # scripted
+sudo aimx hooks prune --orphans --dry-run  # show what would be removed without writing
+```
+
+`hooks prune --orphans` removes every `HookTemplate` whose `run_as` user is gone, plus every `Hook` whose `run_as` user is gone or whose referenced template is gone. It is root-only, atomically rewrites `config.toml`, and prints a summary of what was removed (names plus the reason for each). To avoid cascading a half-broken config, it refuses to run if `aimx doctor` reports non-orphan issues — fix those first. Typical operator flow: delete a Linux user with `userdel alice`, run `aimx doctor` to confirm only orphan warnings remain, then `sudo aimx hooks prune --orphans` to clean up.
+
 ## Structured hook-fire logs
 
 Every hook fire emits one `info`-level log line with a stable format:
 
 ```text
-hook_name=<name> event=<on_receive|after_send> mailbox=<m> template=<name|-> run_as=<aimx-hook|root> sandbox=<systemd-run|fallback> email_id=<id> exit_code=<n> duration_ms=<n> timed_out=<true|false> stderr_tail="..."
+hook_name=<name> event=<on_receive|after_send> mailbox=<m> template=<name|-> run_as=<username|root|aimx-catchall> sandbox=<systemd-run|fallback> email_id=<id> exit_code=<n> duration_ms=<n> timed_out=<true|false> stderr_tail="..."
 ```
 
-`template=-` indicates a raw-cmd hook; `run_as` reflects what the daemon *attempted* (on non-root dev boxes without the `aimx-hook` user, the log still reads `run_as=aimx-hook` while the subprocess actually runs as the current user and a WARN is logged separately).
+`template=-` indicates a raw-cmd hook; `run_as` reflects the configured user (resolved at fire time via `getpwnam`). When the user has been removed (`userdel alice`), the daemon soft-skips the hook with a WARN carrying `reason = "run_as_missing"` — see `aimx doctor` and `hooks prune --orphans`.
 
 Operators can build `journalctl -u aimx | grep hook_name=<name>` workflows around it to trace every fire. `aimx doctor` parses these log lines to report 24h fire and failure counts per template.
 
@@ -290,23 +315,26 @@ Operators can build `journalctl -u aimx | grep hook_name=<name>` workflows aroun
 ### Trigger Claude Code on verified mail (template hook)
 
 ```toml
-# config.toml — operator installs the template once via `aimx setup`
+# config.toml — alice's `aimx agent-setup claude-code` writes this block over UDS
 [[hook_template]]
-name = "invoke-claude"
+name = "invoke-claude-alice"
 description = "Pipe email into Claude Code with a prompt"
-cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
+cmd = ["/home/alice/.local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
 stdin = "email"
+run_as = "alice"
+timeout_secs = 60
+allowed_events = ["on_receive", "after_send"]
 ```
 
 Then an agent binds the template to a mailbox:
 
 ```bash
-# Via MCP hook_create, or from the CLI:
-sudo aimx hooks create \
+# Via MCP hook_create, or from the CLI (no sudo needed — the UDS verifies the caller owns the mailbox):
+aimx hooks create \
   --mailbox schedule \
   --event on_receive \
-  --template invoke-claude \
+  --template invoke-claude-alice \
   --param prompt="Handle this scheduling request."
 ```
 

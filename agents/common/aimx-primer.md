@@ -25,11 +25,45 @@ aimx gives you two complementary ways to interact with email:
    read/unread). The `aimx` MCP server runs over stdio and is launched
    on-demand by your MCP client.
 2. **Direct filesystem reads** for reading `.md` email files, scanning
-   directories, or bulk-processing. The data directory is world-readable and
-   its format is stable.
+   directories, or bulk-processing. Mailbox directories are mode `0700`
+   and owned by the mailbox's Linux owner, so you see only the mailboxes
+   owned by the user running your MCP process.
 
 Writes always go through MCP. Never create, modify, or delete `.md` files
 directly. The daemon owns those paths.
+
+## Per-user ownership model
+
+Each mailbox belongs to exactly one Linux user (one user can own many
+mailboxes; one mailbox has exactly one owner). aimx enforces this at
+every layer:
+
+- **Storage.** `/var/lib/aimx/inbox/<mailbox>/` and `sent/<mailbox>/` are
+  chowned `<owner>:<owner>` mode `0700`. Non-owners cannot traverse in,
+  regardless of group. The one exception is the catchall mailbox, owned
+  by the dedicated `aimx-catchall` system user.
+- **MCP visibility.** The MCP server runs as your Linux uid (launched
+  over stdio by your MCP client). Tool calls that target a mailbox you
+  do not own — `email_list`, `email_read`, `email_send`, `email_reply`,
+  `email_mark_read`, `email_mark_unread`, `hook_create`, `hook_delete` —
+  are rejected by the daemon with `EACCES`. You only see the user's own
+  mailboxes from `mailbox_list()`.
+- **Hook templates.** The per-agent templates registered by
+  `aimx agent-setup` follow the naming scheme
+  `invoke-<agent>-<username>` (for example
+  `invoke-claude-alice` when alice runs `aimx agent-setup claude-code`).
+  Each template's `run_as` equals the user that registered it, so the
+  child process drops into that uid before executing. `hook_list_templates`
+  returns templates whose `run_as` matches the caller, plus reserved
+  templates whose `run_as` is `aimx-catchall` (catchall handlers) or
+  `root` (operator-only, rare).
+- **Sending.** `email_send` with `from_mailbox` set to a mailbox you do
+  not own is rejected by the daemon (UDS `SO_PEERCRED` check).
+
+On a single-user box (the common case) the model is invisible: your
+one user owns every mailbox and every template. On a multi-user box it
+gives real isolation — alice's agent cannot see, read, or act on bob's
+mail.
 
 ## MCP tools: quick reference
 
@@ -64,12 +98,15 @@ on success and error strings on failure.
 Hooks are shell commands the daemon fires on mail events (`on_receive`,
 `after_send`). To keep the world-writable UDS socket safe, MCP cannot
 submit arbitrary shell. Every hook you create references a **template**
-the operator installed during `aimx setup` — you only pick a template and
-fill its declared params.
+that is either bundled (`webhook`) or registered on demand by
+`aimx agent-setup` (`invoke-<agent>-<username>`). You only pick a
+template and fill its declared params.
 
-- `hook_list_templates()`: list templates enabled on this install. Call
-  this first. An empty list means the operator has not enabled any
-  templates — ask them to re-run `sudo aimx setup`.
+- `hook_list_templates()`: list templates visible to your Linux user
+  (your own `run_as` templates plus reserved ones such as `webhook`).
+  Call this first. An empty list means no templates are registered for
+  your user — ask the operator (or you, if you own an account) to run
+  `aimx agent-setup <agent>` without sudo.
 - `hook_create(mailbox, event, template, params, name?)`: attach a
   template hook. The daemon substitutes your `params` into the
   template's argv and stamps `origin = "mcp"` on the resulting hook.
@@ -93,21 +130,25 @@ types and return values across every tool.
 aimx stores mail under a data directory (default `/var/lib/aimx/`):
 
 ```
-/var/lib/aimx/                          # world-readable datadir
+/var/lib/aimx/                          # root:root 0755 (traversable)
 ├── README.md                           # agent-facing layout guide (auto-generated)
-├── inbox/
-│   ├── <mailbox>/
+├── inbox/                              # root:root 0755
+│   ├── <mailbox>/                      # <owner>:<owner> 0700
 │   │   ├── 2026-04-15-143022-meeting-notes.md
 │   │   └── 2026-04-15-153300-invoice-march/     # attachment bundle
 │   │       ├── 2026-04-15-153300-invoice-march.md
 │   │       ├── invoice.pdf
 │   │       └── receipt.png
-│   └── catchall/                       # unknown local parts
+│   └── catchall/                       # aimx-catchall:aimx-catchall 0700
 │       └── ...
-└── sent/
-    └── <mailbox>/
+└── sent/                               # root:root 0755
+    └── <mailbox>/                      # <owner>:<owner> 0700
         └── 2026-04-15-160145-re-meeting-notes.md
 ```
+
+Each mailbox directory is `0700 <owner>:<owner>`, so only the owner and
+root can read or traverse in. Your MCP process runs as your uid and only
+sees mailboxes you own.
 
 - **Filenames** follow `YYYY-MM-DD-HHMMSS-<slug>.md` (UTC). The slug is
   derived from the subject: lowercase, non-alphanumeric chars replaced with
@@ -229,12 +270,15 @@ sent (`after_send`). They are how you go from "the agent reads mail" to
 "the agent acts on mail automatically."
 
 The safety model: you cannot submit raw shell via MCP. Every hook you
-create must reference a **template** the operator pre-vetted during
-`aimx setup`. A template declares an argv shape plus the parameter
-names you are allowed to fill. Your `hook_create` call supplies values
-for those params, and the daemon substitutes them into the template's
-argv slots — no shell interpretation, no argv splitting, no way to
-escape the value slot.
+create must reference a **template** registered either at install time
+(the bundled `webhook`) or per-user by `aimx agent-setup <agent>`
+(names follow `invoke-<agent>-<username>`). A template declares an argv
+shape plus the parameter names you are allowed to fill. Your
+`hook_create` call supplies values for those params, and the daemon
+substitutes them into the template's argv slots — no shell
+interpretation, no argv splitting, no way to escape the value slot. The
+spawned child drops privilege to the template's `run_as` before
+executing, which must match your uid.
 
 The four tools work together:
 
@@ -254,15 +298,29 @@ The four tools work together:
    host.
 
 If `hook_list_templates` is empty, no amount of calling `hook_create`
-will help — the operator needs to run `sudo aimx setup` and tick the
-templates they want. Tell the user that, with the exact command. Do not
-guess at template names.
+will help — the user needs to run `aimx agent-setup <agent>` (no sudo)
+to register `invoke-<agent>-<username>`. Tell them that, with the exact
+command. Do not guess at template names.
+
+### Template naming: `invoke-<agent>-<username>`
+
+Per-agent templates are registered by the user who will run them. On a
+host where alice runs `aimx agent-setup claude-code`, aimx probes her
+`$PATH`, finds `/home/alice/.local/bin/claude`, and submits a
+`TEMPLATE-CREATE` over the UDS. The resulting template is named
+`invoke-claude-alice` with `run_as = "alice"` and
+`cmd = ["/home/alice/.local/bin/claude", ...]`. When bob does the same
+on the same box he gets `invoke-claude-bob`, bound to his path.
+`hook_list_templates` returns only the templates for your uid's
+username plus any reserved-`run_as` templates, so you should always
+expect to see `invoke-<agent>-<your-username>` (for example
+`invoke-claude-alice` when the MCP client ran as alice).
 
 Template hooks fire only on **trusted** inbound mail (`trusted == "true"`
 on the email's frontmatter). If your hook does not fire, check the
 email's `trusted` field first. See `references/hooks.md` for the full
-troubleshooting checklist (template enabled? mailbox exists? event
-allowed? `aimx-hook` user readable?) and several worked example prompts.
+troubleshooting checklist (template registered for your user? mailbox
+owned by your user? event allowed?) and several worked example prompts.
 
 ## Trust model
 
