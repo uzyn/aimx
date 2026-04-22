@@ -123,7 +123,11 @@ impl Caller {
     }
 }
 
-fn lookup_username(uid: u32) -> Option<String> {
+/// Resolve a Linux uid to a username via `getpwuid(3)`. Root is returned
+/// as `Some("root")` without touching `getpwuid` because test resolvers
+/// and minimal container images have been known to return null for uid 0.
+/// Unknown uids return `None`.
+pub fn lookup_username(uid: u32) -> Option<String> {
     // Fast path: root is guaranteed by POSIX. Avoids a `getpwuid(0)`
     // call — test resolvers and minimal container images alike have
     // been known to return null for it.

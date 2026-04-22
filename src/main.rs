@@ -86,7 +86,17 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             list,
             force,
             print,
-        } => agent_setup::run(agent, list, force, print, cli.data_dir.as_deref()),
+            no_template,
+            redetect,
+        } => agent_setup::run(agent_setup::RunOpts {
+            agent,
+            list,
+            force,
+            print,
+            no_template,
+            redetect,
+            data_dir: cli.data_dir.as_deref(),
+        }),
         // `aimx send` is a pure UDS client. It never reads config.toml.
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.

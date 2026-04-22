@@ -4,8 +4,13 @@
 //! bundled into the binary via `include_dir!`, and installs them into the
 //! user's `$HOME`-based agent directory.
 
+use crate::config::HookTemplateStdin;
+use crate::hook::HookEvent;
+use crate::hook_client::{TemplateCrudFallback, submit_template_create_via_daemon};
+use crate::send_protocol::{TemplateCreateRequest, TemplateUpdateRequest, UdsTemplatePayload};
 use crate::term;
 use include_dir::{Dir, DirEntry, include_dir};
+use std::ffi::OsString;
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -30,17 +35,28 @@ pub struct AgentSpec {
     /// demand. Agents that take a single blob (Goose, Gemini, OpenCode)
     /// receive only the main primer.
     pub progressive_disclosure: bool,
-    /// Bundled hook template that lets this agent create its own hooks
-    /// via MCP (PRD §6.4). Populated for every agent that ships with a
-    /// matching `invoke-<agent>` template; left `None` for the generic
-    /// `webhook` template (no specific agent owner).
-    ///
-    /// When `Some`, `agent-setup` appends a post-install "Hook Templates"
-    /// section pointing the operator at the matching template. The
-    /// printed command mentions `sudo aimx setup` because the dedicated
-    /// `sudo aimx hooks template-enable <name>` CLI is deferred to v2;
-    /// the hint will upgrade to the dedicated command when that lands.
-    pub matching_template: Option<&'static str>,
+    /// Canonical binary name probed on `$PATH` during `aimx agent-setup`
+    /// to locate the agent's executable (e.g. `claude-code` → `claude`).
+    /// `cmd[0]` of the registered template is the resolved path.
+    pub canonical_binary: &'static str,
+    /// Extra argv appended to `[<found_path>]` when building the
+    /// template's `cmd` on `TEMPLATE-CREATE`. Empty by default — agents
+    /// launched headlessly with piped stdin need nothing here.
+    pub args: &'static [&'static str],
+    /// `UdsTemplatePayload.params` — declared placeholder names the
+    /// template's `cmd` may reference. Empty for the default `invoke-*`
+    /// shape; present when the registry wants to accept MCP-bound params.
+    pub params: &'static [&'static str],
+    /// Stdin delivery mode for the hook child (`email`, `email_json`, or
+    /// `none`). Every v1 agent takes the raw `.md` on stdin.
+    pub stdin: HookTemplateStdin,
+    /// Hard timeout in seconds for the hook child, within
+    /// `[1, HOOK_TEMPLATE_TIMEOUT_SECS_MAX]`.
+    pub timeout_secs: u32,
+    /// Events the template may be wired to on hook creation. v1 agents
+    /// are invoke-on-arrival, i.e. `on_receive` only; they fire nothing
+    /// on outbound send.
+    pub allowed_events: &'static [HookEvent],
 }
 
 /// Static registry of supported agents.
@@ -75,7 +91,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.claude/plugins/aimx",
             activation_hint: claude_code_hint,
             progressive_disclosure: true,
-            matching_template: Some("invoke-claude"),
+            canonical_binary: "claude",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "codex",
@@ -83,7 +104,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.codex/skills/aimx",
             activation_hint: codex_hint,
             progressive_disclosure: true,
-            matching_template: Some("invoke-codex"),
+            canonical_binary: "codex",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "opencode",
@@ -91,7 +117,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
             activation_hint: opencode_hint,
             progressive_disclosure: false,
-            matching_template: Some("invoke-opencode"),
+            canonical_binary: "opencode",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "gemini",
@@ -99,7 +130,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.gemini/skills/aimx",
             activation_hint: gemini_hint,
             progressive_disclosure: false,
-            matching_template: Some("invoke-gemini"),
+            canonical_binary: "gemini",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "goose",
@@ -110,7 +146,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$XDG_CONFIG_HOME/goose/recipes",
             activation_hint: goose_hint,
             progressive_disclosure: false,
-            matching_template: Some("invoke-goose"),
+            canonical_binary: "goose",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "openclaw",
@@ -120,7 +161,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.openclaw/skills/aimx",
             activation_hint: openclaw_hint,
             progressive_disclosure: true,
-            matching_template: Some("invoke-openclaw"),
+            canonical_binary: "openclaw",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
         AgentSpec {
             name: "hermes",
@@ -133,7 +179,12 @@ pub fn registry() -> &'static [AgentSpec] {
             dest_template: "$HOME/.hermes/skills/aimx",
             activation_hint: hermes_hint,
             progressive_disclosure: true,
-            matching_template: Some("invoke-hermes"),
+            canonical_binary: "hermes",
+            args: &[],
+            params: &[],
+            stdin: HookTemplateStdin::Email,
+            timeout_secs: 60,
+            allowed_events: &[HookEvent::OnReceive],
         },
     ]
 }
@@ -374,10 +425,6 @@ pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
 /// charset can still own mailboxes (operators can hand-author templates
 /// in `config.toml`), but they cannot use `agent-setup`'s template
 /// registration because the derived name would fail validation.
-// Callers land in Sprint 6 (`aimx agent-setup` TEMPLATE-CREATE wiring);
-// the type is already `pub` so the binary dead-code lint for an unused
-// but public API must be silenced here.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateNameError {
     EmptyAgentSlug,
@@ -415,10 +462,6 @@ impl std::error::Error for TemplateNameError {}
 /// (`TEMPLATE-UPDATE` on `--redetect`). Keeping one derivation
 /// guarantees idempotence: re-running the command always targets the
 /// same name.
-// Consumed by Sprint 6 (`aimx agent-setup` TEMPLATE-CREATE wiring). The
-// fn is already `pub` for that future call site; silence the binary
-// dead-code lint until the wiring lands.
-#[allow(dead_code)]
 pub fn derive_template_name(agent_slug: &str, username: &str) -> Result<String, TemplateNameError> {
     if agent_slug.is_empty() {
         return Err(TemplateNameError::EmptyAgentSlug);
@@ -435,7 +478,6 @@ pub fn derive_template_name(agent_slug: &str, username: &str) -> Result<String, 
     Ok(format!("invoke-{agent_slug}-{username}"))
 }
 
-#[allow(dead_code)]
 fn is_valid_template_name_component(s: &str) -> bool {
     !s.is_empty()
         && s.bytes()
@@ -450,6 +492,35 @@ pub trait AgentEnv {
     fn is_root(&self) -> bool;
     fn is_stdin_tty(&self) -> bool;
     fn read_line(&self) -> io::Result<String>;
+    /// The current user's Linux username (from `getpwuid(geteuid())`).
+    /// Since `agent-setup` refuses root, this is always a real user.
+    fn caller_username(&self) -> Option<String> {
+        caller_username_from_euid()
+    }
+    /// Probe the caller's `$PATH` for `binary_name`. Default wraps the
+    /// free-standing `probe_path` helper so production callers pick up
+    /// the real `$PATH` without forcing tests to mutate process env.
+    fn probe_binary(&self, binary_name: &str) -> Option<PathBuf> {
+        probe_path(binary_name)
+    }
+    /// Submit a `TEMPLATE-CREATE` frame to the daemon. Default delegates
+    /// to the UDS client; tests can override to avoid spinning up a
+    /// socket.
+    fn submit_template_create(
+        &self,
+        request: &TemplateCreateRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        submit_template_create_via_daemon(request)
+    }
+    /// Submit a `TEMPLATE-UPDATE` frame to the daemon. Default delegates
+    /// to the UDS client; tests can override to avoid spinning up a
+    /// socket.
+    fn submit_template_update(
+        &self,
+        request: &TemplateUpdateRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        crate::hook_client::submit_template_update_via_daemon(request)
+    }
 }
 
 pub struct RealAgentEnv;
@@ -480,11 +551,97 @@ impl AgentEnv for RealAgentEnv {
     }
 }
 
+/// Resolve the caller's Linux username via `getpwuid(geteuid())`. Returns
+/// `None` if the euid does not map to a passwd entry. `agent-setup`
+/// refuses root up front (PRD §6.6 + §8.2), so in production this always
+/// resolves to a real, non-root username. Used as the `run_as` / username
+/// component of the derived template name.
+///
+/// Thin wrapper over [`crate::uds_authz::lookup_username`] so the two
+/// callers (UDS authz cache and agent-setup) share one `getpwuid` helper.
+pub fn caller_username_from_euid() -> Option<String> {
+    // SAFETY: `geteuid` is a bare syscall with no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    crate::uds_authz::lookup_username(uid)
+}
+
+/// Walk the caller's `$PATH` in order looking for an executable named
+/// `binary_name`. Returns the canonical path of the first match.
+///
+/// `$PATH` is read via `env::var_os` and split on POSIX `:`. Each entry is
+/// joined with `binary_name`, `stat(2)`'d (empty entries, missing files,
+/// and non-regular files are skipped silently), and checked for
+/// `access(X_OK)` via `nix::unistd::access`. The first entry that passes
+/// wins; `canonicalize` resolves symlinks so callers always see the real
+/// on-disk path.
+///
+/// Returns `None` when `$PATH` is unset/empty or no entry contains an
+/// executable match.
+///
+/// Pure helper: no I/O beyond `stat`/`access`/`canonicalize`. Safe to
+/// call on the fast-refusal path before the daemon is reached.
+pub fn probe_path(binary_name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    probe_path_in(binary_name, &path)
+}
+
+/// Testable core of [`probe_path`]. Exposed with `pub(crate)` so unit
+/// tests can inject a controlled `PATH` value without mutating
+/// process-global `env::set_var` state.
+pub(crate) fn probe_path_in(binary_name: &str, path_var: &OsString) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+
+    if binary_name.is_empty() {
+        return None;
+    }
+
+    // Split on `:` at the byte level so a non-UTF-8 $PATH entry doesn't
+    // get silently dropped. POSIX $PATH entries are byte strings and can
+    // legally contain any byte except `:` and `\0`.
+    let bytes = path_var.as_bytes();
+    for entry in bytes.split(|b| *b == b':') {
+        if entry.is_empty() {
+            // POSIX reserves an empty `$PATH` entry as the current
+            // working directory. We treat it the same as a missing
+            // directory (skip) to avoid surprising the operator with
+            // a CWD-resolved match.
+            continue;
+        }
+        let entry_os = std::ffi::OsStr::from_bytes(entry);
+        let candidate = Path::new(entry_os).join(binary_name);
+
+        let meta = match std::fs::metadata(&candidate) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        if nix::unistd::access(&candidate, nix::unistd::AccessFlags::X_OK).is_err() {
+            continue;
+        }
+        // `canonicalize` resolves any symlinks so the stored `cmd[0]` is
+        // the real on-disk path. If canonicalization fails (rare — the
+        // path was just `stat`'d), fall back to the joined candidate.
+        return Some(std::fs::canonicalize(&candidate).unwrap_or(candidate));
+    }
+
+    None
+}
+
 /// Options controlling a single `agent-setup` invocation.
 pub struct InstallOptions<'a> {
     pub force: bool,
     pub print: bool,
     pub data_dir: Option<&'a Path>,
+    /// `--no-template`: install plugin files only; skip probe + UDS
+    /// `TEMPLATE-CREATE`. Mutually meaningful with `--redetect` (the CLI
+    /// rejects the combination).
+    pub no_template: bool,
+    /// `--redetect`: re-probe `$PATH` and submit `TEMPLATE-UPDATE`
+    /// instead of `TEMPLATE-CREATE`, pointing the existing template at
+    /// the new binary path.
+    pub redetect: bool,
 }
 
 /// Resolve a destination template against the environment. Substitutes
@@ -505,42 +662,55 @@ pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, Strin
     Ok(PathBuf::from(substituted))
 }
 
+/// Parameters for one `aimx agent-setup` invocation. Carries everything
+/// `run` / `run_with_env` / `run_with_env_to_writer` need so these
+/// entry-point signatures don't keep growing each time a new CLI flag
+/// lands. Short-lived, borrowed-`data_dir`; not `Clone` by design —
+/// callers should not reuse the same `RunOpts` across invocations.
+pub struct RunOpts<'a> {
+    pub agent: Option<String>,
+    pub list: bool,
+    pub force: bool,
+    pub print: bool,
+    pub no_template: bool,
+    pub redetect: bool,
+    pub data_dir: Option<&'a Path>,
+}
+
 /// Entry point called from `main.rs`.
-pub fn run(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    data_dir: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(opts: RunOpts<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let env = RealAgentEnv;
-    run_with_env(agent, list, force, print, data_dir, &env)
+    match run_with_env(opts, &env) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Daemon-down → exit 2 (matches `aimx send`'s socket-missing
+            // convention, §6.6 AC); binary-missing → exit 3. Other errors
+            // fall through to the caller's default exit code.
+            if let Some(code) = e.downcast_ref::<AgentSetupExitCode>() {
+                eprintln!("{}", code.message());
+                std::process::exit(code.code());
+            }
+            Err(e)
+        }
+    }
 }
 
 pub fn run_with_env(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    data_dir: Option<&Path>,
+    opts: RunOpts<'_>,
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_env_to_writer(agent, list, force, print, data_dir, env, &mut io::stdout())
+    run_with_env_to_writer(opts, env, &mut io::stdout())
 }
 
 /// Testable core of `run_with_env`: writes install output, `--list` output,
 /// or the bare-invocation registry dump (plus usage-hint footer) to `out`
 /// rather than real stdout so tests can capture and assert on it.
 pub fn run_with_env_to_writer(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    data_dir: Option<&Path>,
+    opts: RunOpts<'_>,
     env: &dyn AgentEnv,
     out: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if list {
+    if opts.list {
         print_registry_to_writer(env, out)?;
         return Ok(());
     }
@@ -552,14 +722,28 @@ pub fn run_with_env_to_writer(
         return Err("agent-setup is a per-user operation. Run without sudo or as root".into());
     }
 
-    let opts = InstallOptions {
-        force,
-        print,
-        data_dir,
+    // Defense in depth: clap's `conflicts_with = "redetect"` on
+    // `no_template` (see `cli.rs`) already rejects this combination at
+    // parse time with a standard clap usage-hint. This runtime check is
+    // kept so direct library callers of `run_with_env` that skip clap
+    // still fail loudly rather than silently picking one branch.
+    if opts.no_template && opts.redetect {
+        return Err("--no-template and --redetect are mutually exclusive; \
+             --no-template skips template registration entirely, --redetect \
+             updates an existing template"
+            .into());
+    }
+
+    let install_opts = InstallOptions {
+        force: opts.force,
+        print: opts.print,
+        data_dir: opts.data_dir,
+        no_template: opts.no_template,
+        redetect: opts.redetect,
     };
 
-    let spec = match agent {
-        Some(name) => find_agent(&name).ok_or_else(|| {
+    let spec = match opts.agent.as_deref() {
+        Some(name) => find_agent(name).ok_or_else(|| {
             format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
         })?,
         None => {
@@ -575,7 +759,7 @@ pub fn run_with_env_to_writer(
         }
     };
 
-    install_to_writer(spec, &opts, env, out)
+    install_to_writer(spec, &install_opts, env, out)
 }
 
 fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
@@ -604,9 +788,11 @@ fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Resu
 /// once an `AgentSpec` has been resolved from the positional `<agent>`
 /// argument.
 ///
-/// Handles `--print` (dry run; emits file list + activation hint) and the
-/// normal install path (lays files down under `dest_template`, then prints
-/// the activation hint).
+/// Handles `--print` (dry run; emits file list + activation hint + the
+/// rendered template TOML the install WOULD register) and the normal
+/// install path (lays files down under `dest_template`, then prints the
+/// activation hint and the template-registration status line per
+/// PRD §6.6).
 fn install_to_writer(
     spec: &AgentSpec,
     opts: &InstallOptions,
@@ -636,9 +822,16 @@ fn install_to_writer(
         // (opencode, gemini) expose their MCP JSON block under dry-run.
         writeln!(out, "=== activation ===")?;
         writeln!(out, "{hint}")?;
-        if let Some(tmpl) = spec.matching_template {
-            writeln!(out, "=== hook templates ===")?;
-            writeln!(out, "{}", render_template_hint(spec.name, tmpl))?;
+
+        // Render the template TOML `agent-setup` WOULD submit. Uses the
+        // caller's real username so the derived name matches what the
+        // daemon would store. If the username can't be resolved or does
+        // not pass the `[a-z0-9-]+` charset (PRD §8.2), fall back to a
+        // `<username>` placeholder and explain inline.
+        writeln!(out, "=== template ===")?;
+        match print_template_preview(spec, env) {
+            Ok(toml_body) => writeln!(out, "{toml_body}")?,
+            Err(e) => writeln!(out, "<template could not be rendered: {e}>")?,
         }
         return Ok(());
     }
@@ -654,36 +847,298 @@ fn install_to_writer(
     )?;
     writeln!(out, "{hint}")?;
 
-    // Post-install hook-template hint (Sprint 4, PRD §6.4).
-    if let Some(tmpl) = spec.matching_template {
-        writeln!(out)?;
-        writeln!(out, "{}", term::header("Hook Templates"))?;
-        writeln!(out, "{}", render_template_hint(spec.name, tmpl))?;
+    // Template registration (Sprint 6, PRD §6.6). One status line,
+    // picked from the three cases in the sprint spec.
+    writeln!(out)?;
+    let outcome = register_template(spec, opts, env);
+    match outcome {
+        TemplateOutcome::Registered { name, path } => {
+            writeln!(
+                out,
+                "{} {} (cmd: {}, run_as: {})",
+                term::success("Template"),
+                term::highlight(&name),
+                term::highlight(&path.to_string_lossy()),
+                term::highlight(&caller_username_for_display(env)),
+            )?;
+            writeln!(out, "  registered via aimx-socket.")?;
+        }
+        TemplateOutcome::Updated { name, path } => {
+            writeln!(
+                out,
+                "{} {} re-pointed at {}",
+                term::success("Template"),
+                term::highlight(&name),
+                term::highlight(&path.to_string_lossy()),
+            )?;
+        }
+        TemplateOutcome::Skipped => {
+            writeln!(
+                out,
+                "{}",
+                term::info("Skipped template registration (--no-template).")
+            )?;
+        }
+        TemplateOutcome::AlreadyExists { name } => {
+            writeln!(
+                out,
+                "{} {} already exists. Use 'aimx agent-setup {} --redetect' to update it.",
+                term::warn("Template"),
+                term::highlight(&name),
+                spec.name,
+            )?;
+        }
+        TemplateOutcome::Failed { reason, exit_code } => {
+            let msg = format!("Template registration failed: {reason}");
+            if let Some(code) = exit_code {
+                // Error routed via `AgentSetupExitCode`; `run()` prints
+                // `msg` to stderr before `process::exit(code)`. Emitting
+                // to `out` too would duplicate the line across streams.
+                return Err(Box::new(AgentSetupExitCode::from_code(code, msg)));
+            }
+            writeln!(out, "{}", term::error(&msg))?;
+        }
     }
 
     Ok(())
 }
 
-/// Render the "enable the matching template" hint printed after a
-/// successful `agent-setup <agent>`. Centralised so both the install
-/// path and `--print` path (and the unit tests) produce the same copy.
-///
-/// v1 points operators at `sudo aimx setup` because the dedicated
-/// `sudo aimx hooks template-enable <name>` CLI ships in v2; the hint
-/// updates in the sprint that ships that command.
-fn render_template_hint(agent_name: &str, template: &str) -> String {
-    format!(
-        "To let {agent_name} create its own hooks via MCP, enable the matching\n\
-         template as root:\n\
-         \n\
-         \x20\x20sudo aimx setup\n\
-         \n\
-         and tick `{template}` when the [Hook Templates] prompt appears.\n\
-         (Already enabled if you ticked it during an earlier `aimx setup`.)\n\
-         A dedicated `sudo aimx hooks template-enable {template}` CLI is\n\
-         planned for a future release.",
-    )
+/// Compose the `UdsTemplatePayload` the current invocation would submit
+/// and return it rendered as TOML. Used by `--print` to give operators
+/// a dry-run view of the template (PRD §6.6 + sprint S6-3).
+fn print_template_preview(spec: &AgentSpec, env: &dyn AgentEnv) -> Result<String, String> {
+    let username = env.caller_username().unwrap_or_else(|| "<username>".into());
+    // Allow the placeholder-username case through render so `--print` on
+    // a minimal container image still emits a syntactically valid TOML
+    // preview. The real register path enforces charset via
+    // `derive_template_name`.
+    let name = match derive_template_name(spec.name, &username) {
+        Ok(n) => n,
+        Err(_) => format!("invoke-{}-<username>", spec.name),
+    };
+    let payload = build_template_payload_preview(spec, &name, &username, env);
+    crate::send_protocol::render_template_payload(&payload).map_err(|e| e.to_string())
 }
+
+/// Outcome categories for the template-registration status line printed
+/// after a successful plugin install. Every case maps to exactly one
+/// line of on-screen output per Sprint 6 §S6-4.
+enum TemplateOutcome {
+    /// Happy path: `TEMPLATE-CREATE` accepted.
+    Registered { name: String, path: PathBuf },
+    /// `--redetect` succeeded; the template now points at `path`.
+    Updated { name: String, path: PathBuf },
+    /// `--no-template` was set; nothing submitted.
+    Skipped,
+    /// Daemon reported `ECONFLICT` on CREATE — the template already
+    /// exists. Operator should re-run with `--redetect` (PRD §6.6).
+    AlreadyExists { name: String },
+    /// Every other failure: probe miss, daemon down, validation, etc.
+    /// `exit_code` propagates as the CLI exit code when set.
+    Failed {
+        reason: String,
+        exit_code: Option<i32>,
+    },
+}
+
+/// Drive the probe + UDS submit flow. Pure w.r.t. the filesystem: caller
+/// decides how to render `TemplateOutcome` to stdout. Extracted so
+/// `install_to_writer` stays readable and unit tests can drive it
+/// without also asserting on the surrounding plugin-install copy.
+fn register_template(
+    spec: &AgentSpec,
+    opts: &InstallOptions,
+    env: &dyn AgentEnv,
+) -> TemplateOutcome {
+    if opts.no_template {
+        return TemplateOutcome::Skipped;
+    }
+
+    let Some(username) = env.caller_username() else {
+        return TemplateOutcome::Failed {
+            reason: "Could not resolve the caller's username from getpwuid(geteuid()).".to_string(),
+            exit_code: Some(1),
+        };
+    };
+
+    let name = match derive_template_name(spec.name, &username) {
+        Ok(n) => n,
+        Err(e) => {
+            return TemplateOutcome::Failed {
+                reason: e.to_string(),
+                exit_code: Some(1),
+            };
+        }
+    };
+
+    let path = match env.probe_binary(spec.canonical_binary) {
+        Some(p) => p,
+        None => {
+            let bin = spec.canonical_binary;
+            return TemplateOutcome::Failed {
+                reason: format!(
+                    "Could not find '{bin}' in $PATH. Install it, then re-run 'aimx agent-setup {}'.",
+                    spec.name
+                ),
+                exit_code: Some(3),
+            };
+        }
+    };
+
+    let payload = build_template_payload_with_path(spec, &name, &username, &path);
+
+    if opts.redetect {
+        let request = TemplateUpdateRequest {
+            name: name.clone(),
+            payload,
+        };
+        match env.submit_template_update(&request) {
+            Ok(()) => TemplateOutcome::Updated { name, path },
+            Err(TemplateCrudFallback::SocketMissing) => TemplateOutcome::Failed {
+                reason: format!(
+                    "aimx serve is not running; start it with 'sudo systemctl start aimx' \
+                     and re-run 'aimx agent-setup {} --redetect'.",
+                    spec.name
+                ),
+                exit_code: Some(2),
+            },
+            Err(TemplateCrudFallback::Daemon { code, reason }) => {
+                if code == "ENOENT" || code == "NOTFOUND" {
+                    TemplateOutcome::Failed {
+                        reason: format!(
+                            "Template '{name}' does not exist yet. Run 'aimx agent-setup {}' \
+                             without --redetect first.",
+                            spec.name
+                        ),
+                        exit_code: Some(1),
+                    }
+                } else if code == "EACCES" {
+                    TemplateOutcome::Failed {
+                        reason: format!(
+                            "Permission denied updating template '{name}' (EACCES): {reason}"
+                        ),
+                        exit_code: Some(1),
+                    }
+                } else {
+                    TemplateOutcome::Failed {
+                        reason: format!("[{code}] {reason}"),
+                        exit_code: Some(1),
+                    }
+                }
+            }
+            Err(TemplateCrudFallback::Local(msg)) => TemplateOutcome::Failed {
+                reason: msg,
+                exit_code: Some(1),
+            },
+        }
+    } else {
+        let request = TemplateCreateRequest { payload };
+        match env.submit_template_create(&request) {
+            Ok(()) => TemplateOutcome::Registered { name, path },
+            Err(TemplateCrudFallback::SocketMissing) => TemplateOutcome::Failed {
+                reason: format!(
+                    "aimx serve is not running; start it with 'sudo systemctl start aimx' \
+                     and re-run 'aimx agent-setup {}'.",
+                    spec.name
+                ),
+                exit_code: Some(2),
+            },
+            Err(TemplateCrudFallback::Daemon { code, reason }) => {
+                if code == "ECONFLICT" {
+                    TemplateOutcome::AlreadyExists { name }
+                } else {
+                    TemplateOutcome::Failed {
+                        reason: format!("[{code}] {reason}"),
+                        exit_code: Some(1),
+                    }
+                }
+            }
+            Err(TemplateCrudFallback::Local(msg)) => TemplateOutcome::Failed {
+                reason: msg,
+                exit_code: Some(1),
+            },
+        }
+    }
+}
+
+fn build_template_payload_with_path(
+    spec: &AgentSpec,
+    name: &str,
+    username: &str,
+    path: &Path,
+) -> UdsTemplatePayload {
+    let mut cmd = Vec::with_capacity(1 + spec.args.len());
+    cmd.push(path.to_string_lossy().into_owned());
+    for arg in spec.args {
+        cmd.push((*arg).to_string());
+    }
+    UdsTemplatePayload {
+        name: name.to_string(),
+        description: format!(
+            "aimx agent-setup: invoke {} headlessly for {}",
+            spec.name, username
+        ),
+        cmd,
+        params: spec.params.iter().map(|p| (*p).to_string()).collect(),
+        stdin: spec.stdin,
+        run_as: username.to_string(),
+        timeout_secs: spec.timeout_secs,
+        allowed_events: spec.allowed_events.to_vec(),
+    }
+}
+
+/// Build a payload for the `--print` preview path. When `$PATH` has no
+/// match, the probed path is unknown — we substitute `<binary>` as a
+/// placeholder so the TOML stays self-describing.
+fn build_template_payload_preview(
+    spec: &AgentSpec,
+    name: &str,
+    username: &str,
+    env: &dyn AgentEnv,
+) -> UdsTemplatePayload {
+    let path = env
+        .probe_binary(spec.canonical_binary)
+        .unwrap_or_else(|| PathBuf::from(format!("<{}>", spec.canonical_binary)));
+    build_template_payload_with_path(spec, name, username, &path)
+}
+
+/// Resolve the caller's username for display purposes, falling back to
+/// a literal `<username>` placeholder when `getpwuid` returns `None`.
+fn caller_username_for_display(env: &dyn AgentEnv) -> String {
+    env.caller_username().unwrap_or_else(|| "<username>".into())
+}
+
+/// Wrapper error used to carry a specific exit code out of
+/// `agent_setup::run` without losing the user-facing message. `main.rs`
+/// exits with the contained code so the CLI matches the documented
+/// convention (daemon-down → 2, binary-missing → 3).
+#[derive(Debug)]
+pub struct AgentSetupExitCode {
+    code: i32,
+    message: String,
+}
+
+impl AgentSetupExitCode {
+    fn from_code(code: i32, message: String) -> Self {
+        Self { code, message }
+    }
+
+    pub fn code(&self) -> i32 {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl std::fmt::Display for AgentSetupExitCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl std::error::Error for AgentSetupExitCode {}
 
 /// Walk the embedded plugin source, transform known files (skill header +
 /// primer + optional footer, plugin.json), and return the full set of files
@@ -1068,12 +1523,40 @@ mod tests {
     use std::cell::RefCell;
     use tempfile::TempDir;
 
+    /// Behavior a `MockEnv` test harness can inject for the Sprint 6 probe
+    /// + UDS path. `None` on `probe_result` means "act like the binary is
+    ///   missing from `$PATH`". `submit_*_result` defaults to `Ok(())`.
+    struct TemplateStub {
+        probe_result: Option<PathBuf>,
+        submit_create_result: Result<(), TemplateCrudFallback>,
+        submit_update_result: Result<(), TemplateCrudFallback>,
+        submit_create_calls: RefCell<Vec<TemplateCreateRequest>>,
+        submit_update_calls: RefCell<Vec<TemplateUpdateRequest>>,
+    }
+
+    impl Default for TemplateStub {
+        fn default() -> Self {
+            Self {
+                // By default the canonical binary resolves to a synthetic
+                // path so the happy-path tests don't need to touch
+                // `$PATH`. Tests that exercise probe-miss override this.
+                probe_result: Some(PathBuf::from("/mock/bin/agent")),
+                submit_create_result: Ok(()),
+                submit_update_result: Ok(()),
+                submit_create_calls: RefCell::new(Vec::new()),
+                submit_update_calls: RefCell::new(Vec::new()),
+            }
+        }
+    }
+
     struct MockEnv {
         home: PathBuf,
         xdg: Option<PathBuf>,
         root: bool,
         tty: bool,
         responses: RefCell<Vec<String>>,
+        username: Option<String>,
+        template: TemplateStub,
     }
 
     impl MockEnv {
@@ -1084,7 +1567,14 @@ mod tests {
                 root: false,
                 tty: false,
                 responses: RefCell::new(Vec::new()),
+                username: Some("sam".to_string()),
+                template: TemplateStub::default(),
             }
+        }
+
+        fn with_template_stub(mut self, stub: TemplateStub) -> Self {
+            self.template = stub;
+            self
         }
     }
 
@@ -1104,6 +1594,101 @@ mod tests {
         fn read_line(&self) -> io::Result<String> {
             Ok(self.responses.borrow_mut().remove(0))
         }
+        fn caller_username(&self) -> Option<String> {
+            self.username.clone()
+        }
+        fn probe_binary(&self, _binary_name: &str) -> Option<PathBuf> {
+            self.template.probe_result.clone()
+        }
+        fn submit_template_create(
+            &self,
+            request: &TemplateCreateRequest,
+        ) -> Result<(), TemplateCrudFallback> {
+            self.template
+                .submit_create_calls
+                .borrow_mut()
+                .push(request.clone());
+            match &self.template.submit_create_result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(clone_fallback(e)),
+            }
+        }
+        fn submit_template_update(
+            &self,
+            request: &TemplateUpdateRequest,
+        ) -> Result<(), TemplateCrudFallback> {
+            self.template
+                .submit_update_calls
+                .borrow_mut()
+                .push(request.clone());
+            match &self.template.submit_update_result {
+                Ok(()) => Ok(()),
+                Err(e) => Err(clone_fallback(e)),
+            }
+        }
+    }
+
+    fn clone_fallback(e: &TemplateCrudFallback) -> TemplateCrudFallback {
+        match e {
+            TemplateCrudFallback::SocketMissing => TemplateCrudFallback::SocketMissing,
+            TemplateCrudFallback::Daemon { code, reason } => TemplateCrudFallback::Daemon {
+                code: code.clone(),
+                reason: reason.clone(),
+            },
+            TemplateCrudFallback::Local(s) => TemplateCrudFallback::Local(s.clone()),
+        }
+    }
+
+    /// Test-scope wrapper matching the pre-Sprint-6 `run_with_env`
+    /// signature so legacy tests keep their intent (plugin-install
+    /// behavior). Every legacy caller exercised the install + plugin
+    /// side of the flow; we default `no_template=true` so these tests
+    /// don't need the daemon stub for assertions about files on disk.
+    fn run_with_env(
+        agent: Option<String>,
+        list: bool,
+        force: bool,
+        print: bool,
+        data_dir: Option<&Path>,
+        env: &dyn AgentEnv,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        super::run_with_env(
+            super::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template: true,
+                redetect: false,
+                data_dir,
+            },
+            env,
+        )
+    }
+
+    /// Same as above for the writer-capturing entry point.
+    fn run_with_env_to_writer(
+        agent: Option<String>,
+        list: bool,
+        force: bool,
+        print: bool,
+        data_dir: Option<&Path>,
+        env: &dyn AgentEnv,
+        out: &mut dyn Write,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template: true,
+                redetect: false,
+                data_dir,
+            },
+            env,
+            out,
+        )
     }
 
     #[test]
@@ -1161,118 +1746,391 @@ mod tests {
         assert!(find_agent("not-a-real-agent").is_none());
     }
 
-    // ----- Sprint 4 S4-4: matching_template hint --------------------------
-
-    /// Every v1 agent ships with a matching `invoke-<agent>` template so
-    /// the post-install hint has something to point at. A new agent that
-    /// forgets this will fail the test loudly (catches accidental `None`
-    /// during registry edits).
-    #[test]
-    fn every_registered_agent_has_matching_template() {
-        for spec in registry() {
-            let tmpl = spec
-                .matching_template
-                .unwrap_or_else(|| panic!("agent '{}' is missing matching_template", spec.name));
-            assert!(
-                tmpl.starts_with("invoke-"),
-                "agent '{}' should map to an invoke- template, got '{}'",
-                spec.name,
-                tmpl,
-            );
-        }
-    }
+    // ----- Sprint 6 S6-4: Template-registration section ------------------
 
     #[test]
-    fn matching_templates_exist_in_default_bundle() {
-        let bundled: std::collections::HashSet<String> =
-            crate::hook_templates_defaults::default_templates()
-                .into_iter()
-                .map(|t| t.name)
-                .collect();
-        for spec in registry() {
-            let tmpl = spec.matching_template.expect("matching_template set");
-            assert!(
-                bundled.contains(tmpl),
-                "agent '{}' maps to template '{}' which is not in the default bundle",
-                spec.name,
-                tmpl,
-            );
-        }
-    }
-
-    /// Drive the full install for every registered agent (minus the
-    /// content assertion) and confirm the Sprint 4 hint text appears in
-    /// the captured stdout for each one.
-    #[test]
-    fn install_appends_template_hint_for_each_agent() {
-        for spec in registry() {
-            let tmp = TempDir::new().unwrap();
-            let env = MockEnv::new(tmp.path().to_path_buf());
-            let mut buf: Vec<u8> = Vec::new();
-            run_with_env_to_writer(
-                Some(spec.name.into()),
-                false,
-                false,
-                false,
-                None,
-                &env,
-                &mut buf,
-            )
-            .unwrap_or_else(|e| panic!("install failed for {}: {e}", spec.name));
-            let out = String::from_utf8(buf).unwrap();
-
-            assert!(
-                out.contains("Hook Templates"),
-                "missing 'Hook Templates' header for agent '{}': {out}",
-                spec.name,
-            );
-            assert!(
-                out.contains(spec.matching_template.unwrap()),
-                "missing template name '{}' in hint for agent '{}': {out}",
-                spec.matching_template.unwrap(),
-                spec.name,
-            );
-            assert!(
-                out.contains("sudo aimx setup"),
-                "missing setup hint for agent '{}': {out}",
-                spec.name,
-            );
-        }
-    }
-
-    #[test]
-    fn print_mode_includes_template_hint_section() {
+    fn install_prints_template_registered_line_on_happy_path() {
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
-        run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            true, // --print
-            None,
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
         .unwrap();
         let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("=== hook templates ==="), "{out}");
-        assert!(out.contains("invoke-claude"), "{out}");
+        assert!(
+            out.contains("Template"),
+            "missing 'Template' status line: {out}"
+        );
+        assert!(
+            out.contains("invoke-claude-code-sam"),
+            "missing derived template name: {out}"
+        );
+        assert!(
+            out.contains("/mock/bin/agent"),
+            "missing probed cmd path: {out}"
+        );
+        assert!(out.contains("run_as:"), "missing run_as segment: {out}");
+        let forbidden = format!("{} aimx setup", "sudo");
+        assert!(
+            !out.contains(&forbidden),
+            "legacy hint copy must be gone: {out}"
+        );
     }
 
-    /// Future-proofing: if a new agent is added with
-    /// `matching_template: None`, the hint section must be omitted.
-    /// Exercised via the internal `render_template_hint` directly — no
-    /// registered agent currently ships with `None`.
     #[test]
-    fn render_template_hint_shape() {
-        let rendered = render_template_hint("claude-code", "invoke-claude");
-        assert!(rendered.contains("claude-code"));
-        assert!(rendered.contains("invoke-claude"));
-        assert!(rendered.contains("sudo aimx setup"));
+    fn install_prints_skipped_line_with_no_template() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
         assert!(
-            rendered.contains("future release"),
-            "must call out the v2 CLI in the hint body: {rendered}"
+            out.contains("Skipped template registration (--no-template)"),
+            "missing skipped status line: {out}"
+        );
+        // Binary-not-found would prefix "Could not find"; since we
+        // skipped the probe entirely, that text must not appear.
+        assert!(!out.contains("Could not find"), "{out}");
+    }
+
+    #[test]
+    fn install_prints_failed_line_when_binary_missing() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            probe_result: None,
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
+        assert_eq!(exit.code(), 3, "binary-not-found must map to exit 3");
+        let msg = exit.message();
+        assert!(
+            msg.contains("Template registration failed:"),
+            "missing failure line: {msg}"
+        );
+        assert!(
+            msg.contains("Could not find 'claude' in $PATH"),
+            "missing binary-missing copy: {msg}"
+        );
+        // The failure line must NOT also land on stdout — `run` prints it
+        // to stderr via the `AgentSetupExitCode` handler. Duplicating
+        // would mean operators see the same message twice.
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
+        );
+    }
+
+    #[test]
+    fn install_prints_failed_line_when_daemon_missing() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            submit_create_result: Err(TemplateCrudFallback::SocketMissing),
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
+        assert_eq!(exit.code(), 2, "daemon-down must map to exit 2");
+        let msg = exit.message();
+        assert!(
+            msg.contains("aimx serve is not running"),
+            "missing daemon-down copy: {msg}"
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
+        );
+    }
+
+    #[test]
+    fn install_hints_redetect_on_econflict() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            submit_create_result: Err(TemplateCrudFallback::Daemon {
+                code: "ECONFLICT".into(),
+                reason: "template already exists".into(),
+            }),
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        // ECONFLICT is a soft failure from the operator's perspective:
+        // plugin files installed fine, they just need `--redetect`.
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("invoke-claude-code-sam"), "{out}");
+        assert!(out.contains("already exists"), "{out}");
+        assert!(out.contains("--redetect"), "{out}");
+    }
+
+    #[test]
+    fn redetect_submits_template_update() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert_eq!(env.template.submit_update_calls.borrow().len(), 1);
+        assert_eq!(env.template.submit_create_calls.borrow().len(), 0);
+        let update = env.template.submit_update_calls.borrow()[0].clone();
+        assert_eq!(update.name, "invoke-claude-code-sam");
+        assert_eq!(update.payload.cmd[0], "/mock/bin/agent");
+        assert!(out.contains("re-pointed"), "{out}");
+    }
+
+    #[test]
+    fn redetect_handles_enoent_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            submit_update_result: Err(TemplateCrudFallback::Daemon {
+                code: "ENOENT".into(),
+                reason: "template not found".into(),
+            }),
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
+        assert_eq!(exit.code(), 1);
+        let msg = exit.message();
+        assert!(msg.contains("does not exist yet"), "{msg}");
+        assert!(
+            msg.contains("without --redetect first"),
+            "must nudge the operator to run without --redetect first: {msg}"
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
+        );
+    }
+
+    #[test]
+    fn redetect_handles_eaccess_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            submit_update_result: Err(TemplateCrudFallback::Daemon {
+                code: "EACCES".into(),
+                reason: "not template owner".into(),
+            }),
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
+        assert_eq!(exit.code(), 1);
+        let msg = exit.message();
+        assert!(
+            msg.contains("Permission denied"),
+            "must surface EACCES as 'Permission denied': {msg}"
+        );
+        assert!(
+            msg.contains("invoke-claude-code-sam"),
+            "must name the template: {msg}"
+        );
+        assert!(
+            msg.contains("not template owner"),
+            "must include the daemon-supplied reason: {msg}"
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
+        );
+    }
+
+    #[test]
+    fn no_template_and_redetect_are_mutually_exclusive() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        // Exercises the defense-in-depth runtime check — the clap-level
+        // `conflicts_with = "redetect"` catches this earlier on the CLI
+        // path, but the `pub fn` API bypasses clap and must still reject
+        // the combination rather than silently picking a branch.
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn print_mode_includes_rendered_template_toml() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let mut buf: Vec<u8> = Vec::new();
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: true, // --print
+                // `no_template` is unused under `--print` but left `false`
+                // so the preview path still runs end-to-end.
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(out.contains("=== template ==="), "{out}");
+        // Rendered payload must reference the derived name + resolved
+        // path + run_as. Enough keys to guarantee we're seeing real TOML
+        // rather than, say, a copy-pasted placeholder.
+        assert!(out.contains("name = \"invoke-claude-code-sam\""), "{out}");
+        assert!(out.contains("run_as = \"sam\""), "{out}");
+        assert!(out.contains("cmd = "), "{out}");
+        assert!(
+            !out.contains("=== hook templates ==="),
+            "legacy `=== hook templates ===` section must be gone: {out}"
+        );
+    }
+
+    // Make sure the legacy `sudo` ... `aimx setup` copy cannot reappear
+    // in `agent_setup.rs`. This is the grep AC in S6-4 translated to a
+    // compile-time assertion. The forbidden literal is assembled from
+    // runtime pieces so this test file itself does not contain the exact
+    // byte sequence the rest of the module is forbidden from carrying.
+    #[test]
+    fn agent_setup_source_has_no_legacy_setup_hint_copy() {
+        let src = include_str!("agent_setup.rs");
+        let forbidden = format!("{} aimx setup", "sudo");
+        let hits: Vec<&str> = src
+            .lines()
+            .filter(|l| l.contains(&forbidden))
+            .filter(|l| {
+                // Ignore the single line in this test that synthesizes
+                // the forbidden token at runtime via format!.
+                !l.contains("let forbidden = format!")
+            })
+            .collect();
+        assert!(
+            hits.is_empty(),
+            "agent_setup.rs still carries the legacy hint copy on lines: {hits:?}"
         );
     }
 
@@ -1721,6 +2579,8 @@ mod tests {
             force: false,
             print: true,
             data_dir: None,
+            no_template: true,
+            redetect: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         install_to_writer(spec, &opts, &env, &mut buf).unwrap();
@@ -1774,6 +2634,8 @@ mod tests {
             force: false,
             print: true,
             data_dir: Some(&weird),
+            no_template: true,
+            redetect: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         install_to_writer(spec, &opts, &env, &mut buf).unwrap();
@@ -2422,6 +3284,8 @@ mod tests {
             force: false,
             print: true,
             data_dir: None,
+            no_template: true,
+            redetect: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         install_to_writer(spec, &opts, &env, &mut buf).unwrap();
@@ -2446,6 +3310,8 @@ mod tests {
             force: false,
             print: true,
             data_dir: None,
+            no_template: true,
+            redetect: false,
         };
         let mut buf: Vec<u8> = Vec::new();
         install_to_writer(spec, &opts, &env, &mut buf).unwrap();
@@ -2968,5 +3834,204 @@ mod tests {
         run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
         assert!(rendered.contains("aimx agent-setup <agent>"));
+    }
+
+    // ----- Sprint 6 S6-1: $PATH probe --------------------------------------
+
+    /// Shell `$PATH`-style OsString from a slice of paths. Helper so tests
+    /// don't embed `:` separators by hand.
+    fn pathsep(entries: &[&Path]) -> OsString {
+        use std::os::unix::ffi::OsStrExt;
+        let mut bytes: Vec<u8> = Vec::new();
+        for (i, e) in entries.iter().enumerate() {
+            if i > 0 {
+                bytes.push(b':');
+            }
+            bytes.extend_from_slice(e.as_os_str().as_bytes());
+        }
+        use std::os::unix::ffi::OsStringExt;
+        OsString::from_vec(bytes)
+    }
+
+    #[cfg(unix)]
+    fn write_executable(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"#!/bin/sh\nexit 0\n").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    fn write_non_executable(dir: &Path, name: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, b"not-executable").unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_finds_binary_in_first_entry() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let expected = write_executable(&a, "claude");
+        let path = pathsep(&[&a]);
+
+        let got = probe_path_in("claude", &path).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&expected).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_first_match_wins_across_multiple_entries() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let first = write_executable(&a, "claude");
+        let _second = write_executable(&b, "claude");
+        let path = pathsep(&[&a, &b]);
+
+        let got = probe_path_in("claude", &path).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&first).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_finds_binary_in_later_entry_when_earlier_empty() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let second = write_executable(&b, "claude");
+        let path = pathsep(&[&a, &b]);
+
+        let got = probe_path_in("claude", &path).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&second).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_returns_none_when_binary_absent() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let path = pathsep(&[&a]);
+        assert!(probe_path_in("claude", &path).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_skips_non_executable_file() {
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        // Plain-perms file in `a`, real executable in `b`. The probe
+        // must skip `a/claude` and pick up `b/claude`.
+        write_non_executable(&a, "claude");
+        let exec = write_executable(&b, "claude");
+        let path = pathsep(&[&a, &b]);
+
+        let got = probe_path_in("claude", &path).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&exec).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_skips_non_directory_path_entry() {
+        let tmp = TempDir::new().unwrap();
+        // A plain file posing as a `$PATH` entry: `stat` on `<file>/claude`
+        // must fail cleanly and the probe should move on.
+        let file_entry = tmp.path().join("not-a-dir");
+        std::fs::write(&file_entry, b"hi").unwrap();
+        let b = tmp.path().join("b");
+        std::fs::create_dir_all(&b).unwrap();
+        let exec = write_executable(&b, "claude");
+        let path = pathsep(&[&file_entry, &b]);
+
+        let got = probe_path_in("claude", &path).unwrap();
+        assert_eq!(got, std::fs::canonicalize(&exec).unwrap());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_returns_none_on_empty_path_var() {
+        let empty = OsString::from("");
+        assert!(probe_path_in("claude", &empty).is_none());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_path_real_env_reads_var_os() {
+        // Drive the public helper against a synthetic `$PATH`. Uses
+        // `env::set_var` under `serial_test::serial` so other tests
+        // don't observe the mutation.
+        let tmp = TempDir::new().unwrap();
+        let a = tmp.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let expected = write_executable(&a, "claude");
+        let path = pathsep(&[&a]);
+
+        let prev = std::env::var_os("PATH");
+        // SAFETY: single-threaded scope inside this test (serialized by
+        // serial_test). We restore the previous value before returning.
+        unsafe {
+            std::env::set_var("PATH", &path);
+        }
+        let got = probe_path("claude");
+        unsafe {
+            match prev {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        assert_eq!(got.unwrap(), std::fs::canonicalize(&expected).unwrap());
+    }
+
+    #[test]
+    fn every_registered_agent_has_canonical_binary() {
+        // Registry lock-in: accidentally setting `canonical_binary` to
+        // the empty string would silently disable the probe. Every
+        // registered agent must declare a non-empty probe name.
+        for spec in registry() {
+            assert!(
+                !spec.canonical_binary.is_empty(),
+                "agent '{}' has an empty canonical_binary",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn canonical_binary_maps_per_prd_section_six_six() {
+        // Spot check the explicit mappings per Sprint 6 S6-1:
+        // claude-code → claude, codex → codex, opencode → opencode,
+        // gemini-cli / gemini → gemini, goose → goose, openclaw → openclaw.
+        let expect: &[(&str, &str)] = &[
+            ("claude-code", "claude"),
+            ("codex", "codex"),
+            ("opencode", "opencode"),
+            ("gemini", "gemini"),
+            ("goose", "goose"),
+            ("openclaw", "openclaw"),
+        ];
+        for (agent, want_bin) in expect {
+            let spec = find_agent(agent).expect("registered");
+            assert_eq!(
+                spec.canonical_binary, *want_bin,
+                "canonical_binary mismatch for agent '{agent}'"
+            );
+        }
     }
 }
