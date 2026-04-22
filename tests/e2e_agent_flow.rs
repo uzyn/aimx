@@ -257,6 +257,26 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     chown(&user_home, user_uid, user_gid);
     chmod(&user_home, 0o755);
 
+    // Point the user's /etc/passwd home at `user_home`. We pass `-m`
+    // to our `runuser` invocations to preserve the parent `HOME` env,
+    // but PAM's session management can still overwrite HOME from the
+    // passwd entry, so set both sources to the same path to be safe.
+    // Without this, `runuser -u aimx-it-agentflow` inherits the
+    // default `/home/aimx-it-agentflow/` (which doesn't exist because
+    // we `useradd --no-create-home`), and `agent-setup` then fails
+    // with EACCES trying to `mkdir $HOME/.claude/plugins/...`.
+    let usermod_status = Command::new("usermod")
+        .arg("-d")
+        .arg(&user_home)
+        .arg(USER)
+        .status()
+        .expect("failed to spawn usermod");
+    assert!(
+        usermod_status.success(),
+        "usermod -d {} {USER} failed",
+        user_home.display()
+    );
+
     // Start the daemon. Bind to a random port to avoid clashing with a
     // locally running aimx. `AIMX_SANDBOX_FORCE_FALLBACK=1` skips
     // systemd-run and uses the direct setresuid fallback so this test
@@ -303,6 +323,12 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // curated `$PATH` containing only the fake claude so the probe
     // resolves deterministically, and a `$HOME` under tmp.
     let agent_setup_out = Command::new(runuser_path())
+        // `-m` preserves HOME/SHELL/USER/LOGNAME from the parent env —
+        // without it, runuser+PAM resets HOME to the target user's
+        // `/etc/passwd` entry (which doesn't exist because we
+        // `useradd --no-create-home`) and `agent-setup` then fails with
+        // EACCES trying to `mkdir /home/<USER>/.claude/...`.
+        .arg("-m")
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -345,6 +371,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // registered and the mailbox is owned by the caller, so the
     // authz check passes.
     let hook_create_out = Command::new(runuser_path())
+        .arg("-m")
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -433,6 +460,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // test user. Should remove the template via UDS and the plugin
     // dir under $HOME.
     let cleanup_out = Command::new(runuser_path())
+        .arg("-m")
         .arg("-u")
         .arg(USER)
         .arg("--")
@@ -464,6 +492,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // re-creating a hook against it; the daemon should refuse with
     // `unknown-template`.
     let post_cleanup = Command::new(runuser_path())
+        .arg("-m")
         .arg("-u")
         .arg(USER)
         .arg("--")
