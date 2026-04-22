@@ -397,6 +397,27 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("prompt=process this")
         .output()
         .expect("failed to run aimx hooks create");
+    // Diagnostic: on failure, dump socket + config.toml metadata so we can
+    // see what the unprivileged caller actually had access to on the CI
+    // runner. Without this, a generic EACCES bubble comes out nameless
+    // (the raw `io::Error` Display) and we have no leverage.
+    if !hook_create_out.status.success() {
+        let sock_meta = std::fs::metadata(&sock);
+        let cfg_meta = std::fs::metadata(&config_path);
+        let rt_meta = std::fs::metadata(&runtime_dir);
+        let tmp_meta = std::fs::metadata(&tmp_root);
+        eprintln!(
+            "diagnostic:\n  sock={}: {:?}\n  config={}: {:?}\n  runtime_dir={}: {:?}\n  tmp_root={}: {:?}",
+            sock.display(),
+            sock_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            config_path.display(),
+            cfg_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            runtime_dir.display(),
+            rt_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+            tmp_root.display(),
+            tmp_meta.map(|m| format!("mode={:o}", m.permissions().mode())),
+        );
+    }
     assert!(
         hook_create_out.status.success(),
         "hooks create failed: stdout={:?} stderr={:?}",
