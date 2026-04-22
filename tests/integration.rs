@@ -51,8 +51,12 @@ fn install_cached_dkim_keys(tmp: &Path) {
 }
 
 fn setup_test_env(tmp: &Path) -> String {
+    // Sprint 4 §6.5: the UDS now enforces per-mailbox ownership. Tests
+    // that drive MCP / UDS as the current user need alice's owner to
+    // match the running uid so the authz check accepts.
+    let owner = current_username();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"ops\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -508,6 +512,23 @@ fn dkim_keygen_permission_denied_error_mentions_path_and_override() {
 
 fn aimx_binary_path() -> std::path::PathBuf {
     assert_cmd::cargo::cargo_bin("aimx")
+}
+
+/// Sprint 4 §6.5: `MAILBOX-CREATE` / `MAILBOX-DELETE` over UDS are
+/// root-only. Tests that exercise the CLI via UDS need to bail out
+/// when not running as root so a casual `cargo test` doesn't surface
+/// EACCES as a pretend bug. The CI `integration-isolation` job sets
+/// `AIMX_INTEGRATION_SUDO=1` and runs under sudo, so these tests
+/// execute there; non-root local runs skip them with a single stderr
+/// line so the cause is obvious.
+fn skip_if_mailbox_crud_not_root() -> bool {
+    if unsafe { libc::geteuid() } == 0 {
+        return false;
+    }
+    eprintln!(
+        "skipping mailbox-CRUD UDS test: requires root (Sprint 4 §6.5 makes MAILBOX-CRUD root-only)"
+    );
+    true
 }
 
 /// Resolve the current Linux username via `getpwuid`. Used by Sprint 2
@@ -1905,8 +1926,9 @@ fn serve_e2e_connection_refused_after_shutdown() {
 }
 
 fn setup_test_env_with_bob(tmp: &Path) -> String {
+    let owner = current_username();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"ops\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\nowner = \"ops\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n\n[mailboxes.bob]\naddress = \"bob@agent.example.com\"\nowner = \"{owner}\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -2734,6 +2756,7 @@ fn after_send_hook_fires_with_delivered_status() {
 
     // Overwrite config.toml with an after_send hook on `alice`.
     let sentinel = tmp.path().join("after_send.sentinel");
+    let owner = current_username();
     let config = format!(
         r#"domain = "agent.example.com"
 data_dir = "{data_dir}"
@@ -2744,7 +2767,7 @@ owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
-owner = "ops"
+owner = "{owner}"
 
 [[mailboxes.alice.hooks]]
 name = "aftersendhk1"
@@ -3058,6 +3081,9 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 #[cfg(unix)]
 #[test]
 fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
+    if skip_if_mailbox_crud_not_root() {
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3181,6 +3207,9 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
 #[cfg(unix)]
 #[test]
 fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
+    if skip_if_mailbox_crud_not_root() {
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3282,6 +3311,9 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 #[cfg(unix)]
 #[test]
 fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
+    if skip_if_mailbox_crud_not_root() {
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3340,6 +3372,9 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
 #[cfg(unix)]
 #[test]
 fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
+    if skip_if_mailbox_crud_not_root() {
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3735,6 +3770,9 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
 #[cfg(unix)]
 #[test]
 fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
+    if skip_if_mailbox_crud_not_root() {
+        return;
+    }
     // MAILBOX-CREATE takes the outer per-mailbox lock, then the inner
     // process-wide CONFIG_WRITE_LOCK (see `crate::mailbox_locks`).
     // Inbound ingest to the same mailbox takes only the outer lock.
@@ -4384,6 +4422,7 @@ fn setup_test_env_with_template(tmp: &Path) -> String {
     // Sprint 2 will introduce a real non-root test user and flip this
     // back to exercise the orphan-tolerance path the earlier comment
     // described.
+    let owner = current_username();
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
          [[hook_template]]\n\
@@ -4400,7 +4439,7 @@ fn setup_test_env_with_template(tmp: &Path) -> String {
          owner = \"aimx-catchall\"\n\n\
          [mailboxes.alice]\n\
          address = \"alice@agent.example.com\"\n\
-         owner = \"ops\"\n",
+         owner = \"{owner}\"\n",
         tmp.display()
     );
     std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
@@ -4836,6 +4875,7 @@ fn hook_templates_end_to_end_mcp_to_sandbox() {
     // Sprint 1 S1-2) still resolves the template to an active template
     // and the alice mailbox to an active mailbox. The invariant check
     // still holds: the `root` hook run_as is allowed for any owner.
+    let owner = current_username();
     let config_content = format!(
         r#"domain = "agent.example.com"
 data_dir = "{data_dir}"
@@ -4856,7 +4896,7 @@ owner = "aimx-catchall"
 
 [mailboxes.alice]
 address = "alice@agent.example.com"
-owner = "ops"
+owner = "{owner}"
 "#,
         data_dir = tmp.path().display(),
         mock = mock_curl_path.display(),

@@ -741,17 +741,37 @@ async fn run_send_listener(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _addr)) => {
-                        let peer = peer_credentials(&stream);
+                        // Sprint 4 S4-1: capture SO_PEERCRED at accept
+                        // time so every verb handler sees the caller's
+                        // uid/gid/pid before any body bytes are read.
+                        let caller = match crate::uds_authz::caller_from_stream(&stream) {
+                            Ok(c) => c,
+                            Err(reason) => {
+                                eprintln!("[send] peer_cred unavailable: {reason}");
+                                let (_reader, mut writer) = stream.into_split();
+                                let _ = send_protocol::write_ack_response(
+                                    &mut writer,
+                                    &send_protocol::AckResponse::Err {
+                                        code: send_protocol::ErrCode::Eaccess,
+                                        reason,
+                                    },
+                                )
+                                .await;
+                                use tokio::io::AsyncWriteExt;
+                                let _ = writer.shutdown().await;
+                                continue;
+                            }
+                        };
                         eprintln!(
                             "[send] accepted: peer_uid={} peer_pid={}",
-                            peer.uid_str(),
-                            peer.pid_str()
+                            caller.uid,
+                            caller.pid.map(|v| v.to_string()).unwrap_or_else(|| "?".into())
                         );
                         let send_ctx = Arc::clone(&send_ctx);
                         let state_ctx = Arc::clone(&state_ctx);
                         let mb_ctx = Arc::clone(&mb_ctx);
                         tokio::spawn(async move {
-                            handle_uds_connection(stream, send_ctx, state_ctx, mb_ctx).await;
+                            handle_uds_connection(stream, send_ctx, state_ctx, mb_ctx, caller).await;
                         });
                     }
                     Err(e) => {
@@ -779,9 +799,17 @@ async fn handle_uds_connection(
     send_ctx: Arc<SendContext>,
     state_ctx: Arc<StateContext>,
     mb_ctx: Arc<MailboxContext>,
+    caller: crate::uds_authz::Caller,
 ) {
-    handle_uds_connection_with_timeout(stream, send_ctx, state_ctx, mb_ctx, UDS_REQUEST_TIMEOUT)
-        .await;
+    handle_uds_connection_with_timeout(
+        stream,
+        send_ctx,
+        state_ctx,
+        mb_ctx,
+        caller,
+        UDS_REQUEST_TIMEOUT,
+    )
+    .await;
 }
 
 /// One-frame-per-connection dispatcher. Reads a single `AIMX/1` request
@@ -794,6 +822,7 @@ async fn handle_uds_connection_with_timeout(
     send_ctx: Arc<SendContext>,
     state_ctx: Arc<StateContext>,
     mb_ctx: Arc<MailboxContext>,
+    caller: crate::uds_authz::Caller,
     timeout: std::time::Duration,
 ) {
     use send_protocol::{AckResponse, ErrCode, ParseError, Request, SendResponse};
@@ -808,28 +837,31 @@ async fn handle_uds_connection_with_timeout(
     let (reply, parse_failed) =
         match tokio::time::timeout(timeout, send_protocol::parse_request(&mut reader)).await {
             Ok(Ok(Request::Send(req))) => (
-                Reply::Send(crate::send_handler::handle_send(req, &send_ctx).await),
+                Reply::Send(crate::send_handler::handle_send(req, &send_ctx, &caller).await),
                 false,
             ),
             Ok(Ok(Request::Mark(req))) => (
-                Reply::Ack(crate::state_handler::handle_mark(&state_ctx, &req).await),
+                Reply::Ack(crate::state_handler::handle_mark(&state_ctx, &req, &caller).await),
                 false,
             ),
             Ok(Ok(Request::MailboxCrud(req))) => (
                 Reply::Ack(
-                    crate::mailbox_handler::handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+                    crate::mailbox_handler::handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller)
+                        .await,
                 ),
                 false,
             ),
             Ok(Ok(Request::HookCreate(req))) => (
                 Reply::Ack(
-                    crate::hook_handler::handle_hook_create(&state_ctx, &mb_ctx, &req).await,
+                    crate::hook_handler::handle_hook_create(&state_ctx, &mb_ctx, &req, &caller)
+                        .await,
                 ),
                 false,
             ),
             Ok(Ok(Request::HookDelete(req))) => (
                 Reply::Ack(
-                    crate::hook_handler::handle_hook_delete(&state_ctx, &mb_ctx, &req).await,
+                    crate::hook_handler::handle_hook_delete(&state_ctx, &mb_ctx, &req, &caller)
+                        .await,
                 ),
                 false,
             ),
@@ -891,41 +923,6 @@ async fn handle_uds_connection_with_timeout(
         eprintln!("[send] failed to write response: {e}");
     }
     let _ = writer.shutdown().await;
-}
-
-/// Peer-credential snapshot for logging. `None` on platforms/errors where
-/// the kernel could not supply credentials, e.g. the client closed before
-/// we asked. Used only for journald diagnostics (FR-18b), never for
-/// authorization.
-struct PeerCred {
-    uid: Option<u32>,
-    pid: Option<i32>,
-}
-
-impl PeerCred {
-    fn uid_str(&self) -> String {
-        self.uid
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".into())
-    }
-    fn pid_str(&self) -> String {
-        self.pid
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".into())
-    }
-}
-
-fn peer_credentials(stream: &tokio::net::UnixStream) -> PeerCred {
-    match stream.peer_cred() {
-        Ok(c) => PeerCred {
-            uid: Some(c.uid()),
-            pid: c.pid(),
-        },
-        Err(_) => PeerCred {
-            uid: None,
-            pid: None,
-        },
-    }
 }
 
 fn can_read_tls(cert: &std::path::Path, key: &std::path::Path) -> bool {
@@ -1876,12 +1873,24 @@ mod tests {
             });
             let transport: Arc<dyn MailTransport + Send + Sync> = captor.clone();
 
+            // Sprint 4: the UDS now enforces per-mailbox ownership via
+            // SO_PEERCRED, so the mailbox owner must match the uid the
+            // test client connects under. Resolve the running uid back
+            // to a username so this test passes for any CI user (root
+            // on the integration-isolation job, `runner`/`ubuntu`
+            // locally).
+            let caller_uid = unsafe { libc::geteuid() };
+            let caller_username = crate::uds_authz::Caller::new(caller_uid, caller_uid, None)
+                .username()
+                .unwrap_or("root")
+                .to_string();
+
             let mut mailboxes = HashMap::new();
             mailboxes.insert(
                 "alice".to_string(),
                 crate::config::MailboxConfig {
                     address: "alice@example.com".to_string(),
-                    owner: "root".to_string(),
+                    owner: caller_username.clone(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
@@ -1998,6 +2007,7 @@ mod tests {
                         send_ctx,
                         state_ctx,
                         mb_ctx,
+                        crate::uds_authz::Caller::internal_root(),
                         std::time::Duration::from_secs(1),
                     )
                     .await;

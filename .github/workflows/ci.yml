@@ -67,6 +67,15 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test isolation -- --ignored
 
+      # Sprint 4 S4-4: root-gated UDS authz integration test. Reuses
+      # the `aimx-it-alice` / `aimx-it-bob` fixture from Sprint 2 and
+      # asserts that bob cannot SEND/MARK-READ/HOOK-CREATE as alice
+      # over the UDS. Same runtime gating (AIMX_INTEGRATION_SUDO=1 +
+      # sudo + PATH propagation) as the isolation test above.
+      - name: Run UDS authz integration test (root)
+        run: |
+          sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test uds_authz -- --ignored
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:

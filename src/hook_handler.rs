@@ -41,6 +41,7 @@ use crate::send_protocol::{
     AckResponse, ErrCode, HookCreateRequest, HookDeleteRequest, HookTemplateCreateBody,
 };
 use crate::state_handler::StateContext;
+use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root, log_decision};
 
 /// Handle an `AIMX/1 HOOK-CREATE` request. Template-only. Takes the
 /// per-mailbox write lock for the addressed mailbox (outer) plus
@@ -50,6 +51,7 @@ pub async fn handle_hook_create(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     req: &HookCreateRequest,
+    caller: &Caller,
 ) -> AckResponse {
     // --- Parse JSON body (rejects `cmd`, `run_as`, etc. via `deny_unknown_fields`).
     let body: HookTemplateCreateBody = match serde_json::from_slice(&req.body) {
@@ -94,11 +96,32 @@ pub async fn handle_hook_create(
 
     let current = mb_ctx.config_handle.load();
 
-    // --- Resolve mailbox.
-    if !current.mailboxes.contains_key(&req.mailbox) {
+    // --- Resolve mailbox. Sprint 4 §6.5: unknown mailbox returns
+    // `ENOENT` (not `EACCES`) so the authz check itself cannot leak
+    // which mailboxes exist. Authz runs after the mailbox is found.
+    let mailbox_cfg = match current.mailboxes.get(&req.mailbox) {
+        Some(m) => m,
+        None => {
+            log_decision(
+                "HOOK-CREATE",
+                caller,
+                Some(&req.mailbox),
+                "reject",
+                Some("mailbox not found"),
+            );
+            return AckResponse::Err {
+                code: ErrCode::Enoent,
+                reason: format!("mailbox '{}' does not exist", req.mailbox),
+            };
+        }
+    };
+
+    if let Err(reject) =
+        enforce_mailbox_owner_or_root("HOOK-CREATE", caller, &req.mailbox, mailbox_cfg)
+    {
         return AckResponse::Err {
-            code: ErrCode::Mailbox,
-            reason: format!("mailbox '{}' does not exist", req.mailbox),
+            code: reject.code,
+            reason: reject.reason,
         };
     }
 
@@ -242,6 +265,7 @@ pub async fn handle_hook_delete(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     req: &HookDeleteRequest,
+    caller: &Caller,
 ) -> AckResponse {
     if !is_valid_hook_name(&req.name) {
         return AckResponse::Err {
@@ -264,12 +288,32 @@ pub async fn handle_hook_delete(
     let owner = match owner {
         Some(n) => n,
         None => {
+            log_decision(
+                "HOOK-DELETE",
+                caller,
+                None,
+                "reject",
+                Some("hook not found"),
+            );
             return AckResponse::Err {
-                code: ErrCode::NotFound,
+                code: ErrCode::Enoent,
                 reason: format!("hook '{}' not found", req.name),
             };
         }
     };
+
+    // Sprint 4 §6.5: the caller must own the target mailbox OR be
+    // root. Runs before the origin check so a non-owner never learns
+    // whether the hook is MCP- or operator-origin.
+    if let Some(mailbox_cfg) = current.mailboxes.get(&owner)
+        && let Err(reject) =
+            enforce_mailbox_owner_or_root("HOOK-DELETE", caller, &owner, mailbox_cfg)
+    {
+        return AckResponse::Err {
+            code: reject.code,
+            reason: reject.reason,
+        };
+    }
 
     // Origin check: before acquiring any locks, refuse operator-origin
     // hooks up front so callers get a precise error without waiting on
@@ -488,7 +532,7 @@ mod tests {
             name: Some("my_hook".into()),
             body: body(&[("prompt", "hello world")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Ok => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -522,7 +566,7 @@ mod tests {
             body: body(&[("prompt", "anon")]),
         };
         assert!(matches!(
-            handle_hook_create(&state_ctx, &mb_ctx, &req).await,
+            handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
         let live = mb_ctx.config_handle.load();
@@ -542,7 +586,7 @@ mod tests {
             name: None,
             body: json.to_vec(),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("cmd"), "{reason}");
@@ -566,7 +610,7 @@ mod tests {
             name: None,
             body: json.to_vec(),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("run_as"), "{reason}");
@@ -588,7 +632,7 @@ mod tests {
             name: None,
             body: json.to_vec(),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("dangerously_support_untrusted"), "{reason}");
@@ -609,7 +653,7 @@ mod tests {
             name: None,
             body: body(&[]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("unknown-template"), "{reason}");
@@ -631,7 +675,7 @@ mod tests {
             name: None,
             body: body(&[]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("missing-param"), "{reason}");
@@ -653,7 +697,7 @@ mod tests {
             name: None,
             body: body(&[("prompt", "hi"), ("bogus", "zz")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("unknown-param"), "{reason}");
@@ -684,7 +728,7 @@ mod tests {
             name: None,
             body: body(&[("prompt", "hi")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("event-not-allowed"), "{reason}");
@@ -705,12 +749,12 @@ mod tests {
             name: None,
             body: body(&[("prompt", "hi")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
-                assert_eq!(code, ErrCode::Mailbox);
+                assert_eq!(code, ErrCode::Enoent);
                 assert!(reason.contains("ghost"), "{reason}");
             }
-            other => panic!("expected Err(MAILBOX), got {other:?}"),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
         }
     }
 
@@ -726,7 +770,7 @@ mod tests {
             name: None,
             body: body(&[("prompt", "hi")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("invalid event"), "{reason}");
@@ -747,7 +791,7 @@ mod tests {
             name: Some("bad name!".into()),
             body: body(&[("prompt", "hi")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("invalid hook name"), "{reason}");
@@ -769,7 +813,7 @@ mod tests {
             body: body(&[("prompt", "hi")]),
         };
         assert!(matches!(
-            handle_hook_create(&state_ctx, &mb_ctx, &req1).await,
+            handle_hook_create(&state_ctx, &mb_ctx, &req1, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -780,7 +824,7 @@ mod tests {
             name: Some("dup".into()),
             body: body(&[("prompt", "hi2")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req2).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req2, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("name-conflict"), "{reason}");
@@ -801,7 +845,7 @@ mod tests {
             name: None,
             body: b"not-json-at-all".to_vec(),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("malformed HOOK-CREATE body"), "{reason}");
@@ -825,7 +869,7 @@ mod tests {
             name: None,
             body: body(&[("prompt", "a\0b")]),
         };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req).await {
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("param-invalid"), "{reason}");
@@ -874,7 +918,7 @@ mod tests {
             body: body(&[("prompt", "hi")]),
         };
         assert!(matches!(
-            handle_hook_create(&state_ctx, &mb_ctx, &req).await,
+            handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -882,7 +926,7 @@ mod tests {
             name: "mcp_hook".into(),
         };
         assert!(matches!(
-            handle_hook_delete(&state_ctx, &mb_ctx, &del).await,
+            handle_hook_delete(&state_ctx, &mb_ctx, &del, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -901,7 +945,7 @@ mod tests {
         let del = HookDeleteRequest {
             name: "operator_hook".into(),
         };
-        match handle_hook_delete(&state_ctx, &mb_ctx, &del).await {
+        match handle_hook_delete(&state_ctx, &mb_ctx, &del, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("origin-protected"), "{reason}");
@@ -916,15 +960,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hook_delete_unknown_name_returns_notfound() {
+    async fn hook_delete_unknown_name_returns_enoent() {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
         let del = HookDeleteRequest {
             name: "nope".into(),
         };
-        match handle_hook_delete(&state_ctx, &mb_ctx, &del).await {
-            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::NotFound),
-            other => panic!("expected Err(NOTFOUND), got {other:?}"),
+        match handle_hook_delete(&state_ctx, &mb_ctx, &del, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Enoent),
+            other => panic!("expected Err(ENOENT), got {other:?}"),
         }
     }
 
@@ -935,7 +979,7 @@ mod tests {
         let del = HookDeleteRequest {
             name: "bad name!".into(),
         };
-        match handle_hook_delete(&state_ctx, &mb_ctx, &del).await {
+        match handle_hook_delete(&state_ctx, &mb_ctx, &del, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
             other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
@@ -966,7 +1010,7 @@ mod tests {
                     name: Some(name.clone()),
                     body: body(&[("prompt", "hi")]),
                 };
-                handle_hook_create(&s, &m, &req).await
+                handle_hook_create(&s, &m, &req, &Caller::internal_root()).await
             }));
         }
         for h in handles {

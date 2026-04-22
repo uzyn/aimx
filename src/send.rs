@@ -260,18 +260,13 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
     }
     if let Some(err_body) = rest.strip_prefix("ERR ") {
         let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
-        let code = match code_str {
-            "MAILBOX" => ErrCode::Mailbox,
-            "DOMAIN" => ErrCode::Domain,
-            "SIGN" => ErrCode::Sign,
-            "DELIVERY" => ErrCode::Delivery,
-            "TEMP" => ErrCode::Temp,
-            "MALFORMED" => ErrCode::Malformed,
-            "PROTOCOL" => ErrCode::Protocol,
-            "NOTFOUND" => ErrCode::NotFound,
-            "IO" => ErrCode::Io,
-            "VALIDATION" => ErrCode::Validation,
-            "NONEMPTY" => ErrCode::NonEmpty,
+        // Sprint 4: the frame may carry a follow-up `Code:` header on
+        // subsequent lines. We scan for it so clients can branch on
+        // the structured code even if the status-line token drifts.
+        let header_code = header_code(text);
+        let code = match (header_code, ErrCode::from_str(code_str)) {
+            (Some(h), _) => h,
+            (None, Some(inline)) => inline,
             _ => {
                 return SubmitOutcome::Malformed(format!(
                     "unknown ERR code {code_str:?} in response"
@@ -285,6 +280,25 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
     }
 
     SubmitOutcome::Malformed(format!("unexpected response: {line:?}"))
+}
+
+/// Extract the first `Code:` header from the response text, if present.
+/// Introduced in Sprint 4 so the structured code on the wire survives
+/// any future change to the status-line token.
+fn header_code(text: &str) -> Option<ErrCode> {
+    for line in text.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if let Some(v) = line.strip_prefix("Code: ") {
+            return ErrCode::from_str(v.trim());
+        }
+        if let Some(v) = line.strip_prefix("Code:") {
+            return ErrCode::from_str(v.trim());
+        }
+    }
+    None
 }
 
 /// Is the current process running as root? Factored out so tests can override.
@@ -1005,6 +1019,8 @@ mod tests {
 
     #[test]
     fn parse_response_unknown_err_code() {
+        // Neither the inline token nor a Code: header resolves — the
+        // client surfaces Malformed so downstream tooling can flag it.
         let buf = b"AIMX/1 ERR SPLORG something\n";
         assert!(matches!(
             parse_response_line(buf),
@@ -1018,6 +1034,36 @@ mod tests {
             parse_response_line(b""),
             SubmitOutcome::Malformed(_)
         ));
+    }
+
+    #[test]
+    fn parse_response_eacces_via_inline_and_header() {
+        // Sprint 4 S4-3: a response carrying both the legacy inline
+        // `EACCES` token AND a structured `Code:` header is parseable
+        // back into the same `ErrCode::Eaccess` variant.
+        let buf = b"AIMX/1 ERR EACCES not owner\nCode: EACCES\n\n";
+        match parse_response_line(buf) {
+            SubmitOutcome::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Eaccess);
+                assert_eq!(reason, "not owner");
+            }
+            other => panic!("expected Err(EACCES), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_response_enoent_header_takes_precedence() {
+        // If the Code: header disagrees with the inline token, the
+        // structured header wins. This future-proofs against the
+        // status line drifting past the enum vocabulary.
+        let buf = b"AIMX/1 ERR UNKNOWN not found\nCode: ENOENT\n\n";
+        match parse_response_line(buf) {
+            SubmitOutcome::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Enoent);
+                assert_eq!(reason, "not found");
+            }
+            other => panic!("expected Err(ENOENT), got {other:?}"),
+        }
     }
 
     #[test]

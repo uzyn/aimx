@@ -253,6 +253,18 @@ pub enum ErrCode {
     /// owner. Ambiguous state — operator must fix it with `chown`
     /// before the daemon will claim the directories. Sprint 2 §6.3.
     Conflict,
+    /// Sprint 4 §6.5: the caller's uid (from `SO_PEERCRED`) is not
+    /// authorized for the requested verb on the target mailbox, and
+    /// is not root. Mirrors POSIX `EACCES` for operator ergonomics.
+    Eaccess,
+    /// Sprint 4 §6.5: the target resource referenced by the verb
+    /// (mailbox, hook, template) does not exist. Distinct from
+    /// [`ErrCode::NotFound`] so authz helpers can signal
+    /// "unknown-target" vs "unknown-email-id" without overloading the
+    /// legacy code. Emitted instead of `EACCES` whenever the caller's
+    /// authz outcome is leaked by the existence-check itself (PRD
+    /// §6.5 leak-free shape).
+    Enoent,
 }
 
 impl ErrCode {
@@ -270,7 +282,33 @@ impl ErrCode {
             ErrCode::Validation => "VALIDATION",
             ErrCode::NonEmpty => "NONEMPTY",
             ErrCode::Conflict => "ECONFLICT",
+            ErrCode::Eaccess => "EACCES",
+            ErrCode::Enoent => "ENOENT",
         }
+    }
+
+    /// Parse a wire-level code string back into the tagged enum.
+    /// Returns `None` for unknown strings so clients distinguish
+    /// "daemon drifted past our vocabulary" from "daemon reported X".
+    pub fn from_str(s: &str) -> Option<Self> {
+        let v = match s {
+            "MAILBOX" => ErrCode::Mailbox,
+            "DOMAIN" => ErrCode::Domain,
+            "SIGN" => ErrCode::Sign,
+            "DELIVERY" => ErrCode::Delivery,
+            "TEMP" => ErrCode::Temp,
+            "MALFORMED" => ErrCode::Malformed,
+            "PROTOCOL" => ErrCode::Protocol,
+            "NOTFOUND" => ErrCode::NotFound,
+            "IO" => ErrCode::Io,
+            "VALIDATION" => ErrCode::Validation,
+            "NONEMPTY" => ErrCode::NonEmpty,
+            "ECONFLICT" => ErrCode::Conflict,
+            "EACCES" => ErrCode::Eaccess,
+            "ENOENT" => ErrCode::Enoent,
+            _ => return None,
+        };
+        Some(v)
     }
 }
 
@@ -907,8 +945,19 @@ where
     Ok(Some(s))
 }
 
-/// Write a `SendResponse` frame to `writer` and flush. The frame ends with a
-/// single `\n`. No body, no content-length.
+/// Write a `SendResponse` frame to `writer` and flush.
+///
+/// Wire format:
+/// ```text
+/// AIMX/1 OK <message-id>\n           (success)
+/// AIMX/1 ERR <CODE> <reason>\n       (error, status line)
+/// Code: <CODE>\n                     (Sprint 4: structured header)
+/// \n                                 (terminator)
+/// ```
+///
+/// The legacy inline `<CODE>` on the status line is preserved so older
+/// clients that only parse the first line keep working. New clients
+/// read the `Code:` header off the second line for stable branching.
 pub async fn write_response<W>(
     writer: &mut W,
     response: &SendResponse,
@@ -916,23 +965,30 @@ pub async fn write_response<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let line = match response {
+    let payload = match response {
         SendResponse::Ok { message_id } => {
             let id = sanitize_inline(message_id);
             format!("AIMX/1 OK {id}\n")
         }
         SendResponse::Err { code, reason } => {
             let r = sanitize_inline(reason);
-            format!("AIMX/1 ERR {} {r}\n", code.as_str())
+            format!(
+                "AIMX/1 ERR {code} {r}\nCode: {code}\n\n",
+                code = code.as_str()
+            )
         }
     };
-    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(payload.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
 
 /// Write an `AckResponse` frame (bodyless OK / ERR) to `writer` and flush.
 /// Used for MARK-READ / MARK-UNREAD and future bodyless verbs.
+///
+/// Wire format matches [`write_response`]: the error form carries both
+/// the legacy inline `<CODE>` token on the status line AND an explicit
+/// `Code:` header on the next line.
 pub async fn write_ack_response<W>(
     writer: &mut W,
     response: &AckResponse,
@@ -940,14 +996,17 @@ pub async fn write_ack_response<W>(
 where
     W: AsyncWrite + Unpin,
 {
-    let line = match response {
+    let payload = match response {
         AckResponse::Ok => "AIMX/1 OK\n".to_string(),
         AckResponse::Err { code, reason } => {
             let r = sanitize_inline(reason);
-            format!("AIMX/1 ERR {} {r}\n", code.as_str())
+            format!(
+                "AIMX/1 ERR {code} {r}\nCode: {code}\n\n",
+                code = code.as_str()
+            )
         }
     };
-    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(payload.as_bytes()).await?;
     writer.flush().await?;
     Ok(())
 }
@@ -1280,6 +1339,8 @@ mod tests {
             (ErrCode::Validation, "VALIDATION"),
             (ErrCode::NonEmpty, "NONEMPTY"),
             (ErrCode::Conflict, "ECONFLICT"),
+            (ErrCode::Eaccess, "EACCES"),
+            (ErrCode::Enoent, "ENOENT"),
         ] {
             let (mut client, mut server) = duplex(256);
             write_response(
@@ -1296,7 +1357,8 @@ mod tests {
             tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
                 .await
                 .unwrap();
-            let expected = format!("AIMX/1 ERR {label} nope\n");
+            // Sprint 4 wire format: legacy status line + `Code:` header.
+            let expected = format!("AIMX/1 ERR {label} nope\nCode: {label}\n\n");
             assert_eq!(buf, expected.as_bytes());
         }
     }
@@ -1318,7 +1380,7 @@ mod tests {
         tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
             .await
             .unwrap();
-        assert_eq!(buf, b"AIMX/1 ERR DELIVERY badreason\n");
+        assert_eq!(buf, b"AIMX/1 ERR DELIVERY badreason\nCode: DELIVERY\n\n");
     }
 
     #[tokio::test]
@@ -1349,7 +1411,32 @@ mod tests {
         tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
             .await
             .unwrap();
-        assert_eq!(buf, b"AIMX/1 ERR NOTFOUND missing\n");
+        assert_eq!(buf, b"AIMX/1 ERR NOTFOUND missing\nCode: NOTFOUND\n\n");
+    }
+
+    #[tokio::test]
+    async fn write_ack_err_eacces_includes_code_header() {
+        let (mut client, mut server) = duplex(256);
+        write_ack_response(
+            &mut client,
+            &AckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: "not owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+        drop(client);
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&buf);
+        // Both the legacy inline code and the `Code:` header must be
+        // present so clients can pick either. The sprint AC says "a
+        // client reading the frame can deserialize both".
+        assert!(text.contains("AIMX/1 ERR EACCES not owner"));
+        assert!(text.contains("Code: EACCES"));
     }
 
     // ----- MARK-READ / MARK-UNREAD verbs -----------------------------

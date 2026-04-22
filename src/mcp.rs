@@ -1007,19 +1007,12 @@ pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
     }
     if let Some(err_body) = rest.strip_prefix("ERR ") {
         let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
-        let code = match code_str {
-            "MAILBOX" => ErrCode::Mailbox,
-            "DOMAIN" => ErrCode::Domain,
-            "SIGN" => ErrCode::Sign,
-            "DELIVERY" => ErrCode::Delivery,
-            "TEMP" => ErrCode::Temp,
-            "MALFORMED" => ErrCode::Malformed,
-            "PROTOCOL" => ErrCode::Protocol,
-            "NOTFOUND" => ErrCode::NotFound,
-            "IO" => ErrCode::Io,
-            // MAILBOX-CRUD verbs report these codes.
-            "VALIDATION" => ErrCode::Validation,
-            "NONEMPTY" => ErrCode::NonEmpty,
+        // Sprint 4: prefer the structured `Code:` header if the daemon
+        // emitted one, fall back to the legacy inline token.
+        let header = parse_ack_code_header(text);
+        let code = match (header, ErrCode::from_str(code_str)) {
+            (Some(h), _) => h,
+            (None, Some(inline)) => inline,
             _ => {
                 return MarkOutcome::Malformed(format!(
                     "unknown ERR code {code_str:?} in response"
@@ -1032,6 +1025,22 @@ pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
         };
     }
     MarkOutcome::Malformed(format!("unexpected response: {line:?}"))
+}
+
+fn parse_ack_code_header(text: &str) -> Option<ErrCode> {
+    for line in text.lines().skip(1) {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        if let Some(v) = line.strip_prefix("Code: ") {
+            return ErrCode::from_str(v.trim());
+        }
+        if let Some(v) = line.strip_prefix("Code:") {
+            return ErrCode::from_str(v.trim());
+        }
+    }
+    None
 }
 
 #[tool_handler]

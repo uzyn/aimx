@@ -27,6 +27,7 @@ use crate::ownership::chown_as_owner;
 use crate::send_protocol::{ErrCode, SendRequest, SendResponse};
 use crate::slug::{allocate_filename, slugify};
 use crate::transport::{MailTransport, TransportError};
+use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
 
 /// Process-scoped lock guarding the outbound critical section: filename
 /// allocation + file/directory creation. The daemon is the single writer
@@ -75,8 +76,8 @@ pub struct SendContext {
 /// header out of the body → validate the sender domain matches config →
 /// DKIM-sign → deliver via MX. Every error path maps to a stable
 /// [`ErrCode`].
-pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
-    handle_send_with_signer(req, ctx, dkim::sign_message).await
+pub async fn handle_send(req: SendRequest, ctx: &SendContext, caller: &Caller) -> SendResponse {
+    handle_send_with_signer(req, ctx, caller, dkim::sign_message).await
 }
 
 /// Generic form of [`handle_send`] parameterized on the DKIM signer so tests
@@ -85,6 +86,7 @@ pub async fn handle_send(req: SendRequest, ctx: &SendContext) -> SendResponse {
 pub(crate) async fn handle_send_with_signer<F>(
     req: SendRequest,
     ctx: &SendContext,
+    caller: &Caller,
     signer: F,
 ) -> SendResponse
 where
@@ -179,6 +181,19 @@ where
             };
         }
     };
+
+    // Sprint 4 §6.5: authorize the caller against the resolved
+    // mailbox. Non-owners (other than root) get EACCES so a uid bound
+    // to mailbox `bob` cannot spoof `From: alice@domain`.
+    if let Some(mailbox_cfg) = config.mailboxes.get(&from_mailbox)
+        && let Err(reject) =
+            enforce_mailbox_owner_or_root("SEND", caller, &from_mailbox, mailbox_cfg)
+    {
+        return SendResponse::Err {
+            code: reject.code,
+            reason: reject.reason,
+        };
+    }
 
     let to_header = match headers.get("To") {
         Some(v) => v.clone(),
@@ -761,7 +776,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Ok { message_id } => {
                 assert_eq!(message_id, "<abc@example.com>");
@@ -791,7 +806,7 @@ mod tests {
         let req = SendRequest {
             body: body("bogus@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
@@ -817,7 +832,7 @@ mod tests {
         let req = SendRequest {
             body: body("catchall@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Mailbox),
             other => panic!("expected Err(MAILBOX), got {other:?}"),
@@ -834,7 +849,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@other.org"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Domain);
@@ -854,7 +869,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@EXAMPLE.COM"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
 
@@ -870,7 +885,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
 
@@ -886,7 +901,7 @@ mod tests {
         let req = SendRequest {
             body: body("Alice <alice@example.com>"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
 
@@ -904,7 +919,7 @@ mod tests {
                      hello\r\n"
             .to_vec();
         let req = SendRequest { body };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Malformed),
             other => panic!("expected Err, got {other:?}"),
@@ -923,7 +938,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Delivery);
@@ -945,7 +960,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Temp),
             other => panic!("expected Err, got {other:?}"),
@@ -1061,7 +1076,7 @@ mod tests {
                      hello\r\n"
             .to_vec();
         let req = SendRequest { body };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
 
@@ -1080,7 +1095,7 @@ mod tests {
                      hello\r\n"
             .to_vec();
         let req = SendRequest { body };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Ok { message_id } => {
                 assert!(
@@ -1122,7 +1137,8 @@ mod tests {
          -> Result<Vec<u8>, Box<dyn std::error::Error>> {
             Err("simulated DKIM signing failure".into())
         };
-        let resp = handle_send_with_signer(req, &ctx, failing_signer).await;
+        let resp =
+            handle_send_with_signer(req, &ctx, &Caller::internal_root(), failing_signer).await;
         match resp {
             SendResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Sign);
@@ -1146,7 +1162,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
 
         let sent_dir = data_dir.path().join("sent").join("alice");
@@ -1179,7 +1195,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
 
         let sent_dir = data_dir.path().join("sent").join("alice");
@@ -1208,7 +1224,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
 
         let sent_dir = data_dir.path().join("sent").join("alice");
@@ -1232,7 +1248,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
 
         let sent_dir = data_dir.path().join("sent").join("alice");
@@ -1334,7 +1350,7 @@ mod tests {
         let req = SendRequest {
             body: body("alice@example.com"),
         };
-        let resp = handle_send(req, &ctx).await;
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
 
         let sent_dir = data_dir.path().join("sent").join("alice");
