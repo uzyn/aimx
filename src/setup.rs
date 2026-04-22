@@ -1690,6 +1690,20 @@ pub fn prompt_mailbox_owner(
     address: &str,
     sys: &dyn SystemOps,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let stdin = io::stdin();
+    let mut reader = stdin.lock();
+    prompt_mailbox_owner_with_reader(address, sys, &mut reader)
+}
+
+/// Inner prompt helper that reads from an injectable `BufRead`. The
+/// public [`prompt_mailbox_owner`] wraps this with a `stdin().lock()`
+/// reader in production; tests drive the re-prompt / 5-failure branches
+/// with scripted `Cursor<&[u8]>` input.
+pub(crate) fn prompt_mailbox_owner_with_reader(
+    address: &str,
+    sys: &dyn SystemOps,
+    reader: &mut dyn io::BufRead,
+) -> Result<String, Box<dyn std::error::Error>> {
     let local_part = address.split('@').next().unwrap_or("").trim().to_string();
     let default_candidate = if local_part.is_empty() {
         None
@@ -1711,8 +1725,6 @@ pub fn prompt_mailbox_owner(
         });
     }
 
-    let stdin = io::stdin();
-    let mut reader = stdin.lock();
     for attempt in 0..MAX_OWNER_PROMPT_ATTEMPTS {
         match &default_candidate {
             Some(def) => print!("Which Linux user should own `{address}`? [{def}]: "),
@@ -1790,7 +1802,6 @@ pub(crate) fn detect_server_ipv6(enable_ipv6: bool, ipv6: Option<Ipv6Addr>) -> O
 pub fn run_setup(
     domain: Option<&str>,
     data_dir: Option<&Path>,
-    non_interactive: bool,
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -1886,11 +1897,6 @@ pub fn run_setup(
     // domain changes). Must happen before the aimx.service install at the end,
     // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
-
-    // Silence the `non_interactive` unused-var warning until a future
-    // sprint reintroduces an interactive prompt phase. Kept on the
-    // signature so callers don't have to change when that lands.
-    let _ = non_interactive;
 
     // Step 4b: Create `aimx-catchall` service user (PRD §6.4, S3-1) —
     // but only when the operator's configured mailboxes include a
@@ -2433,38 +2439,143 @@ owner = "aimx-catchall"
         );
     }
 
+    #[test]
+    fn prompt_mailbox_owner_reprompts_until_valid_user_entered() {
+        // Sprint 7.5 S7.5-3: exercise the re-prompt loop with a scripted
+        // stdin. Two bad entries (users that don't exist) followed by a
+        // good one — the helper must re-prompt after each bad entry and
+        // return the good entry without burning the full 5-attempt
+        // budget. Mock `SystemOps` reports only "carol" as a real user.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn empty_resolver(_name: &str) -> Option<ResolvedUser> {
+            None
+        }
+        let _r = set_test_resolver(empty_resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(super::NONINTERACTIVE_ENV) };
+
+        let sys = MockSystemOps::default();
+        sys.existing_users.borrow_mut().insert("carol".into());
+
+        // Three lines, one per `read_line` call. The first two are
+        // rejected by the `user_exists` mock, the third succeeds.
+        let scripted = b"alice\nbob\ncarol\n";
+        let mut cursor = std::io::Cursor::new(&scripted[..]);
+        let owner =
+            super::prompt_mailbox_owner_with_reader("team@example.com", &sys, &mut cursor).unwrap();
+        assert_eq!(owner, "carol");
+    }
+
+    #[test]
+    fn prompt_mailbox_owner_errors_after_five_rejected_attempts() {
+        // Sprint 7.5 S7.5-3: when every scripted attempt is a bad user,
+        // the helper must give up after `MAX_OWNER_PROMPT_ATTEMPTS` and
+        // return the documented useradd error.
+        use crate::user_resolver::{ResolvedUser, set_test_resolver};
+        fn empty_resolver(_name: &str) -> Option<ResolvedUser> {
+            None
+        }
+        let _r = set_test_resolver(empty_resolver);
+        let _g = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        unsafe { std::env::remove_var(super::NONINTERACTIVE_ENV) };
+
+        // `existing_users` stays empty — nothing the operator types can
+        // resolve, so every attempt re-prompts.
+        let sys = MockSystemOps::default();
+
+        let scripted = b"a\nb\nc\nd\ne\n";
+        let mut cursor = std::io::Cursor::new(&scripted[..]);
+        let err = super::prompt_mailbox_owner_with_reader("ghost@example.com", &sys, &mut cursor)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("5 attempts") && err.contains("useradd"),
+            "after 5 failures the error must name the ceiling and point at useradd: {err}"
+        );
+    }
+
     // ----- Sprint 3 S3-3: legacy-template-phase removal regression ------
 
     #[test]
     fn legacy_template_phase_is_absent_from_setup() {
-        // Regression guard: the Sprint 3 grep-based AC checks that
-        // setup no longer carries the legacy hook-template wiring.
-        // The check targets pub(crate)-fn definitions only — rendering
-        // the needles with a runtime-built string keeps this test's
-        // own body from tripping its own assertion when it loads its
-        // own source.
+        // Regression guard: the Sprint 3 interactive-checkbox phase
+        // and the `aimx-hook` group plumbing must stay gone. This
+        // check uses a structural `syn` walk over the parsed AST of
+        // `src/setup.rs` rather than a substring grep over the source,
+        // so future string literals and comments that happen to mention
+        // the retired names cannot trip the assertion (Sprint 7.5
+        // S7.5-4 — replaced the Sprint 3 `include_str!` + grep).
+        use syn::visit::Visit;
+
         let source = include_str!("setup.rs");
-        let fn_kw = "pub(crate) fn ";
-        let retired = [
+        let parsed = syn::parse_file(source).expect("src/setup.rs must parse as a Rust file");
+
+        // Retired helpers: any function or method with one of these
+        // identifiers is a regression regardless of visibility, since
+        // the whole point is that the legacy template-checkbox phase
+        // no longer exists anywhere in the module.
+        const RETIRED: &[&str] = &[
             "apply_selected_templates",
             "current_hook_templates",
             "ensure_hook_user",
             "chown_datadir_for_hook_user",
         ];
-        for name in retired {
-            let needle = format!("{fn_kw}{name}");
-            assert!(
-                !source.contains(&needle),
-                "{needle} must stay retired — agent-setup owns template wiring now"
-            );
+        // Any `configure_hook_*` helper was the heart of the old
+        // interactive checkbox flow. Match on the prefix so future
+        // `configure_hook_foo` rebirths surface here.
+        const BANNED_PREFIX: &str = "configure_hook";
+
+        struct Walker {
+            found_retired: Vec<&'static str>,
+            found_banned: Vec<String>,
         }
-        // Separately assert no `configure_hook_*` helper exists (the
-        // interactive-checkbox phase is gone). Target the `pub(crate)`
-        // signature specifically so the test's own body doesn't match.
-        let banned_prefix = format!("{fn_kw}configure_hook");
+        impl<'ast> Visit<'ast> for Walker {
+            fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+                self.record(f.sig.ident.to_string());
+                syn::visit::visit_item_fn(self, f);
+            }
+            fn visit_impl_item_fn(&mut self, f: &'ast syn::ImplItemFn) {
+                self.record(f.sig.ident.to_string());
+                syn::visit::visit_impl_item_fn(self, f);
+            }
+            fn visit_trait_item_fn(&mut self, f: &'ast syn::TraitItemFn) {
+                self.record(f.sig.ident.to_string());
+                syn::visit::visit_trait_item_fn(self, f);
+            }
+        }
+        impl Walker {
+            fn record(&mut self, name: String) {
+                for retired in RETIRED {
+                    if name == *retired {
+                        self.found_retired.push(retired);
+                    }
+                }
+                if name.starts_with(BANNED_PREFIX) {
+                    self.found_banned.push(name);
+                }
+            }
+        }
+
+        let mut walker = Walker {
+            found_retired: Vec::new(),
+            found_banned: Vec::new(),
+        };
+        walker.visit_file(&parsed);
+
         assert!(
-            !source.contains(&banned_prefix),
-            "{banned_prefix}* helpers were removed in Sprint 3 S3-3"
+            walker.found_retired.is_empty(),
+            "retired helper(s) resurfaced — agent-setup owns template wiring now: {:?}",
+            walker.found_retired
+        );
+        assert!(
+            walker.found_banned.is_empty(),
+            "`{BANNED_PREFIX}*` helper(s) were removed in Sprint 3 S3-3 and must \
+             not come back: {:?}",
+            walker.found_banned
         );
     }
 
@@ -3087,7 +3198,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
 
         assert!(
             !*sys.service_file_installed.borrow(),
@@ -3111,7 +3222,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
 
-        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
 
         let err = result.expect_err("preflight failure must bubble up");
         assert!(
@@ -3144,7 +3255,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
 
-        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
         let err = result.expect_err("preflight failure must bubble up");
         assert!(
             err.to_string().contains("Port 25 checks failed"),
@@ -3237,7 +3348,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
 
-        let _ = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let _ = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
 
         assert!(
             !*sys.service_file_installed.borrow(),
@@ -3433,7 +3544,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), None, true, &sys, &net);
+        let result = run_setup(Some("example.com"), None, &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3451,7 +3562,7 @@ owner = "aimx-catchall"
             ..Default::default()
         };
         let net = MockNetworkOps::default();
-        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3858,7 +3969,7 @@ owner = "aimx-catchall"
             inbound_port25: false,
             ..Default::default()
         };
-        let result = run_setup(Some("example.com"), Some(tmp.path()), true, &sys, &net);
+        let result = run_setup(Some("example.com"), Some(tmp.path()), &sys, &net);
         // Should progress past domain prompt and fail on port 25 check
         assert!(result.is_err());
         assert!(

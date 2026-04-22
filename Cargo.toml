@@ -58,3 +58,8 @@ sha2 = "0.10"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tracing-test = "0.2"
 serial_test = "3"
+# Dev-only: structural AST walk for the Sprint 3 legacy-template-phase
+# regression guard in `src/setup.rs` tests. Replaces a brittle
+# `include_str!` + substring grep with a proper syn visitor that matches
+# on `ItemFn` signatures rather than source text.
+syn = { version = "2", features = ["full", "visit"] }

@@ -14,3 +14,4 @@
 - [CLI Reference](cli.md)
 - [Troubleshooting](troubleshooting.md)
 - [FAQ](faq.md)
+- [Release Notes](release-notes.md)
