@@ -133,7 +133,7 @@ pub enum Command {
         print: bool,
 
         /// Install plugin files only; skip probing $PATH and registering the template
-        #[arg(long)]
+        #[arg(long, conflicts_with = "redetect")]
         no_template: bool,
 
         /// Re-probe $PATH and update an existing invoke-<agent>-<username> template

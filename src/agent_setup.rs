@@ -556,29 +556,13 @@ impl AgentEnv for RealAgentEnv {
 /// refuses root up front (PRD §6.6 + §8.2), so in production this always
 /// resolves to a real, non-root username. Used as the `run_as` / username
 /// component of the derived template name.
+///
+/// Thin wrapper over [`crate::uds_authz::lookup_username`] so the two
+/// callers (UDS authz cache and agent-setup) share one `getpwuid` helper.
 pub fn caller_username_from_euid() -> Option<String> {
     // SAFETY: `geteuid` is a bare syscall with no preconditions.
     let uid = unsafe { libc::geteuid() };
-    if uid == 0 {
-        // `agent-setup` refuses root before this is called; the guard is
-        // defense in depth for callers that skip the refusal.
-        return Some("root".to_string());
-    }
-    // SAFETY: `getpwuid` reads a process-global static; we copy the
-    // returned `pw_name` into an owned `String` before any other
-    // `getpw*` call could invalidate the pointer.
-    unsafe {
-        let pw = libc::getpwuid(uid as libc::uid_t);
-        if pw.is_null() {
-            return None;
-        }
-        let name_ptr = (*pw).pw_name;
-        if name_ptr.is_null() {
-            return None;
-        }
-        let cstr = std::ffi::CStr::from_ptr(name_ptr);
-        cstr.to_str().ok().map(str::to_string)
-    }
+    crate::uds_authz::lookup_username(uid)
 }
 
 /// Walk the caller's `$PATH` in order looking for an executable named
@@ -678,27 +662,25 @@ pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, Strin
     Ok(PathBuf::from(substituted))
 }
 
+/// Parameters for one `aimx agent-setup` invocation. Carries everything
+/// `run` / `run_with_env` / `run_with_env_to_writer` need so these
+/// entry-point signatures don't keep growing each time a new CLI flag
+/// lands. Short-lived, borrowed-`data_dir`; not `Clone` by design —
+/// callers should not reuse the same `RunOpts` across invocations.
+pub struct RunOpts<'a> {
+    pub agent: Option<String>,
+    pub list: bool,
+    pub force: bool,
+    pub print: bool,
+    pub no_template: bool,
+    pub redetect: bool,
+    pub data_dir: Option<&'a Path>,
+}
+
 /// Entry point called from `main.rs`.
-pub fn run(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    no_template: bool,
-    redetect: bool,
-    data_dir: Option<&Path>,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(opts: RunOpts<'_>) -> Result<(), Box<dyn std::error::Error>> {
     let env = RealAgentEnv;
-    match run_with_env(
-        agent,
-        list,
-        force,
-        print,
-        no_template,
-        redetect,
-        data_dir,
-        &env,
-    ) {
+    match run_with_env(opts, &env) {
         Ok(()) => Ok(()),
         Err(e) => {
             // Daemon-down → exit 2 (matches `aimx send`'s socket-missing
@@ -713,46 +695,22 @@ pub fn run(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 pub fn run_with_env(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    no_template: bool,
-    redetect: bool,
-    data_dir: Option<&Path>,
+    opts: RunOpts<'_>,
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    run_with_env_to_writer(
-        agent,
-        list,
-        force,
-        print,
-        no_template,
-        redetect,
-        data_dir,
-        env,
-        &mut io::stdout(),
-    )
+    run_with_env_to_writer(opts, env, &mut io::stdout())
 }
 
 /// Testable core of `run_with_env`: writes install output, `--list` output,
 /// or the bare-invocation registry dump (plus usage-hint footer) to `out`
 /// rather than real stdout so tests can capture and assert on it.
-#[allow(clippy::too_many_arguments)]
 pub fn run_with_env_to_writer(
-    agent: Option<String>,
-    list: bool,
-    force: bool,
-    print: bool,
-    no_template: bool,
-    redetect: bool,
-    data_dir: Option<&Path>,
+    opts: RunOpts<'_>,
     env: &dyn AgentEnv,
     out: &mut dyn Write,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if list {
+    if opts.list {
         print_registry_to_writer(env, out)?;
         return Ok(());
     }
@@ -764,23 +722,28 @@ pub fn run_with_env_to_writer(
         return Err("agent-setup is a per-user operation. Run without sudo or as root".into());
     }
 
-    if no_template && redetect {
+    // Defense in depth: clap's `conflicts_with = "redetect"` on
+    // `no_template` (see `cli.rs`) already rejects this combination at
+    // parse time with a standard clap usage-hint. This runtime check is
+    // kept so direct library callers of `run_with_env` that skip clap
+    // still fail loudly rather than silently picking one branch.
+    if opts.no_template && opts.redetect {
         return Err("--no-template and --redetect are mutually exclusive; \
              --no-template skips template registration entirely, --redetect \
              updates an existing template"
             .into());
     }
 
-    let opts = InstallOptions {
-        force,
-        print,
-        data_dir,
-        no_template,
-        redetect,
+    let install_opts = InstallOptions {
+        force: opts.force,
+        print: opts.print,
+        data_dir: opts.data_dir,
+        no_template: opts.no_template,
+        redetect: opts.redetect,
     };
 
-    let spec = match agent {
-        Some(name) => find_agent(&name).ok_or_else(|| {
+    let spec = match opts.agent.as_deref() {
+        Some(name) => find_agent(name).ok_or_else(|| {
             format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
         })?,
         None => {
@@ -796,7 +759,7 @@ pub fn run_with_env_to_writer(
         }
     };
 
-    install_to_writer(spec, &opts, env, out)
+    install_to_writer(spec, &install_opts, env, out)
 }
 
 fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
@@ -927,10 +890,13 @@ fn install_to_writer(
         }
         TemplateOutcome::Failed { reason, exit_code } => {
             let msg = format!("Template registration failed: {reason}");
-            writeln!(out, "{}", term::error(&msg))?;
             if let Some(code) = exit_code {
+                // Error routed via `AgentSetupExitCode`; `run()` prints
+                // `msg` to stderr before `process::exit(code)`. Emitting
+                // to `out` too would duplicate the line across streams.
                 return Err(Box::new(AgentSetupExitCode::from_code(code, msg)));
             }
+            writeln!(out, "{}", term::error(&msg))?;
         }
     }
 
@@ -1029,9 +995,11 @@ fn register_template(
         match env.submit_template_update(&request) {
             Ok(()) => TemplateOutcome::Updated { name, path },
             Err(TemplateCrudFallback::SocketMissing) => TemplateOutcome::Failed {
-                reason: "aimx serve is not running; start it with 'sudo systemctl start aimx' \
-                        and re-run 'aimx agent-setup <agent> --redetect'."
-                    .to_string(),
+                reason: format!(
+                    "aimx serve is not running; start it with 'sudo systemctl start aimx' \
+                     and re-run 'aimx agent-setup {} --redetect'.",
+                    spec.name
+                ),
                 exit_code: Some(2),
             },
             Err(TemplateCrudFallback::Daemon { code, reason }) => {
@@ -1684,11 +1652,21 @@ mod tests {
         data_dir: Option<&Path>,
         env: &dyn AgentEnv,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        super::run_with_env(agent, list, force, print, true, false, data_dir, env)
+        super::run_with_env(
+            super::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template: true,
+                redetect: false,
+                data_dir,
+            },
+            env,
+        )
     }
 
     /// Same as above for the writer-capturing entry point.
-    #[allow(clippy::too_many_arguments)]
     fn run_with_env_to_writer(
         agent: Option<String>,
         list: bool,
@@ -1698,7 +1676,19 @@ mod tests {
         env: &dyn AgentEnv,
         out: &mut dyn Write,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        super::run_with_env_to_writer(agent, list, force, print, true, false, data_dir, env, out)
+        super::run_with_env_to_writer(
+            super::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template: true,
+                redetect: false,
+                data_dir,
+            },
+            env,
+            out,
+        )
     }
 
     #[test]
@@ -1764,13 +1754,15 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
         super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false, // no_template
-            false, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
@@ -1802,13 +1794,15 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
         super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            true,  // no_template
-            false, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
@@ -1833,27 +1827,37 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
         let mut buf: Vec<u8> = Vec::new();
         let err = super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false, // no_template
-            false, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
         .unwrap_err();
         let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
         assert_eq!(exit.code(), 3, "binary-not-found must map to exit 3");
-        let out = String::from_utf8(buf).unwrap();
+        let msg = exit.message();
         assert!(
-            out.contains("Template registration failed:"),
-            "missing failure line: {out}"
+            msg.contains("Template registration failed:"),
+            "missing failure line: {msg}"
         );
         assert!(
-            out.contains("Could not find 'claude' in $PATH"),
-            "missing binary-missing copy: {out}"
+            msg.contains("Could not find 'claude' in $PATH"),
+            "missing binary-missing copy: {msg}"
+        );
+        // The failure line must NOT also land on stdout — `run` prints it
+        // to stderr via the `AgentSetupExitCode` handler. Duplicating
+        // would mean operators see the same message twice.
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
         );
     }
 
@@ -1867,23 +1871,30 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
         let mut buf: Vec<u8> = Vec::new();
         let err = super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false, // no_template
-            false, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
         .unwrap_err();
         let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
         assert_eq!(exit.code(), 2, "daemon-down must map to exit 2");
+        let msg = exit.message();
+        assert!(
+            msg.contains("aimx serve is not running"),
+            "missing daemon-down copy: {msg}"
+        );
         let out = String::from_utf8(buf).unwrap();
         assert!(
-            out.contains("aimx serve is not running"),
-            "missing daemon-down copy: {out}"
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
         );
     }
 
@@ -1902,13 +1913,15 @@ mod tests {
         // ECONFLICT is a soft failure from the operator's perspective:
         // plugin files installed fine, they just need `--redetect`.
         super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false,
-            false,
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
@@ -1925,13 +1938,15 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
         super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false, // no_template
-            true,  // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
@@ -1958,24 +1973,79 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
         let mut buf: Vec<u8> = Vec::new();
         let err = super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            false,
-            true, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
         .unwrap_err();
         let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
         assert_eq!(exit.code(), 1);
-        let out = String::from_utf8(buf).unwrap();
-        assert!(out.contains("does not exist yet"), "{out}");
+        let msg = exit.message();
+        assert!(msg.contains("does not exist yet"), "{msg}");
         assert!(
-            out.contains("without --redetect first"),
-            "must nudge the operator to run without --redetect first: {out}"
+            msg.contains("without --redetect first"),
+            "must nudge the operator to run without --redetect first: {msg}"
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
+        );
+    }
+
+    #[test]
+    fn redetect_handles_eaccess_cleanly() {
+        let tmp = TempDir::new().unwrap();
+        let stub = TemplateStub {
+            submit_update_result: Err(TemplateCrudFallback::Daemon {
+                code: "EACCES".into(),
+                reason: "not template owner".into(),
+            }),
+            ..Default::default()
+        };
+        let env = MockEnv::new(tmp.path().to_path_buf()).with_template_stub(stub);
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let exit = err.downcast_ref::<AgentSetupExitCode>().unwrap();
+        assert_eq!(exit.code(), 1);
+        let msg = exit.message();
+        assert!(
+            msg.contains("Permission denied"),
+            "must surface EACCES as 'Permission denied': {msg}"
+        );
+        assert!(
+            msg.contains("invoke-claude-code-sam"),
+            "must name the template: {msg}"
+        );
+        assert!(
+            msg.contains("not template owner"),
+            "must include the daemon-supplied reason: {msg}"
+        );
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            !out.contains("Template registration failed:"),
+            "failure line must not duplicate onto stdout: {out}"
         );
     }
 
@@ -1984,14 +2054,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
+        // Exercises the defense-in-depth runtime check — the clap-level
+        // `conflicts_with = "redetect"` catches this earlier on the CLI
+        // path, but the `pub fn` API bypasses clap and must still reject
+        // the combination rather than silently picking a branch.
         let err = super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            false,
-            true, // no_template
-            true, // redetect
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: true,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
@@ -2005,13 +2081,17 @@ mod tests {
         let env = MockEnv::new(tmp.path().to_path_buf());
         let mut buf: Vec<u8> = Vec::new();
         super::run_with_env_to_writer(
-            Some("claude-code".into()),
-            false,
-            false,
-            true,  // --print
-            false, // no_template (unused under --print but default)
-            false,
-            None,
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: true, // --print
+                // `no_template` is unused under `--print` but left `false`
+                // so the preview path still runs end-to-end.
+                no_template: false,
+                redetect: false,
+                data_dir: None,
+            },
             &env,
             &mut buf,
         )
