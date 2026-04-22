@@ -43,6 +43,33 @@ use crate::config::MailboxConfig;
 /// pattern. Every daemon-side writer that lands a file in a mailbox tree
 /// must call it immediately after the `fs::write` / `fs::create_dir*` /
 /// `rename(2)` that publishes the file.
+///
+/// ### Two-syscall shape (Sprint 7.5 S7.5-5 revisit)
+///
+/// POSIX has no atomic "change owner and mode in one call" primitive —
+/// `chown(2)` and `chmod(2)` are necessarily distinct syscalls. The
+/// order here is chown-then-chmod because:
+///
+/// 1. `chown` on Linux clears the setuid/setgid bits on success
+///    (POSIX `chown(2)`, "CLEARING OF SET-USER-ID AND SET-GROUP-ID
+///    BITS"), so calling it after `chmod` would silently discard the
+///    mode we just set. chown-first avoids that race entirely.
+/// 2. A partial failure (chown succeeds, chmod fails) is an EPERM /
+///    ENOSPC / ENOENT edge case that in practice only fires when the
+///    caller lacks privileges to chown at all — in which case we never
+///    reach the chmod step anyway. `aimx serve` always runs as root,
+///    where both syscalls succeed or both fail together for the same
+///    underlying reason (ENOSPC, ENOENT, EROFS).
+///
+/// Callers therefore get one of:
+/// - `Ok(())` — file has BOTH the requested owner and mode.
+/// - `Err(_)` — file's final state is undefined and the caller should
+///   roll back (`mailbox_handler::rollback_self_created_dirs`,
+///   ingest's temp-unlink-on-error path).
+///
+/// The test suite pins the post-condition end-to-end (stat the file,
+/// check `mode() & 0o777 == mode` and `uid() == expected_uid`) rather
+/// than trying to assert each syscall's contribution separately.
 pub fn chown_as_owner(path: &Path, mailbox: &MailboxConfig, mode: u32) -> io::Result<()> {
     let uid = mailbox
         .owner_uid()

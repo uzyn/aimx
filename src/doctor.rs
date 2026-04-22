@@ -1,6 +1,6 @@
 use crate::config::{
-    Config, LoadWarning, MailboxConfig, RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT,
-    check_hook_owner_invariant, is_reserved_run_as,
+    Config, HookOwnerInvariantError, LoadWarning, MailboxConfig, RESERVED_RUN_AS_CATCHALL,
+    RESERVED_RUN_AS_ROOT, check_hook_owner_invariant, is_reserved_run_as,
 };
 use crate::frontmatter::InboundFrontmatter;
 use crate::hook::effective_hook_name;
@@ -1310,18 +1310,30 @@ pub fn check_hook_invariants(config: &Config) -> Vec<DoctorFinding> {
     let mut out = Vec::new();
     for (mailbox_name, mb) in &config.mailboxes {
         for hook in &mb.hooks {
-            if let Err(reason) = check_hook_owner_invariant(config, mailbox_name, mb, hook) {
+            if let Err(err) = check_hook_owner_invariant(config, mailbox_name, mb, hook) {
                 let hook_name = effective_hook_name(hook);
+                // Variant-specific fix text: the catchall case has a
+                // different remediation (use `aimx-catchall` or `root`)
+                // from the plain owner-mismatch case.
+                let fix = match &err {
+                    HookOwnerInvariantError::CatchallRunAsMismatch { .. } => format!(
+                        "set run_as='{RESERVED_RUN_AS_CATCHALL}' or \
+                         run_as='{RESERVED_RUN_AS_ROOT}' on the catchall \
+                         hook in config.toml"
+                    ),
+                    HookOwnerInvariantError::OwnerMismatch { .. } => {
+                        "align the hook's run_as with the mailbox owner \
+                         (or set run_as='root') in config.toml"
+                            .to_string()
+                    }
+                };
                 out.push(
                     DoctorFinding::new(
                         "HOOK-INVARIANT",
                         FindingSeverity::Fail,
-                        format!("hook '{hook_name}' on mailbox '{mailbox_name}': {reason}"),
+                        format!("hook '{hook_name}' on mailbox '{mailbox_name}': {err}"),
                     )
-                    .with_fix(
-                        "align the hook's run_as with the mailbox owner (or set \
-                         run_as='root') in config.toml",
-                    ),
+                    .with_fix(fix),
                 );
             }
         }

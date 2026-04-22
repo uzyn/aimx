@@ -518,6 +518,76 @@ impl ConfigResolved {
     }
 }
 
+/// Typed variants returned by [`check_hook_owner_invariant`] when the
+/// hook/mailbox owner invariant fails. Lets callers (doctor findings,
+/// UDS `HOOK-CREATE` response frames) discriminate by variant instead of
+/// string-matching on the rendered message. The `Display` impl produces
+/// the same user-facing text the old `Result<(), String>` shape did, so
+/// existing tests and error-message assertions keep working.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookOwnerInvariantError {
+    /// Hook is attached to a catchall mailbox but `run_as` is neither
+    /// `aimx-catchall` nor `root`.
+    CatchallRunAsMismatch {
+        mailbox: String,
+        hook_label: String,
+        run_as: String,
+    },
+    /// Hook is attached to a non-catchall mailbox and its effective
+    /// `run_as` does not equal the mailbox `owner` (and is not `root`).
+    OwnerMismatch {
+        mailbox: String,
+        hook_label: String,
+        run_as: String,
+        owner: String,
+    },
+}
+
+impl std::fmt::Display for HookOwnerInvariantError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            HookOwnerInvariantError::CatchallRunAsMismatch {
+                mailbox,
+                hook_label,
+                run_as,
+            } => write!(
+                f,
+                "hook '{hook_label}' on catchall mailbox '{mailbox}' has \
+                 run_as='{run_as}'; catchall hooks must use run_as='{catchall}' or \
+                 run_as='{root}' (PRD §6.3)",
+                catchall = RESERVED_RUN_AS_CATCHALL,
+                root = RESERVED_RUN_AS_ROOT,
+            ),
+            HookOwnerInvariantError::OwnerMismatch {
+                mailbox,
+                hook_label,
+                run_as,
+                owner,
+            } => {
+                // When the mailbox owner is already `root` the fallback hint
+                // (`or run_as='root'`) would duplicate the primary suggestion,
+                // so drop the `or` clause for that one case.
+                let fix_suggestion = if owner == RESERVED_RUN_AS_ROOT {
+                    format!("set run_as='{RESERVED_RUN_AS_ROOT}'")
+                } else {
+                    format!(
+                        "set run_as='{owner}' or run_as='{root}'",
+                        root = RESERVED_RUN_AS_ROOT,
+                    )
+                };
+                write!(
+                    f,
+                    "hook '{hook_label}' on mailbox '{mailbox}' has run_as='{run_as}' \
+                     but the mailbox is owned by '{owner}'; fix: {fix_suggestion} so the \
+                     hook can read this mailbox's files (PRD §6.3)"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for HookOwnerInvariantError {}
+
 /// Hook/mailbox owner invariant (PRD §6.3): for every hook on a mailbox
 /// the hook's `run_as` must equal the mailbox's `owner` OR be `root`.
 /// Catchall relaxes the equality: `run_as` may be `aimx-catchall` or
@@ -531,7 +601,7 @@ pub fn check_hook_owner_invariant(
     mailbox_name: &str,
     mailbox: &MailboxConfig,
     hook: &Hook,
-) -> Result<(), String> {
+) -> Result<(), HookOwnerInvariantError> {
     let effective_run_as = resolve_effective_run_as(config, hook);
     let Some(run_as) = effective_run_as else {
         // No explicit run_as, no template to inherit from — a raw-cmd
@@ -545,43 +615,29 @@ pub fn check_hook_owner_invariant(
         return Ok(());
     }
 
+    let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
+
     if mailbox.is_catchall(config) {
         if run_as == RESERVED_RUN_AS_CATCHALL {
             return Ok(());
         }
-        let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
-        return Err(format!(
-            "hook '{hook_label}' on catchall mailbox '{mailbox_name}' has \
-             run_as='{run_as}'; catchall hooks must use run_as='{catchall}' or \
-             run_as='{root}' (PRD §6.3)",
-            catchall = RESERVED_RUN_AS_CATCHALL,
-            root = RESERVED_RUN_AS_ROOT,
-        ));
+        return Err(HookOwnerInvariantError::CatchallRunAsMismatch {
+            mailbox: mailbox_name.to_string(),
+            hook_label,
+            run_as,
+        });
     }
 
     if run_as == mailbox.owner {
         return Ok(());
     }
 
-    let hook_label = hook.name.clone().unwrap_or_else(|| "<anonymous>".into());
-    // When the mailbox owner is already `root` the fallback hint
-    // (`or run_as='root'`) would duplicate the primary suggestion, so
-    // drop the `or` clause for that one case.
-    let fix_suggestion = if mailbox.owner == RESERVED_RUN_AS_ROOT {
-        format!("set run_as='{RESERVED_RUN_AS_ROOT}'")
-    } else {
-        format!(
-            "set run_as='{owner}' or run_as='{root}'",
-            owner = mailbox.owner,
-            root = RESERVED_RUN_AS_ROOT,
-        )
-    };
-    Err(format!(
-        "hook '{hook_label}' on mailbox '{mailbox_name}' has run_as='{run_as}' \
-         but the mailbox is owned by '{owner}'; fix: {fix_suggestion} so the \
-         hook can read this mailbox's files (PRD §6.3)",
-        owner = mailbox.owner,
-    ))
+    Err(HookOwnerInvariantError::OwnerMismatch {
+        mailbox: mailbox_name.to_string(),
+        hook_label,
+        run_as,
+        owner: mailbox.owner.clone(),
+    })
 }
 
 /// Compute the effective `run_as` for a hook: explicit `hook.run_as`
@@ -833,8 +889,8 @@ pub(crate) fn validate_hooks(
                         reason: skip_reason,
                     });
                 }
-            } else {
-                check_hook_owner_invariant(config, mailbox_name, mb, hook)?;
+            } else if let Err(e) = check_hook_owner_invariant(config, mailbox_name, mb, hook) {
+                return Err(e.to_string());
             }
 
             let effective = hook_effective_name;
@@ -1336,12 +1392,24 @@ impl Config {
     /// Warnings are silently discarded — production callers that need
     /// to surface them (daemon startup, SIGHUP reload, doctor) must
     /// use [`Self::load`] directly.
+    ///
+    /// TODO(Sprint 7.5 S7.5-1 audit): when ingest / MCP / UDS paths start
+    /// consulting [`ConfigResolved`] directly (rather than relying on
+    /// `validate_hooks` + load-time rejection), the transitional
+    /// `*_ignore_warnings` helpers should either be pruned from the
+    /// callers that newly need the warning stream, or reserved for test-
+    /// only call sites. Today every caller audited in Sprint 7.5 either
+    /// re-parses after a write (where warnings are redundant), is a
+    /// pre-serve one-shot CLI (mailbox CRUD, portcheck, main's best-
+    /// effort peek), or is a test fixture. Keep the helpers until a new
+    /// production path arrives that genuinely needs warnings suppressed.
     pub fn load_ignore_warnings(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         Self::load(path).map(|(cfg, _)| cfg)
     }
 
     /// Companion to [`Self::load_ignore_warnings`] for the resolved
-    /// config path.
+    /// config path. See the audit TODO on
+    /// [`Self::load_ignore_warnings`] for the remaining-caller story.
     pub fn load_resolved_ignore_warnings() -> Result<Self, Box<dyn std::error::Error>> {
         Self::load_resolved().map(|(cfg, _)| cfg)
     }
@@ -3467,10 +3535,19 @@ allow_root_catchall = true
         let h = hook_for_invariant(Some("bob"));
         let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
         assert!(
-            err.contains("run_as='bob'") && err.contains("owned by 'alice'"),
-            "message must name both run_as and owner: {err}"
+            matches!(
+                err,
+                HookOwnerInvariantError::OwnerMismatch { ref run_as, ref owner, .. }
+                    if run_as == "bob" && owner == "alice"
+            ),
+            "expected OwnerMismatch with run_as=bob owner=alice, got {err:?}"
         );
-        assert!(err.contains("set run_as="), "{err}");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("run_as='bob'") && rendered.contains("owned by 'alice'"),
+            "message must name both run_as and owner: {rendered}"
+        );
+        assert!(rendered.contains("set run_as="), "{rendered}");
     }
 
     #[test]
@@ -3504,8 +3581,17 @@ allow_root_catchall = true
         let h = hook_for_invariant(Some("alice"));
         let err = check_hook_owner_invariant(&cfg, "catchall", &mb, &h).unwrap_err();
         assert!(
-            err.contains("aimx-catchall") && err.contains("catchall"),
-            "catchall error must name the expected run_as: {err}"
+            matches!(
+                err,
+                HookOwnerInvariantError::CatchallRunAsMismatch { ref run_as, .. }
+                    if run_as == "alice"
+            ),
+            "expected CatchallRunAsMismatch, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("aimx-catchall") && rendered.contains("catchall"),
+            "catchall error must name the expected run_as: {rendered}"
         );
     }
 
@@ -3515,7 +3601,16 @@ allow_root_catchall = true
         let mb = mailbox_for_invariant("alice@test.com", "alice");
         let h = hook_for_invariant(Some("aimx-catchall"));
         let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
-        assert!(err.contains("run_as='aimx-catchall'"), "{err}");
+        assert!(
+            matches!(
+                err,
+                HookOwnerInvariantError::OwnerMismatch { ref run_as, .. }
+                    if run_as == "aimx-catchall"
+            ),
+            "expected OwnerMismatch with run_as=aimx-catchall, got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert!(rendered.contains("run_as='aimx-catchall'"), "{rendered}");
     }
 
     #[test]
@@ -3752,7 +3847,9 @@ owner = "ghost-user"
         let cfg = invariant_config("test.com");
         let mb = mailbox_for_invariant("alice@test.com", "root");
         let h = hook_for_invariant(Some("nobody"));
-        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("set run_as='root'"),
             "message must suggest run_as=root: {err}"
@@ -3770,7 +3867,9 @@ owner = "ghost-user"
         let cfg = invariant_config("test.com");
         let mb = mailbox_for_invariant("alice@test.com", "alice");
         let h = hook_for_invariant(Some("nobody"));
-        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h).unwrap_err();
+        let err = check_hook_owner_invariant(&cfg, "alice", &mb, &h)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("set run_as='alice'"), "{err}");
         assert!(err.contains("or run_as='root'"), "{err}");
     }

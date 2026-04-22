@@ -62,14 +62,6 @@ pub enum Command {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]
         verify_host: Option<String>,
-
-        /// Skip interactive prompts (e.g. the hook-template checkbox).
-        /// Useful for CI and scripted installs where no TTY is attached.
-        /// When set, no hook templates are installed; operators can enable
-        /// templates later by re-running `aimx setup` on a real terminal
-        /// or hand-editing `/etc/aimx/config.toml`.
-        #[arg(long)]
-        non_interactive: bool,
     },
 
     /// Uninstall the aimx daemon service (config and data are retained)

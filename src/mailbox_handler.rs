@@ -162,6 +162,19 @@ fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
     Ok((uid, gid))
 }
 
+// Sprint 7.5 S7.5-5 re-evaluation: Sprint 2 review proposed collapsing
+// the repeated `AckResponse::Err { code: ErrCode::Io, reason: format!(...) }`
+// pattern inside `handle_create` into a small `io_err(path, op, e)`
+// helper. A second pass after three more sprints of on-disk evidence
+// confirms the original decision: the six Io-error sites carry four
+// distinct operation verbs (`failed to create`, `failed to chown`,
+// `failed to write`, `stat … failed`) and two of them include
+// site-specific guidance (the chown site names the syscall, the rename
+// site names the config path). A shared helper would either force the
+// verbs into a uniform template (losing the distinct framing the
+// messages currently carry) or accept a `&str` verb argument that
+// reintroduces the same `format!` chain at every call site. Deferred
+// indefinitely; the spelled-out pattern stays more scannable.
 fn handle_create(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
@@ -1086,18 +1099,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rollback_on_chown_failure_removes_only_self_created_dirs() {
-        // Sprint 2 S2-1: when the post-create chown fails the handler
-        // must roll back the directories IT created in this call, but
-        // must NOT remove directories that pre-existed. We simulate
-        // this by pre-creating `inbox/alice` (so the rollback must
-        // preserve it) while letting the handler create `sent/alice`
-        // fresh (so the rollback must remove it on chown failure).
+    async fn create_conflict_on_preexisting_dir_with_wrong_owner_preserves_operator_data() {
+        // Sprint 7.5 S7.5-2: this test pins the `Conflict` short-circuit
+        // in `check_preexisting_dirs`, NOT the chown-failure rollback
+        // path. By pre-creating `inbox/alice` owned by the current uid
+        // while asking the handler to chown for `nobody` (uid 65534),
+        // the preexistence check refuses with `Conflict` BEFORE any
+        // chown is attempted. The rollback invariant we pin here is:
+        // operator-created artifacts survive, no config stanza is
+        // written, and the handler-created sibling dir does not linger.
         //
-        // chown failure is triggered by resolving the owner to uid
-        // 65534 (nobody) on a non-root CI runner: `chown(nobody)` as
-        // unprivileged fails with EPERM, landing us in the rollback
-        // branch. Root runners skip the test since the chown succeeds.
+        // The chown-failure rollback branch is exercised separately by
+        // `create_rollback_on_chown_failure_removes_only_self_created_dirs`.
         let is_root = unsafe { libc::geteuid() == 0 };
         if is_root {
             return;
@@ -1118,8 +1131,6 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        // Pre-create ONLY `inbox/alice` so the rollback must preserve
-        // it. `sent/alice` does not exist and is created by the handler.
         let inbox = tmp.path().join("inbox").join("alice");
         let sent = tmp.path().join("sent").join("alice");
         std::fs::create_dir_all(&inbox).unwrap();
@@ -1135,14 +1146,11 @@ mod tests {
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => {
-                // Either Conflict (pre-existing dir owner mismatch) or
-                // Io (chown failed). Both are valid outcomes for the
-                // rollback invariant we're asserting — the stanza must
-                // not be in the in-memory config, and operator-created
-                // artifacts must survive.
-                assert!(
-                    matches!(code, ErrCode::Io | ErrCode::Conflict),
-                    "expected Io or Conflict, got {code:?}"
+                assert_eq!(
+                    code,
+                    ErrCode::Conflict,
+                    "pre-existing dir with wrong owner must short-circuit with Conflict, \
+                     got {code:?}"
                 );
             }
             other => panic!("expected Err, got {other:?}"),
@@ -1157,12 +1165,86 @@ mod tests {
             inbox.is_dir(),
             "pre-existing inbox dir must survive rollback"
         );
-        // The handler-created sent dir was either never created (early
-        // Conflict return) or rolled back on chown failure. Either way,
-        // it must not exist now.
+        // Sent dir was never created (early Conflict return from the
+        // preexistence check on inbox).
         assert!(
             !sent.exists(),
-            "handler-created sent dir must not survive after failure"
+            "handler must not create the sent dir when inbox pre-exists with wrong owner"
+        );
+        // Config stanza did not get written.
+        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
+    }
+
+    #[tokio::test]
+    async fn create_rollback_on_chown_failure_removes_only_self_created_dirs() {
+        // Sprint 2 S2-1 / Sprint 7.5 S7.5-2: when the post-create chown
+        // fails the handler must roll back the directories IT created
+        // in this call. To deterministically hit the chown-failure
+        // branch (NOT the preexistence Conflict short-circuit), we
+        // leave both `inbox/alice` and `sent/alice` absent so the
+        // handler creates them fresh, then resolve the owner to uid
+        // 65534 (nobody) so the subsequent `libc::chown` syscall fails
+        // with EPERM on an unprivileged CI runner.
+        //
+        // Root runners skip the test since the chown syscall succeeds
+        // and we can't provoke the failure without elevated privilege
+        // tricks we don't want in the test suite.
+        let is_root = unsafe { libc::geteuid() == 0 };
+        if is_root {
+            return;
+        }
+        fn nobody(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            if name == "nobody" {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: "nobody".into(),
+                    uid: 65534,
+                    gid: 65534,
+                })
+            } else {
+                None
+            }
+        }
+        let _r = crate::user_resolver::set_test_resolver(nobody);
+
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let inbox = tmp.path().join("inbox").join("alice");
+        let sent = tmp.path().join("sent").join("alice");
+        // Neither dir pre-exists. The handler creates both fresh, then
+        // the chown for `nobody` fails (EPERM under unprivileged euid),
+        // and rollback removes both self-created dirs.
+        assert!(!inbox.exists());
+        assert!(!sent.exists());
+
+        let req = MailboxCrudRequest {
+            name: "alice".into(),
+            create: true,
+            owner: Some("nobody".into()),
+        };
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(
+                    code,
+                    ErrCode::Io,
+                    "chown failure must surface as Io, got {code:?}: {reason}"
+                );
+                assert!(
+                    reason.contains("failed to chown"),
+                    "reason must name the chown op: {reason}"
+                );
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
+
+        // Both handler-created dirs were rolled back.
+        assert!(
+            !inbox.exists(),
+            "handler-created inbox dir must not survive chown failure"
+        );
+        assert!(
+            !sent.exists(),
+            "handler-created sent dir must not survive chown failure"
         );
         // Config stanza did not get written.
         assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
