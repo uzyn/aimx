@@ -64,6 +64,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         },
     );
     mailboxes.insert(
@@ -74,6 +75,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         },
     );
     Config {

@@ -1427,6 +1427,7 @@ mod tests {
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
+                    allow_root_catchall: false,
                 },
             );
             let config = crate::config::Config {
@@ -1725,16 +1726,18 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
             "alice".to_string(),
             crate::config::MailboxConfig {
                 address: "alice@example.com".to_string(),
-                owner: "root".to_string(),
+                owner: "ops".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         crate::config::Config {
@@ -1882,6 +1885,7 @@ mod tests {
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
+                    allow_root_catchall: false,
                 },
             );
             let config = crate::config::Config {
@@ -2127,10 +2131,11 @@ mod tests {
             "bob".to_string(),
             crate::config::MailboxConfig {
                 address: "bob@example.com".to_string(),
-                owner: "root".to_string(),
+                owner: "ops".to_string(),
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mutated.save(&path).unwrap();
@@ -2188,7 +2193,7 @@ hooks = []
 
 [mailboxes.alice]
 address = "alice@example.com"
-owner = "root"
+owner = "ops"
 
   [[mailboxes.alice.hooks]]
   event = "on_receive"
@@ -2267,10 +2272,11 @@ owner = "root"
                 "bob".to_string(),
                 crate::config::MailboxConfig {
                     address: "bob@example.com".to_string(),
-                    owner: "root".to_string(),
+                    owner: "ops".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
+                    allow_root_catchall: false,
                 },
             );
             cfg1.save(&path).unwrap();
@@ -2296,10 +2302,11 @@ owner = "root"
                 "carol".to_string(),
                 crate::config::MailboxConfig {
                     address: "carol@example.com".to_string(),
-                    owner: "root".to_string(),
+                    owner: "ops".to_string(),
                     hooks: vec![],
                     trust: None,
                     trusted_senders: None,
+                    allow_root_catchall: false,
                 },
             );
             cfg2.save(&path).unwrap();

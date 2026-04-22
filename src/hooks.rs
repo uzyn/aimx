@@ -99,8 +99,8 @@ fn list_templates(
     if config.hook_templates.is_empty() {
         writeln!(
             out,
-            "No hook templates enabled. Run `{}` and tick the templates you need.",
-            term::highlight("sudo aimx setup")
+            "No hook templates enabled. Run `{}` to install one per agent.",
+            term::highlight("aimx agent-setup <agent>")
         )?;
         return Ok(());
     }
@@ -604,6 +604,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
@@ -614,6 +615,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {
@@ -842,7 +844,7 @@ mod tests {
         cfg.hook_templates.clear();
         let out = capture_list_templates(&cfg);
         assert!(out.contains("No hook templates enabled"), "{out}");
-        assert!(out.contains("sudo aimx setup"), "{out}");
+        assert!(out.contains("aimx agent-setup"), "{out}");
     }
 
     #[test]

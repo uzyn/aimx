@@ -79,6 +79,7 @@ pub fn create_mailbox(
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         },
     );
 
@@ -624,6 +625,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         Config {
@@ -687,7 +689,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
 
         // Both `inbox/<name>/` and `sent/<name>/` exist.
         assert!(tmp.path().join("inbox").join("alice").is_dir());
@@ -707,11 +709,11 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         // Re-creating via a fresh Config (as if registration rolled back)
         // must not error; dir creation is idempotent.
         let fresh = test_config(tmp.path());
-        create_mailbox(&fresh, "alice", "root").unwrap();
+        create_mailbox(&fresh, "alice", "ops").unwrap();
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
     }
@@ -755,7 +757,7 @@ mod tests {
         let _guard = setup_config_file(tmp.path(), &config);
 
         // Registered mailbox: catchall + an `alice` we register.
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         let inbox_alice = tmp.path().join("inbox").join("alice");
         std::fs::write(inbox_alice.join("2025-01-01-120000-a.md"), "x").unwrap();
@@ -805,7 +807,7 @@ mod tests {
         let config = test_config(tmp.path());
         let _guard = setup_config_file(tmp.path(), &config);
 
-        create_mailbox(&config, "alice", "root").unwrap();
+        create_mailbox(&config, "alice", "ops").unwrap();
         let config = Config::load_resolved_ignore_warnings().unwrap();
         assert!(config.mailboxes.contains_key("alice"));
 
@@ -1050,6 +1052,7 @@ mod tests {
                 hooks: vec![],
                 trust: None,
                 trusted_senders: None,
+                allow_root_catchall: false,
             },
         );
         mailboxes.insert(
@@ -1083,6 +1086,7 @@ mod tests {
                 ],
                 trust: Some("verified".into()),
                 trusted_senders: Some(vec!["*@company.com".into(), "boss@example.com".into()]),
+                allow_root_catchall: false,
             },
         );
         Config {

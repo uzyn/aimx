@@ -973,6 +973,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.trusted = trusted.as_str().to_string();
@@ -1047,6 +1048,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -1088,6 +1090,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -1131,6 +1134,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -1173,6 +1177,7 @@ mod tests {
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         };
         let ctx = AfterSendContext {
             mailbox: "alice",
@@ -1222,6 +1227,7 @@ mod tests {
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         };
         let ctx = AfterSendContext {
             mailbox: "alice",
@@ -1248,6 +1254,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.trusted = "none".to_string();
@@ -1297,6 +1304,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.trusted = "none".to_string();
@@ -1335,6 +1343,7 @@ mod tests {
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         };
         let ctx = AfterSendContext {
             mailbox: "alice",
@@ -1370,6 +1379,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.from = "`whoami`@attacker.com".to_string();
@@ -1399,6 +1409,7 @@ mod tests {
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.subject = format!("$(touch {})", marker.display());
@@ -1744,6 +1755,7 @@ cmd = "echo legacy"
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -1820,6 +1832,7 @@ cmd = "echo legacy"
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let ctx = OnReceiveContext {
@@ -1844,6 +1857,7 @@ cmd = "echo legacy"
             hooks: vec![],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let meta = sample_metadata();
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1875,6 +1889,7 @@ cmd = "echo legacy"
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.trusted = "none".to_string();
@@ -1907,6 +1922,7 @@ cmd = "echo legacy"
             hooks: vec![hook],
             trust: Some("none".to_string()),
             trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         };
         let mut meta = sample_metadata();
         meta.trusted = "true".to_string();
@@ -1935,6 +1951,7 @@ cmd = "echo legacy"
             hooks: vec![],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         };
         let ctx = AfterSendContext {
             mailbox: "alice",
@@ -1974,6 +1991,7 @@ cmd = "echo legacy"
             hooks: vec![hook],
             trust: None,
             trusted_senders: None,
+            allow_root_catchall: false,
         };
         let ctx = AfterSendContext {
             mailbox: "alice",
