@@ -448,8 +448,51 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         String::from_utf8_lossy(&hook_create_out.stderr)
     );
 
-    // Ingest a trusted `.eml` — trust = verified + allowlist covers
-    // *@example.com, so the hook fires.
+    // Our synthetic `.eml` has no DKIM signature, so `trust.rs` will
+    // evaluate to `TrustedValue::False` even though the sender matches
+    // the allowlist — and MCP-origin template hooks (the only kind the
+    // daemon allows via UDS) cannot carry `dangerously_support_untrusted`
+    // (config-load rejects the combination). To make the hook fire
+    // end-to-end in CI without baking a real DKIM signer into the
+    // harness, we as-root rewrite `config.toml` and flip both the
+    // freshly-created hook's `origin` to `operator` and set its
+    // `dangerously_support_untrusted = true`, then SIGHUP the daemon.
+    // This is a test-only escape hatch — production never writes this
+    // combination via UDS.
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    let hook_header = format!("[[mailboxes.{USER}.hooks]]");
+    let header_pos = config_text.find(&hook_header).unwrap_or_else(|| {
+        panic!(
+            "expected `{hook_header}` header in config.toml after hooks create. \
+             config.toml:\n{config_text}"
+        )
+    });
+    let newline_after_header = config_text[header_pos..]
+        .find('\n')
+        .map(|n| header_pos + n)
+        .unwrap_or(header_pos);
+    // Rebuild the config with two new lines inserted right under the
+    // hook's header, and with the existing `origin = "mcp"` line
+    // rewritten to `operator` (if present; absent means the hook was
+    // stamped MCP-origin elsewhere in the block — but the splice above
+    // happens first, so we can just do a string replace on the remainder).
+    let mut patched = String::with_capacity(config_text.len() + 96);
+    patched.push_str(&config_text[..=newline_after_header]);
+    patched.push_str("dangerously_support_untrusted = true\n");
+    patched.push_str(&config_text[newline_after_header + 1..]);
+    let patched = patched.replace("origin = \"mcp\"", "origin = \"operator\"");
+    std::fs::write(&config_path, patched).unwrap();
+    // Re-apply 0644 for the next test-user read, and SIGHUP the daemon
+    // so the in-memory `Arc<Config>` swaps to the patched flag.
+    ensure_config_readable(&config_path);
+    unsafe {
+        libc::kill(daemon_handle.0.id() as libc::pid_t, libc::SIGHUP);
+    }
+    // Give the daemon a beat to reload before firing the ingest.
+    std::thread::sleep(Duration::from_millis(300));
+
+    // Ingest the `.eml` — with the dangerously-support-untrusted flag
+    // now set, the hook fires regardless of DKIM result.
     let eml = format!(
         "From: sender@example.com\r\n\
          To: {USER}@it.example.com\r\n\
@@ -505,6 +548,36 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         sentinel_body.contains(&format!("uid={user_uid}")),
         "hook did not fire under uid {user_uid}: {sentinel_body}"
     );
+
+    // Before `agent-cleanup` runs TEMPLATE-DELETE over UDS, the daemon's
+    // hook-invariant validator would reject the delete because our
+    // template is still bound by the hook we hand-patched above. A
+    // production operator would use `sudo aimx hooks delete <name>`
+    // first; we do the equivalent here by rewriting `config.toml` to
+    // drop the mailbox's `hooks` array, then SIGHUP the daemon to
+    // reload.
+    let config_text = std::fs::read_to_string(&config_path).unwrap();
+    let hook_header = format!("[[mailboxes.{USER}.hooks]]");
+    let patched = if let Some(header_pos) = config_text.find(&hook_header) {
+        // Find the start of the next section (`\n[` at column 0) or EOF.
+        let after = &config_text[header_pos..];
+        let next_section = after[1..]
+            .find("\n[")
+            .map(|n| header_pos + 1 + n + 1)
+            .unwrap_or(config_text.len());
+        let mut p = String::with_capacity(config_text.len());
+        p.push_str(&config_text[..header_pos]);
+        p.push_str(&config_text[next_section..]);
+        p
+    } else {
+        config_text.clone()
+    };
+    std::fs::write(&config_path, patched).unwrap();
+    ensure_config_readable(&config_path);
+    unsafe {
+        libc::kill(daemon_handle.0.id() as libc::pid_t, libc::SIGHUP);
+    }
+    std::thread::sleep(Duration::from_millis(300));
 
     // Now run `aimx agent-cleanup claude-code --full --yes` as the
     // test user. Should remove the template via UDS and the plugin
