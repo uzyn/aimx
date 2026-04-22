@@ -44,6 +44,7 @@ use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MailboxCrudRequest};
 use crate::state_handler::StateContext;
+use crate::uds_authz::{Caller, enforce_root};
 
 /// Process-wide mutex around the `config.toml` read-modify-write critical
 /// section. Symmetric in spirit to `send_handler::SENT_WRITE_LOCK`: a
@@ -83,11 +84,26 @@ pub async fn handle_mailbox_crud(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
     req: &MailboxCrudRequest,
+    caller: &Caller,
 ) -> AckResponse {
     if let Err(e) = crate::mailbox::validate_mailbox_name(&req.name) {
         return AckResponse::Err {
             code: ErrCode::Validation,
             reason: e,
+        };
+    }
+
+    // Sprint 4 §6.5: MAILBOX-CREATE / MAILBOX-DELETE are root-only.
+    // Non-root callers get EACCES before any lock is acquired.
+    let verb = if req.create {
+        "MAILBOX-CREATE"
+    } else {
+        "MAILBOX-DELETE"
+    };
+    if let Err(reject) = enforce_root(verb, caller, Some(&req.name)) {
+        return AckResponse::Err {
+            code: reject.code,
+            reason: reject.reason,
         };
     }
 
@@ -511,7 +527,7 @@ mod tests {
             owner: Some("testowner".into()),
         };
         assert!(matches!(
-            handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -538,7 +554,7 @@ mod tests {
             create: true,
             owner: Some("testowner".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
                 assert!(reason.contains("already exists"), "{reason}");
@@ -557,7 +573,7 @@ mod tests {
             create: true,
             owner: Some("testowner".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
             other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
@@ -574,7 +590,7 @@ mod tests {
                 create: true,
                 owner: Some("testowner".into()),
             };
-            match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+            match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
                 AckResponse::Err { code, .. } => {
                     assert_eq!(code, ErrCode::Validation, "name {bad:?}")
                 }
@@ -596,7 +612,7 @@ mod tests {
             owner: Some("testowner".into()),
         };
         assert!(matches!(
-            handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -607,7 +623,7 @@ mod tests {
             owner: None,
         };
         assert!(matches!(
-            handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -629,7 +645,7 @@ mod tests {
             owner: Some("testowner".into()),
         };
         assert!(matches!(
-            handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -643,7 +659,7 @@ mod tests {
             create: false,
             owner: None,
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::NonEmpty);
                 assert!(
@@ -668,7 +684,7 @@ mod tests {
             create: false,
             owner: None,
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
                 assert!(reason.contains("catchall"), "{reason}");
@@ -687,7 +703,7 @@ mod tests {
             create: false,
             owner: None,
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
                 assert!(reason.contains("does not exist"), "{reason}");
@@ -726,7 +742,7 @@ mod tests {
             create: true,
             owner: Some("testowner".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &bad_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &bad_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Io),
             other => panic!("expected Err(IO), got {other:?}"),
         }
@@ -841,7 +857,7 @@ mod tests {
             owner: Some("testowner".into()),
         };
         assert!(matches!(
-            handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
 
@@ -887,7 +903,12 @@ mod tests {
             folder: crate::send_protocol::MarkFolder::Inbox,
             read: true,
         };
-        let resp = crate::state_handler::handle_mark(&state_ctx, &mark_req).await;
+        let resp = crate::state_handler::handle_mark(
+            &state_ctx,
+            &mark_req,
+            &crate::uds_authz::Caller::internal_root(),
+        )
+        .await;
         assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
 
         let reread = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
@@ -925,7 +946,7 @@ mod tests {
                     create: true,
                     owner: Some("testowner".into()),
                 };
-                handle_mailbox_crud(&s, &m, &req).await
+                handle_mailbox_crud(&s, &m, &req, &Caller::internal_root()).await
             }));
         }
         for h in handles {
@@ -974,7 +995,7 @@ mod tests {
             create: true,
             owner: None,
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("Owner:"), "{reason}");
@@ -996,7 +1017,7 @@ mod tests {
             create: true,
             owner: Some("ghost".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
                 assert!(reason.contains("ghost"), "{reason}");
@@ -1046,7 +1067,7 @@ mod tests {
         // some exotic CI, in which case the conflict check flips to
         // "already correct" and the create succeeds. Accept either
         // Ok or Conflict so the test is portable.
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Conflict, "{reason}");
                 assert!(
@@ -1112,7 +1133,7 @@ mod tests {
             create: true,
             owner: Some("nobody".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await {
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => {
                 // Either Conflict (pre-existing dir owner mismatch) or
                 // Io (chown failed). Both are valid outcomes for the
@@ -1168,7 +1189,7 @@ mod tests {
         };
         assert!(
             matches!(
-                handle_mailbox_crud(&state_ctx, &mb_ctx, &req).await,
+                handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
                 AckResponse::Ok
             ),
             "idempotent re-create should succeed"

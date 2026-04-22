@@ -33,6 +33,7 @@ mod state_handler;
 mod term;
 mod transport;
 mod trust;
+mod uds_authz;
 mod uninstall;
 mod user_resolver;
 

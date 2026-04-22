@@ -33,6 +33,7 @@ use crate::mailbox_locks::MailboxLocks;
 use crate::mcp::resolve_email_path;
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
+use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
 
 /// Per-connection shared state for the MARK verbs (and the MAILBOX-CRUD
 /// verbs, which share the per-mailbox lock map so their config.toml
@@ -121,21 +122,39 @@ fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
 /// read → rewrite critical section. The lock is shared with the
 /// inbound-ingest writer so MARK and ingest serialize against each
 /// other, not just against other MARK calls.
-pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
+pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller) -> AckResponse {
     if let Err(e) = validate_id(&req.id) {
         return e;
     }
 
     // Mailbox existence is resolved live through the handle so a
     // freshly-created mailbox is immediately target-able from MARK.
+    //
+    // Sprint 4 §6.5: we return `ENOENT` (not `EACCES`) when the mailbox
+    // is absent so the authz check itself cannot leak which mailboxes
+    // exist. Once the mailbox resolves, the ownership check runs.
     let config_snapshot = ctx.config_handle.load();
-    if !config_snapshot.mailboxes.contains_key(&req.mailbox) {
+    // `contains_key` + `get` is split to keep the existence check out
+    // of the authz error path, but the `get` must succeed on the
+    // snapshot we just checked. We match explicitly on `None` and
+    // return `ENOENT` so authz can never be silently skipped if a
+    // future refactor drops the `contains_key` pre-check.
+    let mailbox_cfg = match config_snapshot.mailboxes.get(&req.mailbox) {
+        Some(m) => m.clone(),
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Enoent,
+                reason: format!("mailbox '{}' does not exist", req.mailbox),
+            };
+        }
+    };
+    let verb = if req.read { "MARK-READ" } else { "MARK-UNREAD" };
+    if let Err(reject) = enforce_mailbox_owner_or_root(verb, caller, &req.mailbox, &mailbox_cfg) {
         return AckResponse::Err {
-            code: ErrCode::Mailbox,
-            reason: format!("mailbox '{}' does not exist", req.mailbox),
+            code: reject.code,
+            reason: reject.reason,
         };
     }
-    let mailbox_cfg = config_snapshot.mailboxes.get(&req.mailbox).cloned();
 
     let lock = ctx.lock_for(&req.mailbox);
     let _guard = lock.lock().await;
@@ -242,21 +261,19 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest) -> AckResponse {
             reason: format!("failed to write {}: {e}", tmp_path.display()),
         };
     }
-    if let Some(mb_cfg) = &mailbox_cfg {
-        // Chown + chmod BEFORE the rename publishes the new inode. A
-        // failure here is not fatal for the MARK operation (the
-        // containing dir is `0o700 <owner>:<owner>` so the file is
-        // still safe from non-owners even if ownership drifts) but we
-        // log so doctor can surface the drift.
-        if let Err(e) = chown_as_owner(&tmp_path, mb_cfg, 0o600) {
-            tracing::warn!(
-                target: "aimx::state",
-                "chown temp file failed mailbox={mailbox} path={path} err={err}",
-                mailbox = req.mailbox,
-                path = tmp_path.display(),
-                err = e,
-            );
-        }
+    // Chown + chmod BEFORE the rename publishes the new inode. A
+    // failure here is not fatal for the MARK operation (the
+    // containing dir is `0o700 <owner>:<owner>` so the file is
+    // still safe from non-owners even if ownership drifts) but we
+    // log so doctor can surface the drift.
+    if let Err(e) = chown_as_owner(&tmp_path, &mailbox_cfg, 0o600) {
+        tracing::warn!(
+            target: "aimx::state",
+            "chown temp file failed mailbox={mailbox} path={path} err={err}",
+            mailbox = req.mailbox,
+            path = tmp_path.display(),
+            err = e,
+        );
     }
     if let Err(e) = std::fs::rename(&tmp_path, &filepath) {
         let _ = std::fs::remove_file(&tmp_path);
@@ -358,7 +375,7 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Ok => {}
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -385,7 +402,10 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: false,
         };
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
 
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
         let fm: InboundFrontmatter =
@@ -403,9 +423,11 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
-                assert_eq!(code, ErrCode::Mailbox);
+                // Sprint 4 §6.5: unknown mailbox returns ENOENT so the
+                // authz check cannot leak which mailboxes exist.
+                assert_eq!(code, ErrCode::Enoent);
                 assert!(reason.contains("ghost"), "{reason}");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -423,7 +445,7 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::NotFound),
             other => panic!("expected Err, got {other:?}"),
         }
@@ -439,7 +461,7 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::NotFound);
                 assert!(reason.contains("invalid characters"), "{reason}");
@@ -462,7 +484,10 @@ mod tests {
             folder: MarkFolder::Sent,
             read: true,
         };
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
 
         let fm: InboundFrontmatter = toml::from_str(
             std::fs::read_to_string(sent.join("2025-06-02-001.md"))
@@ -495,7 +520,10 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
 
         let content = std::fs::read_to_string(bundle.join("2025-06-03-001.md")).unwrap();
         let fm: InboundFrontmatter =
@@ -525,7 +553,7 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Io);
                 assert!(
@@ -552,7 +580,10 @@ mod tests {
             read: true,
         };
         let before = chrono::Utc::now();
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
         let after = chrono::Utc::now();
 
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
@@ -581,7 +612,10 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: false,
         };
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
 
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
         // Field must be removed entirely, not serialized as `null`
@@ -619,7 +653,7 @@ mod tests {
 
         // First MARK-READ.
         assert!(matches!(
-            handle_mark(&sctx, &req_read).await,
+            handle_mark(&sctx, &req_read, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
@@ -629,7 +663,7 @@ mod tests {
 
         // MARK-UNREAD clears it.
         assert!(matches!(
-            handle_mark(&sctx, &req_unread).await,
+            handle_mark(&sctx, &req_unread, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
@@ -643,7 +677,7 @@ mod tests {
 
         // Second MARK-READ writes a fresh, later timestamp.
         assert!(matches!(
-            handle_mark(&sctx, &req_read).await,
+            handle_mark(&sctx, &req_read, &Caller::internal_root()).await,
             AckResponse::Ok
         ));
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
@@ -720,7 +754,10 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        assert!(matches!(handle_mark(&sctx, &req).await, AckResponse::Ok));
+        assert!(matches!(
+            handle_mark(&sctx, &req, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
 
         let target = inbox.join("2025-06-01-001.md");
         let md = std::fs::metadata(&target).unwrap();
@@ -812,7 +849,10 @@ mod tests {
         };
         // chown will fail (EPERM) but the handler must still return Ok.
         assert!(
-            matches!(handle_mark(&sctx, &req).await, AckResponse::Ok),
+            matches!(
+                handle_mark(&sctx, &req, &Caller::internal_root()).await,
+                AckResponse::Ok
+            ),
             "chown failure must be non-fatal"
         );
 
@@ -870,7 +910,7 @@ mod tests {
             folder: MarkFolder::Inbox,
             read: true,
         };
-        match handle_mark(&sctx, &req).await {
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Io),
             other => panic!("expected Err(Io), got {other:?}"),
         }
