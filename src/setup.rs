@@ -1653,25 +1653,16 @@ fn config_has_catchall(config_path: &Path) -> bool {
 /// spinning forever when the scripted input never resolves to a real
 /// user. Five attempts is comfortable for an operator fat-fingering the
 /// username without turning an unattended CI into an infinite loop.
-///
-/// `#[allow(dead_code)]` on the non-test helpers below: Sprint 3
-/// introduces the prompt as a shared seam for the per-mailbox owner
-/// interaction; Sprints 5+ (`TEMPLATE-CREATE` client, `aimx mailboxes
-/// create` re-plumbing) wire it into CLI paths. The helper is already
-/// covered by unit tests in this module.
-#[allow(dead_code)]
-const MAX_OWNER_PROMPT_ATTEMPTS: usize = 5;
+pub(crate) const MAX_OWNER_PROMPT_ATTEMPTS: usize = 5;
 
 /// Name of the env var that forces [`prompt_mailbox_owner`] into its
 /// non-interactive branch: if set to a truthy value the helper accepts
 /// the local-part default when it resolves, or errors hard when no
 /// default is available. Mirrors the convention used by other scripted
 /// installer paths (CI, OS image builders) in the aimx codebase.
-#[allow(dead_code)]
-const NONINTERACTIVE_ENV: &str = "AIMX_NONINTERACTIVE";
+pub(crate) const NONINTERACTIVE_ENV: &str = "AIMX_NONINTERACTIVE";
 
-#[allow(dead_code)]
-fn is_noninteractive_env() -> bool {
+pub(crate) fn is_noninteractive_env() -> bool {
     matches!(
         std::env::var(NONINTERACTIVE_ENV).ok().as_deref(),
         Some("1") | Some("true") | Some("yes"),
@@ -1691,7 +1682,10 @@ fn is_noninteractive_env() -> bool {
 ///
 /// The catchall mailbox never goes through this helper; its owner is
 /// hard-coded to `aimx-catchall` by [`finalize_setup`] (S3-2 AC).
-#[allow(dead_code)]
+///
+/// Live caller: `aimx mailboxes create` invokes this when the operator
+/// omits `--owner` (see `mailbox::resolve_create_owner`). Sprints 6+ will
+/// share the same seam from `aimx agent-setup`.
 pub fn prompt_mailbox_owner(
     address: &str,
     sys: &dyn SystemOps,
@@ -2341,11 +2335,12 @@ owner = "ops"
 "#,
         )
         .unwrap();
-        // The `ops` mailbox has `owner = "root"` which is rejected by
-        // Config::load (S3-4) but `config_has_catchall` only uses
-        // `load_ignore_warnings` → the load fails and the helper
-        // returns `false`, which is the correct "don't create the
-        // user" branch for any ambiguous config.
+        // The `ops` mailbox is a named (non-wildcard) address with an
+        // orphan owner; `Config::load_ignore_warnings` happily loads it
+        // (orphan-owner is a warning, not an error) and
+        // `config_has_catchall` then inspects the mailbox map and
+        // returns `false` because no entry is `*@<domain>`. That is the
+        // correct "don't create the catchall user" branch.
         assert!(!super::config_has_catchall(&cfg_path));
     }
 

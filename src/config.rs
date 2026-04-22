@@ -1110,8 +1110,11 @@ fn is_valid_placeholder_name(s: &str) -> bool {
 /// mailbox. On a catchall it is accepted only when
 /// `allow_root_catchall = true` — the escape hatch — and that
 /// acceptance surfaces as a [`LoadWarning::RootCatchallAccepted`] so
-/// the elevation is logged. `allow_root_catchall` on any non-catchall
-/// mailbox, or on a catchall with a non-root owner, is rejected.
+/// the elevation is logged. `allow_root_catchall = true` on any
+/// non-catchall mailbox is rejected hard. On a catchall whose owner is
+/// not `root` (for example the default `aimx-catchall`), the flag is a
+/// no-op — it only gates the root escape hatch — and is silently
+/// accepted.
 fn validate_mailbox_owners(config: &Config) -> Result<Vec<LoadWarning>, String> {
     let mut warnings = Vec::new();
     for (name, mb) in &config.mailboxes {
