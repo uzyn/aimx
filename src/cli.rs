@@ -131,6 +131,14 @@ pub enum Command {
         /// Print plugin contents to stdout instead of writing to disk
         #[arg(long)]
         print: bool,
+
+        /// Install plugin files only; skip probing $PATH and registering the template
+        #[arg(long)]
+        no_template: bool,
+
+        /// Re-probe $PATH and update an existing invoke-<agent>-<username> template
+        #[arg(long)]
+        redetect: bool,
     },
 
     /// Generate DKIM keypair for email signing
