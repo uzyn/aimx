@@ -397,6 +397,10 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // the unprivileged `aimx hooks create` process-wide config load
     // can read it.
     ensure_config_readable(&config_path);
+    // The `claude-code` agent template (see `agent_setup::registry()`)
+    // declares `params: &[]` — it feeds the raw email into the binary
+    // via stdin rather than taking any operator-supplied placeholder.
+    // So `hooks create` must not carry any `--param K=V`.
     let hook_create_out = Command::new(runuser_path())
         .arg("-m")
         .arg("-u")
@@ -414,8 +418,6 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("on_receive")
         .arg("--template")
         .arg(&template_name)
-        .arg("--param")
-        .arg("prompt=process this")
         .output()
         .expect("failed to run aimx hooks create");
     // Diagnostic: on failure, dump socket + config.toml metadata so we can
@@ -561,8 +563,6 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .arg("on_receive")
         .arg("--template")
         .arg(&template_name)
-        .arg("--param")
-        .arg("prompt=should fail")
         .arg("--name")
         .arg("post-cleanup-check")
         .output()
