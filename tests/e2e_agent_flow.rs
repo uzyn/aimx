@@ -182,7 +182,13 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
          owner = \"{USER}\"\n",
     );
     std::fs::write(&config_path, &config_content).unwrap();
-    chmod(&config_path, 0o640);
+    // Production uses 0640 root:root, but the test user needs to read
+    // config.toml from the `aimx hooks create` CLI path (short-lived
+    // root-adjacent subcommands load the config for in-process
+    // validation before submitting over UDS). Relax to 0644 so the
+    // test-user-initiated CLI reads succeed without having to create
+    // an `aimx-hook`-style shared group.
+    chmod(&config_path, 0o644);
 
     // Catchall user must exist for Config::load to not warn (it's
     // a reserved name so `getpwnam` isn't actually required, but
