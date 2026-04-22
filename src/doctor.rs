@@ -1,6 +1,6 @@
 use crate::config::{
     Config, LoadWarning, MailboxConfig, RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT,
-    check_hook_owner_invariant,
+    check_hook_owner_invariant, is_reserved_run_as,
 };
 use crate::frontmatter::InboundFrontmatter;
 use crate::hook::effective_hook_name;
@@ -1455,10 +1455,6 @@ fn resolve_owner(mb: &MailboxConfig) -> Option<(u32, u32)> {
     resolve_user(&mb.owner).map(|u| (u.uid, u.gid))
 }
 
-fn is_reserved_run_as(name: &str) -> bool {
-    name == RESERVED_RUN_AS_ROOT || name == RESERVED_RUN_AS_CATCHALL
-}
-
 /// Result of inspecting a mailbox storage directory for ownership +
 /// permission drift. `Missing` is a `Fail` upstream; `NotADir` signals
 /// someone stomped a file into the expected location.
@@ -1547,7 +1543,7 @@ fn run_runuser(user: &str, path: &str) -> Option<AccessResult> {
     let output = std::process::Command::new("runuser")
         .args(["-u", user, "--", "test", "-x", path])
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .output();
     match output {
         Ok(out) => {
@@ -1557,15 +1553,44 @@ fn run_runuser(user: &str, path: &str) -> Option<AccessResult> {
                 match out.status.code() {
                     // `test -x` returns 1 on "not executable". Higher
                     // codes mean runuser itself failed (user unknown,
-                    // PAM error) — treat those as Unknown.
+                    // PAM error, missing shell, etc.) — log the detail
+                    // at debug level so operators can diagnose PAM /
+                    // permission issues without being conflated with
+                    // "binary not executable", then fall through to the
+                    // fork+seteuid path which returns Unknown.
                     Some(1) => Some(AccessResult::Denied),
-                    Some(_) => None,
-                    None => None,
+                    Some(code) => {
+                        tracing::debug!(
+                            run_as = user,
+                            path = path,
+                            exit_code = code,
+                            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                            "runuser returned non-test exit; falling back to fork+seteuid probe"
+                        );
+                        None
+                    }
+                    None => {
+                        tracing::debug!(
+                            run_as = user,
+                            path = path,
+                            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                            "runuser terminated by signal; falling back to fork+seteuid probe"
+                        );
+                        None
+                    }
                 }
             }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(_) => None,
+        Err(e) => {
+            tracing::debug!(
+                run_as = user,
+                path = path,
+                error = %e,
+                "runuser spawn failed; falling back to fork+seteuid probe"
+            );
+            None
+        }
     }
 }
 
@@ -3476,6 +3501,127 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
                     && f.severity == FindingSeverity::Warn),
             "expected MAILBOX-DIR-MODE-DRIFT, got: {findings:?}"
         );
+        #[cfg(not(unix))]
+        let _ = findings;
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_not_a_dir() {
+        // Someone stomped a regular file into `inbox/alice/` (e.g.,
+        // operator mv'd a loose .md into the wrong place). The check
+        // fires `MAILBOX-DIR-NOT-DIR` at Fail severity.
+        let _guard = set_test_resolver(resolver_current_user);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        std::fs::create_dir_all(tmp.path().join("inbox")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent")).unwrap();
+        // Place a FILE at the spot where `inbox/alice/` should be.
+        std::fs::write(tmp.path().join("inbox/alice"), b"not a dir").unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        #[cfg(unix)]
+        chmod(&tmp.path().join("sent/alice"), 0o700);
+
+        let findings = check_mailbox_ownership(&config);
+        assert!(
+            findings.iter().any(|f| f.check == "MAILBOX-DIR-NOT-DIR"
+                && f.severity == FindingSeverity::Fail
+                && f.message.contains("inbox")
+                && f.message.contains("alice")),
+            "expected MAILBOX-DIR-NOT-DIR for inbox dir, got: {findings:?}"
+        );
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_owner_uid_drift() {
+        // Resolver maps `testowner` to a bogus uid that does NOT match
+        // the filesystem-reported uid (which is the test runner's uid,
+        // since we just created the dirs). The check fires
+        // `MAILBOX-DIR-OWNER-DRIFT` at Fail severity.
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "testowner" || name == "root" {
+                Some(ResolvedUser {
+                    name: name.to_string(),
+                    // Sentinel uid/gid far from any real runtime uid so
+                    // the filesystem-vs-resolver mismatch is unambiguous.
+                    uid: 424242,
+                    gid: 424242,
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&tmp.path().join("inbox/alice"), 0o700);
+            chmod(&tmp.path().join("sent/alice"), 0o700);
+        }
+
+        let findings = check_mailbox_ownership(&config);
+        #[cfg(unix)]
+        assert!(
+            findings.iter().any(|f| f.check == "MAILBOX-DIR-OWNER-DRIFT"
+                && f.severity == FindingSeverity::Fail
+                && f.message.contains("alice")),
+            "expected MAILBOX-DIR-OWNER-DRIFT, got: {findings:?}"
+        );
+        #[cfg(not(unix))]
+        let _ = findings;
+    }
+
+    #[test]
+    fn mailbox_ownership_flags_group_drift() {
+        // Resolver returns the current uid (so owner check passes) but
+        // a bogus gid (so the group check fires). Pinned as Warn — the
+        // sprint plan classifies group drift as recoverable, not an
+        // isolation break.
+        fn fake(name: &str) -> Option<ResolvedUser> {
+            if name == "testowner" || name == "root" {
+                let (uid, gid) = current_uid_gid();
+                Some(ResolvedUser {
+                    name: name.to_string(),
+                    uid,
+                    // Sentinel gid guaranteed to differ from the fs-reported
+                    // gid. Add a large offset instead of picking a constant
+                    // so this test stays correct on hosts where the test
+                    // runner happens to have a high real gid.
+                    gid: gid.wrapping_add(10_000),
+                })
+            } else {
+                None
+            }
+        }
+        let _guard = set_test_resolver(fake);
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = s7_config_with_mailbox(tmp.path(), "testowner");
+        std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
+        #[cfg(unix)]
+        {
+            chmod(&tmp.path().join("inbox/alice"), 0o700);
+            chmod(&tmp.path().join("sent/alice"), 0o700);
+        }
+
+        let findings = check_mailbox_ownership(&config);
+        #[cfg(unix)]
+        {
+            assert!(
+                findings.iter().any(|f| f.check == "MAILBOX-DIR-GROUP-DRIFT"
+                    && f.severity == FindingSeverity::Warn
+                    && f.message.contains("alice")),
+                "expected MAILBOX-DIR-GROUP-DRIFT, got: {findings:?}"
+            );
+            assert!(
+                !findings
+                    .iter()
+                    .any(|f| f.check == "MAILBOX-DIR-OWNER-DRIFT"),
+                "owner uid matches, so MAILBOX-DIR-OWNER-DRIFT must NOT fire, got: {findings:?}"
+            );
+        }
         #[cfg(not(unix))]
         let _ = findings;
     }

@@ -457,29 +457,8 @@ fn prune(config: &Config, orphans: bool, dry_run: bool) -> Result<(), Box<dyn st
             .into());
     }
 
-    // Pre-flight: run the doctor checks and refuse when any Fail
-    // finding is outside the orphan-cleanup set. The operator has to
-    // fix the underlying error first because a bad hook invariant or
-    // missing dir indicates config or filesystem damage that the prune
-    // command has no business silently rewriting around.
-    let load_warnings = match crate::config::Config::load_resolved() {
-        Ok((_, w)) => w,
-        Err(_) => Vec::new(),
-    };
-    let findings = crate::doctor::run_checks(config, &load_warnings);
-    let non_orphan_fails: Vec<&crate::doctor::DoctorFinding> = findings
-        .iter()
-        .filter(|f| f.severity == crate::doctor::FindingSeverity::Fail)
-        .filter(|f| !crate::doctor::ORPHAN_CHECK_IDS.contains(&f.check))
-        .collect();
-    if !non_orphan_fails.is_empty() {
-        let mut msg =
-            String::from("Config has non-orphan failures. Fix those first, then re-run prune.\n");
-        for f in &non_orphan_fails {
-            msg.push_str(&format!("  - [{}] {}\n", f.check, f.message));
-        }
-        return Err(msg.into());
-    }
+    prune_preflight_check(config)
+        .map_err(|r| -> Box<dyn std::error::Error> { r.message.into() })?;
 
     let plan = build_prune_plan(config);
     if plan.is_empty() {
@@ -531,6 +510,42 @@ fn prune(config: &Config, orphans: bool, dry_run: bool) -> Result<(), Box<dyn st
     Ok(())
 }
 
+/// Refusal returned by [`prune_preflight_check`] when doctor reports a
+/// non-orphan `Fail` finding. The operator has to fix the underlying
+/// error first because a bad hook invariant or missing dir indicates
+/// config or filesystem damage that the prune command has no business
+/// silently rewriting around.
+#[derive(Debug)]
+struct PruneRefusal {
+    message: String,
+}
+
+/// Pre-flight: run doctor's checks and refuse when any `Fail` finding
+/// is outside [`crate::doctor::ORPHAN_CHECK_IDS`]. Extracted so the
+/// refusal logic can be unit-tested independently of the root check,
+/// atomic write, and SIGHUP plumbing in [`prune`].
+fn prune_preflight_check(config: &Config) -> Result<(), PruneRefusal> {
+    let load_warnings = match crate::config::Config::load_resolved() {
+        Ok((_, w)) => w,
+        Err(_) => Vec::new(),
+    };
+    let findings = crate::doctor::run_checks(config, &load_warnings);
+    let non_orphan_fails: Vec<&crate::doctor::DoctorFinding> = findings
+        .iter()
+        .filter(|f| f.severity == crate::doctor::FindingSeverity::Fail)
+        .filter(|f| !crate::doctor::ORPHAN_CHECK_IDS.contains(&f.check))
+        .collect();
+    if non_orphan_fails.is_empty() {
+        return Ok(());
+    }
+    let mut msg =
+        String::from("Config has non-orphan failures. Fix those first, then re-run prune.\n");
+    for f in &non_orphan_fails {
+        msg.push_str(&format!("  - [{}] {}\n", f.check, f.message));
+    }
+    Err(PruneRefusal { message: msg })
+}
+
 /// Deterministic, sorted description of what `prune --orphans` will
 /// remove. The `template_names` vector lists orphan template names;
 /// `hooks_by_mailbox` is a sorted list of (mailbox, Vec<hook_name>).
@@ -554,18 +569,14 @@ impl PrunePlan {
 }
 
 fn build_prune_plan(config: &Config) -> PrunePlan {
-    use crate::config::{RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT};
+    use crate::config::is_reserved_run_as;
     use crate::user_resolver::resolve_user;
 
     // Sorted for deterministic output in both diff preview and tests.
     let mut orphan_templates: Vec<String> = config
         .hook_templates
         .iter()
-        .filter(|t| {
-            t.run_as != RESERVED_RUN_AS_ROOT
-                && t.run_as != RESERVED_RUN_AS_CATCHALL
-                && resolve_user(&t.run_as).is_none()
-        })
+        .filter(|t| !is_reserved_run_as(&t.run_as) && resolve_user(&t.run_as).is_none())
         .map(|t| t.name.clone())
         .collect();
     orphan_templates.sort();
@@ -607,7 +618,7 @@ fn build_prune_plan(config: &Config) -> PrunePlan {
 /// its template) does not resolve via `getpwnam`. Reserved values
 /// (`root`, `aimx-catchall`) always resolve for prune's purposes.
 fn hook_run_as_is_orphan(config: &Config, hook: &crate::hook::Hook) -> bool {
-    use crate::config::{RESERVED_RUN_AS_CATCHALL, RESERVED_RUN_AS_ROOT};
+    use crate::config::is_reserved_run_as;
     use crate::user_resolver::resolve_user;
 
     let explicit = hook.run_as.clone();
@@ -622,7 +633,7 @@ fn hook_run_as_is_orphan(config: &Config, hook: &crate::hook::Hook) -> bool {
     let Some(name) = effective else {
         return false;
     };
-    if name == RESERVED_RUN_AS_ROOT || name == RESERVED_RUN_AS_CATCHALL {
+    if is_reserved_run_as(&name) {
         return false;
     }
     resolve_user(&name).is_none()

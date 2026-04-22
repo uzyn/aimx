@@ -54,14 +54,33 @@ fn setup_test_env(tmp: &Path) -> String {
     // Sprint 4 §6.5: the UDS now enforces per-mailbox ownership. Tests
     // that drive MCP / UDS as the current user need alice's owner to
     // match the running uid so the authz check accepts.
+    //
+    // Sprint 7 §6: `aimx doctor` now validates mailbox storage
+    // ownership. The fixture uses the current test-runner's username
+    // for BOTH mailboxes (including the catchall) and creates all four
+    // storage dirs so `MAILBOX-DIR-OWNER-DRIFT` / `MAILBOX-DIR-MISSING`
+    // do not fire for fixture reasons. Tests that specifically need a
+    // catchall owned by `aimx-catchall` must override the config
+    // themselves.
     let owner = current_username();
     let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n",
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"{owner}\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n",
         tmp.display()
     );
-    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
-    std::fs::create_dir_all(tmp.join("inbox").join("alice")).unwrap();
-    std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
+    for sub in [
+        "inbox/catchall",
+        "sent/catchall",
+        "inbox/alice",
+        "sent/alice",
+    ] {
+        let dir = tmp.join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
     let config_path = tmp.join("config.toml");
     std::fs::write(&config_path, &config_content).unwrap();
     install_cached_dkim_keys(tmp);
@@ -1570,17 +1589,15 @@ fn doctor_shows_domain_and_mailboxes() {
         .success();
 
     // Sprint 7: `aimx doctor` now exits non-zero when the Checks
-    // section surfaces any `FAIL`-severity finding. The integration
-    // fixture chowns storage dirs to the test runner's uid but
-    // `setup_test_env` declares `aimx-catchall` as the catchall
-    // owner, which is a genuine ownership mismatch worth flagging.
-    // Assert on stdout content (doctor still prints the full report
-    // before exiting) rather than on the exit status.
+    // section surfaces any `FAIL`-severity finding. `setup_test_env`
+    // owns both mailboxes as the test runner and creates all four
+    // storage dirs at mode 0700, so doctor should succeed.
     let assert = aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("doctor")
-        .assert();
+        .assert()
+        .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
         stdout.contains("agent.example.com"),
@@ -1629,14 +1646,15 @@ fn doctor_renders_logs_pointer_section() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Sprint 7: doctor may exit non-zero on the fixture host due to
-    // storage-dir ownership drift; the Logs section still renders
-    // before the Checks section runs, so inspect stdout directly.
+    // Sprint 7: with the fixture cleaned up (both mailboxes owned by
+    // the test runner, all four storage dirs present at 0700), doctor
+    // succeeds and the Logs section renders in the happy-path report.
     let assert = aimx_cmd(tmp.path())
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("doctor")
-        .assert();
+        .assert()
+        .success();
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
     assert!(
         stdout.contains("Logs"),
