@@ -110,6 +110,160 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test e2e_agent_flow -- --ignored
 
+  # Onboarding Sprint 3 (S3-3): lint + exercise `install.sh` under dash
+  # (debian:stable-slim) and busybox sh (alpine:latest). The happy-path
+  # runs fetch the real `v0.0.0-fixture` GitHub Release — that tag is
+  # permanent per Sprint 1.3 tag discipline, carries all four target
+  # tarballs, and exercises the exact curl-to-shell flow operators hit.
+  #
+  # No checksum-verification test path here: `install.sh` v1 does not
+  # verify SHA-256 (PRD FR-2.4 — trust anchor is HTTPS). Skeptical
+  # operators verify manually via the release-notes `sha256sum -c`
+  # block (FR-1.4).
+  install-sh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: shellcheck install.sh
+        run: shellcheck install.sh
+
+      - name: POSIX parse via dash
+        run: dash -n install.sh
+
+      - name: POSIX parse via busybox sh
+        run: |
+          # busybox sh -n on the host if available; fall back to Docker.
+          if command -v busybox >/dev/null; then
+            busybox sh -n install.sh
+          else
+            docker run --rm -v "${PWD}:/src" -w /src busybox:stable sh -n install.sh
+          fi
+
+      - name: Help flag under dash
+        run: dash install.sh --help
+
+      - name: Dry-run under dash (fixture release, x86_64 gnu)
+        env:
+          AIMX_DRY_RUN: '1'
+        run: |
+          dash install.sh --tag v0.0.0-fixture \
+            --target x86_64-unknown-linux-gnu --to /tmp/aimx-dry
+
+      - name: Dry-run under dash (fixture release, aarch64 musl target override)
+        env:
+          AIMX_DRY_RUN: '1'
+        run: |
+          dash install.sh --tag v0.0.0-fixture \
+            --target aarch64-unknown-linux-musl --to /tmp/aimx-dry
+
+      - name: Fresh install under alpine:latest (busybox sh)
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src alpine:latest sh -eu -c '
+            apk add --no-cache curl tar >/dev/null
+            mkdir -p /tmp/aimx-alpine
+            # alpine is musl; let detection resolve target triple.
+            sh install.sh --tag v0.0.0-fixture --to /tmp/aimx-alpine
+            test -x /tmp/aimx-alpine/aimx
+            /tmp/aimx-alpine/aimx --version
+          '
+
+      - name: Fresh install under debian:stable-slim (dash as sh)
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src debian:stable-slim sh -eu -c '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
+            mkdir -p /tmp/aimx-deb
+            # Run explicitly under dash for POSIX purity.
+            dash install.sh --tag v0.0.0-fixture \
+              --target x86_64-unknown-linux-gnu --to /tmp/aimx-deb
+            test -x /tmp/aimx-deb/aimx
+            /tmp/aimx-deb/aimx --version
+          '
+
+      - name: Unsupported-platform refusal is clean
+        run: |
+          # Force an unsupported target triple; install.sh must err
+          # before any download and exit non-zero.
+          if dash install.sh --target x86_64-unknown-linux-nosuch; then
+            echo "expected failure on unsupported target" >&2
+            exit 1
+          fi
+
+      - name: Same-version re-install refused without --force, accepted with --force
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src debian:stable-slim sh -eu -c '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
+            mkdir -p /tmp/aimx-same
+            # Lay down a stub aimx that self-reports the fixture tag, so the
+            # same-version short-circuit in install.sh fires without relying
+            # on the fixture tarballs self-reporting (they predate Sprint 2
+            # build.rs metadata). Use printf (not HEREDOC) so YAML indentation
+            # does not leak into the file.
+            printf "%s\n" "#!/bin/sh" "echo \"aimx v0.0.0-fixture (stubshad) x86_64-unknown-linux-gnu built 2026-04-23\"" > /tmp/aimx-same/aimx
+            chmod 0755 /tmp/aimx-same/aimx
+            _before="$(stat -c %Y /tmp/aimx-same/aimx)"
+            sleep 1
+            # Without --force: installed == target short-circuits. Exit 0,
+            # log "already installed", binary untouched.
+            if ! dash install.sh --tag v0.0.0-fixture \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same.log 2>&1; then
+              cat /tmp/same.log
+              echo "expected same-version no-force install to exit 0" >&2
+              exit 1
+            fi
+            cat /tmp/same.log
+            grep -q "already installed" /tmp/same.log
+            _after="$(stat -c %Y /tmp/aimx-same/aimx)"
+            if [ "${_before}" != "${_after}" ]; then
+              echo "same-version re-install should not rewrite binary without --force" >&2
+              exit 1
+            fi
+            # With --force: install.sh proceeds through the upgrade path and
+            # swaps the stub for the real fixture binary. mtime must change.
+            sleep 1
+            if ! dash install.sh --tag v0.0.0-fixture --force \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same-force.log 2>&1; then
+              cat /tmp/same-force.log
+              echo "expected same-version --force install to exit 0" >&2
+              exit 1
+            fi
+            cat /tmp/same-force.log
+            _forced="$(stat -c %Y /tmp/aimx-same/aimx)"
+            if [ "${_after}" = "${_forced}" ]; then
+              echo "--force same-version re-install should rewrite binary" >&2
+              exit 1
+            fi
+          '
+
+      - name: Downgrade refusal points at aimx upgrade --force
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src debian:stable-slim sh -eu -c '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
+            mkdir -p /tmp/aimx-down
+            # Lay down a fake "newer" aimx (reports a tag newer than the fixture).
+            # Use printf (not HEREDOC) so YAML indentation does not leak into
+            # the file or stop the HEREDOC terminator from matching at column 0.
+            printf "%s\n" "#!/bin/sh" "echo \"aimx 9.9.9 (deadbeef)\"" > /tmp/aimx-down/aimx
+            chmod 0755 /tmp/aimx-down/aimx
+            # install.sh must refuse to overwrite with the older fixture tag,
+            # even under --force, and emit the "aimx upgrade ... --force" hint.
+            if dash install.sh --tag v0.0.0-fixture --force \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-down >/tmp/down.log 2>&1; then
+              cat /tmp/down.log
+              echo "expected downgrade refusal to exit non-zero" >&2
+              exit 1
+            fi
+            cat /tmp/down.log
+            grep -q "aimx upgrade --version" /tmp/down.log
+            grep -q -- "--force" /tmp/down.log
+          '
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:
