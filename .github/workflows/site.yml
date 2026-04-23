@@ -7,12 +7,14 @@ on:
       - 'website/**'
       - 'book/**'
       - 'etc/aimx-pigeon.svg'
+      - 'install.sh'
       - '.github/workflows/site.yml'
   pull_request:
     paths:
       - 'website/**'
       - 'book/**'
       - 'etc/aimx-pigeon.svg'
+      - 'install.sh'
       - '.github/workflows/site.yml'
   workflow_dispatch:
 
@@ -43,6 +45,11 @@ jobs:
           test -f website/dist/book/faq.html
           test -f website/dist/book/security.html
           test -f website/dist/assets/aimx-pigeon.svg
+          test -f website/dist/install.sh
+          # Verify install.sh is syntactically valid POSIX sh before
+          # publishing to aimx.email — site build is the last gate.
+          sh -n website/dist/install.sh
+          head -1 website/dist/install.sh | grep -q '^#!/bin/sh'
 
       - name: Add CNAME for custom domain
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

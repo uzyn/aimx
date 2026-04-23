@@ -1,5 +1,6 @@
-DIST   := dist
-PIGEON := ../etc/aimx-pigeon.svg
+DIST    := dist
+PIGEON  := ../etc/aimx-pigeon.svg
+INSTALL := ../install.sh
 
 .PHONY: build serve clean
 
@@ -9,6 +10,12 @@ build:
 	mkdir -p $(DIST)/assets
 	cp -R public/. $(DIST)/
 	cp $(PIGEON) $(DIST)/assets/aimx-pigeon.svg
+	# Publish the installer at https://aimx.email/install.sh so the
+	# curl-to-shell one-liner (PRD FR-2.8) has a canonical URL. GitHub
+	# Pages serves files under their on-disk extension; `.sh` resolves
+	# to `application/x-sh` by default, which is correct for
+	# `curl | sh`.
+	cp $(INSTALL) $(DIST)/install.sh
 
 serve: build
 	@echo ""

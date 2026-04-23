@@ -421,12 +421,10 @@ footer a:hover {
 
     <section class="block fade d6">
       <h2 class="section-label">Quick start</h2>
-<pre class="code">git clone https://github.com/uzyn/aimx.git &amp;&amp; cd aimx
-cargo build --release
-sudo cp target/release/aimx /usr/local/bin/
+<pre class="code">curl -fsSL https://aimx.email/install.sh | sh
 sudo aimx setup</pre>
       <p class="prose" style="margin-top: 1.1em;">
-        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements.
+        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Want to see the script before running it? <a href="/install.sh">Read <code>install.sh</code></a>.
       </p>
     </section>
 
