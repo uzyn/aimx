@@ -5433,3 +5433,66 @@ fn hooks_prune_requires_orphans_and_root() {
             .stderr(predicate::str::contains("requires root"));
     }
 }
+
+/// Sprint 2 / FR-6.1: `aimx --version` must render
+/// `aimx <tag> (<git-sha>) <target-triple> built <date>` — all four fields
+/// present on a single line.
+#[test]
+fn aimx_version_renders_full_metadata() {
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .arg("--version")
+        .output()
+        .expect("run aimx --version");
+    assert!(output.status.success(), "aimx --version exited non-zero");
+
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let line = stdout
+        .lines()
+        .next()
+        .expect("at least one output line")
+        .to_string();
+
+    // Shape: clap prepends `<name> ` before our banner, so the full line
+    // typically reads `aimx aimx <tag> (<sha>) <target> built <date>`.
+    // Strip one optional leading `aimx ` to normalise.
+    let core = line.strip_prefix("aimx ").unwrap_or(&line);
+    assert!(
+        core.starts_with("aimx "),
+        "version line missing `aimx ` banner prefix: {line:?}"
+    );
+    assert!(
+        core.contains(" (") && core.contains(") "),
+        "version line missing parenthesised git hash: {line:?}"
+    );
+    let built_pos = core
+        .rfind(" built ")
+        .unwrap_or_else(|| panic!("version line missing ` built ` trailer: {line:?}"));
+    let date = &core[built_pos + " built ".len()..];
+    assert_eq!(date.len(), 10, "build date not YYYY-MM-DD: {date:?}");
+    assert_eq!(
+        &date[4..5],
+        "-",
+        "build date missing first hyphen: {date:?}"
+    );
+    assert_eq!(
+        &date[7..8],
+        "-",
+        "build date missing second hyphen: {date:?}"
+    );
+    assert!(date[..4].chars().all(|c| c.is_ascii_digit()));
+    assert!(date[5..7].chars().all(|c| c.is_ascii_digit()));
+    assert!(date[8..10].chars().all(|c| c.is_ascii_digit()));
+
+    // Target triple sits between `) ` and ` built `. Cargo-supplied triples
+    // carry at least two hyphens; `unknown` is the build.rs fallback.
+    let after_sha = core.split(") ").nth(1).expect("target segment present");
+    let target = after_sha
+        .split(" built ")
+        .next()
+        .expect("target terminated by ` built `");
+    assert!(
+        target == "unknown" || target.matches('-').count() >= 2,
+        "target triple looks wrong: {target:?}"
+    );
+}

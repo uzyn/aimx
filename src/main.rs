@@ -35,8 +35,14 @@ mod term;
 mod transport;
 mod trust;
 mod uds_authz;
+// Sprint 2 lands release metadata + ReleaseOps ahead of the Sprint 4
+// consumer (`aimx upgrade`). Every item is scheduled for use next sprint
+// — silence dead-code until then.
+#[allow(dead_code)]
+mod release;
 mod uninstall;
 mod user_resolver;
+mod version;
 
 use clap::Parser;
 use cli::{Cli, Command};

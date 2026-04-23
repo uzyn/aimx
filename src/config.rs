@@ -106,6 +106,23 @@ pub struct Config {
 
     #[serde(default)]
     pub enable_ipv6: bool,
+
+    /// Optional `[upgrade]` section. Overrides the release-manifest URL used
+    /// by `aimx upgrade` (PRD FR-4.6). The `AIMX_RELEASE_MANIFEST_URL` env
+    /// var takes precedence over this value when both are set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade: Option<UpgradeConfig>,
+}
+
+/// Operator-overridable knobs for `aimx upgrade`. Today only the manifest URL
+/// is configurable; the struct is named for extension (e.g. future proxy,
+/// timeout, or channel settings land here without breaking the TOML shape).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct UpgradeConfig {
+    /// URL the release fetcher hits instead of the GitHub Releases API.
+    /// Supports `file://` for offline fixtures (FR-4.6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_manifest_url: Option<String>,
 }
 
 /// Stdin delivery mode for a hook template. The daemon pipes the matching
@@ -2157,6 +2174,7 @@ dangerously_support_untrusted = true
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
 
         config.save(&path).unwrap();
@@ -2315,6 +2333,7 @@ trusted_senders = []
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         config.save(&path).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -2355,6 +2374,7 @@ trusted_senders = []
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         config.save(&path).unwrap();
         let on_disk = std::fs::read_to_string(&path).unwrap();
@@ -2437,6 +2457,31 @@ enable_ipv6 = true
 "#;
         let config: Config = toml::from_str(toml_str).unwrap();
         assert!(config.enable_ipv6);
+    }
+
+    #[test]
+    fn upgrade_defaults_to_none() {
+        let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
+        let config: Config = toml::from_str(toml_str).unwrap();
+        assert!(config.upgrade.is_none());
+    }
+
+    #[test]
+    fn parse_upgrade_release_manifest_url() {
+        let toml_str = r#"
+domain = "test.com"
+
+[upgrade]
+release_manifest_url = "file:///tmp/fixture/latest.json"
+
+[mailboxes]
+"#;
+        let config: Config = toml::from_str(toml_str).unwrap();
+        let upgrade = config.upgrade.expect("upgrade section parsed");
+        assert_eq!(
+            upgrade.release_manifest_url.as_deref(),
+            Some("file:///tmp/fixture/latest.json")
+        );
     }
 
     #[test]
@@ -3395,6 +3440,7 @@ allow_root_catchall = true
             },
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
         assert!(
@@ -3517,6 +3563,7 @@ allow_root_catchall = true
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 

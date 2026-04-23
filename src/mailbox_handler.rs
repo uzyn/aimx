@@ -490,6 +490,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 

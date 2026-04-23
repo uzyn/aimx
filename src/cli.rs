@@ -1,17 +1,7 @@
 use clap::{Parser, Subcommand};
 
-pub fn version_string() -> &'static str {
-    use std::sync::LazyLock;
-    static VERSION: LazyLock<String> = LazyLock::new(|| {
-        let hash = env!("GIT_HASH");
-        if hash == "unknown" || hash.is_empty() {
-            env!("CARGO_PKG_VERSION").to_string()
-        } else {
-            format!("{} ({hash})", env!("CARGO_PKG_VERSION"))
-        }
-    });
-    &VERSION
-}
+#[allow(unused_imports)]
+pub use crate::version::{build_date, git_hash, release_tag, target_triple, version_string};
 
 #[derive(Parser)]
 #[command(

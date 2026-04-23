@@ -757,6 +757,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         let config_handle = ConfigHandle::new(config);
         SendContext {
@@ -1353,6 +1354,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         let ctx = SendContext {
             dkim_key: Arc::new(key),

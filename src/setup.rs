@@ -1424,6 +1424,7 @@ pub fn finalize_setup(
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
         install_config_file(&cfg, &config_path)?;
         cfg
