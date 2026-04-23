@@ -291,8 +291,8 @@ compare_tags() {
         printf 'equal'
         return 0
     fi
-    # Lexicographic tiebreaker via sort; POSIX `sort` supports -C (silent
-    # order check; exit 0 iff already sorted). First line is the "smaller".
+    # Lexicographic tiebreaker: feed both pre-release strings through
+    # `LC_ALL=C sort` and take the first line — that is the "smaller" one.
     _first="$(printf '%s\n%s\n' "${_a_pre}" "${_b_pre}" | LC_ALL=C sort | head -n1)"
     if [ "${_first}" = "${_a_pre}" ]; then
         printf 'older'
@@ -454,7 +454,7 @@ main() {
     # Print the three facts operators want to see before any download.
     say "target:  ${TARGET}"
     say "tarball: ${_url}"
-    say "install: ${_install_path}"
+    say "install path: ${_install_path}"
 
     # Upgrade-vs-fresh decision (FR-2.5). Only matters when a binary is
     # already present at ${_install_path}.

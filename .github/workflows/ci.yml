@@ -193,6 +193,60 @@ jobs:
             exit 1
           fi
 
+      - name: Same-version re-install refused without --force, accepted with --force
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src debian:stable-slim sh -eu -c '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
+            mkdir -p /tmp/aimx-same
+            # First install the fixture release.
+            dash install.sh --tag v0.0.0-fixture \
+              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same
+            # Re-run without --force — must exit 0 with "already installed" and not rewrite.
+            _before="$(stat -c %Y /tmp/aimx-same/aimx)"
+            sleep 1
+            dash install.sh --tag v0.0.0-fixture \
+              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same 2>&1 | tee /tmp/same.log
+            grep -q "already installed" /tmp/same.log
+            _after="$(stat -c %Y /tmp/aimx-same/aimx)"
+            if [ "${_before}" != "${_after}" ]; then
+              echo "same-version re-install should not rewrite binary without --force" >&2
+              exit 1
+            fi
+            # Now re-run with --force — must rewrite the binary.
+            sleep 1
+            dash install.sh --tag v0.0.0-fixture --force \
+              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same
+            _forced="$(stat -c %Y /tmp/aimx-same/aimx)"
+            if [ "${_after}" = "${_forced}" ]; then
+              echo "--force same-version re-install should rewrite binary" >&2
+              exit 1
+            fi
+          '
+
+      - name: Downgrade refusal points at aimx upgrade --force
+        run: |
+          docker run --rm -v "${PWD}:/src" -w /src debian:stable-slim sh -eu -c '
+            apt-get update >/dev/null
+            apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
+            mkdir -p /tmp/aimx-down
+            # Lay down a fake "newer" aimx (reports a tag newer than the fixture).
+            cat > /tmp/aimx-down/aimx <<EOF
+          #!/bin/sh
+          echo "aimx 9.9.9 (deadbeef)"
+          EOF
+            chmod 0755 /tmp/aimx-down/aimx
+            # install.sh must refuse to overwrite with the older fixture tag,
+            # even under --force, and emit the "aimx upgrade ... --force" hint.
+            if dash install.sh --tag v0.0.0-fixture --force \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-down 2>&1 | tee /tmp/down.log; then
+              echo "expected downgrade refusal to exit non-zero" >&2
+              exit 1
+            fi
+            grep -q "aimx upgrade --version" /tmp/down.log
+            grep -q -- "--force" /tmp/down.log
+          '
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:
