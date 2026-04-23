@@ -197,7 +197,7 @@ jobs:
             range_label="${prev_tag}...${TAG}"
           else
             range="${TAG}"
-            range_label="(initial release)"
+            range_label="initial release"
           fi
 
           {

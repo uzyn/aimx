@@ -1,12 +1,14 @@
 # Setup
 
-Prerequisites, build, setup wizard, DNS records, verification, DKIM keys, and production hardening. For a shorter walkthrough, see [Getting Started](getting-started.md).
+Run the interactive setup wizard, add DNS records, and verify. This chapter assumes the binary is already installed — if not, see [Installation](installation.md) first.
+
+For a condensed walkthrough, see [Getting Started](getting-started.md).
 
 ## Prerequisites
 
 ### Server
 
-- Any Unix VPS with port 25 open inbound **and** outbound (CI tests Ubuntu, Alpine, Fedora)
+- A Linux VPS with port 25 open inbound **and** outbound (CI covers Ubuntu, Alpine, Fedora)
 - A domain you control with access to DNS management
 - Root access (required for service installation and binding port 25)
 
@@ -20,23 +22,6 @@ sudo ufw allow 25/tcp
 
 # If using iptables:
 sudo iptables -A INPUT -p tcp --dport 25 -j ACCEPT
-```
-
-## Building from source
-
-```bash
-# Install Rust (if needed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-
-# Clone and build
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo cp target/release/aimx /usr/local/bin/
-
-# Verify
-aimx --version
 ```
 
 ## Pre-setup verification
@@ -54,7 +39,7 @@ sudo aimx portcheck
 | Outbound port 25 | Performs EHLO handshake to `check.aimx.email` on port 25 | Ask VPS provider to unblock outbound SMTP |
 | Inbound port 25 | Calls the verify service to perform EHLO handshake back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
 
-All checks should show PASS before proceeding with setup.
+Both checks should pass before continuing.
 
 ## Setup wizard
 
@@ -72,23 +57,25 @@ When run without a domain argument, setup will prompt you to enter the domain an
 
 ### First-time setup flow
 
-1. **Root check**: exits if not running as root.
-2. **Port 25 preflight**: checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
-3. **Domain prompt**: asks for domain if not provided as argument.
-4. **Trusted-senders prompt**: asks for a comma-separated list of addresses or glob patterns (e.g. `you@example.com, *@company.com`) that should count as trusted. Leaving the prompt blank selects `trust = "none"` and prints a loud warning that hooks will **not** fire for inbound email. Entries are validated at prompt time; bad entries re-prompt up to five times. Under `AIMX_NONINTERACTIVE=1` the prompt is skipped, the list defaults to empty, and the same warning is *logged* (not displayed) so automated pipelines surface the misconfiguration in their log collectors. Re-entry preserves existing trust config.
-5. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`.
-6. **DKIM key generation + config creation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`) and writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with the catchall mailbox and the trust defaults from step 4.
-7. **Catchall user (on demand)**: when you configure a catchall mailbox, setup creates the unprivileged `aimx-catchall` system user (no login shell, no home directory) and chowns the catchall mailbox to it. No `aimx-catchall` is created if you skip the catchall — and no `aimx-hook` group is ever touched; that legacy shared-group model has been retired.
-8. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter. Press `q` to skip verification and run `aimx doctor` later.
-9. **Service installation + success banner**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, starts `aimx serve`, and prints the single-line `aimx is running for <domain>.` banner.
-10. **Drop-through to `aimx agent-setup`**: when `$SUDO_USER` is set (i.e. you ran the wizard via `sudo aimx setup`, not a direct root login), the wizard re-execs `runuser -u "$SUDO_USER" -- /proc/self/exe agent-setup` so the interactive checkbox TUI takes over the terminal in one continuous flow. If `$SUDO_USER` is unset (direct root login), the wizard prints the guidance message naming `--dangerously-allow-root` as a root-login option, and exits cleanly. `AIMX_NONINTERACTIVE=1` skips the drop-through entirely. If you explicitly passed `--data-dir <path>` to `aimx setup`, the same path is threaded through to `aimx agent-setup` so activation hints reference it; the default `/var/lib/aimx` is left implicit.
+The wizard asks **two** operator decisions — domain and trusted senders — and otherwise drives itself.
 
-No hook-template checkbox UI and no Gmail / deliverability section appear in the wizard — per-user agent wiring happens post-setup via `aimx agent-setup`, and deliverability is the DNS triple plus PTR (see below).
+1. **Root check.** Exits if not running as root.
+2. **Port 25 preflight.** Checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
+3. **Domain prompt.** Asks for the domain if not provided as argument.
+4. **Trusted senders prompt.** Asks for a comma-separated list of addresses or glob patterns (e.g. `you@example.com, *@company.com`) that should count as trusted. Leaving the prompt blank selects `trust = "none"` and prints a loud warning that hooks will **not** fire for inbound email until you add senders via `aimx config trust add`. Entries are validated at prompt time; bad entries re-prompt up to five times. Under `AIMX_NONINTERACTIVE=1` the prompt is skipped, the list defaults to empty, and the same warning is *logged* (not displayed) so automated pipelines surface the misconfiguration in their log collectors. Re-entry preserves existing trust config.
+5. **TLS certificate.** Generates a self-signed certificate at `/etc/ssl/aimx/`.
+6. **DKIM keypair + config creation.** Creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`) and writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with the catchall mailbox and the trust defaults from step 4.
+7. **Catchall user (on demand).** When you configure a catchall mailbox, setup creates the unprivileged `aimx-catchall` system user (no login shell, no home directory) and chowns the catchall mailbox to it. No `aimx-catchall` is created if you skip the catchall.
+8. **DNS guidance.** Prints the six DNS records to add (see below).
+9. **DNS verification loop.** Re-verifies records on Enter. Press **`q`** to skip and re-check later with `aimx doctor`. The `q`-to-skip prompt is deliberately prominent — DNS propagation can take minutes or hours, and blocking the wizard on it is the wrong default.
+10. **Service install + success banner.** Generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, starts `aimx serve`, waits for port 25 ready, and prints the single-line `aimx is running for <domain>.` banner.
+11. **Drop-through to `aimx agent-setup`.** When `$SUDO_USER` is set (i.e. you ran the wizard via `sudo aimx setup`, not a direct root login), the wizard re-execs `runuser -u "$SUDO_USER" -- /proc/self/exe agent-setup` so the interactive checkbox TUI takes over the terminal in one continuous flow. If `$SUDO_USER` is unset (direct root login), the wizard prints the guidance message naming `--dangerously-allow-root` as a root-login option, and exits cleanly. `AIMX_NONINTERACTIVE=1` skips the drop-through entirely. If you explicitly passed `--data-dir <path>` to `aimx setup`, the same path is threaded through to `aimx agent-setup` so activation hints reference it; the default `/var/lib/aimx` is left implicit.
 
-After initial setup, the wizard displays two clearly labeled sections:
+No hook-template checkbox, no Gmail / deliverability section, no `none | verified` trust toggle. Per-user agent wiring happens post-setup via the `aimx agent-setup` drop-through, and deliverability is the DNS triple plus PTR (covered below).
 
-- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records (or press `q` to skip and re-verify later with `aimx doctor`)
-- **[MCP]**: informational summary of the `aimx agent-setup` commands per supported agent — the actual agent wiring happens in a post-install drop-through (see [Agent integration](agent-integration.md)).
+### `[MCP]` summary
+
+After the success banner, setup prints a short `[MCP]` summary listing the `aimx agent-setup` commands for each supported agent. This is purely informational — the drop-through to the TUI (step 11) handles the actual wiring. The summary is there so the operator sees what is about to happen on the other side of the re-exec.
 
 Third-party mail-client workarounds (e.g. Gmail spam-filter whitelists) are **not** part of `aimx setup`'s surface. A correct SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider is the canonical deliverability story.
 
@@ -105,7 +92,7 @@ Which Linux user should own `alice@agent.yourdomain.com`? [alice]
 - If the default user does not exist, setup requires explicit input and rejects unknown usernames with a hint to `useradd` first.
 - The catchall mailbox (if any) is always owned by the reserved `aimx-catchall` system user.
 
-The daemon chowns `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` to `<owner>:<owner>` mode `0700` at create time and keeps ownership consistent through every subsequent write (ingest, send, mark-read). Only the owner and root can read a mailbox's contents — there is no shared `aimx-hook` group in the new model.
+The daemon chowns `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` to `<owner>:<owner>` mode `0700` at create time and keeps ownership consistent through every subsequent write (ingest, send, mark-read). Only the owner and root can read a mailbox's contents — there is no shared `aimx-hook` group in the current model.
 
 ### Catchall user (created on demand)
 
@@ -113,30 +100,34 @@ When you configure a catchall mailbox, setup creates the `aimx-catchall` system 
 
 ### Registering agent templates
 
-Per-agent hook templates (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, etc.) are no longer ticked from a checkbox during setup. Instead, each Linux user who wants an agent runs one command **without sudo** after setup:
+Per-agent hook templates (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, etc.) are not ticked from a checkbox during setup. Instead, the `aimx agent-setup` drop-through (step 11) runs after the wizard completes — as your regular user, not as root — and presents an interactive checkbox picker. For each selected agent, it lays down plugin files under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching `invoke-<agent>-<username>` template over the UDS. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
+
+If you logged in directly as root (no `sudo`), the wizard prints a message pointing you at the same tool. You can either re-run `aimx agent-setup` as a regular user on the box, or pass `--dangerously-allow-root` if this is a single-user VPS where you genuinely want aimx wired into `root`'s home.
+
+### Non-interactive setup
+
+Setting `AIMX_NONINTERACTIVE=1` skips the trusted-senders prompt (defaults to empty list + logged warning) and skips the agent-setup drop-through (no TTY assumed). Useful for provisioning scripts and CI. The domain still must be supplied as an argument.
 
 ```bash
-aimx agent-setup claude-code
+sudo AIMX_NONINTERACTIVE=1 aimx setup agent.example.com
 ```
-
-`aimx agent-setup` lays down the plugin files under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching `invoke-<agent>-<username>` template over the UDS. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
 
 ### Re-running setup
 
-Re-run `aimx setup` on an existing install to re-verify:
+Re-run `aimx setup` on an existing install to re-verify DNS or wire an additional agent:
 
 ```bash
 sudo aimx setup agent.yourdomain.com
 ```
 
-When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install/configure and runs the port 25 preflight, DNS verification, and the output sections as a quick verification pass.
+When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install / configure and runs the port 25 preflight, DNS verification, and the `[MCP]` summary as a quick verification pass — and still drops through to `aimx agent-setup` at the end. Re-entry is the natural "I want to wire another agent" checkpoint; the TUI's `[x] (already wired)` state is self-documenting so you will not double-wire anything by accident.
 
 ### DNS retry loop
 
 At the DNS verification step:
 
 - **Enter** re-checks DNS records (useful after updating DNS in another tab).
-- **q** defers verification; re-run `sudo aimx setup <domain>` later.
+- **`q`** defers verification; re-run `sudo aimx setup <domain>` later or use `aimx doctor`.
 
 ### Uninstalling
 

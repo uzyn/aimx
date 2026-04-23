@@ -4,10 +4,9 @@ Install AIMX (AI Mail Exchange) and run your first setup.
 
 ## Requirements
 
-- **OS:** Any Unix where Rust compiles (CI tests Ubuntu, Alpine, Fedora)
+- **OS:** Linux (x86_64 or aarch64, glibc or musl). Release tarballs ship for all four targets; CI covers Ubuntu, Alpine, Fedora.
 - **Server:** A VPS with port 25 open (inbound and outbound)
 - **Domain:** A domain you control with access to DNS management
-- **Build tools:** Rust toolchain (`rustup`)
 
 ### Compatible VPS providers
 
@@ -26,22 +25,16 @@ Providers that **block** port 25 permanently (not compatible): DigitalOcean, AWS
 ## Install
 
 ```bash
-# Install Rust (if not already installed)
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-
-# Build aimx
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo cp target/release/aimx /usr/local/bin/
+curl -fsSL https://aimx.email/install.sh | sh
 ```
 
-Verify the binary is installed:
+The installer auto-detects your platform and installs `aimx` into `/usr/local/bin/`. Verify the binary is installed:
 
 ```bash
 aimx --version
 ```
+
+See [Installation](installation.md) for install flags (`--tag`, `--target`, `--to`, `--force`), a skeptical-operator manual verify path (`sha256sum -c` against the published `SHA256SUMS`), `aimx upgrade`, and a source-build recipe for contributors.
 
 ## Security model
 
@@ -67,16 +60,16 @@ sudo aimx setup
 
 The wizard will:
 
-1. Generate a self-signed TLS certificate and 2048-bit RSA DKIM keypair
-2. Install a systemd (or OpenRC) service file for `aimx serve`
-3. Start the embedded SMTP listener and verify port 25 connectivity (inbound and outbound)
-4. Display the DNS records you need to add under a **[DNS]** section
-5. Let you verify DNS records (press Enter to re-check, or q to defer)
-6. Display **[MCP]** configuration for your AI agent
-7. Show **[Deliverability Improvement (Optional)]** tips (Gmail filter / whitelist)
-8. Create a default `catchall` mailbox
+1. Run a port 25 preflight (outbound + inbound)
+2. Prompt for the domain (if not passed as an argument) and the trusted-sender list
+3. Generate a self-signed TLS certificate, a 2048-bit RSA DKIM keypair, and `/etc/aimx/config.toml`
+4. Create the unprivileged `aimx-catchall` service user and the default `catchall` mailbox
+5. Print the DNS records you need to add, then re-verify on Enter (press `q` to skip and run `aimx doctor` later)
+6. Install and start `aimx.service`, waiting for port 25 to come up
+7. Print a single-line `aimx is running for <domain>.` banner and a short `[MCP]` summary
+8. Drop through to `aimx agent-setup` as your regular user (via `runuser -u $SUDO_USER`) so you can tick the AI agents to wire into aimx
 
-Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips installation and jumps straight to DNS verification.
+Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips the TLS / DKIM / config-write steps, re-verifies DNS, and drops through to `aimx agent-setup` again so you can wire additional agents.
 
 Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup: DNS Configuration](setup.md#dns-configuration) for per-record details.
 
