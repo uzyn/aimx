@@ -41,6 +41,7 @@ mod uds_authz;
 // item still surfaces.
 mod release;
 mod uninstall;
+mod upgrade;
 mod user_resolver;
 mod version;
 
@@ -116,6 +117,20 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // `aimx logs` is a thin wrapper around journalctl; it does not
         // read config.toml.
         Command::Logs { lines, follow } => logs::run(lines, follow),
+        // `aimx upgrade` reads the release-manifest URL from Config
+        // (optional `[upgrade] release_manifest_url`) but tolerates a
+        // missing / unloadable config — a freshly-installed machine
+        // that never ran `aimx setup` should still be able to upgrade.
+        Command::Upgrade(args) => {
+            let config = config::Config::load_resolved_ignore_warnings().ok();
+            let manifest_url = config
+                .as_ref()
+                .and_then(|c| c.upgrade.as_ref())
+                .and_then(|u| u.release_manifest_url.clone());
+            let release = release::RealReleaseOps::new(manifest_url);
+            let sys = setup::RealSystemOps;
+            upgrade::run(args, &release, &sys)
+        }
         // Everything else loads Config once here and takes it by value.
         // For long-lived processes (`aimx serve`, `aimx doctor`) we log
         // startup warnings via `tracing` so orphan mailboxes / templates
@@ -170,7 +185,8 @@ fn dispatch_with_config(
         | Command::Send(_)
         | Command::Logs { .. }
         | Command::AgentSetup { .. }
-        | Command::AgentCleanup { .. } => unreachable!("handled by dispatch"),
+        | Command::AgentCleanup { .. }
+        | Command::Upgrade(_) => unreachable!("handled by dispatch"),
     }
 }
 

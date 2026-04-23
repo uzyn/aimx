@@ -206,6 +206,36 @@ pub enum Command {
         #[arg(long)]
         force: bool,
     },
+
+    /// Fetch the latest release and swap the installed binary. Requires root.
+    ///
+    /// Compares the running tag to the release manifest and, if a newer
+    /// version exists, downloads the target-matching tarball, stops the
+    /// `aimx.service`, atomically swaps the binary (preserving the old
+    /// one at `<install_path>.prev`), and restarts the service. Any
+    /// failure between stop and final start rolls back to the previous
+    /// binary. Never runs the setup wizard, never prompts.
+    Upgrade(UpgradeArgs),
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub struct UpgradeArgs {
+    /// Print what would happen (current → target version, tarball URL,
+    /// install path, action list) without touching the service or
+    /// writing to `/usr/local/bin`. Exits 0 on "would proceed" and on
+    /// "already up to date"; non-zero only on download failure.
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Target a specific release tag (downgrade path). When omitted,
+    /// `aimx upgrade` resolves the latest release from the manifest.
+    #[arg(long, value_name = "TAG")]
+    pub version: Option<String>,
+
+    /// Re-install the current tag (useful for repair) or the specified
+    /// `--version` tag. Bypasses the up-to-date short-circuit.
+    #[arg(long)]
+    pub force: bool,
 }
 
 #[derive(clap::Args, Clone)]
