@@ -55,6 +55,15 @@ rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 dialoguer = { version = "0.11", default-features = false }
+# Sprint 6 agent-setup TUI (onboarding track, S6-1). Hand-rolled checkbox
+# renderer on top of `console::Term` / `console::Key` to match the Claude
+# Code / OpenClaw multi-select look (colored caret + filled/hollow mark +
+# dim non-selectable rows). dialoguer's MultiSelect doesn't support
+# non-selectable rows cleanly and its default theme ships blue-bold, which
+# conflicts with branding §5.4 — so we drive `console` directly. `console`
+# is already a transitive dep via dialoguer; declaring it here keeps the
+# dependency explicit and avoids relying on a sibling's re-export.
+console = { version = "0.15", default-features = false, features = ["ansi-parsing"] }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
 # `aimx upgrade` (Sprint 4) extracts release tarballs produced by
 # `.github/workflows/release.yml`. The shape is well-known (a flat

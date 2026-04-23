@@ -26,6 +26,15 @@ pub struct AgentSpec {
     pub source_subdir: &'static str,
     /// Destination template, with `$HOME` / `$XDG_CONFIG_HOME` placeholders.
     pub dest_template: &'static str,
+    /// Top-level config directory for the agent itself (e.g. `$HOME/.claude`).
+    /// `detect_install_state` (Sprint 6 S6-1) uses this to distinguish
+    /// "agent not installed on this machine" (directory missing) from
+    /// "agent installed but aimx not wired in yet" (directory exists but
+    /// `dest_template` does not). Always an ancestor of `dest_template`.
+    pub agent_root_template: &'static str,
+    /// Human-readable display name for TUI / summary output (e.g.
+    /// "Claude Code"). Registry key stays the snake-case `name` field.
+    pub display_name: &'static str,
     /// Renders the post-install message. Receives the effective data
     /// directory (when the user passed `--data-dir`) so agents that need
     /// the user to paste a JSON/JSONC snippet can embed the right
@@ -91,6 +100,8 @@ pub fn registry() -> &'static [AgentSpec] {
             name: "claude-code",
             source_subdir: "claude-code",
             dest_template: "$HOME/.claude/plugins/aimx",
+            agent_root_template: "$HOME/.claude",
+            display_name: "Claude Code",
             activation_hint: claude_code_hint,
             progressive_disclosure: true,
             canonical_binary: "claude",
@@ -104,6 +115,8 @@ pub fn registry() -> &'static [AgentSpec] {
             name: "codex",
             source_subdir: "codex",
             dest_template: "$HOME/.codex/skills/aimx",
+            agent_root_template: "$HOME/.codex",
+            display_name: "Codex CLI",
             activation_hint: codex_hint,
             progressive_disclosure: true,
             canonical_binary: "codex",
@@ -117,6 +130,8 @@ pub fn registry() -> &'static [AgentSpec] {
             name: "opencode",
             source_subdir: "opencode",
             dest_template: "$XDG_CONFIG_HOME/opencode/skills/aimx",
+            agent_root_template: "$XDG_CONFIG_HOME/opencode",
+            display_name: "OpenCode",
             activation_hint: opencode_hint,
             progressive_disclosure: false,
             canonical_binary: "opencode",
@@ -130,6 +145,8 @@ pub fn registry() -> &'static [AgentSpec] {
             name: "gemini",
             source_subdir: "gemini",
             dest_template: "$HOME/.gemini/skills/aimx",
+            agent_root_template: "$HOME/.gemini",
+            display_name: "Gemini CLI",
             activation_hint: gemini_hint,
             progressive_disclosure: false,
             canonical_binary: "gemini",
@@ -146,6 +163,8 @@ pub fn registry() -> &'static [AgentSpec] {
             // ~/.config/goose/recipes/. We install one file, not a
             // directory. Destination template points at the file itself.
             dest_template: "$XDG_CONFIG_HOME/goose/recipes",
+            agent_root_template: "$XDG_CONFIG_HOME/goose",
+            display_name: "Goose",
             activation_hint: goose_hint,
             progressive_disclosure: false,
             canonical_binary: "goose",
@@ -161,6 +180,8 @@ pub fn registry() -> &'static [AgentSpec] {
             // OpenClaw scans ~/.openclaw/skills/<name>/SKILL.md. We ship a
             // skill-directory package (no flat SKILL.md at the root).
             dest_template: "$HOME/.openclaw/skills/aimx",
+            agent_root_template: "$HOME/.openclaw",
+            display_name: "OpenClaw",
             activation_hint: openclaw_hint,
             progressive_disclosure: true,
             canonical_binary: "openclaw",
@@ -179,6 +200,8 @@ pub fn registry() -> &'static [AgentSpec] {
             // `mcp_servers:`; there is no shell-side `mcp add` CLI today, so
             // the activation hint prints a YAML snippet to paste in.
             dest_template: "$HOME/.hermes/skills/aimx",
+            agent_root_template: "$HOME/.hermes",
+            display_name: "Hermes",
             activation_hint: hermes_hint,
             progressive_disclosure: true,
             canonical_binary: "hermes",
@@ -562,6 +585,78 @@ impl AgentEnv for RealAgentEnv {
     }
 }
 
+/// Wrapper around an inner [`AgentEnv`] that shadows `home_dir()` and
+/// `xdg_config_home()` with a fixed home path. Used by the Sprint 6
+/// `--dangerously-allow-root` code path (FR-5.1.a): with the flag set,
+/// `home_dir()` resolves to the `root` passwd entry's `pw_dir` (not `$HOME`,
+/// which can be unset under `sudo -H`), and XDG defaults to `<home>/.config`.
+/// All other methods (root check, TTY detection, UDS submits) pass through
+/// to the wrapped env unchanged.
+pub struct OverrideHomeEnv<'a> {
+    inner: &'a dyn AgentEnv,
+    home: PathBuf,
+}
+
+impl<'a> OverrideHomeEnv<'a> {
+    pub fn new(inner: &'a dyn AgentEnv, home: PathBuf) -> Self {
+        Self { inner, home }
+    }
+}
+
+impl<'a> AgentEnv for OverrideHomeEnv<'a> {
+    fn home_dir(&self) -> Option<PathBuf> {
+        Some(self.home.clone())
+    }
+
+    fn xdg_config_home(&self) -> Option<PathBuf> {
+        // Intentionally ignore the ambient `$XDG_CONFIG_HOME` under the
+        // root override: the regular user's XDG dir doesn't apply when
+        // we're writing into `/root/.config/`.
+        None
+    }
+
+    fn is_root(&self) -> bool {
+        self.inner.is_root()
+    }
+
+    fn is_stdin_tty(&self) -> bool {
+        self.inner.is_stdin_tty()
+    }
+
+    fn read_line(&self) -> io::Result<String> {
+        self.inner.read_line()
+    }
+
+    fn caller_username(&self) -> Option<String> {
+        self.inner.caller_username()
+    }
+
+    fn probe_binary(&self, binary_name: &str) -> Option<PathBuf> {
+        self.inner.probe_binary(binary_name)
+    }
+
+    fn submit_template_create(
+        &self,
+        request: &TemplateCreateRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        self.inner.submit_template_create(request)
+    }
+
+    fn submit_template_update(
+        &self,
+        request: &TemplateUpdateRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        self.inner.submit_template_update(request)
+    }
+
+    fn submit_template_delete(
+        &self,
+        request: &TemplateDeleteRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        self.inner.submit_template_delete(request)
+    }
+}
+
 /// Resolve the caller's Linux username via `getpwuid(geteuid())`. Returns
 /// `None` if the euid does not map to a passwd entry. `agent-setup`
 /// refuses root up front (PRD §6.6 + §8.2), so in production this always
@@ -574,6 +669,36 @@ pub fn caller_username_from_euid() -> Option<String> {
     // SAFETY: `geteuid` is a bare syscall with no preconditions.
     let uid = unsafe { libc::geteuid() };
     crate::uds_authz::lookup_username(uid)
+}
+
+/// Resolve a Linux user's home directory via `getpwnam(3)`. Used by
+/// `--dangerously-allow-root` (FR-5.1.a) to look up `/root` — or whatever
+/// the local `root` account's `pw_dir` is — without relying on `$HOME`,
+/// which can be unset or stale under `sudo -H`.
+///
+/// Returns `None` when the username has no matching passwd entry, when
+/// the name contains an interior NUL byte, or when `pw_dir` is empty.
+pub fn home_dir_for_user(username: &str) -> Option<PathBuf> {
+    use std::ffi::CStr;
+    let cname = std::ffi::CString::new(username).ok()?;
+    // SAFETY: `getpwnam` reads a process-global static; we copy the
+    // `pw_dir` field (a `*mut c_char`) into an owned `PathBuf` before any
+    // subsequent getpw* call could invalidate the static.
+    let pw = unsafe { libc::getpwnam(cname.as_ptr()) };
+    if pw.is_null() {
+        return None;
+    }
+    let dir_ptr = unsafe { (*pw).pw_dir };
+    if dir_ptr.is_null() {
+        return None;
+    }
+    let cstr = unsafe { CStr::from_ptr(dir_ptr) };
+    let bytes = cstr.to_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    Some(PathBuf::from(std::ffi::OsStr::from_bytes(bytes)))
 }
 
 /// Walk the caller's `$PATH` in order looking for an executable named
@@ -661,16 +786,136 @@ pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, Strin
     let home = env.home_dir().ok_or_else(|| {
         "HOME is not set; agent-setup writes to the user's home directory".to_string()
     })?;
+    Ok(resolve_template_in_home(
+        template,
+        &home,
+        env.xdg_config_home(),
+    ))
+}
 
-    let xdg = env
-        .xdg_config_home()
-        .unwrap_or_else(|| home.join(".config"));
-
+/// Substitute `$HOME` / `$XDG_CONFIG_HOME` in a template against an explicit
+/// home path. Sprint 6 detection (`detect_install_state`) uses this helper
+/// to resolve paths against a caller-chosen home — for
+/// `--dangerously-allow-root` that's `/root`, not the ambient env's HOME.
+/// When `xdg` is `None`, defaults to `<home>/.config` per the XDG Base
+/// Directory spec.
+pub fn resolve_template_in_home(template: &str, home: &Path, xdg: Option<PathBuf>) -> PathBuf {
+    let xdg_dir = xdg.unwrap_or_else(|| home.join(".config"));
     let substituted = template
-        .replace("$XDG_CONFIG_HOME", &xdg.to_string_lossy())
+        .replace("$XDG_CONFIG_HOME", &xdg_dir.to_string_lossy())
         .replace("$HOME", &home.to_string_lossy());
+    PathBuf::from(substituted)
+}
 
-    Ok(PathBuf::from(substituted))
+/// Per-agent install state used to render the Sprint 6 checkbox TUI.
+///
+/// - `InstalledWired`: the plugin destination path we'd write to already
+///   exists on disk — an earlier `aimx agent-setup <name>` has landed
+///   plugin files there, so aimx is wired into this agent. Rendered
+///   dim + default-unselected in the TUI (`[x] (already wired)`).
+/// - `InstalledNotWired`: the agent's own config directory exists but no
+///   aimx plugin files do. The agent is present on the machine; aimx is
+///   not wired in yet. Rendered default-selected (`[ ]`).
+/// - `NotInstalled`: the agent's own config directory is missing. The
+///   agent itself isn't installed on this machine. Rendered dim +
+///   non-selectable (`[-] (not detected)`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallState {
+    InstalledWired,
+    InstalledNotWired,
+    NotInstalled,
+}
+
+/// Detect the install / wired state of one agent against a concrete home
+/// directory. Sprint 6 S6-1 + FR-5.2.
+///
+/// FR-5.2 specifies `InstalledWired` when the destination "exists AND
+/// contains aimx's MCP entry". Content-check strategy (kept intentionally
+/// cheap — no JSON/TOML parse):
+///
+/// 1. Resolve `dest_template` under `home` / `xdg`.
+/// 2. **Directory destinations** (`claude-code`, `codex`, `opencode`,
+///    `gemini`, `openclaw`, `hermes`): the destination is a directory aimx
+///    itself lays down (e.g. `~/.claude/plugins/aimx`). Consider it
+///    "wired" when the directory exists AND contains at least one file
+///    whose bytes contain the substring `aimx`. This catches the case
+///    where the operator / cleanup left behind an empty `.claude/plugins/
+///    aimx/` directory but aimx's `SKILL.md` / `plugin.json` is gone.
+///    Since aimx's own installer fills the directory with files that
+///    reference "aimx" in their content, any real install hits.
+/// 3. **File-bundle destinations** (`goose`): the destination is a
+///    recipes directory aimx shares with the user's own recipes.
+///    Consider it "wired" when the directory contains an `aimx.yaml`
+///    file (the concrete file aimx writes).
+/// 4. Else, if `agent_root_template` exists → `InstalledNotWired` (agent
+///    present, aimx not yet wired; the default-selected state).
+/// 5. Else → `NotInstalled`.
+///
+/// `xdg` is threaded through so agents whose paths use `$XDG_CONFIG_HOME`
+/// (opencode, goose) resolve identically to how the installer would
+/// resolve them. `None` falls back to `<home>/.config`.
+pub fn detect_install_state(spec: &AgentSpec, home: &Path, xdg: Option<PathBuf>) -> InstallState {
+    let dest = resolve_template_in_home(spec.dest_template, home, xdg.clone());
+    if dest.exists() && dest_contains_aimx_entry(spec, &dest) {
+        return InstallState::InstalledWired;
+    }
+    let root = resolve_template_in_home(spec.agent_root_template, home, xdg);
+    if root.exists() {
+        return InstallState::InstalledNotWired;
+    }
+    InstallState::NotInstalled
+}
+
+/// Per-agent content check used by `detect_install_state` to confirm the
+/// destination isn't just an orphan directory but actually contains the
+/// aimx plugin / skill / recipe files aimx's installer would have laid
+/// down. Returns `true` when the destination looks like a real aimx
+/// wiring, `false` when it's an empty/stale directory or missing the
+/// canonical aimx file.
+///
+/// Chosen over full JSON / TOML parsing because the check runs inside
+/// the TUI hot path for every registered agent on every render loop; a
+/// cheap substring scan on a small file (or file presence for goose) is
+/// sufficient and avoids pulling per-agent parsers into the detection
+/// path.
+fn dest_contains_aimx_entry(spec: &AgentSpec, dest: &Path) -> bool {
+    match spec.name {
+        // Goose ships a single recipe file under the shared recipes
+        // directory; the wired marker is `aimx.yaml` inside it. Checking
+        // for file presence alone is enough — if aimx wrote it, the
+        // filename carries the wiring signal.
+        "goose" => dest.join("aimx.yaml").is_file(),
+        // Directory-shaped destinations: walk the directory's top-level
+        // entries and return true if any regular file contains the
+        // substring "aimx" anywhere in its bytes. aimx's own SKILL.md /
+        // plugin.json / skill headers all reference "aimx" in their
+        // content, so a real install always hits. Limit the scan to the
+        // top level to keep cost bounded on big skill trees.
+        _ => match std::fs::read_dir(dest) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    if let Ok(bytes) = std::fs::read(&path)
+                        && contains_subslice(&bytes, b"aimx")
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        },
+    }
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return needle.is_empty();
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parameters for one `aimx agent-setup` invocation. Carries everything
@@ -685,8 +930,30 @@ pub struct RunOpts<'a> {
     pub print: bool,
     pub no_template: bool,
     pub redetect: bool,
+    /// FR-5.5 — force the plain registry-dump path instead of the Sprint 6
+    /// interactive TUI when no agent argument is passed. Safe to use in
+    /// scripts, non-TTY environments, and tests.
+    pub no_interactive: bool,
+    /// FR-5.1.a — bypass the root-refusal check and resolve `$HOME` to
+    /// `/root`. Applies uniformly to the TUI, per-agent runs, and
+    /// `--no-interactive`. Drop-through from `aimx setup` never sets
+    /// this; the flag is operator-opt-in only.
+    pub dangerously_allow_root: bool,
     pub data_dir: Option<&'a Path>,
 }
+
+/// FR-5.1 root-refusal message. Names both escape hatches: re-run as a
+/// regular user (`sudo -u <user> aimx agent-setup`) **or** pass
+/// `--dangerously-allow-root` for single-user root-login VPS setups that
+/// genuinely want aimx wired into root's home.
+pub const ROOT_REFUSAL_MESSAGE: &str = "agent-setup is a per-user operation and refuses to run as root by default.\n\
+     \n\
+     Re-run as your regular user:\n\
+     \x20\x20sudo -u <user> aimx agent-setup\n\
+     \n\
+     Or, on a single-user root-login VPS that has no separate operator account,\n\
+     pass --dangerously-allow-root to wire aimx into /root's home:\n\
+     \x20\x20aimx agent-setup --dangerously-allow-root";
 
 /// Entry point called from `main.rs`.
 pub fn run(opts: RunOpts<'_>) -> Result<(), Box<dyn std::error::Error>> {
@@ -713,6 +980,21 @@ pub fn run_with_env(
     run_with_env_to_writer(opts, env, &mut io::stdout())
 }
 
+/// Run the non-`--list`, post-root-gate install path directly. Used by
+/// the Sprint 6 TUI's per-agent sub-calls so the root gate (and its
+/// `OverrideHomeEnv` wrap) runs exactly once per top-level invocation
+/// instead of re-wrapping a fresh override for every selected agent.
+/// Non-blocker N6 from PR #139 review. Callers must have already applied
+/// the root gate if the ambient env is root; passing a plain root env
+/// here bypasses the refusal.
+pub fn run_with_env_post_gate(
+    opts: RunOpts<'_>,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_env_to_writer_inner(opts, env, out)
+}
+
 /// Testable core of `run_with_env`: writes install output, `--list` output,
 /// or the bare-invocation registry dump (plus usage-hint footer) to `out`
 /// rather than real stdout so tests can capture and assert on it.
@@ -726,13 +1008,32 @@ pub fn run_with_env_to_writer(
         return Ok(());
     }
 
-    // Enforce the per-user constraint before any install- or bare-invocation
-    // work so every error-path (positional agent, unknown agent, bare) surfaces
-    // the same root refusal instead of an install attempt or registry dump.
+    // FR-5.1 / FR-5.1.a — root gate. Applies uniformly to the TUI, per-agent
+    // runs, and `--no-interactive`. With `--dangerously-allow-root`, swap in
+    // an `OverrideHomeEnv` that points at `/root` (via `getpwnam("root")`) so
+    // every downstream path — detection, `resolve_dest`, the TUI, the
+    // template preview — sees root's home, not the ambient `$HOME`.
     if env.is_root() {
-        return Err("agent-setup is a per-user operation. Run without sudo or as root".into());
+        if !opts.dangerously_allow_root {
+            return Err(ROOT_REFUSAL_MESSAGE.into());
+        }
+        let root_home = home_dir_for_user("root").unwrap_or_else(|| PathBuf::from("/root"));
+        let override_env = OverrideHomeEnv::new(env, root_home);
+        return run_with_env_to_writer_inner(opts, &override_env, out);
     }
 
+    run_with_env_to_writer_inner(opts, env, out)
+}
+
+/// Dispatch the non-`--list` branches after the root gate has already been
+/// applied. Split out so `--dangerously-allow-root` can swap in an
+/// `OverrideHomeEnv` wrapper around the ambient env before we hit any
+/// path-resolving code.
+fn run_with_env_to_writer_inner(
+    opts: RunOpts<'_>,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Defense in depth: clap's `conflicts_with = "redetect"` on
     // `no_template` (see `cli.rs`) already rejects this combination at
     // parse time with a standard clap usage-hint. This runtime check is
@@ -758,19 +1059,51 @@ pub fn run_with_env_to_writer(
             format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
         })?,
         None => {
-            // Bare invocation: print the registry plus a usage-hint footer
-            // and exit cleanly. Same output on TTY and non-TTY; no prompt.
-            print_registry_to_writer(env, out)?;
-            writeln!(
-                out,
-                "Run `aimx agent-setup <agent>` to install one of the agents \
-                 above, or `aimx agent-setup --list` to print this list again."
-            )?;
-            return Ok(());
+            // Bare invocation. Several cases fall back to the plain
+            // registry dump so scripts / `--print` without an agent get
+            // deterministic, non-interactive output:
+            //
+            //   1. `--no-interactive` passed explicitly (FR-5.5).
+            //   2. stdout is not a TTY (script / piped invocation).
+            //   3. `--print` with no agent — `--print` is a dry-run hint
+            //      on a specific agent's install; with no agent there is
+            //      nothing to preview, so launching the TUI would be
+            //      surprising. Print the registry and exit.
+            //
+            // Otherwise launch the Sprint 6 checkbox TUI per FR-5.5.
+            if opts.no_interactive || opts.print || !is_tty_for_tui() {
+                print_registry_to_writer(env, out)?;
+                if opts.print {
+                    writeln!(
+                        out,
+                        "Pass an agent name (e.g. `aimx agent-setup --print claude-code`) \
+                         to preview the files an install would lay down."
+                    )?;
+                } else {
+                    writeln!(
+                        out,
+                        "Run `aimx agent-setup <agent>` to install one of the agents \
+                         above, or `aimx agent-setup --list` to print this list again."
+                    )?;
+                }
+                return Ok(());
+            }
+            return crate::agent_tui::run_tui(&opts, env, out);
         }
     };
 
     install_to_writer(spec, &install_opts, env, out)
+}
+
+/// TTY detection used to decide whether to launch the Sprint 6 checkbox
+/// TUI. The TUI draws to `console::Term::stderr()` and reads keystrokes
+/// from the controlling terminal, so the right check is "is stderr a
+/// TTY" — if stderr is a pipe, the rendered menu would go to `/dev/null`
+/// (or wherever stderr was redirected) even though stdout might still
+/// be a terminal. Non-blocker N7 from PR #139 review.
+fn is_tty_for_tui() -> bool {
+    use std::io::IsTerminal;
+    io::stderr().is_terminal()
 }
 
 fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
@@ -1681,6 +2014,8 @@ mod tests {
                 print,
                 no_template: true,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir,
             },
             env,
@@ -1705,6 +2040,8 @@ mod tests {
                 print,
                 no_template: true,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir,
             },
             env,
@@ -1767,6 +2104,241 @@ mod tests {
         assert!(find_agent("not-a-real-agent").is_none());
     }
 
+    // ----- Sprint 6 S6-1: detect_install_state -------------------------------
+
+    #[test]
+    fn detect_install_state_not_installed_on_empty_home() {
+        // Pristine tempdir → every agent's root dir is missing.
+        let tmp = TempDir::new().unwrap();
+        for spec in registry() {
+            let state = detect_install_state(spec, tmp.path(), None);
+            assert_eq!(
+                state,
+                InstallState::NotInstalled,
+                "agent {} must be NotInstalled on an empty home",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn detect_install_state_installed_not_wired_when_agent_root_exists() {
+        // Create `~/.claude` but not the plugin subdir → Claude Code is
+        // installed, aimx plugin is not wired yet.
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state, InstallState::InstalledNotWired);
+    }
+
+    #[test]
+    fn detect_install_state_installed_wired_when_dest_exists() {
+        // FR-5.2: destination must exist AND contain aimx's MCP entry.
+        // An empty plugin directory reports NotWired; a directory holding
+        // a file that references "aimx" reports Wired.
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        // Empty dir → NotWired (falls back to agent_root existence = InstalledNotWired).
+        let state_empty = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state_empty, InstallState::InstalledNotWired);
+
+        // Drop aimx-content file → Wired.
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"mcpServers":{"aimx":{}}}"#,
+        )
+        .unwrap();
+        let state_wired = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state_wired, InstallState::InstalledWired);
+    }
+
+    #[test]
+    fn detect_install_state_orphan_empty_dest_is_not_wired() {
+        // Regression guard for FR-5.2 content check: an orphan empty
+        // destination directory must not mis-report as wired.
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        // Empty dir is not Wired (agent_root exists → NotWired).
+        assert_eq!(state, InstallState::InstalledNotWired);
+    }
+
+    #[test]
+    fn detect_install_state_dest_with_unrelated_file_is_not_wired() {
+        // Another orphan case: dest dir with a file that doesn't mention
+        // aimx. Must report NotWired rather than Wired.
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("stale.txt"), "nothing to see").unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state, InstallState::InstalledNotWired);
+    }
+
+    #[test]
+    fn detect_install_state_respects_custom_xdg_home() {
+        // opencode uses `$XDG_CONFIG_HOME/opencode/...`. Creating only the
+        // default `<home>/.config/opencode` path is not enough when an
+        // explicit XDG override points elsewhere — detection must follow
+        // the override.
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join("custom-xdg");
+        std::fs::create_dir_all(xdg.join("opencode")).unwrap();
+        let spec = find_agent("opencode").unwrap();
+        let state_with_xdg = detect_install_state(spec, tmp.path(), Some(xdg.clone()));
+        assert_eq!(state_with_xdg, InstallState::InstalledNotWired);
+
+        // Without the override, `<home>/.config/opencode` is missing, so
+        // the same spec reports NotInstalled.
+        let state_no_xdg = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state_no_xdg, InstallState::NotInstalled);
+    }
+
+    #[test]
+    fn detect_install_state_flags_goose_recipe_file() {
+        // Goose's dest_template points at the recipes directory
+        // (`$XDG_CONFIG_HOME/goose/recipes`). FR-5.2 content check:
+        // "wired" means `aimx.yaml` exists inside that directory. A bare
+        // recipes dir (no aimx.yaml) reports NotWired.
+        let tmp = TempDir::new().unwrap();
+        let xdg = tmp.path().join(".config");
+        let recipes = xdg.join("goose").join("recipes");
+        std::fs::create_dir_all(&recipes).unwrap();
+        let spec = find_agent("goose").unwrap();
+        // No aimx.yaml yet → NotWired.
+        let state_empty = detect_install_state(spec, tmp.path(), Some(xdg.clone()));
+        assert_eq!(state_empty, InstallState::InstalledNotWired);
+
+        // Drop aimx.yaml → Wired.
+        std::fs::write(recipes.join("aimx.yaml"), "# aimx recipe\n").unwrap();
+        let state_wired = detect_install_state(spec, tmp.path(), Some(xdg));
+        assert_eq!(state_wired, InstallState::InstalledWired);
+    }
+
+    // ----- Sprint 6 S6-2: OverrideHomeEnv / root override --------------------
+
+    #[test]
+    fn override_home_env_replaces_home_only() {
+        let tmp = TempDir::new().unwrap();
+        let inner = MockEnv::new(tmp.path().to_path_buf());
+        let override_home = tmp.path().join("fake-root-home");
+        std::fs::create_dir_all(&override_home).unwrap();
+        let env = OverrideHomeEnv::new(&inner, override_home.clone());
+        assert_eq!(env.home_dir(), Some(override_home.clone()));
+        // XDG always resolves to `<override>/.config` under the root
+        // override; ambient `$XDG_CONFIG_HOME` never leaks through.
+        assert!(env.xdg_config_home().is_none());
+        // Non-home methods still delegate to the inner env.
+        assert!(!env.is_root());
+        assert!(!env.is_stdin_tty());
+    }
+
+    #[test]
+    fn override_home_env_detection_follows_override() {
+        // Build a home tree under `override_home/.claude` and assert
+        // detection reports InstalledNotWired when resolved through an
+        // OverrideHomeEnv pointing at that tree — even though the inner
+        // env's home is a different (empty) directory.
+        let tmp = TempDir::new().unwrap();
+        let inner_home = tmp.path().join("regular-user");
+        std::fs::create_dir_all(&inner_home).unwrap();
+        let root_home = tmp.path().join("fake-root");
+        std::fs::create_dir_all(root_home.join(".claude")).unwrap();
+
+        let inner = MockEnv::new(inner_home);
+        let env = OverrideHomeEnv::new(&inner, root_home.clone());
+        let home = env.home_dir().unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, &home, env.xdg_config_home());
+        assert_eq!(state, InstallState::InstalledNotWired);
+    }
+
+    // ----- Sprint 6 S6-1/S6-2: root-refusal gate -----------------------------
+
+    #[test]
+    fn run_with_env_refuses_root_without_flag() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.root = true;
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("claude-code".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refuses to run as root"),
+            "refusal must mention root refusal: {msg}"
+        );
+        assert!(
+            msg.contains("sudo -u <user>"),
+            "refusal must name sudo -u escape hatch: {msg}"
+        );
+        assert!(
+            msg.contains("--dangerously-allow-root"),
+            "refusal must name the flag: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_with_env_allows_root_with_dangerous_flag() {
+        // `--dangerously-allow-root` bypasses the refusal and routes
+        // detection through `/root` (or whatever the `root` account's
+        // passwd entry exposes). We use `--list` here to avoid needing a
+        // real install target — the gate runs before `--list` only when
+        // no agent is passed AND the list flag is off. So instead we
+        // drive the list-equivalent: pass a bogus agent name and expect
+        // the "unknown agent" error (which only fires AFTER the root
+        // gate). Seeing that error means the gate let us through.
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.root = true;
+        let mut buf: Vec<u8> = Vec::new();
+        let err = super::run_with_env_to_writer(
+            super::RunOpts {
+                agent: Some("not-a-real-agent".into()),
+                list: false,
+                force: false,
+                print: false,
+                no_template: true,
+                redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: true,
+                data_dir: None,
+            },
+            &env,
+            &mut buf,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unknown agent"),
+            "gate must pass through to the agent-lookup path: {msg}"
+        );
+        assert!(
+            !msg.contains("refuses to run as root"),
+            "root gate must have been bypassed: {msg}"
+        );
+    }
+
     // ----- Sprint 6 S6-4: Template-registration section ------------------
 
     #[test]
@@ -1782,6 +2354,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -1822,6 +2396,8 @@ mod tests {
                 print: false,
                 no_template: true,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -1855,6 +2431,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -1899,6 +2477,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -1941,6 +2521,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -1966,6 +2548,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: true,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -2001,6 +2585,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: true,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -2042,6 +2628,8 @@ mod tests {
                 print: false,
                 no_template: false,
                 redetect: true,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -2087,6 +2675,8 @@ mod tests {
                 print: false,
                 no_template: true,
                 redetect: true,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,
@@ -2111,6 +2701,8 @@ mod tests {
                 // so the preview path still runs end-to-end.
                 no_template: false,
                 redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
                 data_dir: None,
             },
             &env,

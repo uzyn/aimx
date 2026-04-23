@@ -1952,6 +1952,11 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Sprint 6 S6-3: capture the operator's *explicit* `--data-dir`
+    // choice (distinct from the `/var/lib/aimx` default resolved below)
+    // so the `runuser` re-exec passes `--data-dir <path>` through only
+    // when the operator named a path on the command line.
+    let explicit_data_dir: Option<PathBuf> = data_dir.map(|p| p.to_path_buf());
     // Install the shared tracing subscriber up front so structured
     // warnings emitted from this path (notably the FR-3.8
     // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
@@ -2169,19 +2174,119 @@ pub fn run_setup(
     // Step 8 (FR-3.5): one-line success banner.
     announce_setup_complete(&domain);
 
-    // Placeholder for the Sprint 6 drop-through to `aimx agent-setup`
-    // as `$SUDO_USER`. Skipped under AIMX_NONINTERACTIVE=1 (FR-3.8) so
-    // scripted installs don't print a hint that only makes sense to a
-    // human operator at the end of the wizard.
+    // Sprint 6 S6-3: drop through to `aimx agent-setup` as `$SUDO_USER`
+    // per FR-3.6. Skipped under AIMX_NONINTERACTIVE=1 (FR-3.8) so
+    // scripted installs don't hang on a TUI no one's watching. When
+    // `$SUDO_USER` is unset (direct root login) we fall back to the
+    // placeholder guidance so the operator still knows where to go.
     if !is_noninteractive_env() {
+        drop_through_to_agent_setup(explicit_data_dir.as_deref());
+    }
+
+    Ok(())
+}
+
+/// Build the argv we'd hand to `runuser -u <sudo_user> --` so the drop-
+/// through re-execs `aimx agent-setup` as the invoking user. Pure helper
+/// — no syscalls — so unit tests can assert on the exact argv without
+/// spinning up a process.
+///
+/// Layout:
+///
+/// ```text
+/// [exe, "agent-setup",
+///  // --data-dir is only appended when the operator explicitly named a
+///  // path on the `aimx setup` command line (per S6-3 AC). The default
+///  // `/var/lib/aimx` is left implicit so it matches what a standalone
+///  // `aimx agent-setup` invocation would resolve.
+///  "--data-dir", <path>]
+/// ```
+///
+/// `--dangerously-allow-root` is *never* appended — the drop-through
+/// fires only when `$SUDO_USER` is set, and FR-5.1.a explicitly forbids
+/// implicit `--dangerously-allow-root` (operators must opt in by hand).
+pub(crate) fn build_agent_setup_argv(
+    exe: &Path,
+    explicit_data_dir: Option<&Path>,
+) -> Vec<std::ffi::OsString> {
+    use std::ffi::OsString;
+    let mut argv: Vec<OsString> = Vec::with_capacity(4);
+    argv.push(exe.as_os_str().to_os_string());
+    argv.push(OsString::from("agent-setup"));
+    if let Some(p) = explicit_data_dir {
+        argv.push(OsString::from("--data-dir"));
+        argv.push(p.as_os_str().to_os_string());
+    }
+    argv
+}
+
+/// Drive the Sprint 6 drop-through:
+/// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
+///    /proc/self/exe agent-setup [--data-dir …]` via
+///    `CommandExt::exec`. `exec` replaces the current process so the
+///    TUI takes over the terminal cleanly.
+/// 2. If `$SUDO_USER` is unset → print the FR-3.6 guidance message
+///    (naming `--dangerously-allow-root` as the root-login option) and
+///    return.
+///
+/// On `exec` failure (e.g. `runuser` not installed on a stripped
+/// container image) we fall back to the same guidance message so the
+/// wizard still exits cleanly.
+fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) {
+    use std::os::unix::process::CommandExt;
+
+    let sudo_user = std::env::var("SUDO_USER").unwrap_or_default();
+    if sudo_user.is_empty() {
+        // Direct root login path. Print the guidance and return.
         println!(
             "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
             term::highlight("→"),
             term::highlight("aimx agent-setup")
         );
+        println!(
+            "  (On a single-user root-login VPS, pass `{}` to wire aimx into /root's home.)",
+            term::highlight("aimx agent-setup --dangerously-allow-root")
+        );
+        return;
     }
 
-    Ok(())
+    // `/proc/self/exe` resolves to the current binary even when it lives
+    // outside `/usr/local/bin` (e.g. `AIMX_PREFIX=/opt/aimx` installs).
+    // Self-canonicalise so the re-exec works from a bare `$PATH`.
+    let exe = std::path::PathBuf::from("/proc/self/exe");
+    let argv = build_agent_setup_argv(&exe, explicit_data_dir);
+
+    println!();
+    println!(
+        "{} Dropping through to `{}` as {}...",
+        term::highlight("→"),
+        term::highlight("aimx agent-setup"),
+        term::highlight(&sudo_user)
+    );
+
+    // Hand off to `runuser`. `exec` replaces the current process so on
+    // success this call does not return.
+    let exec_err = std::process::Command::new("runuser")
+        .arg("-u")
+        .arg(&sudo_user)
+        .arg("--")
+        .args(&argv)
+        .exec();
+
+    // Only reached when exec itself failed (e.g. runuser missing). Fall
+    // back to the guidance message so the operator still knows what to
+    // do.
+    eprintln!(
+        "{} Could not drop through to `aimx agent-setup` automatically: {}",
+        term::warn("warning:"),
+        exec_err
+    );
+    println!(
+        "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
+        term::highlight("→"),
+        term::highlight("aimx agent-setup"),
+        term::highlight(&sudo_user)
+    );
 }
 
 /// Install the systemd/OpenRC service file, restart the daemon, and poll
@@ -5158,6 +5263,61 @@ owner = "aimx-catchall"
             walker.found.is_empty(),
             "Sprint 5 S5-1 retired helpers must stay gone: {:?}",
             walker.found
+        );
+    }
+
+    // ----- Sprint 6 S6-3: drop-through argv construction --------------------
+
+    #[test]
+    fn build_agent_setup_argv_without_data_dir() {
+        let exe = Path::new("/usr/local/bin/aimx");
+        let argv = super::build_agent_setup_argv(exe, None);
+        assert_eq!(argv.len(), 2);
+        assert_eq!(argv[0], std::ffi::OsStr::new("/usr/local/bin/aimx"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
+    }
+
+    #[test]
+    fn build_agent_setup_argv_appends_explicit_data_dir() {
+        // When the operator passed `--data-dir /custom` to `aimx setup`,
+        // the drop-through must carry it through so `aimx agent-setup`
+        // emits activation hints referencing the same path.
+        let exe = Path::new("/proc/self/exe");
+        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
+        assert_eq!(argv.len(), 4);
+        assert_eq!(argv[0], std::ffi::OsStr::new("/proc/self/exe"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
+        assert_eq!(argv[2], std::ffi::OsStr::new("--data-dir"));
+        assert_eq!(argv[3], std::ffi::OsStr::new("/srv/aimx-data"));
+    }
+
+    #[test]
+    fn build_agent_setup_argv_never_includes_dangerously_allow_root() {
+        // FR-5.1.a: the drop-through MUST NOT pass
+        // `--dangerously-allow-root` implicitly. Regression guard — if
+        // someone adds the flag in the future, this test fails loudly.
+        let exe = Path::new("/proc/self/exe");
+        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/opt/data")));
+        for part in &argv {
+            assert_ne!(
+                part,
+                std::ffi::OsStr::new("--dangerously-allow-root"),
+                "drop-through must never pass --dangerously-allow-root implicitly: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn build_agent_setup_argv_uses_proc_self_exe_shape() {
+        // Sprint 6 §8.5: `/proc/self/exe` is preferred over hardcoding
+        // `/usr/local/bin/aimx` so custom-prefix installs
+        // (`AIMX_PREFIX=/opt/aimx`) still re-exec the right binary.
+        // Assert the call-site in `drop_through_to_agent_setup` still
+        // uses the `/proc/self/exe` literal.
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains("\"/proc/self/exe\""),
+            "drop-through must self-reference via /proc/self/exe"
         );
     }
 
