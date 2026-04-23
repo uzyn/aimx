@@ -941,10 +941,13 @@ pub enum FindingSeverity {
 impl FindingSeverity {
     fn badge(self) -> colored::ColoredString {
         match self {
-            FindingSeverity::Pass => term::pass_badge(),
+            FindingSeverity::Pass => term::success_mark(),
+            // Branding §5.4 does not define an info mark; the literal "INFO"
+            // text is a deliberate pragmatic fallback until the spec is
+            // extended (or a Unicode mark is chosen).
             FindingSeverity::Info => term::info("INFO"),
-            FindingSeverity::Warn => term::warn_badge(),
-            FindingSeverity::Fail => term::fail_badge(),
+            FindingSeverity::Warn => term::warn_mark(),
+            FindingSeverity::Fail => term::fail_mark(),
         }
     }
 }

@@ -177,12 +177,12 @@ pub fn run_tui(
 
         let (status_display, record) = match outcome {
             Ok(()) => (
-                format!("{} ok", term::success("✓")),
+                format!("{} ok", term::success_mark()),
                 Ok(dest.to_string_lossy().into_owned()),
             ),
             Err(e) => {
-                writeln!(out, "  {} {}", term::error("✗"), e)?;
-                (format!("{} failed", term::error("✗")), Err(e.to_string()))
+                writeln!(out, "  {} {}", term::fail_mark(), e)?;
+                (format!("{} failed", term::fail_mark()), Err(e.to_string()))
             }
         };
         results.push((spec.display_name.to_string(), status_display, record));
@@ -328,16 +328,16 @@ fn render(term_handle: &Term, rows: &[Row], cursor: usize) -> io::Result<()> {
     term_handle.write_line(&term::header("Wire aimx into your AI agents").to_string())?;
     term_handle.write_line(&format!(
         "  {} Space toggles, Enter confirms, q cancels.",
-        term::dim("→")
+        term::prompt_mark()
     ))?;
     for (i, row) in rows.iter().enumerate() {
         let spec = &registry()[row.spec_index];
         let caret = if i == cursor && row.is_selectable() {
-            // Colored caret on the focused row. Uses the same success-green
-            // as other markers until Sprint 7 introduces the copper accent
-            // helper in `term.rs`. Non-selectable rows never receive the
+            // Copper `❯` on the focused row per branding §5.4 — the
+            // prompt/navigation accent is the one surface that uses the
+            // brand's accent color. Non-selectable rows never receive the
             // caret (the cursor skips them).
-            term::success("❯").to_string()
+            term::accent("❯").to_string()
         } else {
             " ".to_string()
         };
@@ -555,12 +555,12 @@ mod tests {
         let results = vec![
             (
                 "Claude Code".to_string(),
-                format!("{} ok", term::success("✓")),
+                format!("{} ok", term::success_mark()),
                 Ok::<String, String>("/home/u/.claude/plugins/aimx".to_string()),
             ),
             (
                 "Codex CLI".to_string(),
-                format!("{} failed", term::error("✗")),
+                format!("{} failed", term::fail_mark()),
                 Err::<String, String>("boom".to_string()),
             ),
         ];

@@ -126,6 +126,7 @@ Axum HTTP server with `/probe` (EHLO handshake) and `/health` endpoints. Runs a 
 - Test fixtures in `tests/fixtures/` (`.eml` files for ingest testing).
 - Agent-facing plugins live under `agents/<agent>/` and are embedded at compile time. The canonical primer is `agents/common/aimx-primer.md` with reference docs in `agents/common/references/`. The datadir README template is `src/datadir_readme.md.tpl`.
 - Built-in hook templates live at `hook-templates/defaults.toml` (plain TOML, embedded via `include_str!` by `hook_templates_defaults.rs`). Edit this file — not the Rust source — to add or change a bundled template.
+- CLI output styling is centralised in `src/term.rs`. Raw `.red()` / `.green()` / `.yellow()` / `.blue()` / `.bold()` calls outside `term.rs` are banned — route through `term::success` / `error` / `warn` / `info` / `header` / `highlight` / `dim` / `accent`. Status marks use `term::success_mark()` / `fail_mark()` / `warn_mark()` / `prompt_mark()` (Unicode on TTY, `[OK]`/`[FAIL]`/`[WARN]`/`[>]` on non-TTY). The `cli-colors` CI job enforces both rules (FR-7.4, FR-7.5).
 
 ## Documentation
 
