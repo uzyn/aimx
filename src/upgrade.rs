@@ -425,17 +425,16 @@ pub fn extract_tarball(
 }
 
 /// Move the currently-installed binary to `<install_path>.prev`. Uses
-/// `rename` for atomicity on the same filesystem. If the install path
-/// does not exist (fresh install on a path-not-yet-written machine),
-/// returns `Ok(())` — there is nothing to preserve.
+/// `rename` for atomicity on the same filesystem — `fs::rename` on Unix
+/// overwrites the destination atomically, so we rely on that instead of
+/// pre-deleting a stale `.prev`. If the rename fails for an unrelated
+/// reason (cross-filesystem, ENOSPC, etc.), the previous cycle's `.prev`
+/// is preserved untouched. If the install path does not exist (fresh
+/// install on a path-not-yet-written machine), returns `Ok(())` — there
+/// is nothing to preserve.
 fn preserve_previous_binary(install_path: &Path, prev_path: &Path) -> Result<(), String> {
     if !install_path.exists() {
         return Ok(());
-    }
-    // Remove any stale .prev from a prior upgrade before renaming.
-    if prev_path.exists() {
-        fs::remove_file(prev_path)
-            .map_err(|e| format!("remove stale {}: {e}", prev_path.display()))?;
     }
     fs::rename(install_path, prev_path).map_err(|e| {
         format!(
@@ -1017,6 +1016,13 @@ mod tests {
         // Binary reverted.
         let installed = std::fs::read(&install).unwrap();
         assert!(installed.starts_with(b"#!/bin/sh"));
+        // Service came back up on the old binary: one start call for
+        // the upgrade, one start call for rollback.
+        assert_eq!(
+            sys.started_services.borrow().len(),
+            2,
+            "expected start_service called twice (upgrade + rollback)"
+        );
     }
 
     #[test]
@@ -1049,6 +1055,172 @@ mod tests {
         assert_eq!(
             prev_path(Path::new("/opt/aimx/bin/aimx")),
             PathBuf::from("/opt/aimx/bin/aimx.prev")
+        );
+    }
+
+    /// N2 regression guard: feed `run_upgrade` a malformed tarball and
+    /// assert the PreSwap(ExtractTarball) outcome — the service is never
+    /// stopped and `.prev` is never created. Closes the S4-3 AC
+    /// "Rollback fires on tarball-extraction failure" at the `run_upgrade`
+    /// level (the in-helper test only covered `extract_tarball` directly).
+    #[test]
+    fn run_upgrade_malformed_tarball_returns_preswap_extract_error() {
+        let mut sys = MockSystemOps::default();
+        let tmp = TempDir::new().unwrap();
+        let install = write_fake_binary(tmp.path());
+        seed_install_path(&mut sys, install.clone());
+
+        let tag = "v9.9.9-malformed";
+        let target = current_target();
+        let asset = tarball_filename(tag, target);
+        // Not a gzipped tar — `extract_tarball` must reject this.
+        let garbage = b"not a tarball at all".to_vec();
+        let release = MockReleaseOps::default();
+        release.push_latest(Ok(make_manifest(tag, &[&asset])));
+        release.push_asset(Ok(garbage));
+
+        let err = run_upgrade(&args_default(), &release, &sys).unwrap_err();
+        match &err {
+            UpgradeError::PreSwap { step, .. } => {
+                assert_eq!(*step, UpgradeStep::ExtractTarball);
+            }
+            other => panic!("expected PreSwap(ExtractTarball), got {other:?}"),
+        }
+
+        // Service was never touched — pre-swap means no rollback was
+        // needed, so stop/start must have zero calls.
+        assert!(
+            sys.stopped_services.borrow().is_empty(),
+            "stop_service must not run on extract-tarball failure"
+        );
+        assert!(
+            sys.started_services.borrow().is_empty(),
+            "start_service must not run on extract-tarball failure"
+        );
+        // Binary untouched and `.prev` never created.
+        let installed = std::fs::read(&install).unwrap();
+        assert!(installed.starts_with(b"#!/bin/sh"));
+        let prev = prev_path(&install);
+        assert!(!prev.exists(), ".prev must not exist after pre-swap abort");
+    }
+
+    /// N3 regression guard: make the `install_binary` step fail and
+    /// assert `RolledBack { failed_step: InstallNewBinary }` with the
+    /// `.prev` body restored onto `install_path`. Forces the failure by
+    /// planting a *directory* at the sibling temp-file path
+    /// (`<parent>/.aimx.upgrade.tmp`) that `install_binary` uses as its
+    /// staging target: `fs::copy` refuses to overwrite a directory, so
+    /// the install fails cleanly at the copy step. `preserve_previous_binary`
+    /// runs before that and succeeds — putting us squarely in the
+    /// post-stop / post-preserve rollback branch.
+    #[test]
+    fn run_upgrade_install_binary_failure_rolls_back_to_prev() {
+        let mut sys = MockSystemOps::default();
+        let tmp = TempDir::new().unwrap();
+        let install_dir = tmp.path().join("bin");
+        std::fs::create_dir(&install_dir).unwrap();
+        let install = write_fake_binary(&install_dir);
+        seed_install_path(&mut sys, install.clone());
+
+        // Plant a directory where `install_binary` expects to write a
+        // sibling temp file. `fs::copy(staged, &tmp)` fails with
+        // "Is a directory" on Linux, deterministically driving the
+        // InstallNewBinary branch of `attempt_rollback`.
+        let blocker = install_dir.join(".aimx.upgrade.tmp");
+        std::fs::create_dir(&blocker).unwrap();
+
+        let tag = "v9.9.9-installfail";
+        let target = current_target();
+        let asset = tarball_filename(tag, target);
+        let bytes = make_tarball(tag, target, b"would-be new body");
+        let release = MockReleaseOps::default();
+        release.push_latest(Ok(make_manifest(tag, &[&asset])));
+        release.push_asset(Ok(bytes));
+
+        let err = run_upgrade(&args_default(), &release, &sys).unwrap_err();
+
+        match &err {
+            UpgradeError::RolledBack { failed_step, .. } => {
+                assert_eq!(
+                    *failed_step,
+                    UpgradeStep::InstallNewBinary,
+                    "expected RolledBack at InstallNewBinary, got {failed_step:?}"
+                );
+            }
+            other => panic!("expected RolledBack(InstallNewBinary), got {other:?}"),
+        }
+
+        // `.prev` was restored back onto `install_path` — the running
+        // binary is the original.
+        let installed = std::fs::read(&install).unwrap();
+        assert!(
+            installed.starts_with(b"#!/bin/sh"),
+            "install path should hold the original binary after rollback"
+        );
+        // Rollback fired a start_service (the upgrade never got there).
+        assert_eq!(
+            sys.started_services.borrow().len(),
+            1,
+            "rollback should have called start_service exactly once"
+        );
+        // Service was stopped once (before the failed install).
+        assert_eq!(
+            sys.stopped_services.borrow().len(),
+            1,
+            "stop_service should have run before install failed"
+        );
+    }
+
+    /// N4 regression guard: the canonical `RolledBack { failed_step:
+    /// StartService }` outcome. The upgrade's `start_service` fails
+    /// once, rollback's own `start_service` succeeds, and the service
+    /// is left running on the previous binary. Requires the fail-once
+    /// knob on `MockSystemOps` (`start_service_failures_remaining`) —
+    /// the sticky `start_service_fails` bool would fail rollback's
+    /// start too and yield `RollbackFailed` instead.
+    #[test]
+    fn rollback_succeeds_when_start_fails_once() {
+        let mut sys = MockSystemOps::default();
+        // Fail the upgrade's start, then allow rollback's start to succeed.
+        sys.start_service_failures_remaining.set(1);
+        let tmp = TempDir::new().unwrap();
+        let install = write_fake_binary(tmp.path());
+        seed_install_path(&mut sys, install.clone());
+
+        let tag = "v9.9.9-startfailonce";
+        let target = current_target();
+        let asset = tarball_filename(tag, target);
+        let bytes = make_tarball(tag, target, b"new body (start fails once)");
+        let release = MockReleaseOps::default();
+        release.push_latest(Ok(make_manifest(tag, &[&asset])));
+        release.push_asset(Ok(bytes));
+
+        let err = run_upgrade(&args_default(), &release, &sys).unwrap_err();
+        match &err {
+            UpgradeError::RolledBack {
+                failed_step,
+                previous_tag,
+                ..
+            } => {
+                assert_eq!(*failed_step, UpgradeStep::StartService);
+                assert_eq!(previous_tag, version::release_tag());
+            }
+            other => panic!("expected RolledBack(StartService), got {other:?}"),
+        }
+
+        // Binary restored to the original.
+        let installed = std::fs::read(&install).unwrap();
+        assert!(installed.starts_with(b"#!/bin/sh"));
+        // Two start_service calls: one failed, one succeeded.
+        assert_eq!(
+            sys.started_services.borrow().len(),
+            2,
+            "expected start_service called twice (upgrade + rollback)"
+        );
+        assert_eq!(
+            sys.start_service_failures_remaining.get(),
+            0,
+            "fail-once counter should be drained"
         );
     }
 

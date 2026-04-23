@@ -24,18 +24,17 @@ pub trait SystemOps {
     /// shutdown and startup. Idempotent w.r.t. the real init system:
     /// a stop call on an already-stopped service is not an error.
     ///
-    /// Default impl panics — unrelated mocks in the tree don't need to
-    /// implement this. The Sprint 4 `aimx upgrade` path uses
-    /// [`MockSystemOps`] in `setup::tests` which overrides it.
-    fn stop_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        Err("stop_service not implemented for this SystemOps impl".into())
-    }
+    /// Required trait method — every `SystemOps` impl must provide it.
+    /// Test mocks in modules that never reach the upgrade path
+    /// (`doctor.rs`, `logs.rs`, `portcheck.rs`, `uninstall.rs`) are
+    /// expected to `unreachable!()` here; a future sprint that teaches
+    /// those modules to stop/start the service will then surface a
+    /// clear panic rather than a silent `Err` string.
+    fn stop_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
     /// Complement of `stop_service`. Not idempotent — starting an
     /// already-started service surfaces as an error from both systemd
-    /// and OpenRC.
-    fn start_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
-        Err("start_service not implemented for this SystemOps impl".into())
-    }
+    /// and OpenRC. Required trait method; see `stop_service` above.
+    fn start_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn is_service_running(&self, service: &str) -> bool;
     fn generate_tls_cert(
         &self,
@@ -2216,10 +2215,18 @@ pub(crate) mod tests {
         /// If set, `stop_service` returns an error. Used to exercise the
         /// "stop failed, nothing to roll back" branch.
         pub(crate) stop_service_fails: bool,
-        /// If set, `start_service` returns an error. Used to exercise
-        /// both the normal start-failure rollback path and the
-        /// rollback-failed-to-start path.
+        /// If set (sticky), every `start_service` call returns an error.
+        /// Used to exercise the "start failed, rollback's own start
+        /// also fails" path that yields `UpgradeError::RollbackFailed`.
         pub(crate) start_service_fails: bool,
+        /// Number of upcoming `start_service` calls that must fail
+        /// before subsequent calls succeed. Takes precedence over
+        /// `start_service_fails` when non-zero. Set to `1` to drive the
+        /// canonical `RolledBack { failed_step: StartService }` path:
+        /// the upgrade's `start_service` call fails, rollback's own
+        /// `start_service` call succeeds, and the service is left
+        /// running on the previous binary.
+        pub(crate) start_service_failures_remaining: std::cell::Cell<u32>,
     }
 
     impl Default for MockSystemOps {
@@ -2242,6 +2249,7 @@ pub(crate) mod tests {
                 override_aimx_binary_path: None,
                 stop_service_fails: false,
                 start_service_fails: false,
+                start_service_failures_remaining: std::cell::Cell::new(0),
             }
         }
     }
@@ -2271,6 +2279,11 @@ pub(crate) mod tests {
         }
         fn start_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
             self.started_services.borrow_mut().push(service.to_string());
+            let remaining = self.start_service_failures_remaining.get();
+            if remaining > 0 {
+                self.start_service_failures_remaining.set(remaining - 1);
+                return Err("mock start failure (scheduled)".into());
+            }
             if self.start_service_fails {
                 return Err("mock start failure".into());
             }

@@ -99,6 +99,20 @@ jobs:
             mailbox_delete_force_without_yes_prompts_and_aborts_on_n \
             concurrent_mailbox_create_and_ingest_does_not_deadlock
 
+      # Sprint 4 review NB-1: drives `RealReleaseOps::fetch_asset`
+      # end-to-end against the live `v0.0.0-fixture` release. The
+      # non-root test in `tests/release_integration.rs` only asserts
+      # the root-check refusal; this sudo-gated step is what actually
+      # exercises the rustls + HTTPS production path in CI so a
+      # regression in `fetch_asset` or the rustls-provider install
+      # surfaces here.
+      - name: Run release end-to-end integration test (root)
+        run: |
+          sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 \
+            cargo test --features integration --test release_integration -- \
+            --ignored --exact \
+            real_release_ops_end_to_end_against_fixture_as_root
+
       # Sprint 8 S8-4: end-to-end agent flow test. Creates a real
       # system user, runs `aimx setup`-style config + DKIM keys, then
       # `aimx agent-setup claude-code` with a fake `claude` binary,

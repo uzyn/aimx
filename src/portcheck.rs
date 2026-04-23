@@ -274,6 +274,12 @@ mod tests {
         fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
+        fn stop_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("portcheck::run must not touch stop_service")
+        }
+        fn start_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("portcheck::run must not touch start_service")
+        }
         fn is_service_running(&self, _service: &str) -> bool {
             false
         }

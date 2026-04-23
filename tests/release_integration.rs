@@ -189,25 +189,104 @@ fn fixture_release_tarball_sha256_matches() {
 }
 
 /// Sprint 4 S4-1 / S4-3 addendum (backlog item from Sprint 2 review):
-/// exercise the **production** `RealReleaseOps` path end-to-end with the
-/// real rustls wiring, against the live `v0.0.0-fixture` release. The
-/// earlier test in this file hand-rolls a bare `ureq::Agent` and only
-/// covers `parse_release_json` / `verify_sha256` indirectly; this test
-/// goes through `RealReleaseOps::latest_release_url` override
-/// resolution, `RealReleaseOps::fetch_asset` (which owns the rustls
-/// provider install + HTTPS-only enforcement), and `verify_sha256`.
+/// wire-through check for the `aimx upgrade` verb.
+///
+/// Asserts that running `aimx upgrade --dry-run --version v0.0.0-fixture`
+/// as a non-root user hits the root check and exits with the expected
+/// refusal message — proving the verb is plumbed through `cli.rs` /
+/// `main.rs` / `upgrade::run` without actually making any network calls.
+///
+/// **This test does NOT drive `RealReleaseOps::fetch_asset` end-to-end.**
+/// The full production HTTPS path is exercised by
+/// `real_release_ops_end_to_end_against_fixture_as_root`, which is
+/// `#[ignore]`-gated and run under sudo in the `integration-isolation`
+/// CI job. Without that sudo step the production-path-with-TLS gap
+/// remains open in CI.
 #[test]
-fn real_release_ops_end_to_end_against_fixture() {
+fn real_release_ops_wireup_non_root_refuses() {
+    use std::process::Command;
+
     // SAFETY: pointing at the tag URL lets us exercise `latest_release`
     // without depending on whichever release is `latest` on GitHub at
-    // test time.
+    // test time. Not strictly needed for the non-root refusal branch,
+    // but kept for symmetry with the root path.
     unsafe {
         std::env::set_var("AIMX_RELEASE_MANIFEST_URL", FIXTURE_RELEASE_URL);
     }
 
-    // Use the compiled binary's library crate via `assert_cmd` to
-    // discover the running target triple — mirrors the earlier test.
+    // This test is only valid when running non-root. Under sudo, the
+    // sibling `real_release_ops_end_to_end_against_fixture_as_root`
+    // test drives the full HTTPS path instead.
+    let euid = unsafe { libc::geteuid() };
+    if euid == 0 {
+        eprintln!(
+            "skipping — running as root; the sibling #[ignore]-gated test \
+             covers the root path under the `integration-isolation` CI job"
+        );
+        unsafe {
+            std::env::remove_var("AIMX_RELEASE_MANIFEST_URL");
+        }
+        return;
+    }
+
+    let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
+        .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
+        .output()
+        .expect("run aimx upgrade --dry-run");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("aimx upgrade requires root"),
+        "expected root-check refusal, got: {combined}"
+    );
+    unsafe {
+        std::env::remove_var("AIMX_RELEASE_MANIFEST_URL");
+    }
+}
+
+/// Sprint 4 review NB-1: drives the **production** `RealReleaseOps`
+/// path end-to-end against the live `v0.0.0-fixture` release. Runs
+/// `aimx upgrade --dry-run --version v0.0.0-fixture` as root —
+/// `--dry-run` stops after `fetch_asset` and never touches the
+/// filesystem or the service, so the test is safe under sudo.
+///
+/// Gated by `#[ignore]` + `AIMX_INTEGRATION_SUDO=1` so a casual
+/// `cargo test --features integration` does not shell out under root.
+/// The `.github/workflows/ci.yml` `integration-isolation` job runs
+/// this test under sudo via:
+///
+/// ```text
+/// sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 \
+///   cargo test --features integration --test release_integration \
+///   -- --ignored --exact \
+///   real_release_ops_end_to_end_against_fixture_as_root
+/// ```
+///
+/// which is the sibling pattern to the `isolation` / `uds_authz` /
+/// MAILBOX-CRUD sudo-gated tests already in that job.
+#[test]
+#[ignore = "requires root + AIMX_INTEGRATION_SUDO=1; run in CI under sudo"]
+fn real_release_ops_end_to_end_against_fixture_as_root() {
     use std::process::Command;
+
+    let euid = unsafe { libc::geteuid() };
+    assert_eq!(
+        euid, 0,
+        "this test must run as root so `aimx upgrade` passes the root \
+         check and exercises RealReleaseOps::fetch_asset against the \
+         fixture release; re-run under sudo with AIMX_INTEGRATION_SUDO=1"
+    );
+    assert_eq!(
+        std::env::var("AIMX_INTEGRATION_SUDO").ok().as_deref(),
+        Some("1"),
+        "AIMX_INTEGRATION_SUDO=1 must be set to opt into network + root \
+         integration tests"
+    );
+
+    // Discover the running target triple.
     let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
         .arg("--version")
         .output()
@@ -222,59 +301,23 @@ fn real_release_ops_end_to_end_against_fixture() {
 
     let tarball_name = format!("aimx-0.0.0-fixture-{target}.tar.gz");
     let expected = expected_sums();
-    let expected_sha = match expected.get(tarball_name.as_str()) {
-        Some(s) => *s,
-        None => {
-            eprintln!("skipping — target {target:?} is not a fixture-release target");
-            unsafe {
-                std::env::remove_var("AIMX_RELEASE_MANIFEST_URL");
-            }
-            return;
-        }
-    };
+    if !expected.contains_key(tarball_name.as_str()) {
+        eprintln!("skipping — target {target:?} is not a fixture-release target");
+        return;
+    }
 
-    // Install the rustls provider explicitly so when we construct
-    // RealReleaseOps below via the `aimx` binary's crate, its internal
+    // Install the rustls provider explicitly so when the spawned `aimx`
+    // subprocess constructs `RealReleaseOps`, its internal
     // `install_rustls_provider` idempotently finds the slot taken.
+    // (Belt-and-braces — the subprocess has its own provider init.)
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .ok();
 
-    // Spawn a tiny helper: use `aimx upgrade --dry-run --version
-    // v0.0.0-fixture` which walks the exact production path —
-    // `RealReleaseOps::release_by_tag` → `fetch_asset` against a real
-    // HTTPS URL — and prints the asset URL it would install.
-    //
-    // Dry-run exits 0 and never touches the service or filesystem,
-    // making this safe to run in CI even as a non-root test runner.
-    // The dry-run refuses under a non-root uid though, so we fall
-    // back to a subprocess only if the test is actually running as
-    // root; otherwise we assert the refusal message to prove the
-    // verb is wired.
-    let euid = unsafe { libc::geteuid() };
-    if euid != 0 {
-        let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
-            .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
-            .output()
-            .expect("run aimx upgrade --dry-run");
-        // Non-root should hit the root check before any network I/O.
-        let combined = format!(
-            "{}{}",
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            combined.contains("aimx upgrade requires root"),
-            "expected root-check refusal, got: {combined}"
-        );
-        unsafe {
-            std::env::remove_var("AIMX_RELEASE_MANIFEST_URL");
-        }
-        return;
-    }
-
-    // Running as root: exercise the real end-to-end dry-run which
-    // drives `RealReleaseOps::fetch_asset` against the fixture tarball.
+    // Drive the exact production path — `RealReleaseOps::release_by_tag`
+    // → `fetch_asset` over real HTTPS — via `aimx upgrade --dry-run`.
+    // The dry-run exits cleanly after the fetch without touching the
+    // service or filesystem, so this is safe to run under sudo in CI.
     let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
         .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
         .env("AIMX_RELEASE_MANIFEST_URL", FIXTURE_RELEASE_URL)
@@ -294,14 +337,6 @@ fn real_release_ops_end_to_end_against_fixture() {
         combined.contains(&tarball_name),
         "expected tarball name {tarball_name} in dry-run output: {combined}"
     );
-    // Expected SHA only asserted for the side-effect of using it —
-    // the dry-run downloads but does not checksum, so we leave the
-    // checksum to the other test.
-    let _ = expected_sha;
-
-    unsafe {
-        std::env::remove_var("AIMX_RELEASE_MANIFEST_URL");
-    }
 }
 
 fn hex(bytes: &[u8]) -> String {
