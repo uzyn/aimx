@@ -21,18 +21,26 @@ use std::time::Duration;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+// Every item in this module is consumed from within the module itself
+// (unit tests) and from `aimx upgrade` in Sprint 4. Per-item
+// `#[allow(dead_code)]` narrows the lint so unrelated future dead code
+// still surfaces — in contrast to a blanket module-level allow.
+
 /// Environment variable that overrides the release-manifest URL
 /// (PRD FR-4.6). Takes precedence over `[upgrade] release_manifest_url`
 /// in `config.toml`.
+#[allow(dead_code)]
 pub const RELEASE_MANIFEST_URL_ENV: &str = "AIMX_RELEASE_MANIFEST_URL";
 
 /// Default release-manifest URL — the GitHub Releases API `latest` endpoint
 /// for the canonical `uzyn/aimx` repo.
+#[allow(dead_code)]
 pub const DEFAULT_RELEASE_MANIFEST_URL: &str =
     "https://api.github.com/repos/uzyn/aimx/releases/latest";
 
 /// Base URL used to resolve a specific tag via `.../releases/tags/<tag>`
 /// when `[upgrade] release_manifest_url` is unset.
+#[allow(dead_code)]
 pub const DEFAULT_RELEASE_TAGS_BASE_URL: &str = "https://api.github.com/repos/uzyn/aimx/releases";
 
 /// Description of a GitHub Release, distilled to the fields `aimx upgrade`
@@ -40,6 +48,7 @@ pub const DEFAULT_RELEASE_TAGS_BASE_URL: &str = "https://api.github.com/repos/uz
 /// the upgrade flow today; the struct is public because unit tests in other
 /// modules construct it directly against [`MockReleaseOps`].
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct ReleaseManifest {
     pub tag: String,
     pub published_at: String,
@@ -53,6 +62,7 @@ impl ReleaseManifest {
     /// Look up the download URL for an asset by filename, surfacing a
     /// distinct [`ReleaseError::AssetNotFound`] so callers can distinguish
     /// "wrong name" from transport errors.
+    #[allow(dead_code)]
     pub fn asset_url(&self, name: &str) -> Result<&str, ReleaseError> {
         self.asset_urls
             .get(name)
@@ -67,6 +77,7 @@ impl ReleaseManifest {
 /// message, so the variants are deliberately granular rather than collapsed
 /// into a single "network failed" bucket.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ReleaseError {
     /// The URL was neither `https://` nor `file://` (the only two schemes
     /// [`RealReleaseOps::fetch_asset`] accepts).
@@ -116,6 +127,7 @@ impl std::error::Error for ReleaseError {}
 /// returns bytes rather than a stream because release tarballs are
 /// small (< 20 MB per PRD §7) and the upgrade flow buffers them into
 /// a temp file before extraction regardless.
+#[allow(dead_code)]
 pub trait ReleaseOps {
     fn latest_release(&self) -> Result<ReleaseManifest, ReleaseError>;
     fn release_by_tag(&self, tag: &str) -> Result<ReleaseManifest, ReleaseError>;
@@ -127,6 +139,7 @@ pub trait ReleaseOps {
 /// The manifest URL is resolved lazily inside each method so tests that
 /// swap `AIMX_RELEASE_MANIFEST_URL` mid-process (via `TestManifestUrl`)
 /// pick up the new value without rebuilding the struct.
+#[allow(dead_code)]
 pub struct RealReleaseOps {
     /// Override for the manifest URL, typically sourced from
     /// `[upgrade] release_manifest_url` in `config.toml`. The
@@ -140,6 +153,7 @@ impl Default for RealReleaseOps {
     }
 }
 
+#[allow(dead_code)]
 impl RealReleaseOps {
     /// `config_manifest_url` mirrors `Config::upgrade.release_manifest_url`.
     /// Callers typically pass `config.upgrade.as_ref().and_then(|u|
@@ -188,6 +202,15 @@ impl RealReleaseOps {
 /// Rewrite a URL that ends in `/latest` to `/tags/<tag>`. For any other
 /// shape, append `/tags/<tag>` (makes `file:///.../releases.json` style
 /// fixtures work when the test author points at a directory).
+///
+/// **Fixture naming convention (load-bearing).** For `file://` URLs that
+/// end in `.json`, this function maps `.../latest.json` to
+/// `.../tag-<tag>.json`. Test fixtures that want per-tag resolution via
+/// `RealReleaseOps::release_by_tag_url` MUST be named accordingly — e.g.
+/// a fixture set at `tests/fixtures/releases/latest.json` implies a peer
+/// file `tests/fixtures/releases/tag-v1-2-3.json` resolves `v1.2.3`.
+/// Any other `.json` filename is passed through unchanged.
+#[allow(dead_code)]
 fn rewrite_to_tag(url: &str, tag: &str) -> String {
     if let Some(stripped) = url.strip_suffix("/latest") {
         format!("{stripped}/tags/{tag}")
@@ -227,6 +250,7 @@ impl ReleaseOps for RealReleaseOps {
 /// consume are deserialized — unknown fields are ignored so API additions
 /// don't break parsing.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GithubRelease {
     tag_name: String,
     #[serde(default)]
@@ -236,6 +260,7 @@ struct GithubRelease {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct GithubAsset {
     name: String,
     browser_download_url: String,
@@ -259,17 +284,20 @@ impl From<GithubRelease> for ReleaseManifest {
 /// Parse a JSON release document into a [`ReleaseManifest`]. Exposed so
 /// tests can build manifests from fixture files without going through
 /// [`RealReleaseOps`].
+#[allow(dead_code)]
 pub fn parse_release_json(bytes: &[u8]) -> Result<ReleaseManifest, ReleaseError> {
     let release: GithubRelease =
         serde_json::from_slice(bytes).map_err(|e| ReleaseError::Parse(e.to_string()))?;
     Ok(release.into())
 }
 
+#[allow(dead_code)]
 fn fetch_manifest(url: &str) -> Result<ReleaseManifest, ReleaseError> {
     let bytes = fetch_bytes(url)?;
     parse_release_json(&bytes)
 }
 
+#[allow(dead_code)]
 fn fetch_bytes(url: &str) -> Result<Vec<u8>, ReleaseError> {
     if let Some(path) = url.strip_prefix("file://") {
         let p = PathBuf::from(path);
@@ -315,6 +343,7 @@ fn fetch_bytes(url: &str) -> Result<Vec<u8>, ReleaseError> {
     Ok(body)
 }
 
+#[allow(dead_code)]
 fn install_rustls_provider() {
     use std::sync::Once;
     static INSTALL: Once = Once::new();
@@ -329,6 +358,7 @@ fn install_rustls_provider() {
 /// (case-insensitive). Pure; does no I/O. Not called on the default
 /// `aimx upgrade` path — kept for future `aimx verify` surfaces and
 /// integration-test assertions against published `.sha256` files.
+#[allow(dead_code)]
 pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), ReleaseError> {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
@@ -344,6 +374,7 @@ pub fn verify_sha256(bytes: &[u8], expected_hex: &str) -> Result<(), ReleaseErro
 
 /// Lowercase hex encoding of `bytes`. Tiny hand-rolled impl so we don't pull
 /// in the `hex` crate just for one call site.
+#[allow(dead_code)]
 pub fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -357,6 +388,7 @@ pub fn hex_encode(bytes: &[u8]) -> String {
 /// Parse the first line of a standard `sha256sum` output (`<hex>  <name>`)
 /// into the hex digest. Tolerates either two spaces (binary mode) or a
 /// single space (text mode); trims trailing whitespace.
+#[allow(dead_code)]
 pub fn parse_sha256_file(contents: &str) -> Result<String, ReleaseError> {
     let line = contents.lines().next().unwrap_or("").trim();
     let hex = line
@@ -476,6 +508,22 @@ pub(crate) mod test_env {
         /// Point the override at a `file://` URL derived from a local path.
         pub(crate) fn set_file(path: &Path) -> Self {
             Self::set(&format!("file://{}", path.display()))
+        }
+
+        /// Hold the guard with the env var explicitly removed. Use when a
+        /// test needs to assert behaviour that is ONLY correct when the
+        /// env var is absent (e.g. fall-through to config / default).
+        pub(crate) fn unset() -> Self {
+            let guard = GUARD.lock().unwrap_or_else(|e| e.into_inner());
+            let prev = std::env::var_os(RELEASE_MANIFEST_URL_ENV);
+            // SAFETY: env mutation serialized via GUARD.
+            unsafe {
+                std::env::remove_var(RELEASE_MANIFEST_URL_ENV);
+            }
+            Self {
+                _guard: guard,
+                prev,
+            }
         }
     }
 
@@ -678,26 +726,21 @@ mod tests {
 
     #[test]
     fn latest_release_url_falls_through_to_config_then_default() {
-        // Ensure env is unset for this test.
-        let _guard = ReleaseManifestUrlOverride::set("");
-        // Setting to "" won't unset; expliclty drop below. Instead use a
-        // direct ops with no env interference by unsetting after set.
-        drop(_guard);
+        // Serialize env mutation via the shared GUARD and explicitly remove
+        // the env var for the duration of the test. Previously this test
+        // wrapped both assertions in `if env.is_none()`, which meant a
+        // leaked `AIMX_RELEASE_MANIFEST_URL` from the ambient shell / CI
+        // job would silently skip the assertion instead of failing.
+        let _guard = ReleaseManifestUrlOverride::unset();
 
         let ops = RealReleaseOps::new(Some("https://config.example/only".to_string()));
-        // After the guard drops, env is restored to pre-test state. If the
-        // ambient process had no env, this now reads config.
-        if std::env::var_os(RELEASE_MANIFEST_URL_ENV).is_none() {
-            assert_eq!(ops.latest_release_url(), "https://config.example/only");
-        }
+        assert_eq!(ops.latest_release_url(), "https://config.example/only");
 
         let ops_default = RealReleaseOps::default();
-        if std::env::var_os(RELEASE_MANIFEST_URL_ENV).is_none() {
-            assert_eq!(
-                ops_default.latest_release_url(),
-                DEFAULT_RELEASE_MANIFEST_URL
-            );
-        }
+        assert_eq!(
+            ops_default.latest_release_url(),
+            DEFAULT_RELEASE_MANIFEST_URL
+        );
     }
 
     #[test]

@@ -5453,22 +5453,53 @@ fn aimx_version_renders_full_metadata() {
         .expect("at least one output line")
         .to_string();
 
-    // Shape: clap prepends `<name> ` before our banner, so the full line
-    // typically reads `aimx aimx <tag> (<sha>) <target> built <date>`.
-    // Strip one optional leading `aimx ` to normalise.
-    let core = line.strip_prefix("aimx ").unwrap_or(&line);
+    // FR-6.1: output must be exactly `aimx <tag> (<sha>) <target> built <date>`
+    // — one `aimx ` prefix, not two. An earlier revision of this test stripped
+    // an optional leading `aimx ` and would have silently accepted the
+    // `aimx aimx ...` bug; we assert the exact shape here so that regression
+    // fails loudly.
     assert!(
-        core.starts_with("aimx "),
+        line.starts_with("aimx "),
         "version line missing `aimx ` banner prefix: {line:?}"
     );
-    assert!(
-        core.contains(" (") && core.contains(") "),
-        "version line missing parenthesised git hash: {line:?}"
+    // Crucially, the second token must be the tag — NOT a second `aimx`.
+    let mut tokens = line.split(' ');
+    assert_eq!(tokens.next(), Some("aimx"), "first token must be `aimx`");
+    let second = tokens
+        .next()
+        .unwrap_or_else(|| panic!("version line missing tag token: {line:?}"));
+    assert_ne!(
+        second, "aimx",
+        "duplicate `aimx` prefix reintroduced (FR-6.1 violation): {line:?}"
     );
-    let built_pos = core
-        .rfind(" built ")
+    assert!(!second.is_empty(), "tag token must be non-empty: {line:?}");
+
+    // Remainder must match: `<tag> (<hex-sha>) <target> built <YYYY-MM-DD>`.
+    let rest = &line["aimx ".len()..];
+    // Parenthesised SHA.
+    let open = rest
+        .find(" (")
+        .unwrap_or_else(|| panic!("version line missing ` (<sha>)` segment: {line:?}"));
+    let close_rel = rest[open..]
+        .find(") ")
+        .unwrap_or_else(|| panic!("version line missing `) ` after sha: {line:?}"));
+    let sha = &rest[open + 2..open + close_rel];
+    assert!(
+        !sha.is_empty() && sha.chars().all(|c| c.is_ascii_hexdigit()),
+        "git sha segment not hex: {sha:?} in {line:?}"
+    );
+
+    let after_sha = &rest[open + close_rel + 2..];
+    let built_idx = after_sha
+        .find(" built ")
         .unwrap_or_else(|| panic!("version line missing ` built ` trailer: {line:?}"));
-    let date = &core[built_pos + " built ".len()..];
+    let target = &after_sha[..built_idx];
+    assert!(
+        target == "unknown" || target.matches('-').count() >= 2,
+        "target triple looks wrong: {target:?}"
+    );
+
+    let date = &after_sha[built_idx + " built ".len()..];
     assert_eq!(date.len(), 10, "build date not YYYY-MM-DD: {date:?}");
     assert_eq!(
         &date[4..5],
@@ -5483,16 +5514,4 @@ fn aimx_version_renders_full_metadata() {
     assert!(date[..4].chars().all(|c| c.is_ascii_digit()));
     assert!(date[5..7].chars().all(|c| c.is_ascii_digit()));
     assert!(date[8..10].chars().all(|c| c.is_ascii_digit()));
-
-    // Target triple sits between `) ` and ` built `. Cargo-supplied triples
-    // carry at least two hyphens; `unknown` is the build.rs fallback.
-    let after_sha = core.split(") ").nth(1).expect("target segment present");
-    let target = after_sha
-        .split(" built ")
-        .next()
-        .expect("target terminated by ` built `");
-    assert!(
-        target == "unknown" || target.matches('-').count() >= 2,
-        "target triple looks wrong: {target:?}"
-    );
 }
