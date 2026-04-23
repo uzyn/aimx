@@ -1615,7 +1615,15 @@ pub(crate) const MAX_TRUSTED_SENDERS_ATTEMPTS: usize = 5;
 /// where the interactive surface is skipped (FR-3.8). Kept as a
 /// module-level constant so tests can assert the exact wording.
 pub(crate) const EMPTY_TRUSTED_SENDERS_WARNING: &str = "No trusted senders configured. Hooks will NOT fire for inbound email. \
-     Add senders later via `aimx config trust add`.";
+Add senders later by editing `/etc/aimx/config.toml` under `[trust]` / `trusted_senders`, \
+or re-run `sudo aimx setup` to prompt again.";
+
+/// Prompt text printed before each [`prompt_trusted_senders`] read. Kept
+/// as a constant so unit tests can assert the rendered string is free
+/// of the double-space artifacts that `\`-newline + leading-indent
+/// continuations silently produce.
+pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com, *@company.com) \
+— leave blank to disable hooks: ";
 
 /// Validate that a string is a plausible email address or glob pattern
 /// suitable for `trusted_senders`. Delegates final semantics to the
@@ -1687,10 +1695,7 @@ pub fn prompt_trusted_senders(
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
     for attempt in 1..=MAX_TRUSTED_SENDERS_ATTEMPTS {
-        print!(
-            "Trusted sender addresses (comma-separated, e.g. you@example.com, *@company.com) \
-             — leave blank to disable hooks: "
-        );
+        print!("{TRUSTED_SENDERS_PROMPT}");
         io::stdout().flush()?;
         let mut line = String::new();
         reader.read_line(&mut line)?;
@@ -1723,6 +1728,23 @@ fn print_empty_trusted_senders_warning() {
     println!("{}", term::warn_badge());
     println!("  {}", term::warn(EMPTY_TRUSTED_SENDERS_WARNING));
     println!();
+}
+
+/// Resolve the trust defaults for the non-interactive setup path
+/// (FR-3.8). The scripted-install branch of [`run_setup`] defaults to
+/// an empty trusted-senders list and must *log* the operator-visible
+/// warning (not display it on the TTY) so automated pipelines surface
+/// the misconfiguration in their journald / log collectors.
+///
+/// Installs the shared tracing subscriber via [`crate::logging::init`]
+/// before emitting so the warning actually reaches stderr — without
+/// this call `tracing::warn!` is a no-op because `aimx setup` does not
+/// otherwise install a subscriber. `logging::init` is idempotent.
+/// Returns the `("none", vec![])` defaults the caller persists.
+pub(crate) fn resolve_noninteractive_trust_defaults() -> (String, Vec<String>) {
+    crate::logging::init();
+    tracing::warn!("{}", EMPTY_TRUSTED_SENDERS_WARNING);
+    ("none".to_string(), Vec::<String>::new())
 }
 
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
@@ -1930,6 +1952,14 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Install the shared tracing subscriber up front so structured
+    // warnings emitted from this path (notably the FR-3.8
+    // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
+    // actually reach stderr. Matches the pattern in `serve::run` /
+    // `ingest::run`. `logging::init` is idempotent so in-process tests
+    // re-entering `run_setup` are safe.
+    crate::logging::init();
+
     // Step 1: Root check
     if !sys.check_root() {
         return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
@@ -2006,8 +2036,7 @@ pub fn run_setup(
     let trust_defaults = if config_path.exists() {
         None
     } else if is_noninteractive_env() {
-        tracing::warn!("{}", EMPTY_TRUSTED_SENDERS_WARNING);
-        Some(("none".to_string(), Vec::<String>::new()))
+        Some(resolve_noninteractive_trust_defaults())
     } else {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
@@ -4040,7 +4069,18 @@ owner = "aimx-catchall"
         // "NOT fire" / "Add senders later" language.
         assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("No trusted senders"));
         assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("NOT fire"));
-        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("aimx config trust add"));
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("/etc/aimx/config.toml"));
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("sudo aimx setup"));
+        // Guard against the old misleading reference (PR #138 review).
+        assert!(
+            !EMPTY_TRUSTED_SENDERS_WARNING.contains("aimx config trust add"),
+            "warning must not reference a non-existent subcommand"
+        );
+        // Cosmetic: no double-spaces inside the rendered warning.
+        assert!(
+            !EMPTY_TRUSTED_SENDERS_WARNING.contains("  "),
+            "warning should not contain leaked double spaces from \\-newline continuations"
+        );
     }
 
     #[test]
@@ -4056,6 +4096,157 @@ owner = "aimx-catchall"
         unsafe { std::env::set_var(NONINTERACTIVE_ENV, "1") };
         assert!(is_noninteractive_env());
         unsafe { std::env::remove_var(NONINTERACTIVE_ENV) };
+    }
+
+    #[test]
+    fn resolve_noninteractive_trust_defaults_emits_logged_warning() {
+        // PR #138 regression (B1): under AIMX_NONINTERACTIVE=1 the
+        // FR-3.8 contract requires the empty-trusted-senders warning
+        // to be *logged* (not displayed). Before the fix the call site
+        // was a bare `tracing::warn!` with no subscriber ever
+        // installed on the setup path — a no-op. The helper below
+        // installs the shared subscriber (idempotently) and then
+        // emits; this test proves the emit reaches a `tracing` layer
+        // end-to-end by snapshotting into a thread-local capturing
+        // subscriber.
+        //
+        // The capturing subscriber is set via `set_default` (scoped to
+        // this thread) BEFORE calling the helper, so it wins over any
+        // global subscriber prior tests may have installed. The
+        // helper's own `logging::init()` call uses `.try_init()` which
+        // is a no-op once a global default is present, so the two
+        // subscribers do not conflict.
+        #[derive(Clone)]
+        struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+            type Writer = SharedBuf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = SharedBuf(buf.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+            .with_writer(writer)
+            .with_target(true)
+            .finish();
+        let _dispatch_guard = tracing::subscriber::set_default(subscriber);
+
+        let (policy, senders) = resolve_noninteractive_trust_defaults();
+        assert_eq!(policy, "none");
+        assert!(senders.is_empty());
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("No trusted senders"),
+            "FR-3.8: empty-trusted-senders warning must reach the tracing layer. \
+             Captured:\n{captured}"
+        );
+        assert!(
+            captured.contains("NOT fire"),
+            "FR-3.8: warning body must explain that hooks will NOT fire. Captured:\n{captured}"
+        );
+        assert!(
+            captured.contains("/etc/aimx/config.toml"),
+            "FR-3.2: warning must point at a real remediation path. Captured:\n{captured}"
+        );
+    }
+
+    #[test]
+    fn resolve_noninteractive_trust_defaults_installs_tracing_subscriber() {
+        // PR #138 regression (B1, structural guard): the helper must
+        // call `crate::logging::init()` before emitting the warn. If
+        // a refactor drops the subscriber-install the FR-3.8 warning
+        // becomes a silent no-op in production (cargo tests
+        // themselves cannot catch that — see the unit test above for
+        // the emit-reaches-layer proof). This source-level check
+        // locks the install in place.
+        let source = std::fs::read_to_string(std::path::Path::new(file!())).unwrap();
+        let helper_start = source
+            .find("pub(crate) fn resolve_noninteractive_trust_defaults")
+            .expect("helper signature present");
+        // Scan the helper body through the next `}` at column 0.
+        let body = &source[helper_start..];
+        let end = body
+            .find("\n}\n")
+            .expect("helper body terminates with newline-brace");
+        let window = &body[..end];
+        // Only count uncommented calls — a refactor that guts the
+        // body but leaves a doc-link like `[crate::logging::init]` in
+        // the docstring must still fail.
+        let has_live_init = window.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//")
+                && !trimmed.starts_with("///")
+                && !trimmed.starts_with("/*")
+                && trimmed.contains("crate::logging::init()")
+        });
+        assert!(
+            has_live_init,
+            "resolve_noninteractive_trust_defaults must install the tracing \
+             subscriber before emitting the FR-3.8 warning (uncommented call). \
+             Window:\n{window}"
+        );
+        let init_idx = window.find("crate::logging::init()").unwrap();
+        let warn_idx = window
+            .find("tracing::warn!")
+            .expect("helper must emit the warn");
+        assert!(
+            init_idx < warn_idx,
+            "logging::init() must run before tracing::warn! so the warn is not dropped"
+        );
+    }
+
+    #[test]
+    fn run_setup_wires_noninteractive_trust_defaults_helper() {
+        // PR #138 regression (B1, structural guard): the non-interactive
+        // branch of `run_setup` must go through
+        // `resolve_noninteractive_trust_defaults` so the subscriber-
+        // install + warn-emit pair stay co-located. A future refactor
+        // that inlines the `tracing::warn!` back into `run_setup`
+        // without re-adding a `logging::init()` call in that branch
+        // would silently regress the FR-3.8 contract again.
+        let source = std::fs::read_to_string(std::path::Path::new(file!())).unwrap();
+        let run_setup_start = source
+            .find("pub fn run_setup(")
+            .expect("run_setup signature present");
+        // Scan from `run_setup` onward to the end of the file.
+        let body = &source[run_setup_start..];
+        // The body between the `is_noninteractive_env()` branch and
+        // the next `else` must reference the helper by name.
+        let nonint_idx = body
+            .find("is_noninteractive_env()")
+            .expect("non-interactive branch present");
+        let window = &body[nonint_idx..nonint_idx + 500];
+        assert!(
+            window.contains("resolve_noninteractive_trust_defaults"),
+            "run_setup non-interactive branch must delegate to \
+             resolve_noninteractive_trust_defaults (FR-3.8). Window:\n{window}"
+        );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_prompt_text_has_no_double_spaces() {
+        // PR #138 review (N2): the `\`-newline + leading indent
+        // continuation pattern silently leaks extra spaces into the
+        // rendered prompt. Assert the rendered constant reads naturally.
+        assert!(
+            !TRUSTED_SENDERS_PROMPT.contains("  "),
+            "prompt should not contain leaked double spaces from \\-newline continuations"
+        );
+        assert!(TRUSTED_SENDERS_PROMPT.contains("leave blank to disable hooks"));
+        assert!(TRUSTED_SENDERS_PROMPT.contains("*@company.com"));
     }
 
     #[test]
