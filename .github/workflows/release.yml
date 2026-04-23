@@ -1,0 +1,271 @@
+name: Release
+
+# Onboarding Sprint 1 (M1 / FR-1.1–1.5): build tarballs + SHA-256 sums
+# for all four supported Linux targets on every SemVer-shaped tag push,
+# and publish them as assets on a GitHub Release with a templated body
+# that includes a verbatim `curl + sha256sum -c` verify block.
+#
+# Trigger glob accepts tags shaped like `v<digit>...` (e.g. `v1.0.0`,
+# `v1.2.3-rc1`, `v0.0.0-fixture`). Non-SemVer tags (`test`, `dev-*`) are
+# ignored so ad-hoc tags never spend CI minutes or publish a release.
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - x86_64-unknown-linux-musl
+          - aarch64-unknown-linux-musl
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve version string
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Install cross
+        run: cargo install cross --locked --version 0.2.5
+
+      - name: Build release binary
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Stage tarball contents
+        run: |
+          set -euo pipefail
+          stage="aimx-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          mkdir -p "${stage}"
+          cp "target/${{ matrix.target }}/release/aimx" "${stage}/aimx"
+          chmod 0755 "${stage}/aimx"
+          cp LICENSE "${stage}/LICENSE"
+          cp README.md "${stage}/README.md"
+          cp -R book "${stage}/book"
+          mkdir -p "${stage}/hook-templates"
+          cp hook-templates/defaults.toml "${stage}/hook-templates/defaults.toml"
+          echo "stage=${stage}" >> "$GITHUB_ENV"
+
+      - name: Create tarball and per-asset SHA-256
+        run: |
+          set -euo pipefail
+          tarball="${stage}.tar.gz"
+          # Deterministic-ish tar: fixed owner/group and mtime from the commit.
+          # The GNU tar on ubuntu-latest supports these flags.
+          mtime="$(git log -1 --format=%cI "${GITHUB_REF_NAME}")"
+          tar \
+            --sort=name \
+            --owner=0 --group=0 --numeric-owner \
+            --mtime="${mtime}" \
+            -czf "${tarball}" "${stage}"
+          sha256sum "${tarball}" > "${tarball}.sha256"
+          echo "tarball=${tarball}" >> "$GITHUB_ENV"
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aimx-${{ matrix.target }}
+          path: |
+            ${{ env.tarball }}
+            ${{ env.tarball }}.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve version string
+        id: version
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          date="$(date -u +%Y-%m-%d)"
+          echo "date=${date}" >> "$GITHUB_OUTPUT"
+
+      - name: Download build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: aimx-*
+          merge-multiple: true
+
+      - name: Aggregate SHA256SUMS
+        id: sums
+        run: |
+          set -euo pipefail
+          cd dist
+          # Normalise per-asset .sha256 files (strip any path prefix left by
+          # matrix stages) and assemble the release-wide SHA256SUMS file.
+          : > SHA256SUMS
+          for t in aimx-*.tar.gz; do
+            digest="$(sha256sum "${t}" | awk '{print $1}')"
+            printf '%s  %s\n' "${digest}" "${t}" >> SHA256SUMS
+            printf '%s  %s\n' "${digest}" "${t}" > "${t}.sha256"
+          done
+          sort -o SHA256SUMS SHA256SUMS
+          # Expose each target digest for the release-notes template.
+          {
+            for target in \
+              x86_64-unknown-linux-gnu \
+              aarch64-unknown-linux-gnu \
+              x86_64-unknown-linux-musl \
+              aarch64-unknown-linux-musl
+            do
+              tarball="aimx-${{ steps.version.outputs.version }}-${target}.tar.gz"
+              if [ -f "${tarball}" ]; then
+                digest="$(sha256sum "${tarball}" | awk '{print $1}')"
+                echo "sha_${target}=${digest}"
+              fi
+            done
+          } >> "$GITHUB_OUTPUT"
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Build release notes body
+        id: notes
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DATE: ${{ steps.version.outputs.date }}
+          SHA_X86_GNU: ${{ steps.sums.outputs.sha_x86_64-unknown-linux-gnu }}
+          SHA_ARM_GNU: ${{ steps.sums.outputs.sha_aarch64-unknown-linux-gnu }}
+          SHA_X86_MUSL: ${{ steps.sums.outputs.sha_x86_64-unknown-linux-musl }}
+          SHA_ARM_MUSL: ${{ steps.sums.outputs.sha_aarch64-unknown-linux-musl }}
+        run: |
+          set -euo pipefail
+          notes_file="$(mktemp)"
+          base_url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}"
+
+          # Resolve the previous SemVer-shaped tag (if any) for the
+          # changelog range. If no previous tag exists, fall back to the
+          # root commit so first releases still produce a sensible log.
+          prev_tag="$(git tag --list 'v[0-9]*' --sort=-v:refname \
+            | grep -v -x "${TAG}" | head -n1 || true)"
+          if [ -n "${prev_tag}" ]; then
+            range="${prev_tag}..${TAG}"
+            range_label="${prev_tag}...${TAG}"
+          else
+            range="${TAG}"
+            range_label="(initial release)"
+          fi
+
+          {
+            echo "# aimx ${TAG}"
+            echo
+            echo "_Released ${DATE}._"
+            echo
+            echo "## Changelog (${range_label})"
+            echo
+            if [ -n "${prev_tag}" ]; then
+              git log --no-merges --pretty=format:'- %s (%h)' "${range}" || true
+            else
+              git log --no-merges --pretty=format:'- %s (%h)' "${TAG}" || true
+            fi
+            echo
+            echo
+            echo "## SHA-256 checksums"
+            echo
+            echo "| Target | SHA-256 |"
+            echo "| --- | --- |"
+            echo "| \`x86_64-unknown-linux-gnu\`   | \`${SHA_X86_GNU:-unavailable}\` |"
+            echo "| \`aarch64-unknown-linux-gnu\`  | \`${SHA_ARM_GNU:-unavailable}\` |"
+            echo "| \`x86_64-unknown-linux-musl\`  | \`${SHA_X86_MUSL:-unavailable}\` |"
+            echo "| \`aarch64-unknown-linux-musl\` | \`${SHA_ARM_MUSL:-unavailable}\` |"
+            echo
+            echo "The release-wide \`SHA256SUMS\` file is attached as an asset."
+            echo
+            echo "## Verify a download"
+            echo
+            echo "Pick the tarball for your target, then:"
+            echo
+            echo '```sh'
+            echo "# x86_64 glibc"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            echo
+            echo "# aarch64 glibc"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256"
+            echo
+            echo "# x86_64 musl"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256"
+            echo
+            echo "# aarch64 musl"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256"
+            echo '```'
+            echo
+            echo "Or verify every tarball at once with the aggregate file:"
+            echo
+            echo '```sh'
+            echo "curl -fsSLO ${base_url}/SHA256SUMS"
+            echo "sha256sum -c --ignore-missing SHA256SUMS"
+            echo '```'
+            echo
+            echo "Trust anchor for v1 is HTTPS on the GitHub Releases domain."
+            echo "Signed releases (minisign / cosign / GPG) are deferred to v2."
+          } > "${notes_file}"
+          echo "notes_file=${notes_file}" >> "$GITHUB_OUTPUT"
+
+      - name: Detect pre-release
+        id: prerelease
+        env:
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Treat any tag that carries a hyphen after the SemVer core as
+          # a pre-release (e.g. v0.0.0-rc1, v0.0.0-fixture, v1.2.3-rc1).
+          if printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: aimx ${{ steps.version.outputs.tag }}
+          body_path: ${{ steps.notes.outputs.notes_file }}
+          prerelease: ${{ steps.prerelease.outputs.prerelease }}
+          fail_on_unmatched_files: true
+          files: |
+            dist/aimx-*.tar.gz
+            dist/aimx-*.tar.gz.sha256
+            dist/SHA256SUMS
