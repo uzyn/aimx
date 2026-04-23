@@ -318,9 +318,18 @@ fn real_release_ops_end_to_end_against_fixture_as_root() {
     // → `fetch_asset` over real HTTPS — via `aimx upgrade --dry-run`.
     // The dry-run exits cleanly after the fetch without touching the
     // service or filesystem, so this is safe to run under sudo in CI.
+    //
+    // Point the env override at the canonical `/releases/latest` URL
+    // rather than the per-tag URL — `RealReleaseOps::release_by_tag_url`
+    // runs `rewrite_to_tag` on the override, which maps `.../latest`
+    // to `.../tags/<tag>`. Passing the per-tag URL directly would
+    // double-append `/tags/<tag>` and 404.
     let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
         .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
-        .env("AIMX_RELEASE_MANIFEST_URL", FIXTURE_RELEASE_URL)
+        .env(
+            "AIMX_RELEASE_MANIFEST_URL",
+            "https://api.github.com/repos/uzyn/aimx/releases/latest",
+        )
         .output()
         .expect("run aimx upgrade --dry-run (root)");
     let combined = format!(
