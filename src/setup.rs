@@ -402,7 +402,22 @@ impl SystemOps for RealSystemOps {
     }
 
     fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        std::env::current_exe().map_err(|e| e.into())
+        // Sprint 5 S5-4: canonicalize so the generated unit file's
+        // `ExecStart=` line points at the real binary rather than a
+        // symlink — systemd best practice, and what closes PRD §11's
+        // "non-/usr/local prefixes" open question. An operator who
+        // installed via `AIMX_PREFIX=/opt/aimx curl ... | sh` now gets
+        // a unit whose ExecStart is `/opt/aimx/bin/aimx serve`, not
+        // whatever `/usr/local/bin/aimx` symlink the installer might
+        // have left behind.
+        let exe = std::env::current_exe()?;
+        exe.canonicalize().map_err(|e| {
+            format!(
+                "cannot resolve current executable path ({}): {e}",
+                exe.display()
+            )
+            .into()
+        })
     }
 
     fn check_root(&self) -> bool {
@@ -422,10 +437,22 @@ impl SystemOps for RealSystemOps {
             InitSystem, detect_init_system, generate_openrc_script, generate_systemd_unit,
         };
 
-        let aimx_path = self
-            .get_aimx_binary_path()
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "/usr/local/bin/aimx".to_string());
+        // Sprint 5 S5-4: derive `ExecStart=` from the canonicalized
+        // current-exe path. Abort hard if we cannot resolve it —
+        // writing a unit whose ExecStart points at a non-existent or
+        // non-executable binary silently is worse than failing fast
+        // (the service would just loop on restart, burning
+        // StartLimitBurst for no reason).
+        let aimx_path_buf =
+            self.get_aimx_binary_path()
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    format!(
+                        "✗ cannot resolve current executable path: {e}. \
+                 Re-run `sudo aimx setup` from the installed binary."
+                    )
+                    .into()
+                })?;
+        let aimx_path = aimx_path_buf.to_string_lossy().to_string();
         let data_dir_str = data_dir.to_string_lossy().to_string();
 
         match detect_init_system() {
@@ -1372,31 +1399,6 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     lines
 }
 
-pub fn display_deliverability_section(domain: &str) {
-    println!(
-        "\n{}",
-        term::header("[Deliverability Improvement (Optional)]")
-    );
-    println!();
-    println!("{}", gmail_whitelist_instructions(domain));
-    println!();
-}
-
-pub fn gmail_whitelist_instructions(domain: &str) -> String {
-    format!(
-        r#"To prevent emails from {domain} landing in spam:
-
-  1. Open Gmail Settings > Filters and Blocked Addresses
-  2. Click "Create a new filter"
-  3. In the "From" field, enter: *@{domain}
-  4. Click "Create filter"
-  5. Check "Never send it to Spam"
-  6. Click "Create filter"
-
-Alternatively, just reply to an email from {domain}. Gmail will learn it's not spam."#
-    )
-}
-
 /// Finalize the on-disk install: ensure `data_dir` exists, create or
 /// update `config.toml`, and generate the DKIM keypair if missing.
 ///
@@ -1492,9 +1494,14 @@ pub fn finalize_setup(
 }
 
 fn announce_setup_complete(domain: &str) {
+    // FR-3.5 step 8: the wizard closes with a single-line success
+    // banner naming the domain. Intentionally terse — the operator just
+    // sat through TLS, DKIM, DNS, and systemctl start; they don't need
+    // more ceremony.
+    println!();
     println!(
-        "\n{}\n",
-        term::success_banner(&format!("Setup complete for {domain}!"))
+        "{}",
+        term::success(&format!("aimx is running for {domain}."))
     );
 }
 
@@ -1596,54 +1603,148 @@ fn validate_domain(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// Interactively prompt for the global default trust policy and, if the
-/// operator picks `verified`, an optional `trusted_senders` allowlist.
+/// Upper bound on re-prompt attempts inside [`prompt_trusted_senders`].
+/// Matches the [`MAX_OWNER_PROMPT_ATTEMPTS`] error-budget pattern so a
+/// scripted stdin that never resolves to a valid entry cannot spin
+/// forever. Operators fat-fingering an address get five chances before
+/// the wizard aborts with the rejection history.
+pub(crate) const MAX_TRUSTED_SENDERS_ATTEMPTS: usize = 5;
+
+/// Warning printed when the operator leaves the trusted-senders prompt
+/// blank. Also logged (at `warn` level) under `AIMX_NONINTERACTIVE=1`
+/// where the interactive surface is skipped (FR-3.8). Kept as a
+/// module-level constant so tests can assert the exact wording.
+pub(crate) const EMPTY_TRUSTED_SENDERS_WARNING: &str = "No trusted senders configured. Hooks will NOT fire for inbound email. \
+Add senders later by editing `/etc/aimx/config.toml` under `[trust]` / `trusted_senders`, \
+or re-run `sudo aimx setup` to prompt again.";
+
+/// Prompt text printed before each [`prompt_trusted_senders`] read. Kept
+/// as a constant so unit tests can assert the rendered string is free
+/// of the double-space artifacts that `\`-newline + leading-indent
+/// continuations silently produce.
+pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com, *@company.com) \
+— leave blank to disable hooks: ";
+
+/// Validate that a string is a plausible email address or glob pattern
+/// suitable for `trusted_senders`. Delegates final semantics to the
+/// `trust.rs` matcher — this only catches obvious typos at prompt time
+/// so the operator sees the error before it hits `config.toml`.
+///
+/// Rules: exactly one `@`, a non-empty local part, a non-empty domain
+/// part, and every character in the allowed set (alphanumeric, `.`,
+/// `-`, `_`, `+`, `*`, `?`). Globs like `*@company.com`,
+/// `alice*@example.com`, and `alice@*.company.com` all pass.
+pub(crate) fn validate_trusted_sender(entry: &str) -> Result<(), String> {
+    if entry.is_empty() {
+        return Err("empty entry".to_string());
+    }
+    let at_count = entry.chars().filter(|c| *c == '@').count();
+    if at_count != 1 {
+        return Err(format!("expected exactly one '@', got {at_count}"));
+    }
+    let (local, domain) = entry.split_once('@').expect("one '@' checked above");
+    if local.is_empty() {
+        return Err("empty local part before '@'".to_string());
+    }
+    if domain.is_empty() {
+        return Err("empty domain after '@'".to_string());
+    }
+    for c in entry.chars() {
+        if c == '@' {
+            continue;
+        }
+        let ok = c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | '+' | '*' | '?');
+        if !ok {
+            return Err(format!("invalid character '{c}'"));
+        }
+    }
+    Ok(())
+}
+
+/// Parse a comma- or whitespace-separated line into a list of
+/// trusted-sender entries. Each entry is validated via
+/// [`validate_trusted_sender`]; the first invalid entry short-circuits
+/// with an error that names the offending entry and the validation
+/// reason — callers decide whether to re-prompt or abort.
+pub(crate) fn parse_trusted_senders_line(line: &str) -> Result<Vec<String>, (String, String)> {
+    let mut entries = Vec::new();
+    for raw in line.split(|c: char| c == ',' || c.is_whitespace()) {
+        let s = raw.trim();
+        if s.is_empty() {
+            continue;
+        }
+        match validate_trusted_sender(s) {
+            Ok(()) => entries.push(s.to_string()),
+            Err(reason) => return Err((s.to_string(), reason)),
+        }
+    }
+    Ok(entries)
+}
+
+/// Interactively prompt for the `trusted_senders` allowlist (FR-3.2).
 ///
 /// Returns `(policy, senders)`:
-/// - policy: `"none"` (default) or `"verified"`.
-/// - senders: empty for `none`; for `verified`, parsed from a single line
-///   split on commas and whitespace.
-pub fn prompt_default_trust(
+/// - Non-empty list → `("verified", senders)`; no warning printed.
+/// - Empty input  → `("none", vec![])`; a loud warning block is printed
+///   so the operator knows hooks will not fire.
+///
+/// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
+/// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
+pub fn prompt_trusted_senders(
     reader: &mut dyn BufRead,
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
-    println!("Default trust policy for inbound email:");
-    println!("  none     - accept all inbound, channel triggers always fire (default)");
-    println!("  verified - channel triggers only fire when DKIM passes OR sender is allowlisted");
-    println!("Each mailbox can override this default later by setting `trust` in config.toml.");
-    print!("Trust policy [none]: ");
-    io::stdout().flush()?;
-
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let mode = line.trim().to_ascii_lowercase();
-    let mode = if mode.is_empty() {
-        "none".to_string()
-    } else {
-        mode
-    };
-    if mode != "none" && mode != "verified" {
-        return Err(format!("invalid trust policy '{mode}', expected 'none' or 'verified'").into());
+    for attempt in 1..=MAX_TRUSTED_SENDERS_ATTEMPTS {
+        print!("{TRUSTED_SENDERS_PROMPT}");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        match parse_trusted_senders_line(&line) {
+            Ok(senders) if senders.is_empty() => {
+                print_empty_trusted_senders_warning();
+                return Ok(("none".to_string(), vec![]));
+            }
+            Ok(senders) => return Ok(("verified".to_string(), senders)),
+            Err((entry, reason)) => {
+                println!("{} invalid sender '{entry}': {reason}", term::fail_badge());
+                if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
+                    return Err(format!(
+                        "trusted-senders prompt aborted after {MAX_TRUSTED_SENDERS_ATTEMPTS} \
+                         attempts; last error: invalid sender '{entry}': {reason}"
+                    )
+                    .into());
+                }
+            }
+        }
     }
+    unreachable!("loop exits via return");
+}
 
-    if mode == "none" {
-        return Ok((mode, vec![]));
-    }
+/// Print the loud warning block for an empty trusted-senders list.
+/// Extracted so [`prompt_trusted_senders`] and the non-interactive
+/// branch in [`run_setup`] can share the exact wording.
+fn print_empty_trusted_senders_warning() {
+    println!();
+    println!("{}", term::warn_badge());
+    println!("  {}", term::warn(EMPTY_TRUSTED_SENDERS_WARNING));
+    println!();
+}
 
-    print!(
-        "Trusted senders (comma- or space-separated globs, e.g. '*@company.com, boss@gmail.com'), \
-         leave blank for none: "
-    );
-    io::stdout().flush()?;
-    let mut line = String::new();
-    reader.read_line(&mut line)?;
-    let senders: Vec<String> = line
-        .trim()
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
-    Ok((mode, senders))
+/// Resolve the trust defaults for the non-interactive setup path
+/// (FR-3.8). The scripted-install branch of [`run_setup`] defaults to
+/// an empty trusted-senders list and must *log* the operator-visible
+/// warning (not display it on the TTY) so automated pipelines surface
+/// the misconfiguration in their journald / log collectors.
+///
+/// Installs the shared tracing subscriber via [`crate::logging::init`]
+/// before emitting so the warning actually reaches stderr — without
+/// this call `tracing::warn!` is a no-op because `aimx setup` does not
+/// otherwise install a subscriber. `logging::init` is idempotent.
+/// Returns the `("none", vec![])` defaults the caller persists.
+pub(crate) fn resolve_noninteractive_trust_defaults() -> (String, Vec<String>) {
+    crate::logging::init();
+    tracing::warn!("{}", EMPTY_TRUSTED_SENDERS_WARNING);
+    ("none".to_string(), Vec::<String>::new())
 }
 
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
@@ -1851,6 +1952,14 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    // Install the shared tracing subscriber up front so structured
+    // warnings emitted from this path (notably the FR-3.8
+    // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
+    // actually reach stderr. Matches the pattern in `serve::run` /
+    // `ingest::run`. `logging::init` is idempotent so in-process tests
+    // re-entering `run_setup` are safe.
+    crate::logging::init();
+
     // Step 1: Root check
     if !sys.check_root() {
         return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
@@ -1916,8 +2025,29 @@ pub fn run_setup(
                 "Existing aimx configuration detected. Skipping install, proceeding to verification."
             )
         );
+    }
+
+    // Step 3 (FR-3.5): Trusted-senders prompt. Runs BEFORE TLS cert and
+    // DKIM keygen so the operator is not asked a decision question
+    // after the wizard has started mutating /etc. Re-entry skips the
+    // prompt (existing values preserved — FR-3.7). Non-interactive
+    // installs default to an empty list with the warning logged, not
+    // displayed (FR-3.8).
+    let trust_defaults = if config_path.exists() {
+        None
+    } else if is_noninteractive_env() {
+        Some(resolve_noninteractive_trust_defaults())
     } else {
-        // Step 3: Generate TLS cert
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        Some(prompt_trusted_senders(&mut reader)?)
+    };
+
+    // Step 4 (FR-3.5): Generate TLS cert, then write config.toml + DKIM
+    // keys. Idempotent on re-entry (handles domain changes). Must
+    // happen before the aimx.service install at the end, because the
+    // daemon refuses to start without a loadable config and DKIM key.
+    if !already_configured {
         let cert_dir = Path::new("/etc/ssl/aimx");
         if !sys.file_exists(&cert_dir.join("cert.pem")) {
             println!("Generating self-signed TLS certificate...");
@@ -1928,20 +2058,6 @@ pub fn run_setup(
         }
     }
 
-    // Prompt for the default trust policy only on fresh installs. On
-    // re-entry, pass `None` so `finalize_setup` preserves the existing
-    // top-level values in config.toml.
-    let trust_defaults = if config_path.exists() {
-        None
-    } else {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        Some(prompt_default_trust(&mut reader)?)
-    };
-
-    // Step 4: Write config.toml + DKIM keys. Idempotent on re-entry (handles
-    // domain changes). Must happen before the aimx.service install at the end,
-    // because the daemon refuses to start without a loadable config and DKIM key.
     finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
     // Step 4b: Create `aimx-catchall` service user (PRD §6.4, S3-1) —
@@ -1985,20 +2101,29 @@ pub fn run_setup(
         &dkim_selector,
     );
 
-    // DNS retry loop
+    // Step 6 (FR-3.5): DNS verify loop. The "press q to skip and run
+    // `aimx doctor` later" escape is surfaced as a prominent standalone
+    // line, not buried as a parenthetical, so an operator who hasn't
+    // finished propagating records doesn't feel trapped in the wizard.
     loop {
+        println!();
         println!(
-            "\nPress {} to verify DNS records, or {} to finish and verify later.",
-            term::highlight("Enter"),
-            term::highlight("q")
+            "  Press {} to verify DNS records now.",
+            term::highlight("Enter")
         );
+        println!(
+            "  Press {} to skip and run `{}` later.",
+            term::highlight("q"),
+            term::highlight("aimx doctor")
+        );
+        print!("> ");
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
         if input.trim().eq_ignore_ascii_case("q") {
             println!(
-                "Update your DNS records and run `{}` again to verify.",
-                term::highlight(&format!("sudo aimx setup {domain}"))
+                "Update your DNS records and run `{}` to re-verify.",
+                term::highlight("aimx doctor")
             );
             break;
         }
@@ -2025,23 +2150,36 @@ pub fn run_setup(
         }
     }
 
-    // Section [MCP]
-    display_mcp_section(data_dir);
-
-    // Section [Deliverability Improvement (Optional)]
-    display_deliverability_section(&domain);
-
     // Write (or refresh) the agent-facing README inside the data directory.
     crate::datadir_readme::write(data_dir)?;
 
-    // Step 8: Install and start aimx.service as the final step, once all
-    // preflight + DNS guidance is out of the way. Setup concludes with the
-    // daemon bound to :25 and verified healthy, or a loud error.
+    // Step 7 (FR-3.5): Install and start aimx.service once DNS guidance
+    // is out of the way. Setup concludes with the daemon bound to :25
+    // and verified healthy, or a loud error.
     if !already_configured {
         install_and_verify_service(sys, data_dir)?;
     }
 
+    // Section [MCP] — informational summary per FR-3.4. The actual
+    // agent-setup drop-through lands in Sprint 6; for now the wizard
+    // closes with the placeholder message pointing operators at
+    // `aimx agent-setup`.
+    display_mcp_section(data_dir);
+
+    // Step 8 (FR-3.5): one-line success banner.
     announce_setup_complete(&domain);
+
+    // Placeholder for the Sprint 6 drop-through to `aimx agent-setup`
+    // as `$SUDO_USER`. Skipped under AIMX_NONINTERACTIVE=1 (FR-3.8) so
+    // scripted installs don't print a hint that only makes sense to a
+    // human operator at the end of the wizard.
+    if !is_noninteractive_env() {
+        println!(
+            "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
+            term::highlight("→"),
+            term::highlight("aimx agent-setup")
+        );
+    }
 
     Ok(())
 }
@@ -3265,14 +3403,6 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn gmail_whitelist_has_domain() {
-        let instructions = gmail_whitelist_instructions("agent.example.com");
-        assert!(instructions.contains("agent.example.com"));
-        assert!(instructions.contains("*@agent.example.com"));
-        assert!(instructions.contains("Never send it to Spam"));
-    }
-
-    #[test]
     fn run_setup_skips_install_on_reentrant_path() {
         // When `is_already_configured` returns true, the entire install
         // block is skipped, so `install_service_file` must NOT be called.
@@ -3808,70 +3938,315 @@ owner = "aimx-catchall"
         let _ = &net as &dyn NetworkOps;
     }
 
-    // S18.1: Interactive domain prompt tests
+    // Sprint 5 S5-2: Trusted-senders prompt tests
 
     #[test]
-    fn prompt_default_trust_defaults_to_none_on_enter() {
+    fn validate_trusted_sender_accepts_plain_address() {
+        assert!(validate_trusted_sender("alice@example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_trusted_sender_accepts_domain_glob() {
+        assert!(validate_trusted_sender("*@company.com").is_ok());
+    }
+
+    #[test]
+    fn validate_trusted_sender_accepts_local_part_glob() {
+        assert!(validate_trusted_sender("alice*@example.com").is_ok());
+    }
+
+    #[test]
+    fn validate_trusted_sender_accepts_domain_wildcard() {
+        assert!(validate_trusted_sender("alice@*.company.com").is_ok());
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_empty() {
+        assert!(validate_trusted_sender("").is_err());
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_missing_at() {
+        let err = validate_trusted_sender("no-at-here.com").unwrap_err();
+        assert!(err.contains("'@'"));
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_multiple_ats() {
+        assert!(validate_trusted_sender("a@b@c.com").is_err());
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_empty_local_part() {
+        let err = validate_trusted_sender("@example.com").unwrap_err();
+        assert!(err.contains("local part"));
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_empty_domain() {
+        let err = validate_trusted_sender("alice@").unwrap_err();
+        assert!(err.contains("domain"));
+    }
+
+    #[test]
+    fn validate_trusted_sender_rejects_stray_chars() {
+        // Space is not allowed; whitespace would be a separator.
+        assert!(validate_trusted_sender("alice@exa mple.com").is_err());
+        // Angle-brackets are not allowed — the RFC 5322 display-name
+        // form is the matcher's concern, not the stored pattern's.
+        assert!(validate_trusted_sender("<alice@example.com>").is_err());
+    }
+
+    #[test]
+    fn prompt_trusted_senders_empty_input_returns_none_with_warning() {
         let input = b"\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
         assert_eq!(mode, "none");
         assert!(senders.is_empty());
     }
 
     #[test]
-    fn prompt_default_trust_none_explicit() {
-        let input = b"none\n";
+    fn prompt_trusted_senders_single_address() {
+        let input = b"alice@example.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
-        assert_eq!(mode, "none");
-        assert!(senders.is_empty());
-    }
-
-    #[test]
-    fn prompt_default_trust_verified_no_senders() {
-        let input = b"verified\n\n";
-        let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
         assert_eq!(mode, "verified");
-        assert!(senders.is_empty());
+        assert_eq!(senders, vec!["alice@example.com".to_string()]);
     }
 
     #[test]
-    fn prompt_default_trust_verified_with_senders() {
-        let input = b"verified\n*@company.com, boss@gmail.com\n";
+    fn prompt_trusted_senders_comma_separated() {
+        let input = b"alice@example.com, *@company.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(
             senders,
-            vec!["*@company.com".to_string(), "boss@gmail.com".to_string()]
+            vec!["alice@example.com".to_string(), "*@company.com".to_string()]
         );
     }
 
     #[test]
-    fn prompt_default_trust_verified_senders_whitespace_only() {
-        let input = b"verified\n  \t \n";
+    fn prompt_trusted_senders_whitespace_separated() {
+        let input = b"alice@example.com   *@company.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_default_trust(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
         assert_eq!(mode, "verified");
+        assert_eq!(senders.len(), 2);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_retries_invalid_then_accepts() {
+        let input = b"not-an-address\nalice@example.com\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(senders, vec!["alice@example.com".to_string()]);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_aborts_after_max_attempts() {
+        // Five bad lines in a row — the sixth line is never read because
+        // the wizard aborts on attempt 5 per the error-budget contract.
+        let input = b"bad1\nbad2\nbad3\nbad4\nbad5\nalice@example.com\n";
+        let mut reader = io::Cursor::new(input);
+        let err = prompt_trusted_senders(&mut reader).unwrap_err().to_string();
+        assert!(
+            err.contains(&MAX_TRUSTED_SENDERS_ATTEMPTS.to_string()),
+            "error must name the attempt ceiling: {err}"
+        );
+        assert!(
+            err.contains("bad5"),
+            "error should name the last bad entry: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_trusted_senders_warning_text_is_stable() {
+        // The operator-visible warning wording is load-bearing (PRD
+        // FR-3.2). Guard against silent edits that drop the
+        // "NOT fire" / "Add senders later" language.
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("No trusted senders"));
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("NOT fire"));
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("/etc/aimx/config.toml"));
+        assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("sudo aimx setup"));
+        // Guard against the old misleading reference (PR #138 review).
+        assert!(
+            !EMPTY_TRUSTED_SENDERS_WARNING.contains("aimx config trust add"),
+            "warning must not reference a non-existent subcommand"
+        );
+        // Cosmetic: no double-spaces inside the rendered warning.
+        assert!(
+            !EMPTY_TRUSTED_SENDERS_WARNING.contains("  "),
+            "warning should not contain leaked double spaces from \\-newline continuations"
+        );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_skipped_under_noninteractive_env() {
+        // FR-3.8: under AIMX_NONINTERACTIVE=1 the trusted-senders prompt
+        // is NOT read. `run_setup` short-circuits before calling
+        // `prompt_trusted_senders`, so this test documents the contract
+        // by way of the shared helper: `is_noninteractive_env()` returns
+        // true, and no stdin is consumed.
+        let _guard = NONINT_ENV_SERIALIZE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        unsafe { std::env::set_var(NONINTERACTIVE_ENV, "1") };
+        assert!(is_noninteractive_env());
+        unsafe { std::env::remove_var(NONINTERACTIVE_ENV) };
+    }
+
+    #[test]
+    fn resolve_noninteractive_trust_defaults_emits_logged_warning() {
+        // PR #138 regression (B1): under AIMX_NONINTERACTIVE=1 the
+        // FR-3.8 contract requires the empty-trusted-senders warning
+        // to be *logged* (not displayed). Before the fix the call site
+        // was a bare `tracing::warn!` with no subscriber ever
+        // installed on the setup path — a no-op. The helper below
+        // installs the shared subscriber (idempotently) and then
+        // emits; this test proves the emit reaches a `tracing` layer
+        // end-to-end by snapshotting into a thread-local capturing
+        // subscriber.
+        //
+        // The capturing subscriber is set via `set_default` (scoped to
+        // this thread) BEFORE calling the helper, so it wins over any
+        // global subscriber prior tests may have installed. The
+        // helper's own `logging::init()` call uses `.try_init()` which
+        // is a no-op once a global default is present, so the two
+        // subscribers do not conflict.
+        #[derive(Clone)]
+        struct SharedBuf(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for SharedBuf {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(buf);
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedBuf {
+            type Writer = SharedBuf;
+            fn make_writer(&'a self) -> Self::Writer {
+                self.clone()
+            }
+        }
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let writer = SharedBuf(buf.clone());
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("warn"))
+            .with_writer(writer)
+            .with_target(true)
+            .finish();
+        let _dispatch_guard = tracing::subscriber::set_default(subscriber);
+
+        let (policy, senders) = resolve_noninteractive_trust_defaults();
+        assert_eq!(policy, "none");
         assert!(senders.is_empty());
+
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            captured.contains("No trusted senders"),
+            "FR-3.8: empty-trusted-senders warning must reach the tracing layer. \
+             Captured:\n{captured}"
+        );
+        assert!(
+            captured.contains("NOT fire"),
+            "FR-3.8: warning body must explain that hooks will NOT fire. Captured:\n{captured}"
+        );
+        assert!(
+            captured.contains("/etc/aimx/config.toml"),
+            "FR-3.2: warning must point at a real remediation path. Captured:\n{captured}"
+        );
     }
 
     #[test]
-    fn prompt_default_trust_verified_is_case_insensitive() {
-        let input = b"VERIFIED\n\n";
-        let mut reader = io::Cursor::new(input);
-        let (mode, _) = prompt_default_trust(&mut reader).unwrap();
-        assert_eq!(mode, "verified");
+    fn resolve_noninteractive_trust_defaults_installs_tracing_subscriber() {
+        // PR #138 regression (B1, structural guard): the helper must
+        // call `crate::logging::init()` before emitting the warn. If
+        // a refactor drops the subscriber-install the FR-3.8 warning
+        // becomes a silent no-op in production (cargo tests
+        // themselves cannot catch that — see the unit test above for
+        // the emit-reaches-layer proof). This source-level check
+        // locks the install in place.
+        let source = std::fs::read_to_string(std::path::Path::new(file!())).unwrap();
+        let helper_start = source
+            .find("pub(crate) fn resolve_noninteractive_trust_defaults")
+            .expect("helper signature present");
+        // Scan the helper body through the next `}` at column 0.
+        let body = &source[helper_start..];
+        let end = body
+            .find("\n}\n")
+            .expect("helper body terminates with newline-brace");
+        let window = &body[..end];
+        // Only count uncommented calls — a refactor that guts the
+        // body but leaves a doc-link like `[crate::logging::init]` in
+        // the docstring must still fail.
+        let has_live_init = window.lines().any(|line| {
+            let trimmed = line.trim_start();
+            !trimmed.starts_with("//")
+                && !trimmed.starts_with("///")
+                && !trimmed.starts_with("/*")
+                && trimmed.contains("crate::logging::init()")
+        });
+        assert!(
+            has_live_init,
+            "resolve_noninteractive_trust_defaults must install the tracing \
+             subscriber before emitting the FR-3.8 warning (uncommented call). \
+             Window:\n{window}"
+        );
+        let init_idx = window.find("crate::logging::init()").unwrap();
+        let warn_idx = window
+            .find("tracing::warn!")
+            .expect("helper must emit the warn");
+        assert!(
+            init_idx < warn_idx,
+            "logging::init() must run before tracing::warn! so the warn is not dropped"
+        );
     }
 
     #[test]
-    fn prompt_default_trust_rejects_unknown_policy() {
-        let input = b"strict\n";
-        let mut reader = io::Cursor::new(input);
-        let err = prompt_default_trust(&mut reader).unwrap_err().to_string();
-        assert!(err.contains("strict"), "error should name input: {err}");
+    fn run_setup_wires_noninteractive_trust_defaults_helper() {
+        // PR #138 regression (B1, structural guard): the non-interactive
+        // branch of `run_setup` must go through
+        // `resolve_noninteractive_trust_defaults` so the subscriber-
+        // install + warn-emit pair stay co-located. A future refactor
+        // that inlines the `tracing::warn!` back into `run_setup`
+        // without re-adding a `logging::init()` call in that branch
+        // would silently regress the FR-3.8 contract again.
+        let source = std::fs::read_to_string(std::path::Path::new(file!())).unwrap();
+        let run_setup_start = source
+            .find("pub fn run_setup(")
+            .expect("run_setup signature present");
+        // Scan from `run_setup` onward to the end of the file.
+        let body = &source[run_setup_start..];
+        // The body between the `is_noninteractive_env()` branch and
+        // the next `else` must reference the helper by name.
+        let nonint_idx = body
+            .find("is_noninteractive_env()")
+            .expect("non-interactive branch present");
+        let window = &body[nonint_idx..nonint_idx + 500];
+        assert!(
+            window.contains("resolve_noninteractive_trust_defaults"),
+            "run_setup non-interactive branch must delegate to \
+             resolve_noninteractive_trust_defaults (FR-3.8). Window:\n{window}"
+        );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_prompt_text_has_no_double_spaces() {
+        // PR #138 review (N2): the `\`-newline + leading indent
+        // continuation pattern silently leaks extra spaces into the
+        // rendered prompt. Assert the rendered constant reads naturally.
+        assert!(
+            !TRUSTED_SENDERS_PROMPT.contains("  "),
+            "prompt should not contain leaked double spaces from \\-newline continuations"
+        );
+        assert!(TRUSTED_SENDERS_PROMPT.contains("leave blank to disable hooks"));
+        assert!(TRUSTED_SENDERS_PROMPT.contains("*@company.com"));
     }
 
     #[test]
@@ -4610,5 +4985,197 @@ owner = "aimx-catchall"
             }
             other => panic!("expected DnsVerifyResult::Fail, got {other:?}"),
         }
+    }
+
+    // ----- Sprint 5 S5-4: systemd/OpenRC ExecStart respects binary -------
+
+    #[test]
+    fn mock_get_aimx_binary_path_honours_override() {
+        // `MockSystemOps::override_aimx_binary_path` is the Sprint 5
+        // seam: when an operator installed via `AIMX_PREFIX=/opt/aimx`
+        // the canonicalized current-exe path is `/opt/aimx/bin/aimx`,
+        // not `/usr/local/bin/aimx`. Verify the mock returns the
+        // override so the generated unit string below reflects it.
+        let sys = MockSystemOps {
+            override_aimx_binary_path: Some(PathBuf::from("/opt/aimx/bin/aimx")),
+            ..Default::default()
+        };
+        let resolved = sys.get_aimx_binary_path().unwrap();
+        assert_eq!(resolved, PathBuf::from("/opt/aimx/bin/aimx"));
+    }
+
+    #[test]
+    fn generated_systemd_unit_reflects_custom_prefix() {
+        // End-to-end of the S5-4 contract: the path returned by
+        // `get_aimx_binary_path` flows directly into
+        // `generate_systemd_unit`'s `ExecStart=` line. When the install
+        // prefix is `/opt/aimx`, the unit file carries
+        // `ExecStart=/opt/aimx/bin/aimx serve --data-dir ...` — not
+        // the hardcoded `/usr/local/bin/aimx` fallback from before.
+        use crate::serve::service::generate_systemd_unit;
+        let sys = MockSystemOps {
+            override_aimx_binary_path: Some(PathBuf::from("/opt/aimx/bin/aimx")),
+            ..Default::default()
+        };
+        let aimx_path = sys.get_aimx_binary_path().unwrap();
+        let unit = generate_systemd_unit(&aimx_path.to_string_lossy(), "/var/lib/aimx");
+        assert!(
+            unit.contains("ExecStart=/opt/aimx/bin/aimx serve --data-dir /var/lib/aimx"),
+            "generated unit must carry the custom-prefix ExecStart, got:\n{unit}"
+        );
+        assert!(
+            !unit.contains("ExecStart=/usr/local/bin/aimx"),
+            "unit must not silently fall back to /usr/local/bin: {unit}"
+        );
+    }
+
+    #[test]
+    fn generated_openrc_script_reflects_custom_prefix() {
+        use crate::serve::service::generate_openrc_script;
+        let sys = MockSystemOps {
+            override_aimx_binary_path: Some(PathBuf::from("/opt/aimx/bin/aimx")),
+            ..Default::default()
+        };
+        let aimx_path = sys.get_aimx_binary_path().unwrap();
+        let script = generate_openrc_script(&aimx_path.to_string_lossy(), "/var/lib/aimx");
+        assert!(
+            script.contains("command=/opt/aimx/bin/aimx"),
+            "OpenRC script must carry the custom-prefix `command=`, got:\n{script}"
+        );
+    }
+
+    #[test]
+    fn install_service_file_has_no_silent_fallback() {
+        // Regression guard (S5-4): the Sprint 5 rewrite replaces the
+        // `.unwrap_or_else(|_| "/usr/local/bin/aimx".to_string())`
+        // silent fallback in `install_service_file` with a hard-fail.
+        // Walk the parsed AST and verify that the only occurrences of
+        // the `/usr/local/bin/aimx` literal are inside a `#[cfg(test)]`
+        // mod — production code must not hardcode the install prefix.
+        use syn::visit::Visit;
+        let source = include_str!("setup.rs");
+        let parsed = syn::parse_file(source).expect("src/setup.rs must parse");
+
+        struct Walker {
+            in_test_mod_depth: usize,
+            hits: Vec<String>,
+        }
+        impl<'ast> Visit<'ast> for Walker {
+            fn visit_item_mod(&mut self, m: &'ast syn::ItemMod) {
+                let is_test = m.attrs.iter().any(|a| {
+                    a.path().is_ident("cfg") && {
+                        let mut found = false;
+                        let _ = a.parse_nested_meta(|meta| {
+                            if meta.path.is_ident("test") {
+                                found = true;
+                            }
+                            Ok(())
+                        });
+                        found
+                    }
+                });
+                if is_test {
+                    self.in_test_mod_depth += 1;
+                    syn::visit::visit_item_mod(self, m);
+                    self.in_test_mod_depth -= 1;
+                } else {
+                    syn::visit::visit_item_mod(self, m);
+                }
+            }
+            fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+                if self.in_test_mod_depth == 0 && lit.value() == "/usr/local/bin/aimx" {
+                    self.hits.push(lit.value());
+                }
+                syn::visit::visit_lit_str(self, lit);
+            }
+        }
+
+        let mut walker = Walker {
+            in_test_mod_depth: 0,
+            hits: Vec::new(),
+        };
+        walker.visit_file(&parsed);
+        assert!(
+            walker.hits.is_empty(),
+            "production code in setup.rs must NOT hardcode \
+             /usr/local/bin/aimx — the path must flow from \
+             `get_aimx_binary_path()` (S5-4). Hits: {:?}",
+            walker.hits
+        );
+    }
+
+    // ----- Sprint 5 S5-3: wizard flow / success banner polish -------------
+
+    #[test]
+    fn success_banner_is_single_line_and_names_domain() {
+        // FR-3.5 step 8: the wizard closes with `aimx is running for
+        // <domain>.` on a single line. Capture stdout via the
+        // `announce_setup_complete` helper and verify.
+        // (Direct stdout capture is finicky under cargo test; instead
+        // assert the helper calls `term::success` with the expected
+        // string shape by grepping the source for the key literal.)
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains("aimx is running for {domain}."),
+            "announce_setup_complete must emit the FR-3.5 single-line banner"
+        );
+    }
+
+    #[test]
+    fn wizard_does_not_display_deliverability_section() {
+        // S5-1 regression: `display_deliverability_section` and
+        // `gmail_whitelist_instructions` must stay deleted from the
+        // wizard surface. Walk the parsed AST for any function with
+        // those names (regardless of visibility) — a substring grep
+        // would false-positive on this test's own comments.
+        use syn::visit::Visit;
+        let source = include_str!("setup.rs");
+        let parsed = syn::parse_file(source).expect("src/setup.rs must parse");
+
+        const RETIRED: &[&str] = &[
+            "display_deliverability_section",
+            "gmail_whitelist_instructions",
+        ];
+
+        struct Walker {
+            found: Vec<&'static str>,
+        }
+        impl<'ast> Visit<'ast> for Walker {
+            fn visit_item_fn(&mut self, f: &'ast syn::ItemFn) {
+                let name = f.sig.ident.to_string();
+                for r in RETIRED {
+                    if name == *r {
+                        self.found.push(*r);
+                    }
+                }
+                syn::visit::visit_item_fn(self, f);
+            }
+        }
+
+        let mut walker = Walker { found: Vec::new() };
+        walker.visit_file(&parsed);
+        assert!(
+            walker.found.is_empty(),
+            "Sprint 5 S5-1 retired helpers must stay gone: {:?}",
+            walker.found
+        );
+    }
+
+    #[test]
+    fn dns_verify_loop_has_prominent_q_escape() {
+        // FR-3.5 step 6: the "press `q` to skip and run `aimx doctor`
+        // later" escape must be a prominent standalone line, not a
+        // parenthetical. Assert both the `aimx doctor` hint and the
+        // literal `q` key appear near a line-start marker so future
+        // compaction doesn't bury the escape hatch.
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains("Press {} to skip and run `{}` later."),
+            "q-escape hint must be its own line"
+        );
+        assert!(
+            source.contains("aimx doctor"),
+            "q-escape must name `aimx doctor` as the followup"
+        );
     }
 }

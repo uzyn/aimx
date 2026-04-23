@@ -72,22 +72,24 @@ When run without a domain argument, setup will prompt you to enter the domain an
 
 ### First-time setup flow
 
-1. **Root check**: exits if not running as root
+1. **Root check**: exits if not running as root.
 2. **Port 25 preflight**: checks for a foreign process on port 25, then verifies outbound and inbound port 25 connectivity. Runs before the domain prompt so a VPS that blocks SMTP fails fast without asking for a domain or writing any files.
-3. **Domain prompt**: asks for domain if not provided as argument
-4. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`
-5. **DKIM key generation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`)
-6. **Config creation**: writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with any mailboxes you configure
-7. **Mailbox owners**: prompts for the Linux user who should own each mailbox (default = the address's local part if that user exists on the host). The daemon chowns each mailbox's `inbox/<mailbox>/` and `sent/<mailbox>/` to `<owner>:<owner>` mode `0700`.
-8. **Catchall user (on demand)**: when you configure a catchall mailbox, setup creates the unprivileged `aimx-catchall` system user (no login shell, no home directory) and chowns the catchall mailbox to it. No `aimx-catchall` is created if you skip the catchall — and no `aimx-hook` group is ever touched; that legacy shared-group model has been retired.
-9. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
-10. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
+3. **Domain prompt**: asks for domain if not provided as argument.
+4. **Trusted-senders prompt**: asks for a comma-separated list of addresses or glob patterns (e.g. `you@example.com, *@company.com`) that should count as trusted. Leaving the prompt blank selects `trust = "none"` and prints a loud warning that hooks will **not** fire for inbound email. Entries are validated at prompt time; bad entries re-prompt up to five times. Under `AIMX_NONINTERACTIVE=1` the prompt is skipped, the list defaults to empty, and the same warning is *logged* (not displayed) so automated pipelines surface the misconfiguration in their log collectors. Re-entry preserves existing trust config.
+5. **TLS certificate**: generates a self-signed certificate at `/etc/ssl/aimx/`.
+6. **DKIM key generation + config creation**: creates a 2048-bit RSA keypair at `/etc/aimx/dkim/` (private `0600`, public `0644`) and writes `/etc/aimx/config.toml` (mode `0640`, owner `root:root`) with the catchall mailbox and the trust defaults from step 4.
+7. **Catchall user (on demand)**: when you configure a catchall mailbox, setup creates the unprivileged `aimx-catchall` system user (no login shell, no home directory) and chowns the catchall mailbox to it. No `aimx-catchall` is created if you skip the catchall — and no `aimx-hook` group is ever touched; that legacy shared-group model has been retired.
+8. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter. Press `q` to skip verification and run `aimx doctor` later.
+9. **Service installation + success banner**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, starts `aimx serve`, prints the single-line `aimx is running for <domain>.` banner, and (only under an interactive TTY) drops through with a `→ Run aimx agent-setup` hint for the next step. `AIMX_NONINTERACTIVE=1` suppresses the drop-through hint.
 
-After initial setup, the wizard displays three clearly labeled sections:
+No hook-template checkbox UI and no Gmail / deliverability section appear in the wizard — per-user agent wiring happens post-setup via `aimx agent-setup`, and deliverability is the DNS triple plus PTR (see below).
 
-- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
-- **[MCP]**: configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
-- **[Deliverability Improvement (Optional)]**: Gmail filter/whitelist instructions
+After initial setup, the wizard displays two clearly labeled sections:
+
+- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records (or press `q` to skip and re-verify later with `aimx doctor`)
+- **[MCP]**: informational summary of the `aimx agent-setup` commands per supported agent — the actual agent wiring happens in a post-install drop-through (see [Agent integration](agent-integration.md)).
+
+Third-party mail-client workarounds (e.g. Gmail spam-filter whitelists) are **not** part of `aimx setup`'s surface. A correct SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider is the canonical deliverability story.
 
 ### Mailbox-owner prompt
 
@@ -262,8 +264,7 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 
 1. Ensure all DNS records are correctly set (especially DKIM, SPF, DMARC, and AAAA if your server has IPv6).
 2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain. This is the operator's responsibility. aimx does not check or manage PTR.
-3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
-4. Alternatively, reply to an email from the domain. Gmail learns it's not spam.
+3. Third-party mail-client whitelists (e.g. Gmail filter rules) are out of scope for aimx. If your recipients' provider misclassifies well-signed mail, it is a client-side workaround; configure it on their end, not in aimx.
 
 ### Firewall
 
