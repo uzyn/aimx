@@ -1,17 +1,7 @@
 use clap::{Parser, Subcommand};
 
-pub fn version_string() -> &'static str {
-    use std::sync::LazyLock;
-    static VERSION: LazyLock<String> = LazyLock::new(|| {
-        let hash = env!("GIT_HASH");
-        if hash == "unknown" || hash.is_empty() {
-            env!("CARGO_PKG_VERSION").to_string()
-        } else {
-            format!("{} ({hash})", env!("CARGO_PKG_VERSION"))
-        }
-    });
-    &VERSION
-}
+#[allow(unused_imports)]
+pub use crate::version::{build_date, git_hash, release_tag, target_triple, version_string};
 
 #[derive(Parser)]
 #[command(
@@ -21,7 +11,10 @@ pub fn version_string() -> &'static str {
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
                    MCP is built in. Hooks trigger agent actions on incoming mail.",
-    version = version_string()
+    // We render `--version` ourselves so the output is exactly the FR-6.1
+    // banner produced by `version_string()`. Clap's built-in version flag
+    // would prepend the binary name, yielding `aimx aimx <tag> ...`.
+    disable_version_flag = true
 )]
 pub struct Cli {
     /// Data directory override (default: /var/lib/aimx)
@@ -30,6 +23,62 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Command,
+}
+
+/// If the user invoked `aimx --version` / `aimx -V` at the top level,
+/// print the FR-6.1 banner and return `true` so `main()` can exit before
+/// clap's parser refuses a missing subcommand. Handled manually because
+/// clap's default `ArgAction::Version` prepends the binary name and would
+/// render `aimx aimx <tag> ...`.
+pub fn handle_version_flag<I, S>(args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    for (idx, arg) in args.into_iter().enumerate() {
+        if idx == 0 {
+            continue;
+        }
+        let s = arg.as_ref();
+        if s == "--version" || s == "-V" {
+            println!("{}", version_string());
+            return true;
+        }
+        // Stop scanning once we cross into a subcommand's own args so
+        // subcommand-level `--version` (if any is ever added) isn't
+        // swallowed.
+        if let Some(str_ref) = s.to_str()
+            && !str_ref.starts_with('-')
+        {
+            return false;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handle_version_flag_matches_long_form() {
+        assert!(handle_version_flag(["aimx", "--version"]));
+    }
+
+    #[test]
+    fn handle_version_flag_matches_short_form() {
+        assert!(handle_version_flag(["aimx", "-V"]));
+    }
+
+    #[test]
+    fn handle_version_flag_ignores_subcommand() {
+        assert!(!handle_version_flag(["aimx", "serve", "--version"]));
+    }
+
+    #[test]
+    fn handle_version_flag_ignores_absent() {
+        assert!(!handle_version_flag(["aimx", "doctor"]));
+    }
 }
 
 #[derive(Subcommand)]

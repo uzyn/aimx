@@ -27,6 +27,12 @@ jobs:
       - name: Run tests
         run: cargo test
 
+      # Sprint 2 S2-3: Tier-2 integration tests that hit the live
+      # `v0.0.0-fixture` GitHub release. Feature-gated so the default
+      # `cargo test` above stays offline and free of rate-limit flakes.
+      - name: Run release integration tests
+        run: cargo test --features integration --test release_integration
+
       - name: Check author metadata
         run: |
           if grep -r '"author"' agents/ | grep -q '"AIMX"'; then

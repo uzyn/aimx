@@ -88,6 +88,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
+        upgrade: None,
     }
 }
 
@@ -834,6 +835,7 @@ async fn test_ingest_failure_returns_451() {
         mailboxes: HashMap::new(),
         verify_host: None,
         enable_ipv6: false,
+        upgrade: None,
     };
     let (port, _shutdown) = start_server(config).await;
     let mut client = TestClient::connect(port).await;

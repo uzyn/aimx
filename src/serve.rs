@@ -1455,6 +1455,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                upgrade: None,
             };
 
             let server = crate::smtp::SmtpServer::new(config);
@@ -1765,6 +1766,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 
@@ -1925,6 +1927,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                upgrade: None,
             };
             let handle_cfg = ConfigHandle::new(config);
 

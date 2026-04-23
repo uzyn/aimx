@@ -1928,6 +1928,7 @@ mod tests {
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 
@@ -2397,6 +2398,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
 
         let info = gather_status(&config);
@@ -2924,6 +2926,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         };
 
         let info = gather_status_with_ops(
@@ -2995,6 +2998,7 @@ mod tests {
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 
@@ -3389,6 +3393,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            upgrade: None,
         }
     }
 
