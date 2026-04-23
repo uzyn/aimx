@@ -7,7 +7,9 @@
 use crate::config::HookTemplateStdin;
 use crate::hook::HookEvent;
 use crate::hook_client::{TemplateCrudFallback, submit_template_create_via_daemon};
-use crate::send_protocol::{TemplateCreateRequest, TemplateUpdateRequest, UdsTemplatePayload};
+use crate::send_protocol::{
+    TemplateCreateRequest, TemplateDeleteRequest, TemplateUpdateRequest, UdsTemplatePayload,
+};
 use crate::term;
 use include_dir::{Dir, DirEntry, include_dir};
 use std::ffi::OsString;
@@ -520,6 +522,15 @@ pub trait AgentEnv {
         request: &TemplateUpdateRequest,
     ) -> Result<(), TemplateCrudFallback> {
         crate::hook_client::submit_template_update_via_daemon(request)
+    }
+    /// Submit a `TEMPLATE-DELETE` frame to the daemon. Default delegates
+    /// to the UDS client; tests can override to exercise the
+    /// socket-missing / NOTFOUND branches without a daemon.
+    fn submit_template_delete(
+        &self,
+        request: &TemplateDeleteRequest,
+    ) -> Result<(), TemplateCrudFallback> {
+        crate::hook_client::submit_template_delete_via_daemon(request)
     }
 }
 
@@ -1625,6 +1636,16 @@ mod tests {
                 Ok(()) => Ok(()),
                 Err(e) => Err(clone_fallback(e)),
             }
+        }
+        fn submit_template_delete(
+            &self,
+            _request: &TemplateDeleteRequest,
+        ) -> Result<(), TemplateCrudFallback> {
+            // Not exercised in agent-setup tests; agent-cleanup covers
+            // the delete path in its own module tests.
+            Err(TemplateCrudFallback::Local(
+                "submit_template_delete not used in agent-setup tests".into(),
+            ))
         }
     }
 

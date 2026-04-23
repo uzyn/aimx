@@ -13,7 +13,6 @@
 //! present-but-orphan user from an outright lookup error.
 
 use std::ffi::CString;
-use std::sync::RwLock;
 
 /// A resolved Linux user. `name` echoes the input for convenience so
 /// callers can use the resolved value in error messages without cloning
@@ -121,13 +120,6 @@ pub(crate) fn set_test_resolver(
 ) -> test_resolver::ResolverOverride {
     test_resolver::ResolverOverride::set(f)
 }
-
-// Shared RwLock scaffold so a future, non-test-gated hot-swap (e.g.,
-// SIGHUP re-resolves cached uids) can drop in without API churn. Today
-// the RwLock is unused in production — the direct `libc::getpwnam` path
-// is cheap enough that we don't need a cache.
-#[allow(dead_code)]
-static _RESOLVER_SCAFFOLD: RwLock<()> = RwLock::new(());
 
 #[cfg(test)]
 mod tests {

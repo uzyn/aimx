@@ -6,8 +6,9 @@ Mailboxes are the core organizational unit in aimx. Each mailbox maps an email a
 
 ## Concepts
 
-- **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No OS users, no passwords, no database.
-- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only. No `sent/catchall/` directory is created.
+- **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No passwords, no database.
+- **Per-mailbox owner.** Every mailbox has an `owner` field in `config.toml` naming the Linux user who owns it. Storage is chowned `<owner>:<owner>` mode `0700` at create time and kept consistent through every write. One user can own many mailboxes; one mailbox has exactly one owner. Only the owner (and root) can read a mailbox's contents. The MCP server and UDS socket both enforce per-mailbox owner checks on every request — alice cannot list, read, or act on bob's mailboxes. See [Hooks § UDS authorization](hooks.md#uds-authorization-so_peercred) for the authz table.
+- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only. No `sent/catchall/` directory is created. The catchall's owner is always the reserved `aimx-catchall` system user, created on demand by setup.
 - **No restart needed. The daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/aimx.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
 - **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files. It returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
 - **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files, continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**. The MCP `mailbox_delete` tool deliberately does not gain a force variant. Destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
@@ -47,12 +48,31 @@ For example, with mailboxes `support` and `catchall` configured:
 
 ```bash
 aimx mailboxes create support
+aimx mailboxes create support --owner alice
 ```
 
 This creates `support@agent.yourdomain.com` and both directories:
 `/var/lib/aimx/inbox/support/` (for incoming mail) and
 `/var/lib/aimx/sent/support/` (for outbound copies). Deletion removes
 both; `catchall` cannot be deleted.
+
+The `--owner` flag names the Linux user who should own the mailbox. The daemon validates the user via `getpwnam`, atomically rewrites `config.toml` with `owner = "<user>"`, and chowns both storage directories to `<owner>:<owner>` mode `0700`. When `--owner` is omitted and the caller is on a TTY, `aimx mailboxes create` prompts interactively (default = the local part of the address if that user exists). On a non-TTY (pipe, script, `AIMX_NONINTERACTIVE=1`) it errors with a hint to `useradd` if the user is missing.
+
+**Worked example:** alice sets up a shared `support` mailbox on the family server:
+
+```bash
+# create the Linux user first (operator does this)
+sudo useradd --system --shell /usr/sbin/nologin support-agent
+
+# alice (or the operator) creates the mailbox owned by that user
+aimx mailboxes create support --owner support-agent
+
+# verify ownership landed where expected
+ls -la /var/lib/aimx/inbox/support/    # drwx------  support-agent support-agent
+ls -la /var/lib/aimx/sent/support/     # drwx------  support-agent support-agent
+```
+
+Any agent running under uid `support-agent` can now read `/var/lib/aimx/inbox/support/` and use the MCP tools against the `support` mailbox. alice's own uid cannot read it (unless she is also root) — isolation is filesystem-enforced.
 
 ### List mailboxes
 

@@ -96,7 +96,7 @@ Trust only gates hook execution (`on_receive`). All email is stored regardless o
 
 ### Hook settings
 
-Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is either **template-bound** (`template = "..."`, `params = {...}`) or **raw-cmd** (`cmd = "..."`). Both flavours run sandboxed as `aimx-hook` by default.
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is either **template-bound** (`template = "..."`, `params = {...}`) or **raw-cmd** (`cmd = "..."`). Both flavours run sandboxed as the mailbox's `owner` by default (catchall hooks default to the reserved `aimx-catchall` user).
 
 | Setting | Type | Description |
 |---------|------|-------------|
@@ -107,7 +107,7 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is either **
 | `template` | string | Name of a `[[hook_template]]` to bind to. Mutually exclusive with `cmd`. |
 | `params` | table | Bound parameter values for template-bound hooks. Keys must match the template's declared `params`; unknown keys rejected. |
 | `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on hooks with `origin = "mcp"`. |
-| `run_as` | string | `"aimx-hook"` (default) or `"root"`. `root` is only settable via hand-edit of `config.toml` — not via CLI or MCP. |
+| `run_as` | string | Any existing Linux username; must equal the mailbox's `owner` (catchall exception: `"aimx-catchall"`) or `"root"`. Defaults to the mailbox's `owner` when omitted. `"root"` is only settable via hand-edit of `config.toml` — not via CLI or MCP. |
 | `origin` | string | `"operator"` (default) or `"mcp"`. Stamped by the daemon based on submission channel. |
 
 Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
@@ -123,7 +123,7 @@ Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](
 | `cmd` | array of strings | *(required)* | Argv for the child process. `cmd[0]` is the binary path; subsequent entries may embed `{name}` placeholders in string values. |
 | `params` | array of strings | `[]` | Declared placeholder names the operator/agent fills at hook-create time. Must be a 1:1 set with the placeholders in `cmd` (minus built-ins). |
 | `stdin` | string | `"email"` | `"email"` (pipe the raw `.md`), `"email_json"` (`{"raw": ...}`), or `"none"`. |
-| `run_as` | string | `"aimx-hook"` | Unix user for the child process. Only `"aimx-hook"` or `"root"` are accepted. |
+| `run_as` | string | *(required)* | Linux username the child process runs as. Any user resolvable via `getpwnam(3)` is accepted, plus the reserved `"aimx-catchall"` (for catchall-bound templates) and `"root"` (only settable via root-executed `config.toml` edit; the UDS verb rejects these two values). Templates registered via `aimx agent-setup` default to the registering user's username. |
 | `timeout_secs` | int | `60` | Hard subprocess timeout. Range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `allowed_events` | array of strings | `["on_receive", "after_send"]` | Events the template may be wired to. MCP `hook_create` with a disallowed event is rejected. |
 

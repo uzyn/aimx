@@ -1,3 +1,4 @@
+mod agent_cleanup;
 mod agent_setup;
 mod cli;
 mod config;
@@ -54,17 +55,10 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         Command::Setup {
             domain,
             verify_host,
-            non_interactive,
         } => {
             let sys = setup::RealSystemOps;
             let net = build_network_ops(verify_host.as_deref())?;
-            setup::run_setup(
-                domain.as_deref(),
-                cli.data_dir.as_deref(),
-                non_interactive,
-                &sys,
-                &net,
-            )
+            setup::run_setup(domain.as_deref(), cli.data_dir.as_deref(), &sys, &net)
         }
         // Uninstall also runs pre-config: config may be missing or unreadable.
         Command::Uninstall { yes } => {
@@ -97,6 +91,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             redetect,
             data_dir: cli.data_dir.as_deref(),
         }),
+        // agent-cleanup is the per-user inverse of agent-setup. Drops
+        // the `invoke-<agent>-<username>` template over UDS and, with
+        // `--full`, removes the plugin files too. Never loads config.
+        Command::AgentCleanup { agent, full, yes } => {
+            agent_cleanup::run(agent_cleanup::RunOpts { agent, full, yes })
+        }
         // `aimx send` is a pure UDS client. It never reads config.toml.
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.
@@ -157,7 +157,8 @@ fn dispatch_with_config(
         | Command::Mcp
         | Command::Send(_)
         | Command::Logs { .. }
-        | Command::AgentSetup { .. } => unreachable!("handled by dispatch"),
+        | Command::AgentSetup { .. }
+        | Command::AgentCleanup { .. } => unreachable!("handled by dispatch"),
     }
 }
 

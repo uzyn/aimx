@@ -11,7 +11,7 @@ The reasoning is narrow: the only thing that lets an actor credibly impersonate 
 - aimx is a **single-operator, single-host** SMTP server. It assumes one administrator and treats every local user and agent on that host as inside the trust boundary.
 - `aimx serve` runs as root and owns the DKIM signing key. All other processes (`aimx send`, `aimx mcp`, hook subprocesses) are unprivileged and cannot forge outbound signatures.
 - The Unix socket at `/run/aimx/aimx.sock` is intentionally world-writable (`0666`). It is a signing oracle for the configured mailboxes, nothing more; it cannot be used to run arbitrary commands on the host.
-- Hook subprocesses run as the unprivileged `aimx-hook` user by default. Template hooks (the agent-creatable kind) never invoke a shell and cannot escape their declared argv slots.
+- Hook subprocesses run as the mailbox's owner (the registering Linux user) by default, never as root. Template hooks (the agent-creatable kind) never invoke a shell and cannot escape their declared argv slots.
 - DKIM / SPF / DMARC results are recorded in every inbound email's frontmatter but only DKIM gates hook execution. Mail is always stored, regardless of the authentication outcome.
 - aimx does not implement per-user mailbox isolation, IMAP / POP3, webmail, SMTP AUTH, a retry queue, DSN bounces, spam filtering, or rate limiting. Those are out of scope by design, not on a roadmap.
 
@@ -45,7 +45,7 @@ The clearest view of aimx is a table of who-can-reach-what:
 | `aimx serve`       | root                  | yes                | n/a (handles the socket)  | yes (via its own UDS)  |
 | `aimx send`        | invoking user         | no                 | yes                       | no                     |
 | `aimx mcp`         | the agent's user      | no                 | yes (subset of verbs)     | no                     |
-| Hook subprocess    | `aimx-hook`           | no                 | no (env-only)             | no                     |
+| Hook subprocess    | mailbox owner (`run_as`) | no              | no (env-only)             | no                     |
 | Any local user     | their login UID       | no                 | yes (socket is `0666`)    | no                     |
 
 The only subject that touches the DKIM key is the daemon. Every other subject that wants to send mail under your domain has to ask the daemon nicely, over the socket — and the daemon, not the caller, decides whether to sign.
@@ -75,12 +75,12 @@ Everything aimx creates on disk has a deliberate permission choice. The surprisi
 | `/etc/aimx/dkim/private.key`  | `0600`  | `root:root`       | DKIM signing key                                   |
 | `/etc/aimx/dkim/public.key`   | `0644`  | `root:root`       | Published in the `_domainkey` TXT record           |
 | `/var/lib/aimx/`              | `0755`  | `root:root`       | Storage root (world-readable *by design*)          |
-| `/var/lib/aimx/inbox/`        | group-readable | `root:aimx-hook` | Inbound mail (`chmod -R g+rX` so hook stdin works) |
-| `/var/lib/aimx/sent/`         | group-readable | `root:aimx-hook` | Outbound copies (`chmod -R g+rX` so hook stdin works) |
+| `/var/lib/aimx/inbox/<mailbox>/` | `0700`   | `<owner>:<owner>` | Inbound mail for the mailbox (owner = the Linux user who owns it) |
+| `/var/lib/aimx/sent/<mailbox>/`  | `0700`   | `<owner>:<owner>` | Outbound copies for the mailbox (same owner) |
 | `/run/aimx/`                  | `0755`  | `root:root`       | Runtime directory (provided by systemd/OpenRC)     |
 | `/run/aimx/aimx.sock`         | `0666`  | `root:root`       | UDS signing oracle (world-writable *by design*)    |
 
-Two choices are load-bearing and deserve their own sections below: the **world-readable storage tree** and the **world-writable socket**. Both are deliberate, and both have their escape hatches (run on a dedicated host, don't share the box with untrusted users).
+Two choices are load-bearing and deserve their own sections below: the **per-owner mailbox isolation** and the **world-writable socket**. Both are deliberate, and both have their escape hatches (run on a dedicated host, don't share the box with untrusted users).
 
 ### `/etc/aimx/` and `/var/lib/aimx/`
 
@@ -88,7 +88,7 @@ The two directories exist on purpose to hold opposite kinds of data.
 
 `/etc/aimx/` holds **secrets and policy**: the DKIM private key that signs as your domain, the mailbox list, the hook config, the template definitions. If any of that is writable or readable by a non-root process, the boundary collapses. So the whole tree is root-owned with the key at `0600`, the config at `0640`, and the daemon is the only process that opens it for read at startup.
 
-`/var/lib/aimx/` holds **the mailboxes**: Markdown files with TOML frontmatter, one per email, plus their attachments as siblings in a Zola-style bundle. This tree is world-readable on purpose, because the whole point of storing mail this way is to hand agents a flat, parse-friendly corpus they can `ls`, `grep`, `head`, index with an LLM pipeline, or walk directly from a shell hook without going through an IMAP server or a mailbox API. `.md` + TOML frontmatter is specifically chosen because every LLM and every RAG tool already knows how to read it; there is no custom schema to learn and no decoder to write. Making the tree private would either force agents to speak IMAP (a protocol they are notoriously bad at) or to proxy every read through an MCP tool (adding latency and cost). The deliberate trade is: on a single-operator host, local read access to the mailbox tree is a feature, not a leak.
+`/var/lib/aimx/` holds **the mailboxes**: Markdown files with TOML frontmatter, one per email, plus their attachments as siblings in a Zola-style bundle. Each mailbox is chowned to its configured owner (`<owner>:<owner>`) at mode `0700`, so only that owner and root can read its contents. The daemon enforces this on every write (ingest, send, mark-read). The storage model is deliberately flat text — agents `ls`, `grep`, `head`, index with an LLM pipeline, or walk directly from a shell hook without going through an IMAP server or a mailbox API. `.md` + TOML frontmatter is specifically chosen because every LLM and every RAG tool already knows how to read it; there is no custom schema to learn and no decoder to write. Per-mailbox ownership keeps each agent scoped to its own inbox while preserving the flat-corpus ergonomics inside that inbox.
 
 The boundary between these two directories is why the design holds: secrets never flow outward, mail never flows into the secrets tree.
 
@@ -196,17 +196,17 @@ The operator installs a small set of pre-vetted command shapes once — during `
 
 ```toml
 [[hook_template]]
-name = "invoke-claude"
+name = "invoke-claude-code-alice"
 cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
 params = ["prompt"]
-run_as = "aimx-hook"
+run_as = "alice"
 timeout_secs = 60
 ```
 
 Agents bind to those shapes over MCP, filling declared `{placeholder}` slots with string values:
 
 ```json
-{"template": "invoke-claude", "params": {"prompt": "File this email"}}
+{"template": "invoke-claude-code-alice", "params": {"prompt": "File this email"}}
 ```
 
 What makes this safe is a short list of guarantees the code enforces (from `src/hook_substitute.rs`):
@@ -218,7 +218,7 @@ What makes this safe is a short list of guarantees the code enforces (from `src/
 
 The rendered argv vector is handed to `execvp` directly. `/bin/sh -c` is never invoked for template hooks, so there is no string-to-argv parsing step for an attacker to subvert.
 
-Template hooks run as `aimx-hook`, a system user with no login shell and no home directory, created once by `aimx setup`. On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`.
+Template hooks run as the template's `run_as` Linux user — typically the mailbox owner that registered the template via `aimx agent-setup` — never as root. On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`, with `--uid=<run_as>`.
 
 The substitution logic has no I/O and no locks, so it is fuzzed in isolation (`tests/hook_substitute_fuzz.rs`).
 
@@ -230,7 +230,7 @@ The operator keeps a full-power escape hatch. Raw-cmd hooks are shell strings wr
 - May set `run_as = "root"` by hand-edit only. The CLI does not expose the flag.
 - May set `dangerously_support_untrusted = true` (on `on_receive` hooks only), bypassing the trust gate described below.
 - Are loaded by sending SIGHUP to the daemon.
-- Run as `aimx-hook` by default unless `run_as` is overridden.
+- Run as the mailbox's `owner` by default unless `run_as` is overridden (catchall hooks default to `aimx-catchall`).
 
 Crucially, raw-cmd hooks are **never** reachable from the socket, and therefore never from MCP. An agent that wants shell-level automation has to file a ticket with the operator, who decides whether to add a template for it. This is the intended friction.
 
@@ -283,7 +283,7 @@ The MCP server is in scope the same way any other local subject is: it runs as t
 
 These are not on a roadmap. They are non-goals.
 
-1. **Per-user mailbox isolation.** Mailboxes are world-readable by design. Use Postfix or Stalwart if you need private inboxes per human user.
+1. **Multi-user mailbox ACLs beyond owner/root.** Each mailbox is owned by one Linux user at mode `0700`; there is no shared-group readership and no fine-grained per-other-user ACL layer. Use Postfix or Stalwart if you need that.
 2. **SMTP AUTH / submission port 587.** aimx is not a submission MTA. Its outbound path is UDS → DKIM-sign → direct MX.
 3. **IMAP / POP3 / webmail.** Agents read `.md` files via MCP or the filesystem. There is no mailbox server protocol.
 4. **Reverse DNS (PTR).** Configured at your VPS provider, not by `aimx setup`. Optional but improves deliverability.
@@ -302,4 +302,4 @@ The design leaves a few knobs you can tighten beyond the defaults:
 - **Keep the template list minimal.** Every installed template is an argv shape you have authorised for agents to invoke.
 - **Review hook-fire logs** after a new template lands: `journalctl -u aimx | grep hook_name=<name>`.
 - **Switch `trust` to `"verified"`** and populate `trusted_senders` once you know which senders should trigger agents. Default `"none"` is safe but silent.
-- **Set `run_as` explicitly** on raw-cmd hooks you hand-edit, even to the default `aimx-hook`. Explicit configs survive refactors better than implicit defaults.
+- **Set `run_as` explicitly** on raw-cmd hooks you hand-edit, even to the mailbox's owner. Explicit configs survive refactors better than implicit defaults.
