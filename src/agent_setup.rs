@@ -829,18 +829,34 @@ pub enum InstallState {
 /// Detect the install / wired state of one agent against a concrete home
 /// directory. Sprint 6 S6-1 + FR-5.2.
 ///
-/// Rules:
-/// 1. If `dest_template` (resolved under `home`) exists → `InstalledWired`.
-/// 2. Else, if `agent_root_template` (resolved under `home`) exists →
-///    `InstalledNotWired` (agent present, aimx not yet wired).
-/// 3. Else → `NotInstalled`.
+/// FR-5.2 specifies `InstalledWired` when the destination "exists AND
+/// contains aimx's MCP entry". Content-check strategy (kept intentionally
+/// cheap — no JSON/TOML parse):
+///
+/// 1. Resolve `dest_template` under `home` / `xdg`.
+/// 2. **Directory destinations** (`claude-code`, `codex`, `opencode`,
+///    `gemini`, `openclaw`, `hermes`): the destination is a directory aimx
+///    itself lays down (e.g. `~/.claude/plugins/aimx`). Consider it
+///    "wired" when the directory exists AND contains at least one file
+///    whose bytes contain the substring `aimx`. This catches the case
+///    where the operator / cleanup left behind an empty `.claude/plugins/
+///    aimx/` directory but aimx's `SKILL.md` / `plugin.json` is gone.
+///    Since aimx's own installer fills the directory with files that
+///    reference "aimx" in their content, any real install hits.
+/// 3. **File-bundle destinations** (`goose`): the destination is a
+///    recipes directory aimx shares with the user's own recipes.
+///    Consider it "wired" when the directory contains an `aimx.yaml`
+///    file (the concrete file aimx writes).
+/// 4. Else, if `agent_root_template` exists → `InstalledNotWired` (agent
+///    present, aimx not yet wired; the default-selected state).
+/// 5. Else → `NotInstalled`.
 ///
 /// `xdg` is threaded through so agents whose paths use `$XDG_CONFIG_HOME`
 /// (opencode, goose) resolve identically to how the installer would
 /// resolve them. `None` falls back to `<home>/.config`.
 pub fn detect_install_state(spec: &AgentSpec, home: &Path, xdg: Option<PathBuf>) -> InstallState {
     let dest = resolve_template_in_home(spec.dest_template, home, xdg.clone());
-    if dest.exists() {
+    if dest.exists() && dest_contains_aimx_entry(spec, &dest) {
         return InstallState::InstalledWired;
     }
     let root = resolve_template_in_home(spec.agent_root_template, home, xdg);
@@ -848,6 +864,58 @@ pub fn detect_install_state(spec: &AgentSpec, home: &Path, xdg: Option<PathBuf>)
         return InstallState::InstalledNotWired;
     }
     InstallState::NotInstalled
+}
+
+/// Per-agent content check used by `detect_install_state` to confirm the
+/// destination isn't just an orphan directory but actually contains the
+/// aimx plugin / skill / recipe files aimx's installer would have laid
+/// down. Returns `true` when the destination looks like a real aimx
+/// wiring, `false` when it's an empty/stale directory or missing the
+/// canonical aimx file.
+///
+/// Chosen over full JSON / TOML parsing because the check runs inside
+/// the TUI hot path for every registered agent on every render loop; a
+/// cheap substring scan on a small file (or file presence for goose) is
+/// sufficient and avoids pulling per-agent parsers into the detection
+/// path.
+fn dest_contains_aimx_entry(spec: &AgentSpec, dest: &Path) -> bool {
+    match spec.name {
+        // Goose ships a single recipe file under the shared recipes
+        // directory; the wired marker is `aimx.yaml` inside it. Checking
+        // for file presence alone is enough — if aimx wrote it, the
+        // filename carries the wiring signal.
+        "goose" => dest.join("aimx.yaml").is_file(),
+        // Directory-shaped destinations: walk the directory's top-level
+        // entries and return true if any regular file contains the
+        // substring "aimx" anywhere in its bytes. aimx's own SKILL.md /
+        // plugin.json / skill headers all reference "aimx" in their
+        // content, so a real install always hits. Limit the scan to the
+        // top level to keep cost bounded on big skill trees.
+        _ => match std::fs::read_dir(dest) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        continue;
+                    }
+                    if let Ok(bytes) = std::fs::read(&path)
+                        && contains_subslice(&bytes, b"aimx")
+                    {
+                        return true;
+                    }
+                }
+                false
+            }
+            Err(_) => false,
+        },
+    }
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return needle.is_empty();
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Parameters for one `aimx agent-setup` invocation. Carries everything
@@ -910,6 +978,21 @@ pub fn run_with_env(
     env: &dyn AgentEnv,
 ) -> Result<(), Box<dyn std::error::Error>> {
     run_with_env_to_writer(opts, env, &mut io::stdout())
+}
+
+/// Run the non-`--list`, post-root-gate install path directly. Used by
+/// the Sprint 6 TUI's per-agent sub-calls so the root gate (and its
+/// `OverrideHomeEnv` wrap) runs exactly once per top-level invocation
+/// instead of re-wrapping a fresh override for every selected agent.
+/// Non-blocker N6 from PR #139 review. Callers must have already applied
+/// the root gate if the ambient env is root; passing a plain root env
+/// here bypasses the refusal.
+pub fn run_with_env_post_gate(
+    opts: RunOpts<'_>,
+    env: &dyn AgentEnv,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_env_to_writer_inner(opts, env, out)
 }
 
 /// Testable core of `run_with_env`: writes install output, `--list` output,
@@ -976,17 +1059,33 @@ fn run_with_env_to_writer_inner(
             format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
         })?,
         None => {
-            // Bare invocation. With `--no-interactive` (or a non-TTY
-            // stdout such as a pipe), fall back to the plain registry
-            // dump so scripts get a deterministic listing. Otherwise,
-            // launch the Sprint 6 checkbox TUI per FR-5.5.
-            if opts.no_interactive || !is_stdout_tty() {
+            // Bare invocation. Several cases fall back to the plain
+            // registry dump so scripts / `--print` without an agent get
+            // deterministic, non-interactive output:
+            //
+            //   1. `--no-interactive` passed explicitly (FR-5.5).
+            //   2. stdout is not a TTY (script / piped invocation).
+            //   3. `--print` with no agent — `--print` is a dry-run hint
+            //      on a specific agent's install; with no agent there is
+            //      nothing to preview, so launching the TUI would be
+            //      surprising. Print the registry and exit.
+            //
+            // Otherwise launch the Sprint 6 checkbox TUI per FR-5.5.
+            if opts.no_interactive || opts.print || !is_tty_for_tui() {
                 print_registry_to_writer(env, out)?;
-                writeln!(
-                    out,
-                    "Run `aimx agent-setup <agent>` to install one of the agents \
-                     above, or `aimx agent-setup --list` to print this list again."
-                )?;
+                if opts.print {
+                    writeln!(
+                        out,
+                        "Pass an agent name (e.g. `aimx agent-setup --print claude-code`) \
+                         to preview the files an install would lay down."
+                    )?;
+                } else {
+                    writeln!(
+                        out,
+                        "Run `aimx agent-setup <agent>` to install one of the agents \
+                         above, or `aimx agent-setup --list` to print this list again."
+                    )?;
+                }
                 return Ok(());
             }
             return crate::agent_tui::run_tui(&opts, env, out);
@@ -996,9 +1095,15 @@ fn run_with_env_to_writer_inner(
     install_to_writer(spec, &install_opts, env, out)
 }
 
-fn is_stdout_tty() -> bool {
+/// TTY detection used to decide whether to launch the Sprint 6 checkbox
+/// TUI. The TUI draws to `console::Term::stderr()` and reads keystrokes
+/// from the controlling terminal, so the right check is "is stderr a
+/// TTY" — if stderr is a pipe, the rendered menu would go to `/dev/null`
+/// (or wherever stderr was redirected) even though stdout might still
+/// be a terminal. Non-blocker N7 from PR #139 review.
+fn is_tty_for_tui() -> bool {
     use std::io::IsTerminal;
-    io::stdout().is_terminal()
+    io::stderr().is_terminal()
 }
 
 fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
@@ -2029,11 +2134,51 @@ mod tests {
 
     #[test]
     fn detect_install_state_installed_wired_when_dest_exists() {
+        // FR-5.2: destination must exist AND contain aimx's MCP entry.
+        // An empty plugin directory reports NotWired; a directory holding
+        // a file that references "aimx" reports Wired.
         let tmp = TempDir::new().unwrap();
-        std::fs::create_dir_all(tmp.path().join(".claude").join("plugins").join("aimx")).unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        // Empty dir → NotWired (falls back to agent_root existence = InstalledNotWired).
+        let state_empty = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state_empty, InstallState::InstalledNotWired);
+
+        // Drop aimx-content file → Wired.
+        std::fs::write(
+            plugin_dir.join("plugin.json"),
+            r#"{"mcpServers":{"aimx":{}}}"#,
+        )
+        .unwrap();
+        let state_wired = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state_wired, InstallState::InstalledWired);
+    }
+
+    #[test]
+    fn detect_install_state_orphan_empty_dest_is_not_wired() {
+        // Regression guard for FR-5.2 content check: an orphan empty
+        // destination directory must not mis-report as wired.
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
         let spec = find_agent("claude-code").unwrap();
         let state = detect_install_state(spec, tmp.path(), None);
-        assert_eq!(state, InstallState::InstalledWired);
+        // Empty dir is not Wired (agent_root exists → NotWired).
+        assert_eq!(state, InstallState::InstalledNotWired);
+    }
+
+    #[test]
+    fn detect_install_state_dest_with_unrelated_file_is_not_wired() {
+        // Another orphan case: dest dir with a file that doesn't mention
+        // aimx. Must report NotWired rather than Wired.
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&plugin_dir).unwrap();
+        std::fs::write(plugin_dir.join("stale.txt"), "nothing to see").unwrap();
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(state, InstallState::InstalledNotWired);
     }
 
     #[test]
@@ -2057,16 +2202,23 @@ mod tests {
 
     #[test]
     fn detect_install_state_flags_goose_recipe_file() {
-        // Goose's dest_template points at a directory
-        // (`$XDG_CONFIG_HOME/goose/recipes`). Creating the directory is
-        // what "aimx has been wired" looks like because that's the path
-        // `agent_setup` creates / writes into.
+        // Goose's dest_template points at the recipes directory
+        // (`$XDG_CONFIG_HOME/goose/recipes`). FR-5.2 content check:
+        // "wired" means `aimx.yaml` exists inside that directory. A bare
+        // recipes dir (no aimx.yaml) reports NotWired.
         let tmp = TempDir::new().unwrap();
         let xdg = tmp.path().join(".config");
-        std::fs::create_dir_all(xdg.join("goose").join("recipes")).unwrap();
+        let recipes = xdg.join("goose").join("recipes");
+        std::fs::create_dir_all(&recipes).unwrap();
         let spec = find_agent("goose").unwrap();
-        let state = detect_install_state(spec, tmp.path(), Some(xdg));
-        assert_eq!(state, InstallState::InstalledWired);
+        // No aimx.yaml yet → NotWired.
+        let state_empty = detect_install_state(spec, tmp.path(), Some(xdg.clone()));
+        assert_eq!(state_empty, InstallState::InstalledNotWired);
+
+        // Drop aimx.yaml → Wired.
+        std::fs::write(recipes.join("aimx.yaml"), "# aimx recipe\n").unwrap();
+        let state_wired = detect_install_state(spec, tmp.path(), Some(xdg));
+        assert_eq!(state_wired, InstallState::InstalledWired);
     }
 
     // ----- Sprint 6 S6-2: OverrideHomeEnv / root override --------------------
