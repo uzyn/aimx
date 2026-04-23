@@ -112,6 +112,12 @@ mod tests {
         fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("logs::run must not touch restart_service")
         }
+        fn stop_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("logs::run must not touch stop_service")
+        }
+        fn start_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("logs::run must not touch start_service")
+        }
         fn is_service_running(&self, _service: &str) -> bool {
             unreachable!("logs::run must not touch is_service_running")
         }

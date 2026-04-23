@@ -1866,6 +1866,12 @@ mod tests {
         fn restart_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("gather_status must not touch restart_service")
         }
+        fn stop_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch stop_service")
+        }
+        fn start_service(&self, _service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("gather_status must not touch start_service")
+        }
         fn is_service_running(&self, service: &str) -> bool {
             assert_eq!(service, "aimx", "status must query the aimx service");
             self.running

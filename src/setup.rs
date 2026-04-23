@@ -18,6 +18,23 @@ pub trait SystemOps {
     fn write_file(&self, path: &Path, content: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn file_exists(&self, path: &Path) -> bool;
     fn restart_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
+    /// Stop the service. `aimx upgrade` requires this split
+    /// (stop → swap → start) because `restart_service` alone can't
+    /// express a pause window where the binary swap happens between
+    /// shutdown and startup. Idempotent w.r.t. the real init system:
+    /// a stop call on an already-stopped service is not an error.
+    ///
+    /// Required trait method — every `SystemOps` impl must provide it.
+    /// Test mocks in modules that never reach the upgrade path
+    /// (`doctor.rs`, `logs.rs`, `portcheck.rs`, `uninstall.rs`) are
+    /// expected to `unreachable!()` here; a future sprint that teaches
+    /// those modules to stop/start the service will then surface a
+    /// clear panic rather than a silent `Err` string.
+    fn stop_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
+    /// Complement of `stop_service`. Not idempotent — starting an
+    /// already-started service surfaces as an error from both systemd
+    /// and OpenRC. Required trait method; see `stop_service` above.
+    fn start_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
     fn is_service_running(&self, service: &str) -> bool;
     fn generate_tls_cert(
         &self,
@@ -304,6 +321,34 @@ impl SystemOps for RealSystemOps {
         let status = std::process::Command::new(program).args(&args).status()?;
         if !status.success() {
             return Err(format!("Failed to restart {service}").into());
+        }
+        Ok(())
+    }
+
+    fn stop_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::serve::service::{detect_init_system, stop_service_command};
+
+        let init = detect_init_system();
+        let (program, args) = stop_service_command(&init, service).ok_or_else(|| {
+            format!("Could not detect init system (systemd or OpenRC) to stop {service}.")
+        })?;
+        let status = std::process::Command::new(program).args(&args).status()?;
+        if !status.success() {
+            return Err(format!("Failed to stop {service}").into());
+        }
+        Ok(())
+    }
+
+    fn start_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+        use crate::serve::service::{detect_init_system, start_service_command};
+
+        let init = detect_init_system();
+        let (program, args) = start_service_command(&init, service).ok_or_else(|| {
+            format!("Could not detect init system (systemd or OpenRC) to start {service}.")
+        })?;
+        let status = std::process::Command::new(program).args(&args).status()?;
+        if !status.success() {
+            return Err(format!("Failed to start {service}").into());
         }
         Ok(())
     }
@@ -2071,7 +2116,7 @@ fn run_port25_preflight(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::mailbox;
     use std::cell::RefCell;
@@ -2134,29 +2179,54 @@ mod tests {
         }
     }
 
-    struct MockSystemOps {
-        written_files: RefCell<HashMap<PathBuf, String>>,
-        existing_files: HashMap<PathBuf, String>,
-        restarted_services: RefCell<Vec<String>>,
-        service_file_installed: RefCell<bool>,
-        is_root: bool,
-        port25_status: Port25Status,
-        service_running: bool,
-        service_ready: bool,
-        wait_for_ready_calls: RefCell<u32>,
+    pub(crate) struct MockSystemOps {
+        pub(crate) written_files: RefCell<HashMap<PathBuf, String>>,
+        pub(crate) existing_files: HashMap<PathBuf, String>,
+        pub(crate) restarted_services: RefCell<Vec<String>>,
+        /// Ordered list of services passed to `stop_service`. Used by
+        /// the Sprint 4 `aimx upgrade` tests to assert the stop → swap
+        /// → start sequence.
+        pub(crate) stopped_services: RefCell<Vec<String>>,
+        /// Ordered list of services passed to `start_service`.
+        pub(crate) started_services: RefCell<Vec<String>>,
+        pub(crate) service_file_installed: RefCell<bool>,
+        pub(crate) is_root: bool,
+        pub(crate) port25_status: Port25Status,
+        pub(crate) service_running: bool,
+        pub(crate) service_ready: bool,
+        pub(crate) wait_for_ready_calls: RefCell<u32>,
         /// Set of existing users (for `user_exists`) — mutable to simulate
         /// a `create_system_user` call creating the user.
-        existing_users: RefCell<std::collections::HashSet<String>>,
+        pub(crate) existing_users: RefCell<std::collections::HashSet<String>>,
         /// Ordered list of `(user, home)` pairs passed to
         /// `create_system_user`. Sprint 3 renames the helper's caller
         /// from `ensure_hook_user` to `ensure_catchall_user`; tests
         /// assert both the user name AND its home-dir arg.
-        created_users: RefCell<Vec<(String, PathBuf)>>,
+        pub(crate) created_users: RefCell<Vec<(String, PathBuf)>>,
         /// Ordered list of `(path, owner, group, mode)` tuples passed to
         /// `ensure_owned_directory`. Sprint 3 replaces the recursive
         /// `chown_group_readable` with a single-path, explicit-mode
         /// helper scoped to the `aimx-catchall` home dir.
-        owned_dirs: RefCell<Vec<(PathBuf, String, String, u32)>>,
+        pub(crate) owned_dirs: RefCell<Vec<(PathBuf, String, String, u32)>>,
+        /// Override for [`SystemOps::get_aimx_binary_path`] so the Sprint 4
+        /// `aimx upgrade` tests can route the swap through a tempdir
+        /// instead of the real `/usr/local/bin/aimx`.
+        pub(crate) override_aimx_binary_path: Option<PathBuf>,
+        /// If set, `stop_service` returns an error. Used to exercise the
+        /// "stop failed, nothing to roll back" branch.
+        pub(crate) stop_service_fails: bool,
+        /// If set (sticky), every `start_service` call returns an error.
+        /// Used to exercise the "start failed, rollback's own start
+        /// also fails" path that yields `UpgradeError::RollbackFailed`.
+        pub(crate) start_service_fails: bool,
+        /// Number of upcoming `start_service` calls that must fail
+        /// before subsequent calls succeed. Takes precedence over
+        /// `start_service_fails` when non-zero. Set to `1` to drive the
+        /// canonical `RolledBack { failed_step: StartService }` path:
+        /// the upgrade's `start_service` call fails, rollback's own
+        /// `start_service` call succeeds, and the service is left
+        /// running on the previous binary.
+        pub(crate) start_service_failures_remaining: std::cell::Cell<u32>,
     }
 
     impl Default for MockSystemOps {
@@ -2165,6 +2235,8 @@ mod tests {
                 written_files: RefCell::new(HashMap::new()),
                 existing_files: HashMap::new(),
                 restarted_services: RefCell::new(vec![]),
+                stopped_services: RefCell::new(vec![]),
+                started_services: RefCell::new(vec![]),
                 service_file_installed: RefCell::new(false),
                 is_root: true,
                 port25_status: Port25Status::Free,
@@ -2174,6 +2246,10 @@ mod tests {
                 existing_users: RefCell::new(std::collections::HashSet::new()),
                 created_users: RefCell::new(vec![]),
                 owned_dirs: RefCell::new(vec![]),
+                override_aimx_binary_path: None,
+                stop_service_fails: false,
+                start_service_fails: false,
+                start_service_failures_remaining: std::cell::Cell::new(0),
             }
         }
     }
@@ -2194,6 +2270,25 @@ mod tests {
                 .push(service.to_string());
             Ok(())
         }
+        fn stop_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            self.stopped_services.borrow_mut().push(service.to_string());
+            if self.stop_service_fails {
+                return Err("mock stop failure".into());
+            }
+            Ok(())
+        }
+        fn start_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>> {
+            self.started_services.borrow_mut().push(service.to_string());
+            let remaining = self.start_service_failures_remaining.get();
+            if remaining > 0 {
+                self.start_service_failures_remaining.set(remaining - 1);
+                return Err("mock start failure (scheduled)".into());
+            }
+            if self.start_service_fails {
+                return Err("mock start failure".into());
+            }
+            Ok(())
+        }
         fn is_service_running(&self, _service: &str) -> bool {
             self.service_running
         }
@@ -2205,7 +2300,10 @@ mod tests {
             Ok(())
         }
         fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-            Ok(PathBuf::from("/usr/local/bin/aimx"))
+            Ok(self
+                .override_aimx_binary_path
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/usr/local/bin/aimx")))
         }
         fn check_root(&self) -> bool {
             self.is_root

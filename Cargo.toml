@@ -56,9 +56,20 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 dialoguer = { version = "0.11", default-features = false }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
+# `aimx upgrade` (Sprint 4) extracts release tarballs produced by
+# `.github/workflows/release.yml`. The shape is well-known (a flat
+# `aimx-<version>-<target>/` directory with the `aimx` binary), so the
+# upgrade path only needs gzip + basic tar extraction — no rollback,
+# no symlink handling. `tar` + `flate2` are the obvious minimal deps.
+tar = "0.4"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# `aimx upgrade` stages the extracted tarball in a tempdir before
+# atomically swapping the binary into place. Pulled into runtime deps
+# (not just dev-deps) so `run_upgrade` can call `tempfile::tempdir`
+# directly rather than re-implementing tempdir cleanup by hand.
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
 wait-timeout = "0.2"
@@ -86,3 +97,10 @@ serde_json = "1"
 # feature shape used by the main crate so we don't link a second
 # crypto backend.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
+# Dev-only: the Sprint 4 addendum test in
+# `tests/release_integration.rs` uses `libc::geteuid` to detect whether
+# the integration test is running as root; in that case it drives the
+# real `aimx upgrade --dry-run` path end-to-end against the fixture
+# release, exercising `RealReleaseOps::fetch_asset` with the full TLS
+# wiring (addresses the backlog item from the Sprint 2 review).
+libc = "0.2"

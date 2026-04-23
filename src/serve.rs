@@ -1050,6 +1050,62 @@ pub mod service {
         }
     }
 
+    /// Pure dispatch table for `stop_service`: returns the `(program,
+    /// args)` the real implementation will invoke. Split out so the
+    /// systemd-vs-OpenRC routing can be unit-tested without shelling out.
+    /// Used by `aimx upgrade` (Sprint 4) to express the strict stop →
+    /// swap → start sequence that `restart_service` alone can't.
+    pub fn stop_service_command(
+        init: &InitSystem,
+        service: &str,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "sudo",
+                vec![
+                    "systemctl".to_string(),
+                    "stop".to_string(),
+                    service.to_string(),
+                ],
+            )),
+            InitSystem::OpenRC => Some((
+                "sudo",
+                vec![
+                    "rc-service".to_string(),
+                    service.to_string(),
+                    "stop".to_string(),
+                ],
+            )),
+            InitSystem::Unknown => None,
+        }
+    }
+
+    /// Pure dispatch table for `start_service`: the `stop` complement.
+    pub fn start_service_command(
+        init: &InitSystem,
+        service: &str,
+    ) -> Option<(&'static str, Vec<String>)> {
+        match init {
+            InitSystem::Systemd => Some((
+                "sudo",
+                vec![
+                    "systemctl".to_string(),
+                    "start".to_string(),
+                    service.to_string(),
+                ],
+            )),
+            InitSystem::OpenRC => Some((
+                "sudo",
+                vec![
+                    "rc-service".to_string(),
+                    service.to_string(),
+                    "start".to_string(),
+                ],
+            )),
+            InitSystem::Unknown => None,
+        }
+    }
+
     /// Pure dispatch table for `is_service_running`: returns the `(program,
     /// args)` to probe the service's running state.
     pub fn is_service_running_command(
@@ -1403,6 +1459,44 @@ mod tests {
     #[test]
     fn restart_service_unknown_init_returns_none() {
         assert!(restart_service_command(&InitSystem::Unknown, "aimx").is_none());
+    }
+
+    #[test]
+    fn stop_service_systemd_dispatch() {
+        let (prog, args) = stop_service_command(&InitSystem::Systemd, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec!["systemctl", "stop", "aimx"]);
+    }
+
+    #[test]
+    fn stop_service_openrc_dispatch() {
+        let (prog, args) = stop_service_command(&InitSystem::OpenRC, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec!["rc-service", "aimx", "stop"]);
+    }
+
+    #[test]
+    fn stop_service_unknown_init_returns_none() {
+        assert!(stop_service_command(&InitSystem::Unknown, "aimx").is_none());
+    }
+
+    #[test]
+    fn start_service_systemd_dispatch() {
+        let (prog, args) = start_service_command(&InitSystem::Systemd, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec!["systemctl", "start", "aimx"]);
+    }
+
+    #[test]
+    fn start_service_openrc_dispatch() {
+        let (prog, args) = start_service_command(&InitSystem::OpenRC, "aimx").unwrap();
+        assert_eq!(prog, "sudo");
+        assert_eq!(args, vec!["rc-service", "aimx", "start"]);
+    }
+
+    #[test]
+    fn start_service_unknown_init_returns_none() {
+        assert!(start_service_command(&InitSystem::Unknown, "aimx").is_none());
     }
 
     #[test]
