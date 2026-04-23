@@ -231,18 +231,19 @@ jobs:
             apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
             mkdir -p /tmp/aimx-down
             # Lay down a fake "newer" aimx (reports a tag newer than the fixture).
-            cat > /tmp/aimx-down/aimx <<EOF
-          #!/bin/sh
-          echo "aimx 9.9.9 (deadbeef)"
-          EOF
+            # Use printf (not HEREDOC) so YAML indentation does not leak into
+            # the file or stop the HEREDOC terminator from matching at column 0.
+            printf "%s\n" "#!/bin/sh" "echo \"aimx 9.9.9 (deadbeef)\"" > /tmp/aimx-down/aimx
             chmod 0755 /tmp/aimx-down/aimx
             # install.sh must refuse to overwrite with the older fixture tag,
             # even under --force, and emit the "aimx upgrade ... --force" hint.
             if dash install.sh --tag v0.0.0-fixture --force \
-                --target x86_64-unknown-linux-gnu --to /tmp/aimx-down 2>&1 | tee /tmp/down.log; then
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-down >/tmp/down.log 2>&1; then
+              cat /tmp/down.log
               echo "expected downgrade refusal to exit non-zero" >&2
               exit 1
             fi
+            cat /tmp/down.log
             grep -q "aimx upgrade --version" /tmp/down.log
             grep -q -- "--force" /tmp/down.log
           '
