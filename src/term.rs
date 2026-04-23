@@ -125,6 +125,11 @@ pub fn warn_mark() -> ColoredString {
 /// falls back to the nearest 256-color ANSI code elsewhere.
 pub fn prompt_mark() -> ColoredString {
     if colorize_active() {
+        // truecolor used; on 256-color terminals, `colored` falls back to the
+        // nearest named color (red). A precise ANSI-208 fallback would require
+        // either `Color::Fixed(208)` via a different crate or a manual
+        // `COLORTERM` probe; deferred with the owo-colors migration to v2
+        // (PRD §9).
         "→".truecolor(185, 83, 28)
     } else {
         "[>]".normal()
@@ -134,6 +139,9 @@ pub fn prompt_mark() -> ColoredString {
 /// Bold `Step N/M: Title` section header per branding §5.4. Used for
 /// sequential wizard steps in `aimx setup`. Non-sequential section headers
 /// should use [`header`] instead.
+// TODO(sprint-8): wire into the setup wizard once the final step sequence is
+// locked; if Sprint 8 ships without a caller, drop this helper (or move it
+// behind `#[cfg(test)]`) rather than carrying dead public API into v1.0.0.
 #[allow(dead_code)]
 pub fn section_header(step_n: u32, step_total: u32, title: &str) -> ColoredString {
     format!("Step {step_n}/{step_total}: {title}").bold()
