@@ -199,24 +199,40 @@ jobs:
             apt-get update >/dev/null
             apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
             mkdir -p /tmp/aimx-same
-            # First install the fixture release.
-            dash install.sh --tag v0.0.0-fixture \
-              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same
-            # Re-run without --force — must exit 0 with "already installed" and not rewrite.
+            # Lay down a stub aimx that self-reports the fixture tag, so the
+            # same-version short-circuit in install.sh fires without relying
+            # on the fixture tarballs self-reporting (they predate Sprint 2
+            # build.rs metadata). Use printf (not HEREDOC) so YAML indentation
+            # does not leak into the file.
+            printf "%s\n" "#!/bin/sh" "echo \"aimx v0.0.0-fixture (stubshad) x86_64-unknown-linux-gnu built 2026-04-23\"" > /tmp/aimx-same/aimx
+            chmod 0755 /tmp/aimx-same/aimx
             _before="$(stat -c %Y /tmp/aimx-same/aimx)"
             sleep 1
-            dash install.sh --tag v0.0.0-fixture \
-              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same 2>&1 | tee /tmp/same.log
+            # Without --force: installed == target short-circuits. Exit 0,
+            # log "already installed", binary untouched.
+            if ! dash install.sh --tag v0.0.0-fixture \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same.log 2>&1; then
+              cat /tmp/same.log
+              echo "expected same-version no-force install to exit 0" >&2
+              exit 1
+            fi
+            cat /tmp/same.log
             grep -q "already installed" /tmp/same.log
             _after="$(stat -c %Y /tmp/aimx-same/aimx)"
             if [ "${_before}" != "${_after}" ]; then
               echo "same-version re-install should not rewrite binary without --force" >&2
               exit 1
             fi
-            # Now re-run with --force — must rewrite the binary.
+            # With --force: install.sh proceeds through the upgrade path and
+            # swaps the stub for the real fixture binary. mtime must change.
             sleep 1
-            dash install.sh --tag v0.0.0-fixture --force \
-              --target x86_64-unknown-linux-gnu --to /tmp/aimx-same
+            if ! dash install.sh --tag v0.0.0-fixture --force \
+                --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same-force.log 2>&1; then
+              cat /tmp/same-force.log
+              echo "expected same-version --force install to exit 0" >&2
+              exit 1
+            fi
+            cat /tmp/same-force.log
             _forced="$(stat -c %Y /tmp/aimx-same/aimx)"
             if [ "${_after}" = "${_forced}" ]; then
               echo "--force same-version re-install should rewrite binary" >&2
