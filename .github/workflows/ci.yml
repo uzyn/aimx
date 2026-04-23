@@ -311,6 +311,36 @@ jobs:
             exit 1
           fi
 
+  # Onboarding Sprint 8 (S8 review NB-1): build the mdBook docs so CI
+  # catches markdown-syntax drift on every PR. The book sources live
+  # under `book/`; `book.toml` sits in `website/` (with `src = "../book"`)
+  # so we invoke `mdbook build` against the website/ directory — same
+  # command the `website/Makefile` uses.
+  docs-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@ee69d230fe19748b7abf22df32acaa93833fad08 # v2.0.0
+        with:
+          mdbook-version: '0.4.40'
+
+      - name: Build mdbook
+        run: mdbook build website
+
+      # Onboarding Sprint 8 (S8 review NB-2): lightweight shell-level
+      # doc lint. Parses `cargo run -- --help` subcommand names and
+      # fails if `book/` references an `aimx <word>` verb that does not
+      # exist in the CLI. Would have caught the `aimx config trust add`
+      # drift that reviewed on PR #141.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Lint docs against `aimx --help`
+        run: ./scripts/check-docs.sh
+
   verifier-tests:
     runs-on: ubuntu-latest
     defaults:
