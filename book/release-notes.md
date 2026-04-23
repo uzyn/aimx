@@ -2,9 +2,31 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
-## v1 (pre-launch)
+## v1.0.0 — first public release
 
-### Behavioral shifts
+aimx ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`. One-line install:
+
+```bash
+curl -fsSL https://aimx.email/install.sh | sh
+```
+
+And one-line in-place upgrade on any existing install:
+
+```bash
+sudo aimx upgrade
+```
+
+### What landed on the onboarding track
+
+- **Release pipeline.** `.github/workflows/release.yml` builds all four tarballs + per-tarball `.sha256` + release-wide `SHA256SUMS` on every `v*.*.*` tag. Release notes include a verbatim `curl + sha256sum -c` block for skeptical operators. No signing in v1 (deferred to v2).
+- **`install.sh`.** Plain POSIX `sh` installer at `https://aimx.email/install.sh`. Auto-detects OS / arch / libc, supports `--tag` / `--target` / `--to` / `--force` plus `AIMX_VERSION` / `AIMX_PREFIX` / `AIMX_DRY_RUN` / `AIMX_VERBOSE` / `GITHUB_TOKEN`. Upgrade path is wizard-free: stop → swap → start.
+- **`aimx upgrade`.** Single-verb subcommand; flags `--dry-run`, `--version <tag>`, `--force`. Atomic `rename(2)` binary swap with automatic rollback to `/usr/local/bin/aimx.prev` on failure.
+- **Setup wizard refactor.** Wizard asks two decisions (domain, trusted senders) instead of five-plus. Removed: hook-template checkbox, Gmail / deliverability section, `none | verified` trust toggle. Added: loud warning when trusted-senders list is empty, prominent `q`-to-skip on the DNS loop, drop-through to `aimx agent-setup` as `$SUDO_USER` on completion.
+- **`aimx agent-setup` TUI.** No-argument default is now an interactive checkbox picker with detected-status rendering (`[x] (already wired)`, `[ ]`, `[-] (not detected)`). `--no-interactive` and `<agent>` subcommands remain for scripting. `--dangerously-allow-root` escape hatch for direct-root VPS setups.
+- **Version metadata.** `aimx --version` bakes tag + git SHA + target triple + build timestamp at compile time via `build.rs`.
+- **CLI branding reconciliation.** `src/term.rs` now drives every colored / marked surface: `✓ ✗ ⚠ →` marks on TTY, `[OK] [FAIL] [WARN] [>]` fallback when color is disabled. Copper accent (`#B9531C` truecolor) on the prompt arrow. CI lint gate rejects raw `.red()` / `.green()` / `.bold()` outside `term.rs`.
+
+### Behavioral shifts (carried forward from pre-launch)
 
 - **`aimx mailboxes create <name>` without `--owner` now prompts interactively** (agent-integration Sprint 3). Previously this command hard-errored with a `useradd` hint when the local-part of the address did not resolve to an existing Linux user. The new behavior:
   - On a TTY with `AIMX_NONINTERACTIVE` unset: the command prompts for the Linux user that should own the mailbox, re-prompts up to five times if the entered username does not resolve via `getpwnam`, and finally errors with an actionable `useradd` hint if every attempt fails.

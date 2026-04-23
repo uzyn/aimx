@@ -21,9 +21,6 @@
 //! `NO_COLOR=1`, dumb terminal). Always route status output through these so the
 //! fallback vocabulary stays consistent across subcommands.
 //!
-//! [`section_header`] renders the `Step N/M: Title` convention (branding §5.4)
-//! for sequential wizard steps.
-//!
 //! # Deprecated: text badges
 //!
 //! [`pass_badge`], [`fail_badge`], [`warn_badge`], and [`missing_badge`] return
@@ -136,17 +133,6 @@ pub fn prompt_mark() -> ColoredString {
     }
 }
 
-/// Bold `Step N/M: Title` section header per branding §5.4. Used for
-/// sequential wizard steps in `aimx setup`. Non-sequential section headers
-/// should use [`header`] instead.
-// TODO(sprint-8): wire into the setup wizard once the final step sequence is
-// locked; if Sprint 8 ships without a caller, drop this helper (or move it
-// behind `#[cfg(test)]`) rather than carrying dead public API into v1.0.0.
-#[allow(dead_code)]
-pub fn section_header(step_n: u32, step_total: u32, title: &str) -> ColoredString {
-    format!("Step {step_n}/{step_total}: {title}").bold()
-}
-
 /// Deprecated: use [`success_mark`] instead. Retained as a thin wrapper for
 /// one minor release; slated for removal in v1.1.
 #[allow(dead_code)]
@@ -208,7 +194,6 @@ mod tests {
             fail_mark().to_string(),
             warn_mark().to_string(),
             prompt_mark().to_string(),
-            section_header(1, 7, "Port 25 preflight").to_string(),
         ];
         control::unset_override();
         for s in &outputs {
@@ -338,17 +323,6 @@ mod tests {
             s.contains('\x1b'),
             "expected ANSI escape in prompt_mark even when COLORTERM is absent, got {s:?}"
         );
-    }
-
-    #[test]
-    fn section_header_renders_step_n_of_m() {
-        let _guard = COLOR_OVERRIDE_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        control::set_override(false);
-        let s = section_header(1, 7, "Port 25 preflight").to_string();
-        control::unset_override();
-        assert_eq!(s, "Step 1/7: Port 25 preflight");
     }
 
     #[test]

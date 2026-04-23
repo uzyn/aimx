@@ -3,6 +3,7 @@
 [Introduction](README.md)
 
 - [Getting Started](getting-started.md)
+- [Installation](installation.md)
 - [Setup](setup.md)
 - [Configuration](configuration.md)
 - [Mailboxes & Email](mailboxes.md)

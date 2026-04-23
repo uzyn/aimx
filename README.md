@@ -1,9 +1,5 @@
 # AIMX — AI Mail Exchange
 
-
-> [!CAUTION]
-> **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes in v0 releases. Pin to an exact version if you use it on stable systems.
-
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
@@ -48,14 +44,11 @@ Read the [Book](book/) to learn more. See also [Frequently Asked Questions](book
 
 ## Quick start
 
-You need `sudo` rights as port 25 is a [privileged port](https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html).
+aimx ships as a single prebuilt binary for Linux (x86_64 and aarch64, glibc and musl). You need `sudo` rights — port 25 is a [privileged port](https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html).
 
 ```bash
-# 1. Build and install the binary into /usr/local/bin
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo cp target/release/aimx /usr/local/bin/
+# 1. Install the latest release into /usr/local/bin
+curl -fsSL https://aimx.email/install.sh | sh
 
 # 2. Run setup and follow the guided instructions
 sudo aimx setup
@@ -63,6 +56,34 @@ sudo aimx setup
 # 3. Check health
 aimx doctor
 ```
+
+Later, upgrade in place:
+
+```bash
+sudo aimx upgrade
+```
+
+No wizard re-run, no DNS re-verify; the binary is swapped atomically and the service is restarted. See [`book/installation.md`](book/installation.md) for install flags, upgrade semantics, and the manual rollback path (`/usr/local/bin/aimx.prev`).
+
+### Verification (optional)
+
+If you would rather not `curl | sh`, every release ships a `.sha256` per tarball and a release-wide `SHA256SUMS`. The trust anchor in v1 is HTTPS on the GitHub Releases domain — signed releases are deferred to v2. Verify manually:
+
+```bash
+TAG=v1.0.0
+TARGET=x86_64-unknown-linux-gnu
+TARBALL=aimx-${TAG}-${TARGET}.tar.gz
+
+curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}"
+curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}.sha256"
+sha256sum -c "${TARBALL}.sha256"
+
+tar -xzf "${TARBALL}"
+sudo install -m 0755 aimx /usr/local/bin/aimx
+aimx --version
+```
+
+Or inspect the installer itself before running it: `curl -fsSL https://aimx.email/install.sh | less`.
 
 ### CLI Commands
 
@@ -187,6 +208,25 @@ See [`book/mailboxes.md`](book/mailboxes.md#email-format) for the full field sch
 | TXT | agent.yourdomain.com | v=spf1 ip4:YOUR_IP -all |
 | TXT | aimx._domainkey.agent.yourdomain.com | v=DKIM1; k=rsa; p=... |
 | TXT | _dmarc.agent.yourdomain.com | v=DMARC1; p=reject |
+
+
+## Building from source
+
+Source builds are supported for contributors and air-gapped environments. Everyone else should use the one-line installer above — it is faster and pins a tested release.
+
+```bash
+# Prereqs: rustup + a recent stable toolchain
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+git clone https://github.com/uzyn/aimx.git
+cd aimx
+cargo build --release
+sudo install -m 0755 target/release/aimx /usr/local/bin/aimx
+aimx --version
+```
+
+See [`CLAUDE.md`](CLAUDE.md) for the full developer workflow (lint, format, tests, verifier service).
 
 
 ## License
