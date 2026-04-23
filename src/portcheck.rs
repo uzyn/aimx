@@ -160,9 +160,9 @@ pub fn run_with_net(
     print!("  Outbound port 25... ");
     std::io::Write::flush(&mut std::io::stdout())?;
     match setup::check_outbound(net) {
-        setup::PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+        setup::PreflightResult::Pass(_) => println!("{}", term::success_mark()),
         setup::PreflightResult::Fail(msg) => {
-            println!("{}", term::fail_badge());
+            println!("{}", term::fail_mark());
             eprintln!("  {msg}");
             all_pass = false;
         }
@@ -173,9 +173,9 @@ pub fn run_with_net(
             print!("  Inbound port 25... ");
             std::io::Write::flush(&mut std::io::stdout())?;
             match setup::check_inbound(net) {
-                setup::PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+                setup::PreflightResult::Pass(_) => println!("{}", term::success_mark()),
                 setup::PreflightResult::Fail(msg) => {
-                    println!("{}", term::fail_badge());
+                    println!("{}", term::fail_mark());
                     eprintln!("  {msg}");
                     all_pass = false;
                 }

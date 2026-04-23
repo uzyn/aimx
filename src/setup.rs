@@ -248,7 +248,7 @@ pub const CATCHALL_HOME_DIR: &str = "/var/lib/aimx-catchall";
 /// invariant on `/var/lib/aimx-catchall/` so permissions drift is
 /// corrected on every setup pass.
 pub(crate) fn ensure_catchall_user(sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Error>> {
-    println!("\n{}", term::header("[Catchall]"));
+    println!("\n{}", term::header("Catchall"));
     let home = Path::new(CATCHALL_HOME_DIR);
     let created = sys.create_system_user(CATCHALL_SERVICE_USER, home)?;
     if created {
@@ -1053,7 +1053,7 @@ pub fn display_dns_guidance(
     dkim_selector: &str,
 ) {
     let records = generate_dns_records(domain, server_ip, server_ipv6, dkim_value, dkim_selector);
-    println!("\n{}", term::header("[DNS]"));
+    println!("\n{}", term::header("DNS"));
     println!("Add the following DNS records at your domain registrar:\n");
     println!("  TYPE NAME                                          VALUE");
     println!("  ---- --------------------------------------------- -----");
@@ -1278,9 +1278,9 @@ pub fn dns_verification_record_lines(
     let mut all_pass = true;
     for (name, result) in results {
         match result {
-            DnsVerifyResult::Pass => lines.push(format!("  {name}: {}", term::pass_badge())),
+            DnsVerifyResult::Pass => lines.push(format!("  {name}: {}", term::success_mark())),
             DnsVerifyResult::Fail(msg) => {
-                lines.push(format!("  {name}: {} - {msg}", term::fail_badge()));
+                lines.push(format!("  {name}: {} - {msg}", term::fail_mark()));
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
                     lines.push(format!(
                         "         {} {}  {}  {}",
@@ -1305,7 +1305,7 @@ pub fn dns_verification_record_lines(
                 all_pass = false;
             }
             DnsVerifyResult::Missing(msg) => {
-                lines.push(format!("  {name}: {} - {msg}", term::missing_badge()));
+                lines.push(format!("  {name}: {} - {msg}", term::fail_mark()));
                 if let Some(rec) = dns_record_for_check(name, dns_records) {
                     lines.push(format!(
                         "         {} {}  {}  {}",
@@ -1324,7 +1324,7 @@ pub fn dns_verification_record_lines(
                 all_pass = false;
             }
             DnsVerifyResult::Warn(msg) => {
-                lines.push(format!("  {name}: {} - {msg}", term::warn_badge()));
+                lines.push(format!("  {name}: {} - {msg}", term::warn_mark()));
             }
         }
     }
@@ -1361,7 +1361,7 @@ pub fn display_dns_verification(
 }
 
 pub fn display_mcp_section(data_dir: &Path) {
-    println!("\n{}", term::header("[MCP]"));
+    println!("\n{}", term::header("MCP"));
     for line in mcp_section_lines(data_dir) {
         println!("{line}");
     }
@@ -1706,7 +1706,7 @@ pub fn prompt_trusted_senders(
             }
             Ok(senders) => return Ok(("verified".to_string(), senders)),
             Err((entry, reason)) => {
-                println!("{} invalid sender '{entry}': {reason}", term::fail_badge());
+                println!("{} invalid sender '{entry}': {reason}", term::fail_mark());
                 if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
                     return Err(format!(
                         "trusted-senders prompt aborted after {MAX_TRUSTED_SENDERS_ATTEMPTS} \
@@ -1725,8 +1725,11 @@ pub fn prompt_trusted_senders(
 /// branch in [`run_setup`] can share the exact wording.
 fn print_empty_trusted_senders_warning() {
     println!();
-    println!("{}", term::warn_badge());
-    println!("  {}", term::warn(EMPTY_TRUSTED_SENDERS_WARNING));
+    println!(
+        "{} {}",
+        term::warn_mark(),
+        term::warn(EMPTY_TRUSTED_SENDERS_WARNING)
+    );
     println!();
 }
 
@@ -2121,7 +2124,7 @@ pub fn run_setup(
             term::highlight("q"),
             term::highlight("aimx doctor")
         );
-        print!("> ");
+        print!("{} ", term::prompt_mark());
         io::stdout().flush()?;
         let mut input = String::new();
         io::stdin().read_line(&mut input)?;
@@ -2240,7 +2243,7 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) {
         // Direct root login path. Print the guidance and return.
         println!(
             "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
-            term::highlight("→"),
+            term::prompt_mark(),
             term::highlight("aimx agent-setup")
         );
         println!(
@@ -2259,7 +2262,7 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) {
     println!();
     println!(
         "{} Dropping through to `{}` as {}...",
-        term::highlight("→"),
+        term::prompt_mark(),
         term::highlight("aimx agent-setup"),
         term::highlight(&sudo_user)
     );
@@ -2283,7 +2286,7 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) {
     );
     println!(
         "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
-        term::highlight("→"),
+        term::prompt_mark(),
         term::highlight("aimx agent-setup"),
         term::highlight(&sudo_user)
     );
@@ -2304,11 +2307,11 @@ fn install_and_verify_service(
     print!("  Waiting for aimx serve to bind port 25... ");
     io::stdout().flush()?;
     if sys.wait_for_service_ready() {
-        println!("{}", term::pass_badge());
+        println!("{}", term::success_mark());
         println!("{}", term::success("`aimx serve` is running."));
         Ok(())
     } else {
-        println!("{}", term::fail_badge());
+        println!("{}", term::fail_mark());
         Err(
             "aimx.service did not bind port 25 within the readiness window.\n\
              Check `sudo journalctl -u aimx` for errors, then run `sudo aimx setup` again."
@@ -2325,9 +2328,9 @@ fn run_port25_preflight(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
     print!("  Outbound port 25... ");
     io::stdout().flush()?;
     match check_outbound(net) {
-        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+        PreflightResult::Pass(_) => println!("{}", term::success_mark()),
         PreflightResult::Fail(msg) => {
-            println!("{}", term::fail_badge());
+            println!("{}", term::fail_mark());
             eprintln!("\n  {msg}");
             eprintln!("\n  Compatible VPS providers with port 25 open:");
             for p in COMPATIBLE_PROVIDERS {
@@ -2340,9 +2343,9 @@ fn run_port25_preflight(net: &dyn NetworkOps) -> Result<(), Box<dyn std::error::
     print!("  Inbound port 25... ");
     io::stdout().flush()?;
     match check_inbound(net) {
-        PreflightResult::Pass(_) => println!("{}", term::pass_badge()),
+        PreflightResult::Pass(_) => println!("{}", term::success_mark()),
         PreflightResult::Fail(msg) => {
-            println!("{}", term::fail_badge());
+            println!("{}", term::fail_mark());
             eprintln!("\n  {msg}");
             port_failed = true;
         }

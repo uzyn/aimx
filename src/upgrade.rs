@@ -189,8 +189,11 @@ fn render_error(e: UpgradeError) -> Box<dyn std::error::Error> {
         previous_tag,
     } = &e
     {
-        eprintln!("{} {failed_step}: {cause}", term::error("✗"));
-        eprintln!("→ rolled back to {previous_tag}; check logs with 'aimx logs'",);
+        eprintln!("{} {failed_step}: {cause}", term::fail_mark());
+        eprintln!(
+            "{} rolled back to {previous_tag}; check logs with 'aimx logs'",
+            term::prompt_mark()
+        );
     }
     Box::new(e)
 }
@@ -200,7 +203,7 @@ fn print_result(report: &UpgradeReport) {
         Some(Outcome::UpToDate) => {
             println!(
                 "{} aimx {} is up to date.",
-                term::success("✓"),
+                term::success_mark(),
                 term::highlight(&report.current_tag)
             );
         }
@@ -209,9 +212,10 @@ fn print_result(report: &UpgradeReport) {
         }
         Some(Outcome::Upgraded) => {
             println!(
-                "{} aimx {} → {}. Service restarted.",
-                term::success("✓"),
+                "{} aimx {} {} {}. Service restarted.",
+                term::success_mark(),
                 term::highlight(&report.current_tag),
+                term::accent("→"),
                 term::highlight(&report.target_tag)
             );
         }

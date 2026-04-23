@@ -10,7 +10,7 @@ pub fn run(yes: bool, sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Err
     let config_dir = crate::config::config_dir();
     let data_dir = resolve_data_dir_for_display();
 
-    println!("\n{}", term::header("[UNINSTALL]"));
+    println!("\n{}", term::header("Uninstall"));
     println!("This will stop the aimx daemon and remove its service file.");
     println!(
         "Config ({}) and mailbox data ({}) will be kept.",
