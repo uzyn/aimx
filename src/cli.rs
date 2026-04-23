@@ -158,10 +158,10 @@ pub enum Command {
 
     /// Install aimx plugin/skill for an AI agent into the current user's config
     AgentSetup {
-        /// Agent short name (e.g. claude-code). Omit to print the supported-agent registry, or pass --list for the same view.
+        /// Agent short name (e.g. claude-code). Omit to launch the interactive checkbox TUI (Sprint 6), or pass --list for a plain registry dump.
         agent: Option<String>,
 
-        /// List supported agents with destinations and activation hints
+        /// List supported agents with destinations and activation hints (no TUI)
         #[arg(long)]
         list: bool,
 
@@ -180,6 +180,14 @@ pub enum Command {
         /// Re-probe $PATH and update an existing invoke-<agent>-<username> template
         #[arg(long)]
         redetect: bool,
+
+        /// Skip the interactive TUI when invoked with no agent argument; print the same plain registry dump as --list.
+        #[arg(long)]
+        no_interactive: bool,
+
+        /// FOOTGUN: bypass the root-refusal check and wire aimx into /root's home. Intended for single-user root-login VPS setups that have no separate operator account. Prefer `sudo -u <user> aimx agent-setup` on any machine with a regular user.
+        #[arg(long)]
+        dangerously_allow_root: bool,
     },
 
     /// Inverse of agent-setup: remove the invoke-<agent>-<username> template, optionally the plugin files too

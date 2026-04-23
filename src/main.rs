@@ -1,5 +1,6 @@
 mod agent_cleanup;
 mod agent_setup;
+mod agent_tui;
 mod cli;
 mod config;
 mod datadir_readme;
@@ -95,6 +96,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             print,
             no_template,
             redetect,
+            no_interactive,
+            dangerously_allow_root,
         } => agent_setup::run(agent_setup::RunOpts {
             agent,
             list,
@@ -102,6 +105,8 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             print,
             no_template,
             redetect,
+            no_interactive,
+            dangerously_allow_root,
             data_dir: cli.data_dir.as_deref(),
         }),
         // agent-cleanup is the per-user inverse of agent-setup. Drops

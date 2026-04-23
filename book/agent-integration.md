@@ -31,11 +31,40 @@ After this, alice can create hooks via MCP by referencing `invoke-claude-alice` 
 
 ## Discovering supported agents
 
-`aimx agent-setup` with no argument prints the supported-agent registry (one row per agent with its install command, destination path, and activation hint) and exits without installing anything. `aimx agent-setup --list` prints the same view.
+`aimx agent-setup` with no argument launches an interactive checkbox TUI listing every supported agent with its detected install state (already wired, installed but not wired, or not detected). Use the arrow keys to move, `Space` to toggle, `Enter` to confirm, or `q` to cancel. The TUI defaults the right boxes for you: installed-but-not-wired agents are pre-checked; already-wired agents are listed but unchecked; not-detected agents are dimmed and skipped by the cursor.
+
+For scripting, `aimx agent-setup --list` prints the same registry as a plain table with no prompt, and `aimx agent-setup --no-interactive` prints the same table when invoked with no agent argument. Piping the output to `cat` / `less` also falls back to the plain table automatically.
+
+### Reference: TUI visual
+
+```text
+Wire aimx into your AI agents
+  → Space toggles, Enter confirms, q cancels.
+
+❯ [ ] Claude Code
+  [x] Codex CLI  (already wired)
+  [-] Gemini CLI (not detected)
+  [ ] OpenClaw
+  [-] OpenCode (not detected)
+  [-] Hermes (not detected)
+  [-] Goose (not detected)
+```
+
+- `❯` is the colored caret on the focused row.
+- `[x]` / `[ ]` are selected / unselected checkboxes.
+- `[-] ... (not detected)` marks agents whose config directory isn't present on this machine — the cursor skips those rows entirely.
+- `(already wired)` marks agents whose plugin destination already exists on disk — they're listed but default to unchecked.
+
+## Landing in the TUI from `aimx setup`
+
+When `sudo aimx setup` completes, the wizard drops through to `aimx agent-setup` as the invoking user (via `runuser -u $SUDO_USER -- /proc/self/exe agent-setup`) so agent wiring is one continuous flow — no second command to type. If `$SUDO_USER` is unset (you logged in directly as root), the wizard prints the guidance message instead and exits cleanly. See [Setup — drop-through to agent-setup](./setup.md) for the wizard-side details.
+
+Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 
 ## Key properties
 
-- **Runs as the current user.** `aimx agent-setup` refuses to run as root.
+- **Runs as the current user.** `aimx agent-setup` refuses to run as root by default.
+- **`--dangerously-allow-root` escape hatch.** For single-user root-login VPS setups that have no separate operator account, pass `--dangerously-allow-root` to wire aimx into `/root`'s home. The flag applies uniformly to the TUI, per-agent runs, and `--no-interactive`. It is **never** passed implicitly by the `aimx setup` drop-through — you must opt in by hand. On any machine with a regular user, prefer `sudo -u <user> aimx agent-setup` instead.
 - **Writes only to `$HOME`.** Nothing under `/etc` or `/var` is touched by the plugin-install step.
 - **Template registration uses UDS `SO_PEERCRED`.** The daemon reads the caller's uid directly from the socket; the `run_as` of the registered template must equal the caller's username. This is how isolation between users is enforced — alice cannot register a template that runs as bob.
 - **Offline.** The plugin tree is embedded at compile time. No network access is required.
@@ -45,7 +74,9 @@ After this, alice can create hooks via MCP by referencing `invoke-claude-alice` 
 
 | Flag | Purpose |
 |------|---------|
-| `--list` | Print the registry (agent name, destination, activation hint). |
+| `--list` | Print the registry (agent name, destination, activation hint). No TUI. |
+| `--no-interactive` | Skip the checkbox TUI when no agent is named; print the same plain registry dump as `--list`. Intended for scripting. |
+| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Applies uniformly across the TUI, per-agent runs, and `--no-interactive`. See Key properties above. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. Also prints the template that would be registered. |
 | `--no-template` | Skip the `$PATH` probe and `TEMPLATE-CREATE` step. Plugin-install only. |
