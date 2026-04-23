@@ -56,8 +56,13 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
 
-`aimx setup` asks for the default trust policy interactively on the first
-run. On re-entry the existing top-level values on disk are preserved.
+`aimx setup` asks for a list of trusted sender addresses interactively on
+the first run (comma-separated, accepts plain addresses and globs like
+`*@company.com`). A non-empty list sets `trust = "verified"` with that
+allowlist; leaving the prompt blank sets `trust = "none"` and the wizard
+prints a loud warning that hooks will NOT fire for inbound email. On
+re-entry the existing top-level values on disk are preserved and the
+prompt is skipped.
 
 ### Mailbox settings
 

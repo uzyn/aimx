@@ -7,7 +7,7 @@
 //! - [`warn`]:    yellow, used for non-fatal warnings (DNS pending, TLS self-signed)
 //! - [`info`]:    plain, reserved for informational output (kept uncolored so the
 //!   palette stays minimal; wrap if we ever add a cyan accent)
-//! - [`header`]:  bold, used for section headers like `[DNS]`, `[MCP]`, `[Deliverability]`
+//! - [`header`]:  bold, used for section headers like `[DNS]`, `[MCP]`
 //! - [`highlight`]: bold, used to emphasise short inline tokens (keys, commands, mailbox names)
 //! - [`dim`]:     dimmed, used for secondary hint text ("→ Add: ..." under a FAIL line)
 //!

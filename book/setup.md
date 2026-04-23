@@ -83,11 +83,12 @@ When run without a domain argument, setup will prompt you to enter the domain an
 9. **DNS guidance + verification loop**: shows the records to add and re-verifies on Enter
 10. **Service installation**: generates a systemd unit (or OpenRC init script on Alpine) with `RuntimeDirectory=aimx`, and starts `aimx serve`
 
-After initial setup, the wizard displays three clearly labeled sections:
+After initial setup, the wizard displays two clearly labeled sections:
 
-- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records
-- **[MCP]**: configuration snippet for MCP-compatible AI agents (Claude Code, OpenClaw, Codex, OpenCode, etc.)
-- **[Deliverability Improvement (Optional)]**: Gmail filter/whitelist instructions
+- **[DNS]**: the records you need to add (MX, A, AAAA, SPF, DKIM, DMARC), with a retry loop so you can press Enter to re-verify after adding records (or press `q` to skip and re-verify later with `aimx doctor`)
+- **[MCP]**: informational summary of the `aimx agent-setup` commands per supported agent — the actual agent wiring happens in a post-install drop-through (see [Agent integration](agent-integration.md)).
+
+Third-party mail-client workarounds (e.g. Gmail spam-filter whitelists) are **not** part of `aimx setup`'s surface. A correct SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider is the canonical deliverability story.
 
 ### Mailbox-owner prompt
 
@@ -262,8 +263,7 @@ After regenerating keys, update the DKIM DNS record with the new public key.
 
 1. Ensure all DNS records are correctly set (especially DKIM, SPF, DMARC, and AAAA if your server has IPv6).
 2. (Optional but recommended) Configure a PTR / reverse-DNS record at your VPS provider pointing to your domain. This is the operator's responsibility. aimx does not check or manage PTR.
-3. In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
-4. Alternatively, reply to an email from the domain. Gmail learns it's not spam.
+3. Third-party mail-client whitelists (e.g. Gmail filter rules) are out of scope for aimx. If your recipients' provider misclassifies well-signed mail, it is a client-side workaround; configure it on their end, not in aimx.
 
 ### Firewall
 
