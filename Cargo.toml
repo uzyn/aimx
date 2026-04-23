@@ -55,7 +55,7 @@ rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 dialoguer = { version = "0.11", default-features = false }
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "gzip", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
 
 [dev-dependencies]
 tempfile = "3"
@@ -78,5 +78,11 @@ syn = { version = "2", features = ["full", "visit"] }
 # integration`; compiled unconditionally here because cargo does not
 # support feature-gated `dev-dependencies`. Kept in sync with the main
 # crate's `ureq` feature shape.
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "gzip", "json"] }
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
 serde_json = "1"
+# Dev-only: needed by the Sprint 2 Tier-2 integration test to install
+# the process-default rustls CryptoProvider before `ureq` (built with
+# `rustls-no-provider`) performs its first TLS handshake. Mirrors the
+# feature shape used by the main crate so we don't link a second
+# crypto backend.
+rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }

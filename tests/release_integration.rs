@@ -54,6 +54,19 @@ fn expected_sums() -> HashMap<&'static str, &'static str> {
 fn fixture_release_tarball_sha256_matches() {
     use std::process::Command;
 
+    // Install the process-default rustls CryptoProvider. `ureq` is built
+    // with `rustls-no-provider` (so it reuses whatever provider the rest
+    // of the process has installed) but this test constructs a bare
+    // `ureq::Agent` without going through `RealReleaseOps::fetch_bytes`,
+    // which is where `install_rustls_provider()` normally runs. Without
+    // this call, the first TLS handshake panics with "No CryptoProvider
+    // for Rustls". `.ok()` — `install_default` returns `Err` if one is
+    // already installed, which is fine (idempotent). Matches the pattern
+    // used in `src/smtp/tls.rs` and `src/smtp/tests.rs`.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .ok();
+
     // Call the aimx binary's `--version` to discover the build target —
     // we don't link against the crate from integration tests, so we can't
     // call `version::target_triple()` directly. The version renderer
