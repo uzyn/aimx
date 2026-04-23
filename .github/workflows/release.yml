@@ -5,13 +5,18 @@ name: Release
 # and publish them as assets on a GitHub Release with a templated body
 # that includes a verbatim `curl + sha256sum -c` verify block.
 #
-# Trigger glob accepts tags shaped like `v<digit>...` (e.g. `v1.0.0`,
-# `v1.2.3-rc1`, `v0.0.0-fixture`). Non-SemVer tags (`test`, `dev-*`) are
-# ignored so ad-hoc tags never spend CI minutes or publish a release.
+# Trigger glob requires the SemVer-shaped `vMAJOR.MINOR.PATCH` core
+# (with an optional pre-release / build suffix) — e.g. `v1.0.0`,
+# `v1.2.3-rc1`, `v0.0.0-fixture`. GitHub ref filters use fnmatch (not
+# regex), so `[0-9]*` enforces "digit followed by anything" and the two
+# literal dots enforce the three-segment shape. This keeps malformed
+# tags like `v1`, `v1-beta`, `v1.2`, or `test` from spending CI minutes
+# before the pre-release regex (`^v[0-9]+\.[0-9]+\.[0-9]+-`) rejects
+# them further down.
 on:
   push:
     tags:
-      - 'v[0-9]*'
+      - 'v[0-9]*.[0-9]*.[0-9]*'
 
 permissions:
   contents: write
@@ -32,7 +37,10 @@ jobs:
           - x86_64-unknown-linux-musl
           - aarch64-unknown-linux-musl
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned by full commit SHA for supply-chain
+      # safety; the trailing comment names the human-readable version so
+      # `dependabot`/`renovate` (and humans) can bump them in lockstep.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 
       - name: Resolve version string
         id: version
@@ -42,16 +50,20 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable @ 2025-09-27
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@23869a5bd66c73db3c0ac40331f3206eb23791dc # v2.9.1
         with:
           key: release-${{ matrix.target }}
 
-      - name: Install cross
-        run: cargo install cross --locked --version 0.2.5
+      # Use `taiki-e/install-action` to pull a prebuilt `cross` binary
+      # into `~/.cargo/bin` instead of recompiling it from source on
+      # every matrix shard (saved ~1–2 min per leg).
+      - uses: taiki-e/install-action@5f57d6cb7cd20b14a8a27f522884c4bc8a187458 # v2.75.19
+        with:
+          tool: cross@0.2.5
 
       - name: Build release binary
         run: cross build --release --locked --target ${{ matrix.target }}
@@ -86,7 +98,7 @@ jobs:
           echo "tarball=${tarball}" >> "$GITHUB_ENV"
 
       - name: Upload artefact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: aimx-${{ matrix.target }}
           path: |
@@ -100,7 +112,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
@@ -115,7 +127,7 @@ jobs:
           echo "date=${date}" >> "$GITHUB_OUTPUT"
 
       - name: Download build artefacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           pattern: aimx-*
@@ -159,10 +171,14 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
           VERSION: ${{ steps.version.outputs.version }}
           DATE: ${{ steps.version.outputs.date }}
-          SHA_X86_GNU: ${{ steps.sums.outputs.sha_x86_64-unknown-linux-gnu }}
-          SHA_ARM_GNU: ${{ steps.sums.outputs.sha_aarch64-unknown-linux-gnu }}
-          SHA_X86_MUSL: ${{ steps.sums.outputs.sha_x86_64-unknown-linux-musl }}
-          SHA_ARM_MUSL: ${{ steps.sums.outputs.sha_aarch64-unknown-linux-musl }}
+          # Output names include hyphens (the target triples), so use
+          # bracket notation — dot notation on hyphenated identifiers is
+          # ambiguous in the expression language (could tokenize as
+          # subtraction) even though it happens to work today.
+          SHA_X86_GNU: ${{ steps.sums.outputs['sha_x86_64-unknown-linux-gnu'] }}
+          SHA_ARM_GNU: ${{ steps.sums.outputs['sha_aarch64-unknown-linux-gnu'] }}
+          SHA_X86_MUSL: ${{ steps.sums.outputs['sha_x86_64-unknown-linux-musl'] }}
+          SHA_ARM_MUSL: ${{ steps.sums.outputs['sha_aarch64-unknown-linux-musl'] }}
         run: |
           set -euo pipefail
           notes_file="$(mktemp)"
@@ -171,7 +187,10 @@ jobs:
           # Resolve the previous SemVer-shaped tag (if any) for the
           # changelog range. If no previous tag exists, fall back to the
           # root commit so first releases still produce a sensible log.
-          prev_tag="$(git tag --list 'v[0-9]*' --sort=-v:refname \
+          # Keep this glob in lockstep with the trigger glob up top so
+          # only SemVer-shaped tags count as candidate "previous" tags
+          # for the changelog range.
+          prev_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
             | grep -v -x "${TAG}" | head -n1 || true)"
           if [ -n "${prev_tag}" ]; then
             range="${prev_tag}..${TAG}"
@@ -258,7 +277,7 @@ jobs:
           fi
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: aimx ${{ steps.version.outputs.tag }}
