@@ -1471,7 +1471,6 @@ pub fn finalize_setup(
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         install_config_file(&cfg, &config_path)?;

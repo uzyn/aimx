@@ -373,7 +373,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         StateContext::new(data_dir.to_path_buf(), ConfigHandle::new(config))
@@ -763,7 +762,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
@@ -858,7 +856,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
@@ -956,7 +953,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
@@ -1036,7 +1032,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));

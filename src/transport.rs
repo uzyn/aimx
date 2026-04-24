@@ -44,10 +44,9 @@ pub trait MailTransport {
 ///
 /// `helo_name` is the EHLO / HELO identity the transport presents to
 /// recipient MXs. It is captured at construction time from
-/// [`crate::config::Config::smtp_helo_name`] so a later config reload
-/// that swaps the value does not require re-plumbing the transport.
-/// Hardening PRD §6.2: outbound mail must never introduce itself with
-/// the dialed MX hostname.
+/// `config.domain` — the same value DKIM / SPF / DMARC key on, which is
+/// what recipient MTAs expect to see in the EHLO line. Hardening PRD §6.2:
+/// outbound mail must never introduce itself with the dialed MX hostname.
 pub struct LettreTransport {
     enable_ipv6: bool,
     helo_name: String,
@@ -88,9 +87,8 @@ pub(crate) fn select_connect_target(
 }
 
 impl LettreTransport {
-    /// Construct a transport bound to a specific HELO identity. Call
-    /// sites pass `config.smtp_helo_name().to_string()` (see
-    /// `crate::serve::run_serve`).
+    /// Construct a transport bound to `config.domain` as its HELO identity.
+    /// Call sites pass `config.domain.clone()` (see `crate::serve::run_serve`).
     pub fn new(enable_ipv6: bool, helo_name: impl Into<String>) -> Self {
         Self {
             enable_ipv6,
@@ -265,9 +263,9 @@ impl LettreTransport {
 
         let transport = lettre::SmtpTransport::builder_dangerous(&connect_target)
             .hello_name(lettre::transport::smtp::extension::ClientId::Domain(
-                // Hardening PRD §6.2: EHLO identity is ours, not the
-                // dialed MX. Captured from `Config::smtp_helo_name()`
-                // at construction time.
+                // Hardening PRD §6.2: EHLO identity is our own domain,
+                // never the dialed MX. Always `config.domain` so DKIM /
+                // SPF / DMARC alignment stays consistent.
                 self.helo_name.clone(),
             ))
             .port(25)
@@ -459,55 +457,22 @@ mod tests {
 
     #[test]
     fn lettre_transport_stores_helo_name_from_constructor() {
-        // Sprint 1 S1-4: the EHLO identity must come from config, not
-        // from the dialed MX host. The constructor captures the value
-        // so `try_deliver` can pass it to lettre verbatim.
+        // Hardening PRD §6.2: the EHLO identity must come from config
+        // (specifically `config.domain`), not from the dialed MX host.
+        // The constructor captures the value so `try_deliver` can pass
+        // it to lettre verbatim.
         let t = LettreTransport::new(false, "example.com");
         assert_eq!(t.helo_name(), "example.com");
     }
 
     #[test]
-    fn lettre_transport_helo_name_preserves_override() {
-        // When an operator sets `smtp_helo_name = "mail.example.com"`
-        // the transport surfaces that value, not `config.domain`.
-        let t = LettreTransport::new(true, "mail.example.com");
-        assert_eq!(t.helo_name(), "mail.example.com");
-    }
-
-    #[test]
-    fn config_smtp_helo_name_defaults_to_domain() {
-        // Sprint 1 S1-3: the helper returns `config.domain` when the
-        // optional field is unset.
+    fn lettre_transport_helo_name_tracks_config_domain() {
+        // End-to-end: serve builds the transport from `config.domain`.
+        // The transport surfaces that value as its EHLO identity.
         use crate::config::Config;
-        let toml_str = "domain = \"example.com\"\n[mailboxes]\n";
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.smtp_helo_name(), "example.com");
-    }
-
-    #[test]
-    fn config_smtp_helo_name_returns_override_when_set() {
-        use crate::config::Config;
-        let toml_str =
-            "domain = \"example.com\"\nsmtp_helo_name = \"mail.example.com\"\n[mailboxes]\n";
-        let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.smtp_helo_name(), "mail.example.com");
-    }
-
-    #[test]
-    fn lettre_transport_integrates_with_config_helper() {
-        // End-to-end: the transport fed by `Config::smtp_helo_name()`
-        // carries the effective value, regardless of whether the
-        // operator set the override.
-        use crate::config::Config;
-        let default_cfg: Config = toml::from_str("domain = \"a.example\"\n[mailboxes]\n").unwrap();
-        let override_cfg: Config = toml::from_str(
-            "domain = \"a.example\"\nsmtp_helo_name = \"relay.example\"\n[mailboxes]\n",
-        )
-        .unwrap();
-        let t_default = LettreTransport::new(false, default_cfg.smtp_helo_name());
-        let t_override = LettreTransport::new(false, override_cfg.smtp_helo_name());
-        assert_eq!(t_default.helo_name(), "a.example");
-        assert_eq!(t_override.helo_name(), "relay.example");
+        let cfg: Config = toml::from_str("domain = \"a.example\"\n[mailboxes]\n").unwrap();
+        let t = LettreTransport::new(false, cfg.domain.clone());
+        assert_eq!(t.helo_name(), "a.example");
     }
 
     #[test]
