@@ -6,8 +6,7 @@
 #   curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 1.2.3
 #
 # Modelled on `just.systems/install.sh` — `say` / `err` / `need` / `download`
-# helper idioms, no bashisms, HTTPS-only trust anchor. Implements PRD
-# onboarding FR-2.1–2.9 (see docs/onboarding-prd.md).
+# helper idioms, no bashisms, HTTPS-only trust anchor.
 
 set -eu
 
@@ -183,7 +182,7 @@ compose_target() {
 }
 
 # Map a canonical Rust target triple (e.g. `x86_64-unknown-linux-gnu`) to the
-# shortened artifact-filename form used by release tarballs since Sprint 8.0.1
+# shortened artifact-filename form used by release tarballs
 # (`x86_64-linux-gnu`). The canonical triple is still used for
 # `cargo build --target`, `aimx --version`, and operator-facing error
 # messages — only the tarball filename drops the `-unknown-` vendor field.
@@ -211,8 +210,8 @@ resolve_latest_tag() {
 }
 
 # Strip the leading "v" from a tag (v1.2.3 -> 1.2.3) since tarball asset
-# names embed the bare version per release.yml (FR-1.2). Tags are bare
-# SemVer post-Sprint 8.0.1, but this stays lenient against legacy inputs.
+# names embed the bare version per release.yml. Tags are bare SemVer,
+# but this stays lenient against legacy inputs.
 tag_to_version() {
     printf '%s' "$1" | sed 's/^v//'
 }
@@ -223,7 +222,7 @@ tag_to_version() {
 
 # parse_installed_tag <bin-path>
 #   Runs <bin-path> --version and extracts the second whitespace-separated
-#   token, matching the Sprint 2 format:
+#   token, matching the format:
 #     aimx <tag> (<git-sha>) <target-triple> built <date>
 #   Returns empty string on any failure.
 parse_installed_tag() {
@@ -252,7 +251,7 @@ parse_installed_tag() {
 # pairwise; any pre-release suffix (-rc1, -fixture) is compared
 # lexicographically *only* as a tiebreaker (pre-release < release per
 # SemVer). Good enough for the install-script upgrade heuristic; the real
-# Sprint 4 `aimx upgrade` uses a proper crate.
+# `aimx upgrade` uses a proper crate.
 compare_tags() {
     _a="$(tag_to_version "$1")"
     _b="$(tag_to_version "$2")"
@@ -457,7 +456,7 @@ main() {
         say "resolving latest release from ${GITHUB_API}/latest"
         TAG="$(resolve_latest_tag)"
     fi
-    # Tags are bare SemVer post-Sprint 8.0.1. A caller-supplied `v` prefix
+    # Tags are bare SemVer. A caller-supplied `v` prefix
     # (from `--tag v0.0.0-fixture` or `AIMX_VERSION=v1.2.3`) would compose a
     # non-existent `/download/v…/` URL; strip it leniently before we use the
     # tag for URL / asset-name / .sha256 filename composition. Narrow match:
@@ -482,7 +481,7 @@ main() {
     say "tarball: ${_url}"
     say "install path: ${_install_path}"
 
-    # Upgrade-vs-fresh decision (FR-2.5). Only matters when a binary is
+    # Upgrade-vs-fresh decision. Only matters when a binary is
     # already present at ${_install_path}.
     _installed_tag=""
     _is_upgrade=0

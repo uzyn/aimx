@@ -1,19 +1,14 @@
-//! Sprint 2 / S2-3 Tier-2 integration tests.
+//! Tier-2 integration tests.
 //!
 //! Gated behind `--features integration` so `cargo test` without the flag
 //! never touches the network. CI runs `cargo test --features integration`
 //! once per PR to exercise these paths against the live `0.0.0-fixture`
-//! release (rebuilt under the Sprint 8.0.1 naming convention — bare
-//! SemVer tag, no `-unknown-` vendor in tarball filenames).
+//! release (bare SemVer tag, no `-unknown-` vendor in tarball
+//! filenames).
 //!
 //! The fixture release is **permanent** (never deleted). If its SHA-256
 //! sums ever drift (e.g. because the release was re-published), update
 //! the table below **and** `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt`.
-//!
-//! The four sums below are pinned against the `0.0.0-fixture` release
-//! rebuilt by Sprint 8.0.1's tag push; keep
-//! `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt` in lockstep if
-//! the fixture is ever re-published.
 
 #![cfg(feature = "integration")]
 
@@ -24,7 +19,7 @@ const FIXTURE_RELEASE_URL: &str =
     "https://api.github.com/repos/uzyn/aimx/releases/tags/0.0.0-fixture";
 
 /// Expected SHA-256 checksums for the four fixture tarballs. Captured
-/// from the Sprint 8.0.1 fixture rebuild's `SHA256SUMS` asset.
+/// from the fixture's `SHA256SUMS` asset.
 fn expected_sums() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         (
@@ -46,9 +41,9 @@ fn expected_sums() -> HashMap<&'static str, &'static str> {
     ])
 }
 
-/// Map a canonical Rust target triple (`x86_64-unknown-linux-gnu`) to the
-/// Sprint 8.0.1 shortened artifact-target form (`x86_64-linux-gnu`) used
-/// in tarball filenames. The canonical triple is still what
+/// Map a canonical Rust target triple (`x86_64-unknown-linux-gnu`) to
+/// the shortened artifact-target form (`x86_64-linux-gnu`) used in
+/// tarball filenames. The canonical triple is still what
 /// `aimx --version` prints in its `<target>` slot.
 ///
 /// NOTE: the same `-unknown-` → `-` mapping is duplicated in four places
@@ -212,8 +207,7 @@ fn fixture_release_tarball_sha256_matches() {
     );
 }
 
-/// Sprint 4 S4-1 / S4-3 addendum (backlog item from Sprint 2 review):
-/// wire-through check for the `aimx upgrade` verb.
+/// Wire-through check for the `aimx upgrade` verb.
 ///
 /// Asserts that running `aimx upgrade --dry-run --version 0.0.0-fixture`
 /// as a non-root user hits the root check and exits with the expected
@@ -271,7 +265,7 @@ fn real_release_ops_wireup_non_root_refuses() {
     }
 }
 
-/// Sprint 4 review NB-1: drives the **production** `RealReleaseOps`
+/// Drives the **production** `RealReleaseOps`
 /// path end-to-end against the live `0.0.0-fixture` release. Runs
 /// `aimx upgrade --dry-run --version 0.0.0-fixture` as root —
 /// `--dry-run` stops after `fetch_asset` and never touches the

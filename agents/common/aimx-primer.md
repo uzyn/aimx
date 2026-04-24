@@ -123,7 +123,7 @@ types and return values across every tool.
 
 ## Storage layout
 
-<!-- FR-50c: the datadir layout is documented explicitly. The real security
+<!-- The datadir layout is documented explicitly. The real security
      boundary is DKIM keys at /etc/aimx/ (root-only) and the UDS socket at
      /run/aimx/aimx.sock, not filesystem obscurity. -->
 
@@ -351,8 +351,8 @@ the global list entirely (no merging). Valid values:
 - `trusted_senders = ["*@company.com"]`: glob patterns for allowlisted
   senders.
 
-Mail is always stored regardless of trust outcome. Sprint 50 redefined how
-trust gates hooks (shell commands fired on email events): an `on_receive`
+Mail is always stored regardless of trust outcome. Trust gates hooks
+(shell commands fired on email events): an `on_receive`
 hook fires iff `trusted == "true"` OR the hook explicitly opts in via
 `dangerously_support_untrusted = true`. `trust = "none"` therefore fires
 **no** hooks by default. The operator must either switch to

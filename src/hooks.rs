@@ -157,7 +157,7 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     }
 }
 
-// ---- template path (S3-3) -------------------------------------------
+// ---- template path -------------------------------------------------
 
 fn create_template(
     config: &Config,
@@ -273,7 +273,7 @@ fn create_template(
     }
 }
 
-// ---- raw-cmd path (S3-4) ---------------------------------------------
+// ---- raw-cmd path --------------------------------------------------
 
 fn create_raw_cmd(
     config: &Config,
@@ -755,7 +755,7 @@ fn apply_create_direct(
     validate_hooks(&new_config, &OrphanSkipContext::strict())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
     // Use the same temp-then-rename helper the pruner and daemon use so
-    // the CLI fallback path is crash-safe (hardening PRD §6.4 / S3-3).
+    // the CLI fallback path is crash-safe.
     let path = crate::config::config_path();
     crate::mailbox_handler::write_config_atomic(&path, &new_config).map_err(
         |e| -> Box<dyn std::error::Error> { format!("failed to rewrite config.toml: {e}").into() },
@@ -1100,7 +1100,7 @@ mod tests {
         assert!(err.contains("does not allow event"), "{err}");
     }
 
-    // ----- Sprint 4 S4-3: `aimx hooks templates` -------------------------
+    // ----- `aimx hooks templates` ----------------------------------------
 
     fn capture_list_templates(config: &Config) -> String {
         let mut buf: Vec<u8> = Vec::new();
@@ -1133,7 +1133,7 @@ mod tests {
 
     #[test]
     fn list_templates_bundled_defaults_render() {
-        // Sprint 8 S8-1 stripped every `invoke-*` block from
+        // Every `invoke-*` block has been stripped from
         // `hook-templates/defaults.toml`; only `webhook` remains
         // pre-bundled. Per-agent templates are registered on demand
         // by `aimx agent-setup`.
@@ -1217,7 +1217,7 @@ mod tests {
         assert!(find_hook_by_effective_name(&cfg, "not_there").is_none());
     }
 
-    // -------------------- Sprint 7: hooks prune --orphans --------------------
+    // -------------------- hooks prune --orphans ------------------------------
 
     use crate::user_resolver::{ResolvedUser, set_test_resolver};
 
@@ -1535,7 +1535,7 @@ mod tests {
         }
     }
 
-    /// Hardening PRD §6.4 / S3-3: `apply_create_direct` must write
+    /// `apply_create_direct` must write
     /// `config.toml` via temp-then-rename and must NOT truncate or
     /// otherwise mutate the file when the underlying write fails.
     #[test]
@@ -1571,7 +1571,7 @@ mod tests {
         );
     }
 
-    /// Hardening PRD §6.4 / S3-3: same invariant as above, for the
+    /// Same invariant as above, for the
     /// delete-hook direct path. Prove the pre-existing hook survives
     /// untouched on save failure.
     #[test]

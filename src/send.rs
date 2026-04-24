@@ -260,7 +260,7 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
     }
     if let Some(err_body) = rest.strip_prefix("ERR ") {
         let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
-        // Sprint 4: the frame may carry a follow-up `Code:` header on
+        // The frame may carry a follow-up `Code:` header on
         // subsequent lines. We scan for it so clients can branch on
         // the structured code even if the status-line token drifts.
         let header_code = header_code(text);
@@ -283,8 +283,8 @@ fn parse_response_line(buf: &[u8]) -> SubmitOutcome {
 }
 
 /// Extract the first `Code:` header from the response text, if present.
-/// Introduced in Sprint 4 so the structured code on the wire survives
-/// any future change to the status-line token.
+/// The structured code on the wire survives any future change to the
+/// status-line token.
 fn header_code(text: &str) -> Option<ErrCode> {
     for line in text.lines().skip(1) {
         let line = line.trim_end_matches('\r');
@@ -1038,7 +1038,7 @@ mod tests {
 
     #[test]
     fn parse_response_eacces_via_inline_and_header() {
-        // Sprint 4 S4-3: a response carrying both the legacy inline
+        // A response carrying both the legacy inline
         // `EACCES` token AND a structured `Code:` header is parseable
         // back into the same `ErrCode::Eaccess` variant.
         let buf = b"AIMX/1 ERR EACCES not owner\nCode: EACCES\n\n";

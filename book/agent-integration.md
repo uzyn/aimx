@@ -245,8 +245,8 @@ for the schema reference.
 
 Gemini CLI picks up skills from `~/.gemini/skills/<name>/` and configures
 MCP servers in `~/.gemini/settings.json`. aimx does not mutate
-`settings.json` directly (FR-49). Instead the installer prints the exact
-JSON block to merge.
+`settings.json` directly. Instead the installer prints the exact JSON
+block to merge.
 
 Install:
 

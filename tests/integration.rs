@@ -51,12 +51,12 @@ fn install_cached_dkim_keys(tmp: &Path) {
 }
 
 fn setup_test_env(tmp: &Path) -> String {
-    // Sprint 4 §6.5: the UDS now enforces per-mailbox ownership. Tests
-    // that drive MCP / UDS as the current user need alice's owner to
-    // match the running uid so the authz check accepts.
+    // The UDS enforces per-mailbox ownership. Tests that drive MCP /
+    // UDS as the current user need alice's owner to match the running
+    // uid so the authz check accepts.
     //
-    // Sprint 7 §6: `aimx doctor` now validates mailbox storage
-    // ownership. The fixture uses the current test-runner's username
+    // `aimx doctor` validates mailbox storage ownership. The fixture
+    // uses the current test-runner's username
     // for BOTH mailboxes (including the catchall) and creates all four
     // storage dirs so `MAILBOX-DIR-OWNER-DRIFT` / `MAILBOX-DIR-MISSING`
     // do not fire for fixture reasons. Tests that specifically need a
@@ -533,8 +533,8 @@ fn aimx_binary_path() -> std::path::PathBuf {
     assert_cmd::cargo::cargo_bin("aimx")
 }
 
-/// Sprint 4 §6.5: `MAILBOX-CREATE` / `MAILBOX-DELETE` over UDS are
-/// root-only. Tests that exercise the CLI via UDS need to bail out
+/// `MAILBOX-CREATE` / `MAILBOX-DELETE` over UDS are root-only.
+/// Tests that exercise the CLI via UDS need to bail out
 /// when not running as root so a casual `cargo test` doesn't surface
 /// EACCES as a pretend bug. The CI `integration-isolation` job sets
 /// `AIMX_INTEGRATION_SUDO=1` and runs under sudo, so these tests
@@ -544,22 +544,20 @@ fn skip_if_mailbox_crud_not_root() -> bool {
     if unsafe { libc::geteuid() } == 0 {
         return false;
     }
-    eprintln!(
-        "skipping mailbox-CRUD UDS test: requires root (Sprint 4 §6.5 makes MAILBOX-CRUD root-only)"
-    );
+    eprintln!("skipping mailbox-CRUD UDS test: requires root; MAILBOX-CRUD is root-only");
     true
 }
 
 /// Resolve a non-root Linux username suitable for use as a test mailbox
-/// `owner`. Used by Sprint 2+ tests that create mailboxes in a tmpdir:
+/// `owner`. Used by tests that create mailboxes in a tmpdir:
 /// the daemon chowns the new mailbox dirs to the configured owner's
 /// uid, so on a non-root CI runner the owner must be the tester's own
 /// username (chown-to-self is a zero-effect syscall every user can
 /// issue).
 ///
-/// Sprint 3 §6.2 forbids `owner = "root"` on non-catchall mailboxes, so
-/// when the test process runs as root (Sprint 4 root-gated CI step
-/// under `sudo`) we must pick a non-root username. Prefer `SUDO_USER`
+/// `owner = "root"` is forbidden on non-catchall mailboxes, so when
+/// the test process runs as root (root-gated CI step under `sudo`)
+/// we must pick a non-root username. Prefer `SUDO_USER`
 /// — the invoking non-root user — when it points at a real passwd
 /// entry (the normal CI path, where `sudo` preserves the env). Fall
 /// back to `nobody` otherwise (always present on Linux, matches the
@@ -729,7 +727,7 @@ fn mcp_list_tools() {
 
     let resp = client.list_tools();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    // 9 mail/mailbox tools + 4 hook tools (Sprint 5).
+    // 9 mail/mailbox tools + 4 hook tools.
     assert_eq!(tools.len(), 13);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -1221,9 +1219,9 @@ cmd = "touch {}"
 
 #[test]
 fn ingest_trust_none_allows_unsigned_trigger() {
-    // S50-3: mailbox trust=none no longer fires hooks by default. The hook
-    // must explicitly opt in via `dangerously_support_untrusted` to keep
-    // the pre-Sprint-50 "fire on unsigned" behavior.
+    // Mailbox trust=none no longer fires hooks by default. The hook
+    // must explicitly opt in via `dangerously_support_untrusted` to
+    // keep the legacy "fire on unsigned" behavior.
     let tmp = TempDir::new().unwrap();
     let marker = tmp.path().join("triggered");
     let config_content = format!(
@@ -1269,11 +1267,11 @@ dangerously_support_untrusted = true
 /// Verifies the end-to-end global-trust inherit path: the top-level
 /// `trust` + `trusted_senders` on `Config` apply to a mailbox that has
 /// neither field set. On ingest the frontmatter's `trusted` value and the
-/// hook gate (Sprint 50) must both reflect the inherited policy.
+/// hook gate must both reflect the inherited policy.
 #[test]
 fn ingest_inherits_global_trust_when_mailbox_has_no_override() {
-    // S50-3: Sprint 50 inverts the hook gate. It now fires iff the
-    // evaluated `trusted == "true"` OR the hook opts in explicitly.
+    // The hook gate fires iff the evaluated `trusted == "true"` OR
+    // the hook opts in explicitly.
     // Unsigned fixture means `trusted == "false"` even with allowlist, so
     // the hook must opt in or it won't fire. We keep the original intent
     // of this test (inheriting global trust into the mailbox row) by
@@ -1315,12 +1313,12 @@ cmd = "touch {}"
     let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
     assert_eq!(md_files.len(), 1);
 
-    // S50-3: the hook gate now reads `trusted` from frontmatter. The
+    // The hook gate reads `trusted` from frontmatter. The
     // unsigned fixture produces `trusted = "false"` even with the global
     // allowlist covering the sender, so a default hook does NOT fire.
     assert!(
         !marker.exists(),
-        "Default hook must not fire for trusted=false under Sprint 50 semantics"
+        "Default hook must not fire for trusted=false"
     );
 
     // The strict `trusted` field evaluation requires BOTH allowlist AND
@@ -1335,10 +1333,10 @@ cmd = "touch {}"
     );
 }
 
-/// S50-3: per-mailbox `trust = "none"` override yields
-/// `trusted = "none"` on the email, which Sprint 50 no longer treats as
-/// "fire hooks by default." To preserve the original intent (mailbox
-/// override beats global), the hook opts in explicitly.
+/// Per-mailbox `trust = "none"` override yields `trusted = "none"`
+/// on the email, which is no longer treated as "fire hooks by default."
+/// To preserve the original intent (mailbox override beats global),
+/// the hook opts in explicitly.
 #[test]
 fn ingest_mailbox_trust_none_override_beats_global_verified() {
     let tmp = TempDir::new().unwrap();
@@ -1428,8 +1426,8 @@ fn ingest_frontmatter_contains_dkim_spf() {
 
 #[test]
 fn ingest_trusted_sender_bypasses_dkim() {
-    // S50-3: trusted_senders alone no longer yields `trusted = "true"`;
-    // Sprint 50 requires allowlist AND DKIM pass for `trusted = "true"`.
+    // trusted_senders alone no longer yields `trusted = "true"`;
+    // both allowlist AND DKIM pass are required for `trusted = "true"`.
     // To mirror the "bypass DKIM for trusted senders" affordance, the hook
     // opts in explicitly.
     let tmp = TempDir::new().unwrap();
@@ -1475,7 +1473,7 @@ dangerously_support_untrusted = true
     );
 }
 
-/// S31-2 / S44-1 / S50-*: end-to-end hook-recipe test.
+/// End-to-end hook-recipe test.
 ///
 /// Drives the full ingest -> hook-match -> templated shell command path with
 /// an assert-able one-liner that writes `$AIMX_FILEPATH` and `$AIMX_SUBJECT`
@@ -1588,7 +1586,7 @@ fn doctor_shows_domain_and_mailboxes() {
         .assert()
         .success();
 
-    // Sprint 7: `aimx doctor` now exits non-zero when the Checks
+    // `aimx doctor` exits non-zero when the Checks
     // section surfaces any `FAIL`-severity finding. `setup_test_env`
     // owns both mailboxes as the test runner and creates all four
     // storage dirs at mode 0700, so doctor should succeed.
@@ -1646,7 +1644,7 @@ fn doctor_renders_logs_pointer_section() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Sprint 7: with the fixture cleaned up (both mailboxes owned by
+    // With the fixture cleaned up (both mailboxes owned by
     // the test runner, all four storage dirs present at 0700), doctor
     // succeeds and the Logs section renders in the happy-path report.
     let assert = aimx_cmd(tmp.path())
@@ -1682,7 +1680,7 @@ fn doctor_help_works() {
 
 #[test]
 fn mailboxes_and_mailbox_alias_produce_identical_output() {
-    // S48-7: `mailboxes` is the canonical subcommand name; the singular
+    // `mailboxes` is the canonical subcommand name; the singular
     // `mailbox` is retained as a clap alias for muscle memory. Both must
     // produce byte-identical output for `list`.
     let tmp = TempDir::new().unwrap();
@@ -1713,7 +1711,7 @@ fn mailboxes_and_mailbox_alias_produce_identical_output() {
 
 #[test]
 fn status_subcommand_no_longer_exists() {
-    // S48-1 clean rename: `aimx status` must produce a clap "unrecognized
+    // Clean rename: `aimx status` must produce a clap "unrecognized
     // subcommand" error. No alias was kept.
     let assert = Command::cargo_bin("aimx")
         .unwrap()
@@ -2023,7 +2021,7 @@ fn start_serve(tmp: &Path, port: u16) -> std::process::Child {
             // message carries whatever the daemon logged before it
             // failed to bind. Without this, timeouts surface as the
             // bare "did not start within 30s" panic with zero
-            // diagnostic (Sprint 4 CI cycle 3 regression).
+            // diagnostic.
             let _ = child.kill();
             let mut stderr_buf = String::new();
             if let Some(mut err) = child.stderr.take() {
@@ -2369,7 +2367,7 @@ fn serve_e2e_bcc_recipients() {
         "BCC header line should not be in stored email"
     );
     // delivered_to carries the actual RCPT TO (envelope recipient),
-    // which for BCC is the BCC address. This is correct per FR-13.
+    // which for BCC is the BCC address.
     assert_eq!(
         get_toml_str(bob_table, "delivered_to"),
         "bob@agent.example.com",
@@ -2829,7 +2827,7 @@ fn send_uds_end_to_end_delivers_signed_message() {
     );
 }
 
-/// S50-4: end-to-end `after_send` hook test. Replaces the default
+/// End-to-end `after_send` hook test. Replaces the default
 /// `setup_test_env` config with a mailbox that carries an `after_send` hook
 /// writing a sentinel file containing `$AIMX_SEND_STATUS`. After a send
 /// round-trip the sentinel must exist and carry `delivered`.
@@ -3165,7 +3163,7 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
+#[ignore = "requires root; MAILBOX-CRUD is root-only; run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3292,7 +3290,7 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
+#[ignore = "requires root; MAILBOX-CRUD is root-only; run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3392,12 +3390,12 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 }
 
 // ---------------------------------------------------------------------------
-// S48-5: `aimx mailboxes delete --force` (CLI-only wipe + delete)
+// `aimx mailboxes delete --force` (CLI-only wipe + delete)
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
+#[ignore = "requires root; MAILBOX-CRUD is root-only; run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3459,7 +3457,7 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
+#[ignore = "requires root; MAILBOX-CRUD is root-only; run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -3858,7 +3856,7 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
 
 #[cfg(unix)]
 #[test]
-#[ignore = "requires root (Sprint 4 §6.5: MAILBOX-CRUD is root-only); run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
+#[ignore = "requires root; MAILBOX-CRUD is root-only; run via the CI mailbox-crud-root step or AIMX_INTEGRATION_SUDO=1 sudo"]
 fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     if skip_if_mailbox_crud_not_root() {
         return;
@@ -4018,10 +4016,10 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
 }
 
 // ---------------------------------------------------------------------
-// Sprint 51: `aimx mailboxes show` + `aimx hooks` CLI
+// `aimx mailboxes show` + `aimx hooks` CLI
 // ---------------------------------------------------------------------
 
-/// S51-1: `aimx mailboxes show <name>` surfaces trust, senders, hooks,
+/// `aimx mailboxes show <name>` surfaces trust, senders, hooks,
 /// and counts for a configured mailbox. Verify the happy path and the
 /// singular `mailbox show` alias.
 #[test]
@@ -4126,7 +4124,7 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     cmd.env("AIMX_CONFIG_DIR", tmp);
     cmd.env("AIMX_RUNTIME_DIR", &runtime);
     cmd.env("AIMX_SANDBOX_FORCE_FALLBACK", "1");
-    // Sprint 3 S3-4 makes `aimx hooks create --cmd` root-only. CI runs
+    // `aimx hooks create --cmd` is root-only. CI runs
     // non-root, so tests set this test-only escape hatch to exercise
     // the direct-write + SIGHUP path on behalf of the fake-root
     // operator. Production systemd units never pass this env var.
@@ -4134,7 +4132,7 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     cmd
 }
 
-/// S51-2: `aimx hooks create` + `aimx hooks list` roundtrip.
+/// `aimx hooks create` + `aimx hooks list` roundtrip.
 /// Daemon is not running (AIMX_RUNTIME_DIR points at an empty dir), so
 /// the CLI falls back to direct config.toml edit and prints a restart
 /// hint. That path covers the full flag validation and the on-disk
@@ -4352,13 +4350,13 @@ fn hooks_delete_unknown_name_errors() {
 }
 
 // ---------------------------------------------------------------------
-// S51-3: UDS HOOK-CREATE / HOOK-DELETE end-to-end
+// UDS HOOK-CREATE / HOOK-DELETE end-to-end
 // ---------------------------------------------------------------------
 
-/// S3-4: spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm
-/// the CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely
-/// under Sprint 3) and SIGHUP'd the running daemon. The success path
-/// prints a `Reload:` banner and no `Hint:` restart banner.
+/// Spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm the
+/// CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely)
+/// and SIGHUP'd the running daemon. The success path prints a
+/// `Reload:` banner and no `Hint:` restart banner.
 #[test]
 fn hooks_raw_cmd_sighup_hot_swaps_config() {
     let tmp = TempDir::new().unwrap();
@@ -4391,7 +4389,7 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
         create_out.contains("Hook created"),
         "create output: {create_out}"
     );
-    // Sprint 3 S3-4: raw-cmd hooks write config.toml directly and
+    // Raw-cmd hooks write config.toml directly and
     // SIGHUP the daemon. Positive signal: stdout must carry the
     // `Reload:` banner (which only prints on SighupOutcome::Sent).
     // Negative signal: no `Hint:` restart banner (that would indicate
@@ -4406,7 +4404,7 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
     );
 
     // On-disk config.toml should contain the new hook (CLI wrote it
-    // directly — raw-cmd never traverses UDS under Sprint 3).
+    // directly — raw-cmd never traverses UDS).
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
         content.contains("echo via-daemon"),
@@ -4449,7 +4447,7 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .success();
     let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
     assert!(out.contains("Hook created"), "{out}");
-    // Sprint 3 S3-4: when the daemon is up, SIGHUP succeeds and the
+    // When the daemon is up, SIGHUP succeeds and the
     // CLI prints "Reload:" rather than the socket-missing "Hint:"
     // restart banner.
     assert!(
@@ -4499,19 +4497,17 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
 }
 
 // ---------------------------------------------------------------------
-// Sprint 5: MCP hook tools (hook_list_templates, hook_create, hook_list,
+// MCP hook tools (hook_list_templates, hook_create, hook_list,
 // hook_delete)
 // ---------------------------------------------------------------------
 
 /// Like `setup_test_env`, but also registers a single `invoke-claude`
-/// template so the Sprint 5 MCP tool tests have something to bind to.
+/// template so the MCP tool tests have something to bind to.
 fn setup_test_env_with_template(tmp: &Path) -> String {
     // `run_as = "root"` is used here so the fixture loads on any CI
-    // host (Sprint 1 S1-2 retired the `aimx-hook` system user; `root`
-    // always resolves and is invariant-safe for any mailbox owner).
-    // Sprint 2 will introduce a real non-root test user and flip this
-    // back to exercise the orphan-tolerance path the earlier comment
-    // described.
+    // host (`root` always resolves and is invariant-safe for any
+    // mailbox owner). A future test user could flip this back to
+    // exercise the orphan-tolerance path.
     let owner = current_username();
     let config_content = format!(
         "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
@@ -4541,7 +4537,7 @@ fn setup_test_env_with_template(tmp: &Path) -> String {
     config_path.to_string_lossy().to_string()
 }
 
-/// S5-1: `hook_list_templates` with zero templates returns `[]`.
+/// `hook_list_templates` with zero templates returns `[]`.
 #[test]
 fn mcp_hook_list_templates_empty_returns_empty_array() {
     let tmp = TempDir::new().unwrap();
@@ -4557,7 +4553,7 @@ fn mcp_hook_list_templates_empty_returns_empty_array() {
     client.shutdown();
 }
 
-/// S5-1: with one template registered, `hook_list_templates` returns
+/// With one template registered, `hook_list_templates` returns
 /// the PRD-specified shape.
 #[test]
 fn mcp_hook_list_templates_returns_registered_template() {
@@ -4591,7 +4587,7 @@ fn mcp_hook_list_templates_returns_registered_template() {
     client.shutdown();
 }
 
-/// S5-2: `hook_create` without a running daemon returns a precise
+/// `hook_create` without a running daemon returns a precise
 /// socket-missing error rather than panicking.
 #[test]
 fn mcp_hook_create_without_daemon_reports_missing_socket() {
@@ -4623,7 +4619,7 @@ fn mcp_hook_create_without_daemon_reports_missing_socket() {
     client.shutdown();
 }
 
-/// S5-2: full round-trip against a live daemon. `hook_create` submits
+/// Full round-trip against a live daemon. `hook_create` submits
 /// via UDS, the daemon stamps `origin = "mcp"` in `config.toml`, and
 /// the tool response includes the effective name + substituted argv.
 #[test]
@@ -4666,7 +4662,7 @@ fn mcp_hook_create_end_to_end_against_daemon() {
     stop_serve(daemon);
 }
 
-/// S5-2: the daemon's `unknown-template` error surfaces verbatim.
+/// The daemon's `unknown-template` error surfaces verbatim.
 #[test]
 fn mcp_hook_create_unknown_template_returns_error() {
     let tmp = TempDir::new().unwrap();
@@ -4692,7 +4688,7 @@ fn mcp_hook_create_unknown_template_returns_error() {
     client.shutdown();
 }
 
-/// S5-2: missing required params fail at the pre-flight substitution
+/// Missing required params fail at the pre-flight substitution
 /// check on the MCP side (daemon-side re-validates).
 #[test]
 fn mcp_hook_create_missing_param_returns_error() {
@@ -4722,7 +4718,7 @@ fn mcp_hook_create_missing_param_returns_error() {
     stop_serve(daemon);
 }
 
-/// S5-3: `hook_list` emits an empty array when no hooks are configured.
+/// `hook_list` emits an empty array when no hooks are configured.
 #[test]
 fn mcp_hook_list_empty_returns_empty_array() {
     let tmp = TempDir::new().unwrap();
@@ -4738,7 +4734,7 @@ fn mcp_hook_list_empty_returns_empty_array() {
     client.shutdown();
 }
 
-/// S5-3: origin-masking is enforced end-to-end. Operator-origin hooks
+/// Origin-masking is enforced end-to-end. Operator-origin hooks
 /// written to `config.toml` expose only name/mailbox/event/origin;
 /// MCP-origin hooks (created via the daemon in this test) expose the
 /// template + params too.
@@ -4805,7 +4801,7 @@ fn mcp_hook_list_masks_operator_origin() {
     stop_serve(daemon);
 }
 
-/// S5-4: `hook_delete` on an MCP-origin hook succeeds; on an operator-
+/// `hook_delete` on an MCP-origin hook succeeds; on an operator-
 /// origin hook the daemon's `origin-protected` message surfaces verbatim.
 #[test]
 fn mcp_hook_delete_respects_origin_protection() {
@@ -4863,7 +4859,7 @@ fn mcp_hook_delete_respects_origin_protection() {
     stop_serve(daemon);
 }
 
-/// S5-4: `hook_delete` without a running daemon returns a precise
+/// `hook_delete` without a running daemon returns a precise
 /// socket-missing error.
 #[test]
 fn mcp_hook_delete_without_daemon_reports_missing_socket() {
@@ -4882,7 +4878,7 @@ fn mcp_hook_delete_without_daemon_reports_missing_socket() {
 }
 
 // ---------------------------------------------------------------------
-// Sprint 6: S6-1 — End-to-end MCP → hook fire → sandbox verify
+// End-to-end MCP → hook fire → sandbox verify
 // ---------------------------------------------------------------------
 
 /// Write a tiny mock-curl shell script to `path` that records its argv
@@ -4891,7 +4887,7 @@ fn mcp_hook_delete_without_daemon_reports_missing_socket() {
 /// * `<path>.argv` — one argv entry per line, the first line is `argv[0]`.
 /// * `<path>.stdin` — raw bytes piped on stdin.
 /// * `<path>.uid` — output of `id -u` so the root-gated UID assertion
-///   in S6-1 can verify the daemon actually dropped privileges.
+///   the test can verify the daemon actually dropped privileges.
 ///
 /// Returns the path to the script. Marked +x by the caller.
 #[cfg(unix)]
@@ -4902,7 +4898,7 @@ fn write_mock_curl_script(path: &Path) -> std::path::PathBuf {
     let uid_log = path.with_extension("uid");
     let script = format!(
         "#!/bin/sh\n\
-         # Mock curl for S6-1 hook-template e2e test. Records argv + stdin.\n\
+         # Mock curl for hook-template e2e test. Records argv + stdin.\n\
          echo \"$0\" > '{argv}'\n\
          for a in \"$@\"; do echo \"$a\" >> '{argv}'; done\n\
          cat > '{stdin}'\n\
@@ -4919,13 +4915,13 @@ fn write_mock_curl_script(path: &Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
 
-/// S6-1 (PRD §7 + §9): full MCP → daemon → hook fire round-trip.
+/// Full MCP → daemon → hook fire round-trip.
 ///
 /// Flow:
 /// 1. Spin up `aimx serve` with a `webhook` template whose `cmd[0]` is a
 ///    mock-curl shell script in the test's tempdir.
 /// 2. Connect an MCP client and call `hook_list_templates`. Expect the
-///    `webhook` template to appear (validates Sprint 5 surface against
+///    `webhook` template to appear (validates the MCP surface against
 ///    the actual config).
 /// 3. Call `hook_create(mailbox=alice, event=after_send, template=webhook,
 ///    params={url=https://example.com/hook})`. Expect success and an
@@ -4934,7 +4930,7 @@ fn write_mock_curl_script(path: &Path) -> std::path::PathBuf {
 ///    `after_send` fires through the same sandboxed executor as
 ///    `on_receive` (PRD §6.7) — and unlike `on_receive` it has no trust
 ///    gate, so an MCP-origin hook can fire without `dangerously_*` opt-in.
-///    On-receive trust gating is exercised by separate Sprint 1–3 tests.
+///    On-receive trust gating is exercised by separate tests.
 /// 5. Assert the mock-curl recorded the substituted argv (URL ends up at
 ///    the right slot, `cmd[0]` is the mock binary verbatim) and the JSON
 ///    stdin (the webhook template's `stdin = "email_json"` mode wraps
@@ -4955,14 +4951,14 @@ fn hook_templates_end_to_end_mcp_to_sandbox() {
     // Build a config carrying the webhook template (cmd[0] points at the
     // mock) plus an `alice` mailbox. We use the `after_send` event so the
     // hook fire path is exercised end-to-end without depending on a real
-    // DKIM signature on the inbound side (Sprint 1's `evaluate_trust`
+    // DKIM signature on the inbound side (`evaluate_trust`
     // requires DKIM=pass for `trusted = true`, which the test fixtures
     // can't satisfy — see hook_substitute fuzz tests for substitution
     // edge cases that complement this end-to-end coverage).
     let webhook_url = "https://example.com/aimx-hook";
     // Template + mailbox `run_as` / `owner` use `root` in this fixture
     // so the CI runner (whose username isn't `aimx-hook` anymore, per
-    // Sprint 1 S1-2) still resolves the template to an active template
+    // path) still resolves the template to an active template
     // and the alice mailbox to an active mailbox. The invariant check
     // still holds: the `root` hook run_as is allowed for any owner.
     let owner = current_username();
@@ -5077,7 +5073,7 @@ owner = "{owner}"
         .arg("--to")
         .arg("recipient@example.com")
         .arg("--subject")
-        .arg("S6-1 e2e test")
+        .arg("end-to-end test")
         .arg("--body")
         .arg("Test body for end-to-end hook fire")
         .output()
@@ -5092,7 +5088,7 @@ owner = "{owner}"
     let daemon_stderr = stop_serve_capture_stderr(daemon);
 
     // ----- Step 4b: structured hook-fire log line carries run_as = "root"
-    // (Sprint 1 S1-2 retired the `aimx-hook` default; this fixture opts
+    // (the `aimx-hook` default has been retired; this fixture opts
     // into `root` explicitly) and template = "webhook". The fallback
     // executor logs at info level via tracing, which `aimx serve`
     // mirrors to stderr by default.
@@ -5148,7 +5144,7 @@ owner = "{owner}"
 
     // The stdin file must contain a JSON object (webhook template uses
     // `stdin = "email_json"`). The daemon wraps the persisted `.md`
-    // payload as `{"raw": "..."}` per Sprint 2's stdin handling.
+    // payload as `{"raw": "..."}` per the stdin handling.
     assert!(
         stdin_log.exists(),
         "mock-curl must have captured stdin at {}",
@@ -5163,14 +5159,14 @@ owner = "{owner}"
         .and_then(|v| v.as_str())
         .expect("email_json stdin must carry a `raw` key with the email markdown body");
     assert!(
-        raw.contains("S6-1 e2e test")
+        raw.contains("end-to-end test")
             || raw.contains("Test body for end-to-end hook fire")
             || raw.contains("alice@agent.example.com"),
         "stdin payload must reflect the sent email content: {raw}"
     );
 
     // ----- Step 6: root-gated UID assertion (skipped on non-root CI).
-    // This fixture uses `run_as = "root"` (see Sprint 1 S1-2 note at
+    // This fixture uses `run_as = "root"` (see the note at
     // top of the test), so when the harness runs as root the hook's
     // subprocess stays at uid 0 — no privilege drop required. The
     // assertion covers the log-correctness path; the privilege-drop
@@ -5180,7 +5176,7 @@ owner = "{owner}"
         let uid_str = std::fs::read_to_string(&uid_log)
             .expect("mock-curl uid log must exist when running as root");
         let uid: u32 = uid_str.trim().parse().expect("uid log must be numeric");
-        // Sprint 2: this template uses `run_as = "root"`, so the hook
+        // This template uses `run_as = "root"`, so the hook
         // subprocess stays at uid 0 under a root-invoked harness — no
         // privilege drop to observe here. The actual privilege-drop
         // semantics (uid != 0 after `setresuid` into a real Linux
@@ -5207,7 +5203,7 @@ owner = "{owner}"
 }
 
 // ---------------------------------------------------------------------
-// Sprint 2 S2-2 / S2-3: per-mailbox chown on ingest + state rewrites.
+// Per-mailbox chown on ingest + state rewrites.
 // The non-root form of these tests verifies mode (file permission bits)
 // without requiring an actual chown syscall — the tester's own uid is
 // already the mailbox owner (via `testowner` resolver shim), so the
@@ -5274,7 +5270,7 @@ fn ingest_succeeds_and_chown_failure_is_nonfatal() {
         assert_eq!(
             meta.mode() & 0o777,
             0o600,
-            "root ingest must produce 0o600 .md files via Sprint 2 chown"
+            "root ingest must produce 0o600 .md files via post-persist chown"
         );
     }
     // Non-root: chown fails silently and the file stays at umask default.
@@ -5283,7 +5279,7 @@ fn ingest_succeeds_and_chown_failure_is_nonfatal() {
     // creates real users for both alice and bob.
 }
 
-/// Sprint 7 S7-4: `aimx hooks prune --orphans --dry-run` surfaces the
+/// `aimx hooks prune --orphans --dry-run` surfaces the
 /// proposed diff without mutating `config.toml`, and a second pass
 /// actually rewrites the file atomically.
 ///
@@ -5396,7 +5392,7 @@ fn hooks_prune_orphans_dry_run_then_apply() {
     );
 }
 
-/// Sprint 7 S7-4: `aimx hooks prune --orphans` without the flag fails
+/// `aimx hooks prune --orphans` without the flag fails
 /// fast, and without root (and without the skip-root env var) it
 /// refuses.
 #[test]
@@ -5434,7 +5430,7 @@ fn hooks_prune_requires_orphans_and_root() {
     }
 }
 
-/// Sprint 2 / FR-6.1: `aimx --version` must render
+/// `aimx --version` must render
 /// `aimx <tag> (<git-sha>) <target-triple> built <date>` — all four fields
 /// present on a single line.
 #[test]
@@ -5453,7 +5449,7 @@ fn aimx_version_renders_full_metadata() {
         .expect("at least one output line")
         .to_string();
 
-    // FR-6.1: output must be exactly `aimx <tag> (<sha>) <target> built <date>`
+    // Output must be exactly `aimx <tag> (<sha>) <target> built <date>`
     // — one `aimx ` prefix, not two. An earlier revision of this test stripped
     // an optional leading `aimx ` and would have silently accepted the
     // `aimx aimx ...` bug; we assert the exact shape here so that regression
@@ -5470,16 +5466,16 @@ fn aimx_version_renders_full_metadata() {
         .unwrap_or_else(|| panic!("version line missing tag token: {line:?}"));
     assert_ne!(
         second, "aimx",
-        "duplicate `aimx` prefix reintroduced (FR-6.1 violation): {line:?}"
+        "duplicate `aimx` prefix reintroduced: {line:?}"
     );
     assert!(!second.is_empty(), "tag token must be non-empty: {line:?}");
-    // S8.0.1-1 AC: tags are bare SemVer post-Sprint 8.0.1 — the baked
+    // Tags are bare SemVer — the baked
     // `RELEASE_TAG` goes through `build.rs::strip_legacy_v_prefix`, so a
     // leading `v` on this token would signal a regression in either
     // `build.rs` or the release tagging convention. Reject it loudly.
     assert!(
         !second.starts_with('v'),
-        "tag token must not carry a leading `v` (bare SemVer per Sprint 8.0.1): {line:?}"
+        "tag token must not carry a leading `v` (bare SemVer): {line:?}"
     );
     // The tag must either begin with a digit (bare SemVer like `0.1.0`,
     // `0.0.0-fixture`, `0.0.0-fixture-12-gabcdef1-dirty`) or equal `dev`

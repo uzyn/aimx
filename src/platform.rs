@@ -49,7 +49,7 @@ pub const SIGKILL_GRACE: Duration = Duration::from_secs(5);
 /// Default memory cap on systemd-run hooks. Matches PRD §6.7. Operators
 /// who need to raise it set `run_as = "root"` in `config.toml` and live
 /// with the reduced guarantees, or edit `/etc/aimx/config.toml` to add a
-/// per-template override in a future sprint.
+/// per-template override in future work.
 pub const DEFAULT_MEMORY_MAX: &str = "256M";
 
 /// Stdin delivery policy per PRD §6.7. The daemon writes the chosen
@@ -89,7 +89,7 @@ pub struct SandboxOutcome {
     pub exit_code: i32,
     /// Tail of captured stdout. Not surfaced in the structured hook-fire
     /// log line today (only `stderr_tail` is); reserved for the `doctor`
-    /// recent-activity view in Sprint 6.
+    /// recent-activity view.
     #[allow(dead_code)]
     pub stdout_tail: Vec<u8>,
     pub stderr_tail: Vec<u8>,

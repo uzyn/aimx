@@ -1,6 +1,6 @@
-//! Release-metadata fetcher (FR-4.6, PRD §8.1).
+//! Release-metadata fetcher.
 //!
-//! `aimx upgrade` (Sprint 4) consumes this module through the [`ReleaseOps`]
+//! `aimx upgrade` consumes this module through the [`ReleaseOps`]
 //! trait so unit tests can inject a scripted [`MockReleaseOps`] instead of
 //! hitting `api.github.com`. The real implementation, [`RealReleaseOps`],
 //! uses `ureq` — blocking is fine because `aimx upgrade` is a short-lived
@@ -22,12 +22,12 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
 // Every item in this module is consumed from within the module itself
-// (unit tests) and from `aimx upgrade` in Sprint 4. Per-item
-// `#[allow(dead_code)]` narrows the lint so unrelated future dead code
-// still surfaces — in contrast to a blanket module-level allow.
+// (unit tests) and from `aimx upgrade`. Per-item `#[allow(dead_code)]`
+// narrows the lint so unrelated future dead code still surfaces — in
+// contrast to a blanket module-level allow.
 
-/// Environment variable that overrides the release-manifest URL
-/// (PRD FR-4.6). Takes precedence over `[upgrade] release_manifest_url`
+/// Environment variable that overrides the release-manifest URL.
+/// Takes precedence over `[upgrade] release_manifest_url`
 /// in `config.toml`.
 #[allow(dead_code)]
 pub const RELEASE_MANIFEST_URL_ENV: &str = "AIMX_RELEASE_MANIFEST_URL";
@@ -165,7 +165,7 @@ impl RealReleaseOps {
     }
 
     /// Resolve the latest-release URL honoring the env-var > config > default
-    /// precedence chain (FR-4.6).
+    /// precedence chain.
     pub fn latest_release_url(&self) -> String {
         if let Ok(v) = std::env::var(RELEASE_MANIFEST_URL_ENV)
             && !v.is_empty()
@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn rewrite_to_tag_handles_known_shapes() {
-        // Bare SemVer tags (post-Sprint 8.0.1 canonical form).
+        // Bare SemVer tags (canonical form).
         assert_eq!(
             rewrite_to_tag(
                 "https://api.github.com/repos/uzyn/aimx/releases/latest",

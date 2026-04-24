@@ -13,11 +13,11 @@ fn main() {
     // `git describe --tags --always --dirty` → release tag or `dev` fallback.
     // Non-git checkouts (e.g. published crate tarball extract) fall back to `dev`.
     //
-    // Tags are bare SemVer post-Sprint 8.0.1 (`1.95.0`, matching Rust's own
-    // release convention). If git returns a legacy `v`-prefixed tag, strip
-    // the leading `v` leniently so `aimx --version` renders the bare form
-    // for one release cycle. Non-tag describe output (`dev`, `g<sha>`,
-    // `<tag>-N-g<sha>-dirty`) is passed through unchanged.
+    // Tags are bare SemVer (`1.95.0`, matching Rust's own release
+    // convention). If git returns a legacy `v`-prefixed tag, strip the
+    // leading `v` leniently so `aimx --version` renders the bare form.
+    // Non-tag describe output (`dev`, `g<sha>`, `<tag>-N-g<sha>-dirty`)
+    // is passed through unchanged.
     let tag = Command::new("git")
         .args(["describe", "--tags", "--always", "--dirty"])
         .output()

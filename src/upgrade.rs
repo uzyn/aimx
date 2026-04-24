@@ -1,8 +1,8 @@
-//! `aimx upgrade` — single-verb binary self-update (PRD §6.4, FR-4.1–4.6).
+//! `aimx upgrade` — single-verb binary self-update.
 //!
 //! # Flow (happy path)
 //!
-//! 1. Root check (FR-4.1).
+//! 1. Root check.
 //! 2. Resolve the target manifest: `--version <tag>` → `release_by_tag`,
 //!    else `latest_release`. Compare its tag against
 //!    [`crate::version::release_tag`]. Equal and no `--force` → print
@@ -242,8 +242,8 @@ pub fn run_upgrade(
     // Step 1: resolve the target manifest.
     report.record(UpgradeStep::ResolveManifest);
     // Strip any legacy `v` prefix (`--version v0.1.0` → `0.1.0`) before
-    // hitting the GitHub API — release tags are bare SemVer post-Sprint
-    // 8.0.1, so a caller-supplied `v` would 404. Mirrors `install.sh` and
+    // hitting the GitHub API — release tags are bare SemVer, so a
+    // caller-supplied `v` would 404. Mirrors `install.sh` and
     // `build.rs::strip_legacy_v_prefix`.
     let canonical_version = args.canonical_version();
     let manifest = match canonical_version.as_deref() {
@@ -377,12 +377,12 @@ pub fn resolve_install_path(sys: &dyn SystemOps) -> Result<PathBuf, UpgradeError
     Ok(canonical)
 }
 
-/// Standard tarball filename per PRD FR-1.2: `aimx-<version>-<artifact-target>.tar.gz`.
+/// Standard tarball filename: `aimx-<version>-<artifact-target>.tar.gz`.
 ///
 /// The leading `v` is stripped from the tag — `v1.2.3` → version `1.2.3` —
 /// and the canonical Rust target triple is shortened by dropping the
 /// `-unknown-` vendor field (`x86_64-unknown-linux-gnu` →
-/// `x86_64-linux-gnu`) per Sprint 8.0.1. Both transformations match
+/// `x86_64-linux-gnu`). Both transformations match
 /// `.github/workflows/release.yml`.
 pub fn tarball_filename(tag: &str, target: &str) -> String {
     let version = tag.strip_prefix('v').unwrap_or(tag);
@@ -398,9 +398,9 @@ pub fn tarball_inner_dir(tag: &str, target: &str) -> String {
     format!("aimx-{version}-{artifact_target}")
 }
 
-/// Shorten a canonical Rust target triple for release-artifact filenames
-/// per Sprint 8.0.1 (`x86_64-unknown-linux-gnu` → `x86_64-linux-gnu`).
-/// The canonical triple is still used for `cargo build --target`, the
+/// Shorten a canonical Rust target triple for release-artifact
+/// filenames (`x86_64-unknown-linux-gnu` → `x86_64-linux-gnu`). The
+/// canonical triple is still used for `cargo build --target`, the
 /// `TARGET` build-time env, and `aimx --version`'s target slot — only the
 /// artifact filename drops the `-unknown-` vendor field.
 fn artifact_target(target: &str) -> String {
@@ -580,7 +580,7 @@ fn attempt_rollback(
     })
 }
 
-/// Print the dry-run preview (FR-4.2). The exact wording is matched by
+/// Print the dry-run preview. The exact wording is matched by
 /// the integration tests, so changes here must sync with those.
 fn print_dry_run_preview(
     report: &UpgradeReport,
@@ -837,8 +837,8 @@ mod tests {
         release.push_asset(Ok(bytes));
 
         // With --version equal to current tag *and* --force, we must
-        // re-install rather than short-circuit. This is the FR-4.4
-        // same-tag + --force test (PRD §11 resolved open question).
+        // re-install rather than short-circuit. This is the same-tag
+        // + --force test.
         let args = UpgradeArgs {
             dry_run: false,
             version: Some(tag.to_string()),
@@ -1065,7 +1065,7 @@ mod tests {
             tarball_filename("v1.2.3", "x86_64-unknown-linux-gnu"),
             "aimx-1.2.3-x86_64-linux-gnu.tar.gz"
         );
-        // Bare SemVer tags (post-Sprint 8.0.1): taken verbatim for the
+        // Bare SemVer tags: taken verbatim for the
         // version segment; `-unknown-` is still dropped from the target.
         assert_eq!(
             tarball_filename("1.2.3", "aarch64-unknown-linux-musl"),
@@ -1093,11 +1093,11 @@ mod tests {
         );
     }
 
-    /// N2 regression guard: feed `run_upgrade` a malformed tarball and
+    /// Regression guard: feed `run_upgrade` a malformed tarball and
     /// assert the PreSwap(ExtractTarball) outcome — the service is never
-    /// stopped and `.prev` is never created. Closes the S4-3 AC
-    /// "Rollback fires on tarball-extraction failure" at the `run_upgrade`
-    /// level (the in-helper test only covered `extract_tarball` directly).
+    /// stopped and `.prev` is never created. Confirms rollback fires on
+    /// tarball-extraction failure at the `run_upgrade` level (the
+    /// in-helper test only covered `extract_tarball` directly).
     #[test]
     fn run_upgrade_malformed_tarball_returns_preswap_extract_error() {
         let mut sys = MockSystemOps::default();

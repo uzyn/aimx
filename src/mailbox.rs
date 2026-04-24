@@ -143,7 +143,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
-    // Hardening PRD §6.4 / S3-2: save-then-delete ordering.
+    // Save-then-delete ordering.
     //
     // 1. Clone the config and drop the mailbox entry in memory.
     // 2. Persist the new config atomically (temp-then-rename). If this
@@ -245,7 +245,7 @@ fn create(
     owner: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve the effective owner: explicit `--owner`, else fall back
-    // to the shared `prompt_mailbox_owner` seam (Sprint 3). Under a TTY
+    // to the shared `prompt_mailbox_owner` seam. Under a TTY
     // the operator sees a prompt defaulted to the local part; under
     // `AIMX_NONINTERACTIVE=1` the helper accepts that default when it
     // resolves or errors hard so scripted runs fail fast instead of
@@ -497,10 +497,10 @@ fn delete(
     yes: bool,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // S48-5: `--force` wipes `inbox/<name>/` and `sent/<name>/`
-    // contents before invoking the normal delete path. The wipe is
-    // CLI-only (the MCP `mailbox_delete` tool does not gain a force
-    // variant per S48-6) and refuses on the catchall.
+    // `--force` wipes `inbox/<name>/` and `sent/<name>/` contents
+    // before invoking the normal delete path. The wipe is CLI-only
+    // (the MCP `mailbox_delete` tool does not gain a force variant)
+    // and refuses on the catchall.
     if force {
         if name == "catchall" {
             return Err("Cannot delete the catchall mailbox".into());
@@ -687,7 +687,7 @@ mod tests {
 
     #[test]
     fn validate_mailbox_name_rejects_whitespace_and_bad_chars() {
-        // S47-3: tighter validation closes a hole where names like
+        // Tighter validation closes a hole where names like
         // "hello world" made it past the old validator and produced an
         // invalid email address when interpolated into `<name>@<domain>`.
         assert!(validate_mailbox_name("hello world").is_err());
@@ -929,7 +929,7 @@ mod tests {
         assert!(!reloaded.mailboxes.contains_key("alice"));
     }
 
-    /// Hardening PRD §6.4 / S3-2: when the atomic config save fails,
+    /// When the atomic config save fails,
     /// `delete_mailbox` must leave both `inbox/<name>/` and `sent/<name>/`
     /// byte-for-byte untouched so the operator can retry. We induce a
     /// save failure by pointing `AIMX_CONFIG_DIR` at a nonexistent
@@ -1080,7 +1080,7 @@ mod tests {
         );
     }
 
-    // ----- S44-4 restart hint ------------------------------------------
+    // ----- restart hint ------------------------------------------------
 
     fn strip_ansi(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
@@ -1177,7 +1177,7 @@ mod tests {
         );
     }
 
-    // ----- S48-5 wipe_mailbox_contents helper --------------------------
+    // ----- wipe_mailbox_contents helper --------------------------------
 
     #[test]
     fn wipe_mailbox_contents_empties_flat_and_bundle_entries() {
@@ -1209,7 +1209,7 @@ mod tests {
         super::wipe_mailbox_contents(&tmp.path().join("does-not-exist")).unwrap();
     }
 
-    // ----- S51-1 mailboxes show ----------------------------------------
+    // ----- mailboxes show ----------------------------------------------
 
     fn show_test_config(tmp: &Path) -> Config {
         let mut mailboxes = HashMap::new();

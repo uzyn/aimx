@@ -134,7 +134,7 @@ where
     // itself. The client does not send `From-Mailbox:` and does not read
     // `/etc/aimx/config.toml`.
     //
-    // FR-18d: the sender domain must equal the configured primary domain
+    // The sender domain must equal the configured primary domain
     // (case-insensitive) AND the local part must resolve to an explicitly
     // configured non-wildcard mailbox. Catchall (`*@domain`) is
     // inbound-routing only and never accepted as an outbound sender.
@@ -182,7 +182,7 @@ where
         }
     };
 
-    // Sprint 4 §6.5: authorize the caller against the resolved
+    // Authorize the caller against the resolved
     // mailbox. Non-owners (other than root) get EACCES so a uid bound
     // to mailbox `bob` cannot spoof `From: alice@domain`.
     //
@@ -333,7 +333,7 @@ where
         }
     };
 
-    // Sprint 50 / S50-4: fire `after_send` hooks for the from-mailbox.
+    // Fire `after_send` hooks for the from-mailbox.
     // Synchronous: daemon awaits subprocess completion for predictable
     // timing, but exit code is discarded. Failures cannot affect the
     // outbound result the client already expects.
@@ -391,7 +391,7 @@ fn has_any_after_send(mailbox: &MailboxConfig) -> bool {
 /// Tries (in order): exact `address` match → mailbox name equal to the
 /// local part (for the common case where name == local). Returns `None`
 /// when nothing concrete matches. There is no catchall (`*@domain`)
-/// fallback. Catchall is inbound-only per FR-18d.
+/// fallback. Catchall is inbound-only.
 fn resolve_concrete_mailbox(
     mailboxes: &HashMap<String, RegisteredMailbox>,
     bare_from: &str,
@@ -811,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn bogus_local_part_under_config_domain_returns_mailbox_error() {
-        // S45-2: wildcard fallback is gone. Sending as a local part that
+        // Wildcard fallback is gone. Sending as a local part that
         // doesn't match a concrete registered mailbox must be rejected
         // with ERR MAILBOX even when the domain matches the configured one.
         let mock = Arc::new(MockTransport {
@@ -891,7 +891,7 @@ mod tests {
 
     #[tokio::test]
     async fn concrete_mailbox_under_config_domain_is_accepted() {
-        // S45-2: sending as a registered concrete mailbox (not the
+        // Sending as a registered concrete mailbox (not the
         // wildcard catchall) under the configured domain succeeds end-to-end.
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
@@ -1289,7 +1289,7 @@ mod tests {
         assert!(parsed.delivered_at.is_some());
     }
 
-    /// Sprint 2 S2-3: sent files land `0o600` via the post-persist
+    /// Sent files land `0o600` via the post-persist
     /// chown. Uses a test resolver that maps `testowner` (a non-
     /// reserved name so it routes through the resolver) to the current
     /// uid/gid, and a dedicated SendContext whose alice mailbox has
@@ -1379,7 +1379,7 @@ mod tests {
         assert_eq!(
             md.mode() & 0o777,
             0o600,
-            "sent file must land 0o600 via Sprint 2 chown"
+            "sent file must land 0o600 via post-persist chown"
         );
     }
 }

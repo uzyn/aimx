@@ -1,8 +1,8 @@
-//! Sprint 4 — `SO_PEERCRED` UDS authentication.
+//! `SO_PEERCRED` UDS authentication.
 //!
 //! Captures the caller's `{uid, gid, pid, username}` at accept time and
 //! exposes authorization helpers that every UDS verb handler consults
-//! before touching state. The PRD §6.5 authz table lives here as code:
+//! before touching state. The authz table lives here as code:
 //!
 //! | Verb                                    | Rule                                    |
 //! |-----------------------------------------|-----------------------------------------|

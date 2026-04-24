@@ -163,8 +163,8 @@ pub struct MarkRequest {
 /// Both verbs share the same shape; the enum selection is encoded in
 /// `create` so the codec stays a single flat struct rather than two
 /// near-identical types. `MAILBOX-CREATE` requires an `Owner:` header
-/// (Sprint 2 §6.3) so the daemon knows which Linux user to chown the
-/// newly-created mailbox directories to. `MAILBOX-DELETE` ignores
+/// so the daemon knows which Linux user to chown the newly-created
+/// mailbox directories to. `MAILBOX-DELETE` ignores
 /// `owner` — the daemon only needs the name to remove the stanza.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MailboxCrudRequest {
@@ -178,7 +178,7 @@ pub struct MailboxCrudRequest {
     pub owner: Option<String>,
 }
 
-/// Decoded `AIMX/1 HOOK-CREATE` request. Template-only (Sprint 3 S3-1):
+/// Decoded `AIMX/1 HOOK-CREATE` request. Template-only:
 /// the verb no longer accepts a raw `cmd`, `run_as`, `timeout_secs`,
 /// `stdin`, or `dangerously_support_untrusted`. Those are properties of
 /// a `[[hook_template]]` block the operator installs via
@@ -229,7 +229,7 @@ pub struct HookDeleteRequest {
 }
 
 /// Safe, UDS-exposed subset of [`crate::config::HookTemplate`] used by
-/// `TEMPLATE-CREATE` and `TEMPLATE-UPDATE` (Sprint 5 §6.6). Every field
+/// `TEMPLATE-CREATE` and `TEMPLATE-UPDATE`. Every field
 /// is whitelisted; anything else in the submitted body is rejected by
 /// `deny_unknown_fields` with the offending key named in the TOML parser
 /// error (propagated to the caller as `MALFORMED <reason>`).
@@ -443,18 +443,18 @@ pub enum ErrCode {
     /// `MAILBOX-CREATE` found `inbox/<name>/` / `sent/<name>/` already
     /// present but owned by a different uid/gid than the requested
     /// owner. Ambiguous state — operator must fix it with `chown`
-    /// before the daemon will claim the directories. Sprint 2 §6.3.
+    /// before the daemon will claim the directories.
     Conflict,
-    /// Sprint 4 §6.5: the caller's uid (from `SO_PEERCRED`) is not
-    /// authorized for the requested verb on the target mailbox, and
-    /// is not root. Mirrors POSIX `EACCES` for operator ergonomics.
+    /// The caller's uid (from `SO_PEERCRED`) is not authorized for the
+    /// requested verb on the target mailbox, and is not root. Mirrors
+    /// POSIX `EACCES` for operator ergonomics.
     Eaccess,
-    /// Sprint 4 §6.5: the target resource referenced by the verb
-    /// (mailbox, hook, template) does not exist. Distinct from
-    /// [`ErrCode::NotFound`] so authz helpers can signal
-    /// "unknown-target" vs "unknown-email-id" without overloading the
-    /// legacy code. Emitted instead of `EACCES` whenever the caller's
-    /// authz outcome is leaked by the existence-check itself (PRD
+    /// The target resource referenced by the verb (mailbox, hook,
+    /// template) does not exist. Distinct from [`ErrCode::NotFound`]
+    /// so authz helpers can signal "unknown-target" vs
+    /// "unknown-email-id" without overloading the legacy code. Emitted
+    /// instead of `EACCES` whenever the caller's authz outcome is
+    /// leaked by the existence-check itself (PRD
     /// §6.5 leak-free shape).
     Enoent,
 }
@@ -874,7 +874,7 @@ where
                 // header values (embedded whitespace, colons, tabs,
                 // etc.) reject with a precise `Malformed` here rather
                 // than at the `getpwnam`/resolver layer further in.
-                // Mirrors the Sprint-1 `validate_run_as` regex gate.
+                // Mirrors the `validate_run_as` regex gate.
                 if !crate::config::is_valid_system_username(&value) {
                     return Err(ParseError::Malformed(format!(
                         "invalid Owner value: {value:?} (must match [a-z_][a-z0-9_-]*[$]?)"
@@ -908,7 +908,7 @@ where
     // Content-Length is optional for MAILBOX-CRUD verbs; 0 is implicit.
     let _ = content_length;
 
-    // Owner is REQUIRED on CREATE (Sprint 2 §6.3). On DELETE the daemon
+    // Owner is REQUIRED on CREATE. On DELETE the daemon
     // only needs the name; Owner is ignored even if supplied.
     if create && owner.is_none() {
         return Err(ParseError::Malformed(
@@ -1379,7 +1379,7 @@ where
 /// ```text
 /// AIMX/1 OK <message-id>\n           (success)
 /// AIMX/1 ERR <CODE> <reason>\n       (error, status line)
-/// Code: <CODE>\n                     (Sprint 4: structured header)
+/// Code: <CODE>\n                     (structured header)
 /// \n                                 (terminator)
 /// ```
 ///
@@ -1550,7 +1550,7 @@ where
 /// Render a `UdsTemplatePayload` as a TOML body suitable for wire
 /// submission. Separate helper so client code and tests share one
 /// serialization.
-// Consumed by Sprint 6 client code and by the tests below. `pub` so the
+// Consumed by client code and by the tests below. `pub` so the
 // future CLI can import it; `#[allow(dead_code)]` silences the binary's
 // dead-code lint until the wiring lands.
 #[allow(dead_code)]
@@ -1856,7 +1856,7 @@ mod tests {
             tokio::io::AsyncReadExt::read_to_end(&mut server, &mut buf)
                 .await
                 .unwrap();
-            // Sprint 4 wire format: legacy status line + `Code:` header.
+            // Wire format: legacy status line + `Code:` header.
             let expected = format!("AIMX/1 ERR {label} nope\nCode: {label}\n\n");
             assert_eq!(buf, expected.as_bytes());
         }
@@ -1932,8 +1932,8 @@ mod tests {
             .unwrap();
         let text = String::from_utf8_lossy(&buf);
         // Both the legacy inline code and the `Code:` header must be
-        // present so clients can pick either. The sprint AC says "a
-        // client reading the frame can deserialize both".
+        // present so clients can pick either: a client reading the
+        // frame can deserialize both.
         assert!(text.contains("AIMX/1 ERR EACCES not owner"));
         assert!(text.contains("Code: EACCES"));
     }

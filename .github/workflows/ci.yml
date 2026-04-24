@@ -27,10 +27,9 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      # Sprint 2 S2-3: Tier-2 integration tests that hit the live
-      # `0.0.0-fixture` GitHub release (bare SemVer post-Sprint 8.0.1).
-      # Feature-gated so the default `cargo test` above stays offline
-      # and free of rate-limit flakes.
+      # Tier-2 integration tests that hit the live `0.0.0-fixture`
+      # GitHub release (bare SemVer). Feature-gated so the default
+      # `cargo test` above stays offline and free of rate-limit flakes.
       - name: Run release integration tests
         run: cargo test --features integration --test release_integration
 
@@ -56,7 +55,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # Sprint 2 S2-4: root-gated per-mailbox isolation test. Creates
+      # Root-gated per-mailbox isolation test. Creates
       # `aimx-it-alice` and `aimx-it-bob` via `useradd`, delivers an
       # email to alice, asserts bob gets EACCES on alice's inbox. The
       # test is `#[ignore]` and also guarded by AIMX_INTEGRATION_SUDO=1
@@ -74,19 +73,20 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test isolation -- --ignored
 
-      # Sprint 4 S4-4: root-gated UDS authz integration test. Reuses
-      # the `aimx-it-alice` / `aimx-it-bob` fixture from Sprint 2 and
-      # asserts that bob cannot SEND/MARK-READ/HOOK-CREATE as alice
-      # over the UDS. Same runtime gating (AIMX_INTEGRATION_SUDO=1 +
-      # sudo + PATH propagation) as the isolation test above.
+      # Root-gated UDS authz integration test. Reuses the
+      # `aimx-it-alice` / `aimx-it-bob` fixture from the isolation
+      # step and asserts that bob cannot SEND/MARK-READ/HOOK-CREATE
+      # as alice over the UDS. Same runtime gating
+      # (AIMX_INTEGRATION_SUDO=1 + sudo + PATH propagation) as the
+      # isolation test above.
       - name: Run UDS authz integration test (root)
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test uds_authz -- --ignored
 
-      # Sprint 4 review NB-1: the five MAILBOX-CRUD UDS integration
-      # tests in `tests/integration.rs` are `#[ignore]`-gated because
-      # `MAILBOX-CREATE` / `MAILBOX-DELETE` are root-only (PRD §6.5)
-      # and the daemon chowns freshly-created mailbox dirs to the
+      # The five MAILBOX-CRUD UDS integration tests in
+      # `tests/integration.rs` are `#[ignore]`-gated because
+      # `MAILBOX-CREATE` / `MAILBOX-DELETE` are root-only and the
+      # daemon chowns freshly-created mailbox dirs to the
       # configured owner — a non-root `cargo test` cannot exercise the
       # code path. This step runs them explicitly under sudo, one name
       # per `--exact`, so any future skip regresses here rather than
@@ -100,9 +100,9 @@ jobs:
             mailbox_delete_force_without_yes_prompts_and_aborts_on_n \
             concurrent_mailbox_create_and_ingest_does_not_deadlock
 
-      # Sprint 4 review NB-1: drives `RealReleaseOps::fetch_asset`
-      # end-to-end against the live `0.0.0-fixture` release (bare
-      # SemVer post-Sprint 8.0.1). The non-root test in
+      # Drives `RealReleaseOps::fetch_asset` end-to-end against
+      # the live `0.0.0-fixture` release (bare SemVer). The
+      # non-root test in
       # `tests/release_integration.rs` only asserts the root-check
       # refusal; this sudo-gated step is what actually exercises the
       # rustls + HTTPS production path in CI so a regression in
@@ -114,7 +114,7 @@ jobs:
             --ignored --exact \
             real_release_ops_end_to_end_against_fixture_as_root
 
-      # Sprint 8 S8-4: end-to-end agent flow test. Creates a real
+      # End-to-end agent flow test. Creates a real
       # system user, runs `aimx setup`-style config + DKIM keys, then
       # `aimx agent-setup claude-code` with a fake `claude` binary,
       # ingests a trusted `.eml`, and asserts the hook fired under the
@@ -125,17 +125,15 @@ jobs:
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 cargo test --test e2e_agent_flow -- --ignored
 
-  # Onboarding Sprint 3 (S3-3): lint + exercise `install.sh` under dash
-  # (debian:stable-slim) and busybox sh (alpine:latest). The happy-path
-  # runs fetch the real `0.0.0-fixture` GitHub Release (bare SemVer
-  # post-Sprint 8.0.1) — that tag is permanent per Sprint 1.3 tag
-  # discipline, carries all four target tarballs, and exercises the
+  # Lint + exercise `install.sh` under dash (debian:stable-slim) and
+  # busybox sh (alpine:latest). The happy-path runs fetch the real
+  # `0.0.0-fixture` GitHub Release (bare SemVer) — that tag is
+  # permanent, carries all four target tarballs, and exercises the
   # exact curl-to-shell flow operators hit.
   #
   # No checksum-verification test path here: `install.sh` v1 does not
-  # verify SHA-256 (PRD FR-2.4 — trust anchor is HTTPS). Skeptical
-  # operators verify manually via the release-notes `sha256sum -c`
-  # block (FR-1.4).
+  # verify SHA-256 — trust anchor is HTTPS. Skeptical operators
+  # verify manually via the release-notes `sha256sum -c` block.
   install-sh:
     runs-on: ubuntu-latest
     steps:
@@ -217,7 +215,7 @@ jobs:
             mkdir -p /tmp/aimx-same
             # Lay down a stub aimx that self-reports the fixture tag, so the
             # same-version short-circuit in install.sh fires without relying
-            # on the fixture tarballs self-reporting (they predate Sprint 2
+            # on the fixture tarballs self-reporting (they predate the
             # build.rs metadata). Use printf (not HEREDOC) so YAML indentation
             # does not leak into the file.
             printf "%s\n" "#!/bin/sh" "echo \"aimx 0.0.0-fixture (stubshad) x86_64-unknown-linux-gnu built 2026-04-23\"" > /tmp/aimx-same/aimx
@@ -280,12 +278,12 @@ jobs:
             grep -q -- "--force" /tmp/down.log
           '
 
-  # Onboarding Sprint 7 (S7-3 / FR-7.4): enforce that every user-facing styled
-  # string lands via a helper in `src/term.rs`. Raw `.red()/.green()/.yellow()/
-  # .blue()/.bold()` calls outside `term.rs` bypass the palette audit and cause
-  # the CLI vocabulary to drift. The ASCII fallback literals `[OK]/[FAIL]/
-  # [WARN]/[>]` must also only come from `term.rs` so the fallback surface
-  # stays in one place.
+  # Enforce that every user-facing styled string lands via a helper in
+  # `src/term.rs`. Raw `.red()/.green()/.yellow()/.blue()/.bold()` calls
+  # outside `term.rs` bypass the palette audit and cause the CLI
+  # vocabulary to drift. The ASCII fallback literals
+  # `[OK]/[FAIL]/[WARN]/[>]` must also only come from `term.rs` so the
+  # fallback surface stays in one place.
   cli-colors:
     runs-on: ubuntu-latest
     steps:
@@ -297,7 +295,7 @@ jobs:
           matches="$(grep -rnE '\.(red|green|yellow|blue|bold)\(\)' src/ | grep -v 'src/term.rs')"
           if [ -n "$matches" ]; then
             echo "ERROR: raw .red()/.green()/.yellow()/.blue()/.bold() calls are not allowed outside src/term.rs."
-            echo "Route styled output through helpers in src/term.rs instead (FR-7.4)."
+            echo "Route styled output through helpers in src/term.rs instead."
             echo "$matches"
             exit 1
           fi
@@ -308,12 +306,12 @@ jobs:
           matches="$(grep -rnE '\[OK\]|\[FAIL\]|\[WARN\]|\[>\]' src/ | grep -v 'src/term.rs')"
           if [ -n "$matches" ]; then
             echo "ERROR: the [OK]/[FAIL]/[WARN]/[>] fallback literals must only come from term.rs helpers."
-            echo "Use term::success_mark()/fail_mark()/warn_mark()/prompt_mark() instead (FR-7.5)."
+            echo "Use term::success_mark()/fail_mark()/warn_mark()/prompt_mark() instead."
             echo "$matches"
             exit 1
           fi
 
-  # Onboarding Sprint 8 (S8 review NB-1): build the mdBook docs so CI
+  # Build the mdBook docs so CI
   # catches markdown-syntax drift on every PR. The book sources live
   # under `book/`; `book.toml` sits in `website/` (with `src = "../book"`)
   # so we invoke `mdbook build` against the website/ directory — same
@@ -331,8 +329,8 @@ jobs:
       - name: Build mdbook
         run: mdbook build website
 
-      # Onboarding Sprint 8 (S8 review NB-2): lightweight shell-level
-      # doc lint. Parses `cargo run -- --help` subcommand names and
+      # Lightweight shell-level doc lint. Parses
+      # `cargo run -- --help` subcommand names and
       # fails if `book/` references an `aimx <word>` verb that does not
       # exist in the CLI. Would have caught the `aimx config trust add`
       # drift that reviewed on PR #141.

@@ -186,9 +186,9 @@ pub(crate) enum TemplateCrudFallback {
 
 /// Submit an `AIMX/1 TEMPLATE-CREATE` request over UDS. Mirrors
 /// [`submit_hook_template_create_via_daemon`] but for the template-scope
-/// verbs added in Sprint 5. Used by `aimx agent-setup` to register the
+/// template-scope verbs. Used by `aimx agent-setup` to register the
 /// `invoke-<agent>-<username>` template after the plugin files are
-/// installed (PRD §6.6 step 4a).
+/// installed.
 pub(crate) fn submit_template_create_via_daemon(
     request: &TemplateCreateRequest,
 ) -> Result<(), TemplateCrudFallback> {

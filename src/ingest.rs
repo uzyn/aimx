@@ -271,7 +271,7 @@ pub fn ingest_email(
     let slug = slugify(&subject);
     let timestamp = chrono::Utc::now();
 
-    // S47-4: the per-mailbox lock shared with MARK-* and MAILBOX-* is
+    // The per-mailbox lock shared with MARK-* and MAILBOX-* is
     // the outer lock of the two-tier hierarchy (see
     // `crate::mailbox_locks`). Acquired via `blocking_lock()` because
     // `ingest_email` runs from a synchronous context (stdin caller, or
@@ -631,7 +631,7 @@ fn extract_received_ip(raw: &[u8]) -> Option<IpAddr> {
 /// MTA. Any IP embedded in free-text comments, HELO strings, or
 /// `received from hostname` prose is ignored, because those fields are
 /// attacker-controlled: the sender can write anything into the HELO/EHLO
-/// command or a hostname that happens to contain a dotted-quad. See S43-4.
+/// command or a hostname that happens to contain a dotted-quad.
 fn parse_ip_from_received(line: &str) -> Option<IpAddr> {
     let mut chars = line.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1738,7 +1738,7 @@ mod tests {
 
     #[test]
     fn attachment_malicious_names_sanitized_integration() {
-        // S43-7 integration: two attachments with hostile names.
+        // Integration: two attachments with hostile names.
         // - `../../etc/passwd`: path-traversal attempt.
         // - `\x00rce.sh`: embedded NUL + potentially flag-looking name.
         // Both must land INSIDE the bundle directory with names that
@@ -1904,7 +1904,7 @@ mod tests {
 
     #[test]
     fn parse_ip_from_received_rejects_bare_ip_in_comment() {
-        // S43-4: previously the whitespace-split fallback would happily pick
+        // Previously the whitespace-split fallback would happily pick
         // up an IP embedded in a HELO or a free-text comment. That fallback
         // is gone; only the bracketed RFC 5321 form is trusted.
         let line = "Received: from evil.example.com (HELO mail.legit 1.2.3.4 via clever.host)";
@@ -2518,7 +2518,7 @@ mod tests {
         assert!(logs_contain("Failed to parse email"));
     }
 
-    /// Sprint 2 S2-2: bundle-layout chown end-to-end. Ingests an email
+    /// Bundle-layout chown end-to-end. Ingests an email
     /// that produces a Zola-style bundle directory and asserts:
     ///
     ///   - the bundle directory itself is mode `0o700`
@@ -2608,7 +2608,7 @@ mod tests {
         assert_eq!(
             dir_meta.mode() & 0o777,
             0o700,
-            "bundle dir must be 0o700 after Sprint 2 chown"
+            "bundle dir must be 0o700 after post-persist chown"
         );
 
         // Every file inside the bundle: 0o600 (md + each attachment).

@@ -80,8 +80,8 @@ pub enum HookOrigin {
 
 impl HookOrigin {
     /// String form used by `doctor` output and tests. Production log
-    /// lines do not currently surface origin (see PRD §7.3); kept as an
-    /// API so Sprint 3's `hooks list` / doctor summary can format it.
+    /// lines do not currently surface origin; kept as an API so the
+    /// `hooks list` / doctor summary can format it.
     #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -164,8 +164,8 @@ pub struct Hook {
 
 impl Hook {
     /// True iff this hook references a template (rather than carrying its
-    /// own raw `cmd`). Consumed by tests today; wired into `doctor` and
-    /// `hooks list` summary in Sprint 6.
+    /// own raw `cmd`). Consumed by tests today; wired into `doctor`
+    /// and `hooks list` summary.
     #[allow(dead_code)]
     pub fn is_template_bound(&self) -> bool {
         self.template.is_some()
@@ -1437,7 +1437,7 @@ mod tests {
         let _p: &Path = Path::new("/tmp");
     }
 
-    // ----- Sprint 1 S1-3: origin + template + params -----------------------
+    // ----- origin + template + params --------------------------------------
 
     #[test]
     fn hook_origin_default_is_operator() {
@@ -1521,8 +1521,8 @@ mod tests {
 
     #[test]
     fn legacy_hook_toml_defaults_to_operator_origin() {
-        // Hooks hand-edited into `config.toml` before this sprint had no
-        // origin field — load must default to Operator, not error.
+        // Legacy hand-edited hooks in `config.toml` had no origin
+        // field — load must default to Operator, not error.
         let src = r#"
 event = "on_receive"
 cmd = "echo legacy"
@@ -1575,7 +1575,7 @@ cmd = "echo legacy"
         assert_eq!(effective, expected);
     }
 
-    // ----- Sprint 2 S2-1: Hook::resolve_argv -------------------------------
+    // ----- Hook::resolve_argv ----------------------------------------------
 
     fn claude_template() -> HookTemplate {
         HookTemplate {
@@ -1680,7 +1680,7 @@ cmd = "echo legacy"
         ));
     }
 
-    // ----- Sprint 2 S2-3: structured hook-fire log new fields --------------
+    // ----- structured hook-fire log new fields -----------------------------
 
     #[test]
     fn format_stderr_tail_empty_is_quoted_empty() {

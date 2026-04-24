@@ -930,9 +930,9 @@ mod tests {
 
     #[tokio::test]
     async fn self_loop_ehlo_handshake_round_trip() {
-        // This test proves the self-EHLO trap fix (S12.2): the built-in
-        // listener now speaks enough SMTP that our own EHLO prober completes
-        // a successful handshake against it.
+        // This test proves the self-EHLO trap fix: the built-in listener
+        // now speaks enough SMTP that our own EHLO prober completes a
+        // successful handshake against it.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
@@ -945,7 +945,10 @@ mod tests {
             .await
             .unwrap();
         let ok = smtp_ehlo_handshake(stream).await.unwrap();
-        assert!(ok, "Self-loop EHLO handshake must succeed after S12.2 fix");
+        assert!(
+            ok,
+            "Self-loop EHLO handshake must succeed after self-EHLO trap fix"
+        );
     }
 
     // -----------------------------------------------------------------

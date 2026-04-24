@@ -135,7 +135,7 @@ pub struct Config {
 
     /// Installed hook templates. Each entry is a pre-vetted command shape
     /// an agent can reference via MCP `hook_create`. Populated by
-    /// `aimx agent-setup <agent>` (Sprint 3+). Validated at load time.
+    /// `aimx agent-setup <agent>`. Validated at load time.
     ///
     /// Serialized as `[[hook_template]]` blocks (singular) to match the
     /// PRD wording and the usual TOML convention for array-of-tables.
@@ -156,7 +156,7 @@ pub struct Config {
     pub enable_ipv6: bool,
 
     /// Optional `[upgrade]` section. Overrides the release-manifest URL used
-    /// by `aimx upgrade` (PRD FR-4.6). The `AIMX_RELEASE_MANIFEST_URL` env
+    /// by `aimx upgrade`. The `AIMX_RELEASE_MANIFEST_URL` env
     /// var takes precedence over this value when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<UpgradeConfig>,
@@ -168,7 +168,7 @@ pub struct Config {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 pub struct UpgradeConfig {
     /// URL the release fetcher hits instead of the GitHub Releases API.
-    /// Supports `file://` for offline fixtures (FR-4.6).
+    /// Supports `file://` for offline fixtures.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release_manifest_url: Option<String>,
 }
@@ -407,8 +407,8 @@ impl MailboxConfig {
     /// to handle. Loops through [`validate_run_as`] to keep one code
     /// path for regex + `getpwnam` semantics.
     ///
-    /// Wired into Sprint 2's chown paths; callers in Sprint 1 use it
-    /// only through tests.
+    /// Wired into the chown paths; callers use it only through tests
+    /// today.
     #[allow(dead_code)]
     pub fn owner_uid(&self) -> Result<u32, ConfigError> {
         match validate_run_as(&self.owner)? {
@@ -484,8 +484,7 @@ pub enum LoadWarning {
         run_as: String,
     },
     /// `[[hook_template]]` names a `run_as` user that does not resolve.
-    /// The template is retained but flagged orphan; Sprint 6's doctor
-    /// work surfaces it.
+    /// The template is retained but flagged orphan; doctor surfaces it.
     OrphanTemplateRunAs { template: String, run_as: String },
     /// The hook/mailbox owner invariant (PRD §6.3) was skipped at load
     /// because either the mailbox owner or the hook's effective `run_as`
@@ -568,8 +567,7 @@ impl ConfigResolved {
     /// "does this mailbox exist and can we act on it?" answers the same
     /// way as "no such mailbox."
     ///
-    /// Wired into Sprint 2's ingest / MCP / UDS paths; this Sprint
-    /// ships the helper on its own.
+    /// Wired into the ingest / MCP / UDS paths.
     #[allow(dead_code)]
     pub fn is_mailbox_active(&self, name: &str) -> bool {
         !self.inactive_mailboxes.contains(name)
@@ -747,8 +745,8 @@ pub const VALID_TRUST_VALUES: &[&str] = &["none", "verified"];
 /// Pre-parse check: reject the legacy `[[mailboxes.<name>.on_receive]]`
 /// schema with a clear migration error before the TOML parser sees it.
 ///
-/// Sprint 50 is pre-launch, so there is no compat shim. Users hand-editing
-/// old configs see a single actionable error naming the offending mailbox.
+/// No compat shim is offered. Users hand-editing old configs see a
+/// single actionable error naming the offending mailbox.
 fn reject_legacy_on_receive_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error>> {
     for line in toml_text.lines() {
         let trimmed = line.trim();
@@ -1048,7 +1046,7 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
 /// the braces. Matches `\{[a-z0-9_]+\}` greedy from left to right. Unclosed
 /// braces are silently ignored (they can never form a valid placeholder
 /// anyway and are surfaced to the operator as `cmd[0]` rejection or via
-/// substitution failure at fire time in a later sprint).
+/// substitution failure at fire time in a later change).
 fn iter_placeholders(s: &str) -> impl Iterator<Item = &str> {
     let bytes = s.as_bytes();
     let mut i = 0;
@@ -1250,7 +1248,7 @@ fn is_valid_placeholder_name(s: &str) -> bool {
 /// as a config typo rather than an orphan). `getpwnam` misses surface
 /// as [`LoadWarning::OrphanMailboxOwner`] (PRD §6.2).
 ///
-/// S3-4 (PRD §6.2): `owner = "root"` is rejected on any non-catchall
+/// `owner = "root"` is rejected on any non-catchall
 /// mailbox. On a catchall it is accepted only when
 /// `allow_root_catchall = true` — the escape hatch — and that
 /// acceptance surfaces as a [`LoadWarning::RootCatchallAccepted`] so
@@ -1466,12 +1464,12 @@ impl Config {
     /// to surface them (daemon startup, SIGHUP reload, doctor) must
     /// use [`Self::load`] directly.
     ///
-    /// TODO(Sprint 7.5 S7.5-1 audit): when ingest / MCP / UDS paths start
-    /// consulting [`ConfigResolved`] directly (rather than relying on
+    /// TODO: when ingest / MCP / UDS paths start consulting
+    /// [`ConfigResolved`] directly (rather than relying on
     /// `validate_hooks` + load-time rejection), the transitional
     /// `*_ignore_warnings` helpers should either be pruned from the
-    /// callers that newly need the warning stream, or reserved for test-
-    /// only call sites. Today every caller audited in Sprint 7.5 either
+    /// callers that newly need the warning stream, or reserved for
+    /// test-only call sites. Today every audited caller either
     /// re-parses after a write (where warnings are redundant), is a
     /// pre-serve one-shot CLI (mailbox CRUD, portcheck, main's best-
     /// effort peek), or is a test fixture. Keep the helpers until a new
@@ -1491,8 +1489,8 @@ impl Config {
     /// Used by ingest / MCP / hook-fire paths to skip inactive
     /// mailboxes and orphan templates without re-running validation.
     ///
-    /// Wired into Sprint 2's ingest / MCP / UDS paths; Sprint 1 tests
-    /// exercise it through the orphan-tolerance unit tests.
+    /// Wired into the ingest / MCP / UDS paths; exercised through the
+    /// orphan-tolerance unit tests.
     #[allow(dead_code)]
     pub fn resolved_from_warnings(warnings: &[LoadWarning]) -> ConfigResolved {
         let mut resolved = ConfigResolved::default();
@@ -2230,7 +2228,7 @@ dangerously_support_untrusted = true
         assert_eq!(config, loaded);
     }
 
-    /// Hardening PRD §6.4 / S3-1: `Config::save` must be crash-safe.
+    /// `Config::save` must be crash-safe.
     /// When the underlying write fails (here: parent dir missing, so
     /// `File::create` on the temp file returns ENOENT), the on-disk
     /// target file must remain byte-for-byte unchanged.
@@ -2720,7 +2718,7 @@ release_manifest_url = "file:///tmp/fixture/latest.json"
         );
     }
 
-    // ----- Hook template schema & validation (Sprint 1 S1-2) ---------------
+    // ----- Hook template schema & validation -------------------------------
 
     fn write_template_config(body: &str) -> (TempDir, PathBuf) {
         let tmp = TempDir::new().unwrap();
@@ -2770,7 +2768,7 @@ run_as = "root"
         let tmpl = &cfg.hook_templates[0];
         assert_eq!(tmpl.name, "invoke-claude");
         assert_eq!(tmpl.params, vec!["prompt".to_string()]);
-        // Sprint 1 S1-2: `run_as` is required (no default). The fixture
+        // `run_as` is required (no default). The fixture
         // above sets it explicitly to `root` so it resolves on every
         // host.
         assert_eq!(tmpl.run_as, "root");
@@ -2936,7 +2934,7 @@ run_as = "root"
 
     #[test]
     fn load_rejects_bad_run_as() {
-        // Sprint 1 S1-2 retired the static allowlist. A `run_as` that
+        // The static allowlist has been retired. A `run_as` that
         // fails the `useradd`-style regex (uppercase, leading digit,
         // spaces) still hard-rejects at load time.
         let (_tmp, path) = write_template_config(
@@ -3091,7 +3089,7 @@ run_as = "root"
         assert_eq!(cfg, reloaded);
     }
 
-    // ----- Sprint 1 S1-3: Hook template/cmd mutual exclusion ---------------
+    // ----- Hook template/cmd mutual exclusion ------------------------------
 
     #[test]
     fn load_rejects_hook_with_both_cmd_and_template() {
@@ -3233,7 +3231,7 @@ prompt = "Draft a reply"
         // `dangerously_support_untrusted`, regardless of whether they are
         // template-bound or raw-cmd. The guard in `validate_hooks` drops
         // the `is_template_bound()` qualifier so it catches this shape
-        // even though the UDS body-schema tightening lands in Sprint 3.
+        // even on shapes the UDS body-schema tightening also rejects.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -3284,14 +3282,14 @@ dangerously_support_untrusted = true
         );
     }
 
-    // ----- Sprint 1 S1-1: MailboxConfig.owner ---------------------------
+    // ----- MailboxConfig.owner ------------------------------------------
 
     #[test]
     fn load_rejects_non_catchall_owner_root() {
-        // S3-4: `owner = "root"` on a non-catchall mailbox is rejected
-        // (PRD §6.2) with an actionable suggestion pointing operators at
-        // either a regular user or the `allow_root_catchall` escape
-        // hatch on a catchall mailbox.
+        // `owner = "root"` on a non-catchall mailbox is rejected with
+        // an actionable suggestion pointing operators at either a
+        // regular user or the `allow_root_catchall` escape hatch on a
+        // catchall mailbox.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         std::fs::write(
@@ -3446,11 +3444,11 @@ owner = "alice"
         assert_eq!(cfg2.mailboxes["catchall"].owner, "aimx-catchall");
     }
 
-    // ----- Sprint 3 S3-4: owner="root" rules + allow_root_catchall ------
+    // ----- owner="root" rules + allow_root_catchall ---------------------
 
     #[test]
     fn load_accepts_catchall_with_default_aimx_catchall_owner() {
-        // S3-4 AC: catchall with the default `owner = "aimx-catchall"`
+        // Catchall with the default `owner = "aimx-catchall"`
         // still loads clean, without the allow_root_catchall flag.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
@@ -3475,7 +3473,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn load_rejects_root_catchall_without_allow_flag() {
-        // S3-4 AC: catchall with owner="root" but allow_root_catchall=false
+        // Catchall with owner="root" but allow_root_catchall=false
         // (or omitted) rejects at load with a pointer to the opt-in flag.
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
@@ -3499,7 +3497,7 @@ owner = "root"
 
     #[test]
     fn load_accepts_root_catchall_with_allow_flag_and_warns() {
-        // S3-4 AC: catchall with owner="root" + allow_root_catchall=true
+        // Catchall with owner="root" + allow_root_catchall=true
         // loads successfully and surfaces a RootCatchallAccepted warning
         // so the elevation is audit-logged.
         let tmp = TempDir::new().unwrap();
@@ -3530,7 +3528,7 @@ allow_root_catchall = true
 
     #[test]
     fn load_rejects_allow_root_catchall_on_non_catchall_mailbox() {
-        // S3-4 AC: allow_root_catchall on any non-catchall mailbox is a
+        // allow_root_catchall on any non-catchall mailbox is a
         // config-structure error regardless of owner value — the flag
         // only has meaning for the wildcard mailbox.
         use crate::user_resolver::{ResolvedUser, set_test_resolver};
@@ -3606,7 +3604,7 @@ allow_root_catchall = true
         );
     }
 
-    // ----- Sprint 1 S1-2: validate_run_as -------------------------------
+    // ----- validate_run_as ----------------------------------------------
 
     #[test]
     fn validate_run_as_reserved_root() {
@@ -3682,7 +3680,7 @@ allow_root_catchall = true
         );
     }
 
-    // ----- Sprint 1 S1-3: check_hook_owner_invariant --------------------
+    // ----- check_hook_owner_invariant -----------------------------------
 
     fn mailbox_for_invariant(address: &str, owner: &str) -> MailboxConfig {
         MailboxConfig {
@@ -3878,7 +3876,7 @@ run_as = "someoneelse"
         );
     }
 
-    // ----- Sprint 1 S1-4: Orphan tolerance -------------------------------
+    // ----- Orphan tolerance ----------------------------------------------
 
     #[test]
     fn load_valid_config_produces_empty_warning_vec() {

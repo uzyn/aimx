@@ -1,16 +1,16 @@
 //! Per-mailbox ownership helper used by every daemon-side write path.
 //!
-//! Sprint 2 of the agent-integration track (PRD §6.3) requires every file
-//! and directory the daemon creates under `<data_dir>/{inbox,sent}/<mailbox>/`
-//! to land `<owner>:<owner>` with mode `0600` (files) or `0700`
-//! (directories) so that only the owning Linux user (and root) can read
-//! the mailbox. The daemon itself stays root; the privilege drop lives in
+//! Every file and directory the daemon creates under
+//! `<data_dir>/{inbox,sent}/<mailbox>/` must land
+//! `<owner>:<owner>` with mode `0600` (files) or `0700` (directories)
+//! so that only the owning Linux user (and root) can read the
+//! mailbox. The daemon itself stays root; the privilege drop lives in
 //! the hook child processes, not the daemon.
 //!
 //! This module exposes a single helper [`chown_as_owner`] that:
 //!
 //! 1. Resolves the mailbox owner's uid+gid via [`MailboxConfig::owner_uid`]
-//!    / [`MailboxConfig::owner_gid`] (which loop through the Sprint-1
+//!    / [`MailboxConfig::owner_gid`] (which loop through the
 //!    `validate_run_as` helper and the pluggable [`user_resolver`] seam).
 //! 2. Calls `chown(2)` via `libc::chown` to apply ownership.
 //! 3. Calls `chmod(2)` via `libc::chmod` to set the caller-supplied mode
@@ -44,7 +44,7 @@ use crate::config::MailboxConfig;
 /// must call it immediately after the `fs::write` / `fs::create_dir*` /
 /// `rename(2)` that publishes the file.
 ///
-/// ### Two-syscall shape (Sprint 7.5 S7.5-5 revisit)
+/// ### Two-syscall shape
 ///
 /// POSIX has no atomic "change owner and mode in one call" primitive —
 /// `chown(2)` and `chmod(2)` are necessarily distinct syscalls. The

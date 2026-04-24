@@ -1,4 +1,4 @@
-//! Slug algorithm + filename helper (FR-13b).
+//! Slug algorithm + filename helper.
 //!
 //! `slugify` is a pure transform: MIME-decoded subject → deterministic
 //! filesystem-safe stem. `allocate_filename` picks the final on-disk path,
@@ -19,7 +19,7 @@ const SLUG_EMPTY_FALLBACK: &str = "no-subject";
 /// by `mail_parser::Message::subject`, which decodes RFC 2047 encoded words
 /// transparently). The transformation is:
 /// 1. NFC-normalize (so NFC and NFD encodings of the same visible subject
-///    produce identical slugs (see S43-7).
+///    produce identical slugs).
 /// 2. Lowercase (Unicode-aware).
 /// 3. Every non-alphanumeric character becomes `-`.
 /// 4. Runs of `-` collapse to one.
@@ -34,7 +34,7 @@ pub fn slugify(subject: &str) -> String {
     // subject produce the same slug. Without this, `"Héllo"` written as
     // `H` + `e` + combining-acute and `"Héllo"` written as `H` + precomposed
     // `é` would yield different slugs even though humans and mail clients
-    // treat them as identical. See S43-7.
+    // treat them as identical.
     let normalized: String = subject.nfc().collect();
     let lowered: String = normalized.to_lowercase();
 
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn slugify_nfd_and_nfc_match() {
-        // S43-7: NFD and NFC forms of the same visible subject must slug to
+        // NFD and NFC forms of the same visible subject must slug to
         // the same value. Without the NFC-normalization step they split into
         // different slugs because `to_lowercase()` is not composition-aware.
         // "Hé" written two ways:

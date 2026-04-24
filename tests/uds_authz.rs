@@ -1,7 +1,7 @@
-//! Sprint 4 S4-4: cross-user UDS authz integration test.
+//! Cross-user UDS authz integration test.
 //!
-//! Reuses the `aimx-it-alice` / `aimx-it-bob` fixture from Sprint 2
-//! (`tests/isolation.rs`). Spins up a real `aimx serve` subprocess under
+//! Reuses the `aimx-it-alice` / `aimx-it-bob` fixture from
+//! `tests/isolation.rs`. Spins up a real `aimx serve` subprocess under
 //! a tempdir, then issues raw `AIMX/1` frames under bob's uid via
 //! `runuser -u aimx-it-bob python3 -c ...`. Every attack must come
 //! back with `AIMX/1 ERR EACCES`. The root control run succeeds and

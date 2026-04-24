@@ -11,7 +11,7 @@ pub use crate::version::{build_date, git_hash, release_tag, target_triple, versi
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
                    MCP is built in. Hooks trigger agent actions on incoming mail.",
-    // We render `--version` ourselves so the output is exactly the FR-6.1
+    // We render `--version` ourselves so the output is exactly the
     // banner produced by `version_string()`. Clap's built-in version flag
     // would prepend the binary name, yielding `aimx aimx <tag> ...`.
     disable_version_flag = true
@@ -26,7 +26,7 @@ pub struct Cli {
 }
 
 /// If the user invoked `aimx --version` / `aimx -V` at the top level,
-/// print the FR-6.1 banner and return `true` so `main()` can exit before
+/// print the version banner and return `true` so `main()` can exit before
 /// clap's parser refuses a missing subcommand. Handled manually because
 /// clap's default `ArgAction::Version` prepends the binary name and would
 /// render `aimx aimx <tag> ...`.
@@ -158,7 +158,7 @@ pub enum Command {
 
     /// Install aimx plugin/skill for an AI agent into the current user's config
     AgentSetup {
-        /// Agent short name (e.g. claude-code). Omit to launch the interactive checkbox TUI (Sprint 6), or pass --list for a plain registry dump.
+        /// Agent short name (e.g. claude-code). Omit to launch the interactive checkbox TUI, or pass --list for a plain registry dump.
         agent: Option<String>,
 
         /// List supported agents with destinations and activation hints (no TUI)

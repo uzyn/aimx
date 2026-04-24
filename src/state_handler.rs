@@ -130,7 +130,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     // Mailbox existence is resolved live through the handle so a
     // freshly-created mailbox is immediately target-able from MARK.
     //
-    // Sprint 4 §6.5: we return `ENOENT` (not `EACCES`) when the mailbox
+    // We return `ENOENT` (not `EACCES`) when the mailbox
     // is absent so the authz check itself cannot leak which mailboxes
     // exist. Once the mailbox resolves, the ownership check runs.
     let config_snapshot = ctx.config_handle.load();
@@ -221,7 +221,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     };
 
     meta.read = req.read;
-    // FR-13: `read_at` is set when marking read (reflects the most
+    // `read_at` is set when marking read (reflects the most
     // recent read, overwriting any prior timestamp on re-read) and
     // removed entirely when marking unread. Never serialized as null.
     meta.read_at = if req.read {
@@ -442,7 +442,7 @@ mod tests {
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
-                // Sprint 4 §6.5: unknown mailbox returns ENOENT so the
+                // Unknown mailbox returns ENOENT so the
                 // authz check cannot leak which mailboxes exist.
                 assert_eq!(code, ErrCode::Enoent);
                 assert!(reason.contains("ghost"), "{reason}");
@@ -635,8 +635,7 @@ mod tests {
         ));
 
         let content = std::fs::read_to_string(inbox.join("2025-06-01-001.md")).unwrap();
-        // Field must be removed entirely, not serialized as `null`
-        // (FR-19d).
+        // Field must be removed entirely, not serialized as `null`.
         assert!(
             !content.contains("read_at"),
             "read_at must be removed on MARK-UNREAD; got:\n{content}"
@@ -649,7 +648,7 @@ mod tests {
 
     #[tokio::test]
     async fn mark_read_twice_updates_timestamp_to_most_recent() {
-        // FR-13: re-MARK-READ overwrites the prior timestamp. The
+        // Re-MARK-READ overwrites the prior timestamp. The
         // field reflects "most recent read", not "first read".
         let tmp = TempDir::new().unwrap();
         let meta = sample_meta("2025-06-01-001", false);
@@ -707,7 +706,7 @@ mod tests {
         );
     }
 
-    /// Sprint 2 S2-3: after a MARK-READ the rewritten file still lives
+    /// After a MARK-READ the rewritten file still lives
     /// at the same path with the same ownership + mode (0o600). The
     /// write-temp-then-rename dance chowns the temp file BEFORE the
     /// rename so the published inode lands with the correct owner
@@ -793,7 +792,7 @@ mod tests {
         assert!(strays.is_empty(), "no temp file must remain after rename");
     }
 
-    /// Sprint 2 S2-3: when `chown_as_owner` fails (non-root process +
+    /// When `chown_as_owner` fails (non-root process +
     /// unprivileged chown target), the handler logs a warning and
     /// **still succeeds** — the mail stays on disk with fresh content
     /// (`read = true`) and the published file contents match what the
@@ -908,7 +907,7 @@ mod tests {
         );
     }
 
-    /// Sprint 1 S1-2: cross-mailbox symlink attack. Alice plants a
+    /// Cross-mailbox symlink attack. Alice plants a
     /// symlink in her own mailbox pointing at bob's real email. The
     /// MARK handler must reject (`NotFound`) and leave bob's file
     /// byte-for-byte unchanged; alice's symlink is also unchanged (no
@@ -1001,7 +1000,7 @@ mod tests {
         );
     }
 
-    /// Sprint 1 S1-2: bundle-layout variant of the cross-mailbox
+    /// Bundle-layout variant of the cross-mailbox
     /// symlink attack. Alice plants `alice/<id>/<id>.md` as a symlink
     /// to `bob/<id>/<id>.md`. Same expected outcome.
     #[tokio::test]

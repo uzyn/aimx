@@ -488,7 +488,7 @@ mod tests {
         assert!(LettreTransport::extract_domain("nodomain").is_err());
     }
 
-    // Note (S43-5): `classify_lettre_error` maps `lettre::transport::smtp::Error`
+    // Note: `classify_lettre_error` maps `lettre::transport::smtp::Error`
     // variants to our typed `TransportError`. `smtp::Error` has no public
     // constructor. Its `new()`, `code()`, `response()`, `client()`, `network()`,
     // `connection()`, `tls()`, and `transport_shutdown()` helpers are all

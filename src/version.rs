@@ -1,4 +1,4 @@
-//! Build-time version metadata (FR-6.1).
+//! Build-time version metadata.
 //!
 //! `build.rs` emits four `cargo:rustc-env` values — `RELEASE_TAG`, `GIT_HASH`,
 //! `TARGET`, `BUILD_DATE` — that this module re-exports through typed helpers.
@@ -32,7 +32,7 @@ pub fn build_date() -> &'static str {
     env!("BUILD_DATE")
 }
 
-/// `aimx <tag> (<git-sha>) <target-triple> built <date>` (FR-6.1).
+/// `aimx <tag> (<git-sha>) <target-triple> built <date>`.
 ///
 /// When `git describe` had no tags to resolve, the tag field renders as `dev`
 /// and the git hash renders as `unknown`, producing the documented fallback
