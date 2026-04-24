@@ -11,6 +11,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so `build.rs`' `git describe --tags --always
+          # --dirty` can reach the most recent release tag and emit a bare
+          # SemVer `RELEASE_TAG`. With the default shallow/no-tags checkout,
+          # describe falls back to a raw short hash and
+          # `aimx_version_renders_full_metadata` fails.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
