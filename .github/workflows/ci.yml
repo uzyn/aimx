@@ -11,6 +11,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history + tags so `build.rs`' `git describe --tags --always
+          # --dirty` can reach the most recent release tag and emit a bare
+          # SemVer `RELEASE_TAG` (e.g. `0.0.0-fixture-N-g<sha>`). With the
+          # default shallow/no-tags checkout, describe falls back to a raw
+          # short hash and `aimx_version_renders_full_metadata` fails when
+          # the hash happens to start with a hex letter (`a`–`f`).
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -51,6 +59,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # See core-tests rationale: `build.rs` needs tag history so
+          # `RELEASE_TAG` is a bare-SemVer describe output instead of a
+          # raw short hash.
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
