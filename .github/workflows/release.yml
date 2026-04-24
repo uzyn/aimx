@@ -1,20 +1,5 @@
 name: Release
 
-# Build tarballs + SHA-256 sums for all four supported Linux targets
-# on every SemVer-shaped tag push, and publish them as assets on a
-# GitHub Release with a templated body that includes a verbatim
-# `curl + sha256sum -c` verify block.
-#
-# Trigger glob requires the SemVer-shaped `MAJOR.MINOR.PATCH` core (with
-# an optional pre-release / build suffix) — e.g. `1.0.0`, `1.2.3-rc1`,
-# `0.0.0-fixture`. Tags are **bare** (no `v` prefix), matching the
-# Rust-toolchain convention (`rustc 1.95.0`, not
-# `rustc v1.95.0`). GitHub ref filters use fnmatch (not regex), so
-# `[0-9]*` enforces "digit followed by anything" and the two literal
-# dots enforce the three-segment shape. This keeps malformed tags like
-# `1`, `1-beta`, `1.2`, or `test` from spending CI minutes before the
-# pre-release regex (`^[0-9]+\.[0-9]+\.[0-9]+-`) rejects them further
-# down.
 on:
   push:
     tags:
