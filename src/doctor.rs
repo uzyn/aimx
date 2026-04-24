@@ -1937,6 +1937,7 @@ mod tests {
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }
@@ -2407,6 +2408,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
 
@@ -2935,6 +2937,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
 
@@ -3007,6 +3010,7 @@ mod tests {
             mailboxes: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }
@@ -3402,6 +3406,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }

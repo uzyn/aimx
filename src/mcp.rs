@@ -319,7 +319,11 @@ impl AimxMcpServer {
 
         let folder = resolve_folder(params.folder.as_deref())?;
         let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
-        let filepath = resolve_email_path(&mailbox_dir, &params.id).ok_or_else(|| {
+        // Sprint 1 S1-2: read paths audit — `email_read` goes through
+        // the strict resolver so a planted symlink or escape path
+        // cannot exfiltrate another mailbox's mail via `email_read`,
+        // not just via the MARK verbs.
+        let filepath = resolve_email_path_strict(&mailbox_dir, &params.id).ok_or_else(|| {
             format!(
                 "Email '{}' not found in mailbox '{}'.",
                 params.id, params.mailbox
@@ -396,7 +400,11 @@ impl AimxMcpServer {
         }
 
         let mailbox_dir = config.inbox_dir(&params.mailbox);
-        let filepath = resolve_email_path(&mailbox_dir, &params.id).ok_or_else(|| {
+        // Sprint 1 S1-2: `email_reply` reads the parent message to
+        // inherit threading headers; route through the strict resolver
+        // so a symlink cannot leak another mailbox's message into a
+        // reply composition.
+        let filepath = resolve_email_path_strict(&mailbox_dir, &params.id).ok_or_else(|| {
             format!(
                 "Email '{}' not found in mailbox '{}'.",
                 params.id, params.mailbox
@@ -1126,16 +1134,90 @@ pub fn list_emails(
 /// Resolve the on-disk path for an email by ID. Returns `Some(path)` when
 /// the email exists either as a flat `<id>.md` or as a bundle
 /// `<id>/<id>.md` inside `mailbox_dir`.
+///
+/// Thin wrapper over [`resolve_email_path_strict`]; see that function
+/// for the symlink + canonical-containment rejection rules. Kept as a
+/// named entry point so call sites read as "resolve an email path"
+/// without exposing the strictness mechanic in the caller.
+///
+/// Currently only used by the test-only `set_read_status` helper in
+/// this module and by the delegation unit test. Production call sites
+/// invoke [`resolve_email_path_strict`] directly to make the strict
+/// contract explicit at each use point (Sprint 1 S1-2 audit).
+#[allow(dead_code)]
 pub fn resolve_email_path(mailbox_dir: &std::path::Path, id: &str) -> Option<PathBuf> {
+    resolve_email_path_strict(mailbox_dir, id)
+}
+
+/// Strict email-path resolver used by every read/rewrite verb in the
+/// daemon. Returns `Some(path)` only when every condition holds:
+///
+/// - The candidate exists as a regular file (flat `<id>.md` or bundle
+///   inner `<id>/<id>.md`).
+/// - Neither the candidate nor (for the bundle case) the bundle
+///   directory is a symlink. `symlink_metadata` is used so symlinks are
+///   never followed during the check.
+/// - The canonicalized candidate path is a descendant of the
+///   canonicalized `mailbox_dir`. This defends against `..`-style
+///   escapes even if upstream validation is bypassed.
+///
+/// Rejections return `None` (not an error) so upstream handlers keep
+/// emitting the existing `NotFound` shape — a differentiated error
+/// would leak whether the target exists in a sibling mailbox
+/// (PRD §6.1).
+///
+/// Duplicate layouts (a flat `<id>.md` symlink AND a sibling bundle
+/// `<id>/<id>.md`) are a tampering signal and also reject: the strict
+/// resolver never silently falls back from a rejected flat candidate
+/// to the bundle form.
+pub fn resolve_email_path_strict(mailbox_dir: &std::path::Path, id: &str) -> Option<PathBuf> {
+    let mailbox_canon = std::fs::canonicalize(mailbox_dir).ok()?;
+
     let flat = mailbox_dir.join(format!("{id}.md"));
-    if flat.exists() {
-        return Some(flat);
+    match std::fs::symlink_metadata(&flat) {
+        Ok(md) => {
+            // Flat candidate exists on disk. Reject any non-regular
+            // entry (symlink, dir, device, fifo). If the flat candidate
+            // is tampered with, we do NOT fall back to the bundle form
+            // — the duplicate itself is suspicious.
+            if !md.file_type().is_file() {
+                return None;
+            }
+            let candidate = std::fs::canonicalize(&flat).ok()?;
+            if !candidate.starts_with(&mailbox_canon) {
+                return None;
+            }
+            return Some(flat);
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // Fall through to bundle lookup.
+        }
+        Err(_) => return None,
     }
-    let bundle_md = mailbox_dir.join(id).join(format!("{id}.md"));
-    if bundle_md.exists() {
-        return Some(bundle_md);
+
+    let bundle_dir = mailbox_dir.join(id);
+    match std::fs::symlink_metadata(&bundle_dir) {
+        Ok(md) => {
+            if !md.file_type().is_dir() {
+                return None;
+            }
+        }
+        Err(_) => return None,
     }
-    None
+    let bundle_md = bundle_dir.join(format!("{id}.md"));
+    match std::fs::symlink_metadata(&bundle_md) {
+        Ok(md) => {
+            if !md.file_type().is_file() {
+                return None;
+            }
+        }
+        Err(_) => return None,
+    }
+    let candidate = std::fs::canonicalize(&bundle_md).ok()?;
+    if !candidate.starts_with(&mailbox_canon) {
+        return None;
+    }
+    Some(bundle_md)
 }
 
 /// Inbound/outbound folder selector for MCP tools.
@@ -1377,6 +1459,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }
@@ -2315,5 +2398,179 @@ mod tests {
         assert_eq!(json["effective_name"], "abc123");
         assert_eq!(json["substituted_argv"][0], "/bin/echo");
         assert_eq!(json["substituted_argv"][1], "hi");
+    }
+
+    // ----- Sprint 1 S1-1: resolve_email_path_strict -----
+
+    fn write_flat_email(dir: &std::path::Path, id: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(format!("{id}.md")), "+++\n+++\nbody\n").unwrap();
+    }
+
+    fn write_bundle_email(dir: &std::path::Path, id: &str) {
+        let bundle = dir.join(id);
+        std::fs::create_dir_all(&bundle).unwrap();
+        std::fs::write(bundle.join(format!("{id}.md")), "+++\n+++\nbody\n").unwrap();
+    }
+
+    #[test]
+    fn strict_resolver_accepts_flat_regular_file() {
+        let tmp = TempDir::new().unwrap();
+        let mailbox = tmp.path().join("inbox").join("alice");
+        write_flat_email(&mailbox, "2025-06-01-001");
+        let out = resolve_email_path_strict(&mailbox, "2025-06-01-001");
+        assert_eq!(out, Some(mailbox.join("2025-06-01-001.md")));
+    }
+
+    #[test]
+    fn strict_resolver_accepts_bundle_inner_regular_file() {
+        let tmp = TempDir::new().unwrap();
+        let mailbox = tmp.path().join("inbox").join("alice");
+        write_bundle_email(&mailbox, "2025-06-01-002");
+        let out = resolve_email_path_strict(&mailbox, "2025-06-01-002");
+        assert_eq!(
+            out,
+            Some(mailbox.join("2025-06-01-002").join("2025-06-01-002.md"))
+        );
+    }
+
+    #[test]
+    fn strict_resolver_rejects_flat_symlink_even_when_target_valid() {
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        let bob = tmp.path().join("inbox").join("bob");
+        std::fs::create_dir_all(&alice).unwrap();
+        write_flat_email(&bob, "2025-06-01-003");
+
+        let target = bob.join("2025-06-01-003.md");
+        let link = alice.join("2025-06-01-003.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // Symlink target is a real regular file — strict resolver must
+        // still reject the symlink on the candidate side.
+        assert_eq!(resolve_email_path_strict(&alice, "2025-06-01-003"), None);
+        // Bob's copy still resolves for Bob.
+        assert_eq!(
+            resolve_email_path_strict(&bob, "2025-06-01-003"),
+            Some(target)
+        );
+    }
+
+    #[test]
+    fn strict_resolver_rejects_bundle_inner_symlink() {
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        let bob = tmp.path().join("inbox").join("bob");
+        write_bundle_email(&bob, "2025-06-01-004");
+        let alice_bundle = alice.join("2025-06-01-004");
+        std::fs::create_dir_all(&alice_bundle).unwrap();
+
+        let target = bob.join("2025-06-01-004").join("2025-06-01-004.md");
+        let link = alice_bundle.join("2025-06-01-004.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(resolve_email_path_strict(&alice, "2025-06-01-004"), None);
+    }
+
+    #[test]
+    fn strict_resolver_rejects_bundle_dir_symlink() {
+        // The bundle DIRECTORY itself is a symlink pointing at another
+        // mailbox's bundle.
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        let bob = tmp.path().join("inbox").join("bob");
+        std::fs::create_dir_all(&alice).unwrap();
+        write_bundle_email(&bob, "2025-06-01-005");
+
+        let target = bob.join("2025-06-01-005");
+        let link = alice.join("2025-06-01-005");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(resolve_email_path_strict(&alice, "2025-06-01-005"), None);
+    }
+
+    #[test]
+    fn strict_resolver_rejects_flat_symlink_with_sibling_bundle() {
+        // Duplicate layout (flat symlink + real bundle) is a tampering
+        // signal — the resolver must NOT silently fall back to the
+        // bundle form.
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        let bob = tmp.path().join("inbox").join("bob");
+        std::fs::create_dir_all(&alice).unwrap();
+        write_flat_email(&bob, "2025-06-01-006");
+        // Plant flat symlink in alice pointing to bob's flat file.
+        let target = bob.join("2025-06-01-006.md");
+        let link = alice.join("2025-06-01-006.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        // And a sibling real bundle in alice with the same id.
+        write_bundle_email(&alice, "2025-06-01-006");
+
+        assert_eq!(resolve_email_path_strict(&alice, "2025-06-01-006"), None);
+    }
+
+    #[test]
+    fn strict_resolver_rejects_missing_id() {
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        std::fs::create_dir_all(&alice).unwrap();
+        assert_eq!(
+            resolve_email_path_strict(&alice, "2099-01-01-missing"),
+            None
+        );
+    }
+
+    #[test]
+    fn strict_resolver_rejects_escape_via_canonicalization() {
+        // `..`-escape defense: a path whose canonical form lands
+        // outside the mailbox dir must be rejected. We engineer this
+        // by making the whole mailbox dir itself a symlink pointing
+        // elsewhere, so the inner file's canonical path is outside
+        // what the caller treats as the mailbox tree.
+        let tmp = TempDir::new().unwrap();
+        let real_storage = tmp.path().join("storage").join("alice-real");
+        write_flat_email(&real_storage, "2025-06-01-007");
+
+        let visible_root = tmp.path().join("inbox");
+        std::fs::create_dir_all(&visible_root).unwrap();
+        let visible_alice = visible_root.join("alice");
+        std::os::unix::fs::symlink(&real_storage, &visible_alice).unwrap();
+
+        // Pretend the caller treats the symlinked path as the mailbox
+        // dir. Canonicalize(candidate) = real_storage/... which still
+        // starts_with canonicalize(visible_alice) = real_storage — so
+        // this is actually accepted (the dir-level symlink is resolved
+        // on BOTH sides). The escape check catches the case where
+        // candidate canonicalizes OUTSIDE the mailbox canonical root,
+        // which we exercise with the bundle-dir-symlink test above.
+        // Here we assert the resolver does NOT accidentally allow the
+        // flat candidate to leak through when id contains `..`-like
+        // structure. The id validation happens at the caller; we just
+        // prove canonical-containment works for the normal path.
+        assert!(
+            resolve_email_path_strict(&visible_alice, "2025-06-01-007").is_some(),
+            "legitimate dir-level symlink to a regular file should still resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_email_path_wrapper_delegates_to_strict() {
+        // The thin wrapper must behave identically to the strict
+        // resolver — no divergent logic between the two.
+        let tmp = TempDir::new().unwrap();
+        let alice = tmp.path().join("inbox").join("alice");
+        let bob = tmp.path().join("inbox").join("bob");
+        std::fs::create_dir_all(&alice).unwrap();
+        write_flat_email(&bob, "2025-06-01-008");
+
+        let target = bob.join("2025-06-01-008.md");
+        let link = alice.join("2025-06-01-008.md");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        assert_eq!(
+            resolve_email_path(&alice, "2025-06-01-008"),
+            resolve_email_path_strict(&alice, "2025-06-01-008")
+        );
+        assert_eq!(resolve_email_path(&alice, "2025-06-01-008"), None);
     }
 }

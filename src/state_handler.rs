@@ -30,7 +30,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox_locks::MailboxLocks;
-use crate::mcp::resolve_email_path;
+use crate::mcp::resolve_email_path_strict;
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
 use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
@@ -160,9 +160,25 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     let _guard = lock.lock().await;
 
     let mailbox_dir = folder_dir(&ctx.data_dir, &req.mailbox, req.folder);
-    let filepath = match resolve_email_path(&mailbox_dir, &req.id) {
+    let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {
         Some(p) => p,
         None => {
+            // A strict-resolver rejection can mean either "no such file"
+            // or "symlink / canonical-containment violation". Both map
+            // to `NotFound` on the wire (no existence leak per PRD
+            // §6.1), but we log at `info` on `aimx::state` so operators
+            // can spot probe attempts (PRD §7.3). The log payload is
+            // intentionally coarse — we don't disambiguate symlink vs.
+            // absent-file at the handler level to avoid leaking that
+            // fact into anything that tails the log stream downstream.
+            tracing::info!(
+                target: "aimx::state",
+                reason = "symlink_or_escape",
+                mailbox = %req.mailbox,
+                id = %req.id,
+                folder = req.folder.as_str(),
+                "MARK rejected: email not resolvable under mailbox dir"
+            );
             return AckResponse::Err {
                 code: ErrCode::NotFound,
                 reason: format!(
@@ -357,6 +373,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         StateContext::new(data_dir.to_path_buf(), ConfigHandle::new(config))
@@ -746,6 +763,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
@@ -840,6 +858,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
@@ -890,6 +909,171 @@ mod tests {
             unsafe { libc::geteuid() },
             "file ownership must be unchanged after chown failure"
         );
+    }
+
+    /// Sprint 1 S1-2: cross-mailbox symlink attack. Alice plants a
+    /// symlink in her own mailbox pointing at bob's real email. The
+    /// MARK handler must reject (`NotFound`) and leave bob's file
+    /// byte-for-byte unchanged; alice's symlink is also unchanged (no
+    /// replacement-write lands on it).
+    #[tokio::test]
+    async fn mark_rejects_cross_mailbox_symlink_attack() {
+        let tmp = TempDir::new().unwrap();
+
+        // Configure two mailboxes owned by `root` so the authz check
+        // short-circuits to the "internal root" bypass and we can
+        // focus the assertion on the symlink rejection itself.
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "alice".to_string(),
+            crate::config::MailboxConfig {
+                address: "alice@example.com".into(),
+                owner: "root".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "bob".to_string(),
+            crate::config::MailboxConfig {
+                address: "bob@example.com".into(),
+                owner: "root".into(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let config = crate::config::Config {
+            domain: "example.com".into(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            smtp_helo_name: None,
+            upgrade: None,
+        };
+        let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
+
+        // Plant bob's real email.
+        let bob_meta = sample_meta("2025-06-01-777", false);
+        let bob_inbox = tmp.path().join("inbox").join("bob");
+        write_email(&bob_inbox, "2025-06-01-777", &bob_meta);
+        let bob_file = bob_inbox.join("2025-06-01-777.md");
+        let bob_bytes_before = std::fs::read(&bob_file).unwrap();
+
+        // Plant alice's symlink pointing at bob's real file.
+        let alice_inbox = tmp.path().join("inbox").join("alice");
+        std::fs::create_dir_all(&alice_inbox).unwrap();
+        let alice_link = alice_inbox.join("2025-06-01-777.md");
+        std::os::unix::fs::symlink(&bob_file, &alice_link).unwrap();
+
+        // Sanity: alice's entry is a symlink on disk before the MARK.
+        let pre = std::fs::symlink_metadata(&alice_link).unwrap();
+        assert!(pre.file_type().is_symlink());
+
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: "2025-06-01-777".to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::NotFound),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        // Bob's real file is unchanged byte-for-byte.
+        let bob_bytes_after = std::fs::read(&bob_file).unwrap();
+        assert_eq!(
+            bob_bytes_before, bob_bytes_after,
+            "bob's file must be byte-for-byte unchanged after alice's probe"
+        );
+
+        // Alice's entry is still a symlink — no replacement-write
+        // landed on it.
+        let post = std::fs::symlink_metadata(&alice_link).unwrap();
+        assert!(
+            post.file_type().is_symlink(),
+            "alice's planted symlink must not have been replaced by a regular file"
+        );
+    }
+
+    /// Sprint 1 S1-2: bundle-layout variant of the cross-mailbox
+    /// symlink attack. Alice plants `alice/<id>/<id>.md` as a symlink
+    /// to `bob/<id>/<id>.md`. Same expected outcome.
+    #[tokio::test]
+    async fn mark_rejects_cross_mailbox_bundle_symlink_attack() {
+        let tmp = TempDir::new().unwrap();
+
+        let mut mailboxes = std::collections::HashMap::new();
+        for name in ["alice", "bob"] {
+            mailboxes.insert(
+                name.to_string(),
+                crate::config::MailboxConfig {
+                    address: format!("{name}@example.com"),
+                    owner: "root".into(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                    allow_root_catchall: false,
+                },
+            );
+        }
+        let config = crate::config::Config {
+            domain: "example.com".into(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            smtp_helo_name: None,
+            upgrade: None,
+        };
+        let sctx = StateContext::new(tmp.path().to_path_buf(), ConfigHandle::new(config));
+
+        // Bob has a real bundle.
+        let id = "2025-06-01-888";
+        let bob_bundle = tmp.path().join("inbox").join("bob").join(id);
+        std::fs::create_dir_all(&bob_bundle).unwrap();
+        let bob_meta = sample_meta(id, false);
+        let toml_str = toml::to_string(&bob_meta).unwrap();
+        let content = format!("+++\n{toml_str}+++\n\nbob body\n");
+        let bob_inner = bob_bundle.join(format!("{id}.md"));
+        std::fs::write(&bob_inner, content).unwrap();
+        let bob_bytes_before = std::fs::read(&bob_inner).unwrap();
+
+        // Alice has her own bundle directory but the inner `.md` is a
+        // symlink to bob's file.
+        let alice_bundle = tmp.path().join("inbox").join("alice").join(id);
+        std::fs::create_dir_all(&alice_bundle).unwrap();
+        let alice_inner = alice_bundle.join(format!("{id}.md"));
+        std::os::unix::fs::symlink(&bob_inner, &alice_inner).unwrap();
+
+        let req = MarkRequest {
+            mailbox: "alice".to_string(),
+            id: id.to_string(),
+            folder: MarkFolder::Inbox,
+            read: true,
+        };
+        match handle_mark(&sctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::NotFound),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+
+        let bob_bytes_after = std::fs::read(&bob_inner).unwrap();
+        assert_eq!(bob_bytes_before, bob_bytes_after);
+        let post = std::fs::symlink_metadata(&alice_inner).unwrap();
+        assert!(post.file_type().is_symlink());
     }
 
     #[tokio::test]

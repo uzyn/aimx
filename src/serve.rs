@@ -507,7 +507,10 @@ async fn run_serve(
             );
             Arc::new(FileDropTransport::new(drop_path))
         }
-        None => Arc::new(LettreTransport::new(config.enable_ipv6)),
+        None => Arc::new(LettreTransport::new(
+            config.enable_ipv6,
+            config.smtp_helo_name(),
+        )),
     };
 
     // Wrap the starting Config in a live, swappable handle. Every
@@ -1549,6 +1552,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                smtp_helo_name: None,
                 upgrade: None,
             };
 
@@ -1860,6 +1864,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }
@@ -2021,6 +2026,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                smtp_helo_name: None,
                 upgrade: None,
             };
             let handle_cfg = ConfigHandle::new(config);
