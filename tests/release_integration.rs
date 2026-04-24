@@ -50,6 +50,16 @@ fn expected_sums() -> HashMap<&'static str, &'static str> {
 /// Sprint 8.0.1 shortened artifact-target form (`x86_64-linux-gnu`) used
 /// in tarball filenames. The canonical triple is still what
 /// `aimx --version` prints in its `<target>` slot.
+///
+/// NOTE: the same `-unknown-` → `-` mapping is duplicated in four places
+/// on purpose — `release.yml` (bash, drives the CI publish step),
+/// `install.sh` (POSIX sh, drives curl-pipe installs), `src/upgrade.rs`
+/// (Rust, drives `aimx upgrade`), and this file (Rust, drives the Tier-2
+/// integration test). aimx ships as a single binary with no library crate
+/// so the Rust sites can't share a helper; the sh and bash sites can't
+/// reuse Rust at all. Keep all four in lockstep. See also the pinned
+/// contract test `tarball_inner_dir_matches_artifact_target` in
+/// `src/upgrade.rs`.
 fn artifact_target(target: &str) -> String {
     target.replacen("-unknown-", "-", 1)
 }

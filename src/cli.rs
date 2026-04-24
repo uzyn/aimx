@@ -246,6 +246,62 @@ pub struct UpgradeArgs {
     pub force: bool,
 }
 
+impl UpgradeArgs {
+    /// Return `--version` with a single leading `v` stripped when it is
+    /// immediately followed by a digit — mirrors
+    /// `build.rs::strip_legacy_v_prefix` and `install.sh`'s `v[0-9]*`
+    /// normalization so `aimx upgrade --version v0.1.0` resolves the same
+    /// bare-tagged GitHub release as `--version 0.1.0`. Narrow scope:
+    /// leaves non-SemVer inputs like `version-1` and empty strings alone.
+    pub fn canonical_version(&self) -> Option<String> {
+        self.version.as_deref().map(canonical_version_tag)
+    }
+}
+
+/// Strip a single leading `v` only when followed by an ASCII digit. Matches
+/// `build.rs::strip_legacy_v_prefix` and the `v[0-9]*` case in `install.sh`.
+pub fn canonical_version_tag(tag: &str) -> String {
+    if let Some(rest) = tag.strip_prefix('v')
+        && rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        return rest.to_string();
+    }
+    tag.to_string()
+}
+
+#[cfg(test)]
+mod upgrade_args_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_version_strips_leading_v() {
+        // Legacy `v`-prefixed SemVer: strip the `v`.
+        assert_eq!(canonical_version_tag("v0.1.0"), "0.1.0");
+        // Bare SemVer: no-op.
+        assert_eq!(canonical_version_tag("0.1.0"), "0.1.0");
+        // Non-SemVer `v` + non-digit: leave alone.
+        assert_eq!(canonical_version_tag("version-1"), "version-1");
+        // Empty: leave alone.
+        assert_eq!(canonical_version_tag(""), "");
+        // Pre-release with legacy `v`: strip the `v`.
+        assert_eq!(canonical_version_tag("v0.0.0-fixture"), "0.0.0-fixture");
+
+        // Same contract via the UpgradeArgs method.
+        let args = UpgradeArgs {
+            dry_run: false,
+            version: Some("v0.1.0".into()),
+            force: false,
+        };
+        assert_eq!(args.canonical_version().as_deref(), Some("0.1.0"));
+        let args_none = UpgradeArgs {
+            dry_run: false,
+            version: None,
+            force: false,
+        };
+        assert!(args_none.canonical_version().is_none());
+    }
+}
+
 #[derive(clap::Args, Clone)]
 pub struct SendArgs {
     /// Sender address

@@ -457,6 +457,19 @@ main() {
         say "resolving latest release from ${GITHUB_API}/latest"
         TAG="$(resolve_latest_tag)"
     fi
+    # Tags are bare SemVer post-Sprint 8.0.1. A caller-supplied `v` prefix
+    # (from `--tag v0.0.0-fixture` or `AIMX_VERSION=v1.2.3`) would compose a
+    # non-existent `/download/v…/` URL; strip it leniently before we use the
+    # tag for URL / asset-name / .sha256 filename composition. Narrow match:
+    # only strip `v` when the next character is a digit — leaves non-SemVer
+    # inputs like `version-1` alone.
+    case "${TAG}" in
+        v[0-9]*)
+            _stripped="${TAG#v}"
+            say "normalized tag: ${TAG} -> ${_stripped} (bare SemVer)"
+            TAG="${_stripped}"
+            ;;
+    esac
     _version="$(tag_to_version "${TAG}")"
     _artifact_target="$(artifact_target "${TARGET}")"
 

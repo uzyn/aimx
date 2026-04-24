@@ -241,7 +241,12 @@ pub fn run_upgrade(
 
     // Step 1: resolve the target manifest.
     report.record(UpgradeStep::ResolveManifest);
-    let manifest = match args.version.as_deref() {
+    // Strip any legacy `v` prefix (`--version v0.1.0` → `0.1.0`) before
+    // hitting the GitHub API — release tags are bare SemVer post-Sprint
+    // 8.0.1, so a caller-supplied `v` would 404. Mirrors `install.sh` and
+    // `build.rs::strip_legacy_v_prefix`.
+    let canonical_version = args.canonical_version();
+    let manifest = match canonical_version.as_deref() {
         Some(tag) => release.release_by_tag(tag)?,
         None => release.latest_release()?,
     };
