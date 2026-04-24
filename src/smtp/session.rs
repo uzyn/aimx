@@ -373,13 +373,24 @@ impl SmtpSession {
         if addr.is_empty() {
             return "501 Syntax: RCPT TO:<address>\r\n".to_string();
         }
-        let configured_domain = self.params.config_handle.load().domain.clone();
-        if !recipient_domain_matches(&addr, &configured_domain) {
+        let config = self.params.config_handle.load();
+        if !recipient_domain_matches(&addr, &config.domain) {
             eprintln!(
                 "[{}] RCPT rejected (relay): recipient={} configured_domain={}",
-                self.params.peer_addr, addr, configured_domain
+                self.params.peer_addr, addr, config.domain
             );
             return "550 5.7.1 relay not permitted\r\n".to_string();
+        }
+        // S2-1: mailbox-routing preflight. Reject at RCPT time when no
+        // mailbox (concrete or catchall) can accept the address. Keeps
+        // the RCPT-time and DATA-time decisions in sync via the shared
+        // `resolve_recipient_mailbox` helper.
+        if crate::ingest::resolve_recipient_mailbox(&config, &addr).is_none() {
+            eprintln!(
+                "[{}] RCPT rejected (no mailbox): recipient={}",
+                self.params.peer_addr, addr
+            );
+            return format!("550 5.1.1 <{addr}>: Recipient address rejected: User unknown\r\n");
         }
         session_state.forward_paths.push(addr);
         session_state.state = State::RcptTo;
@@ -551,30 +562,45 @@ impl SmtpSession {
 
         let size = data.len();
         let rcpt_count = session_state.forward_paths.len();
-        if succeeded > 0 {
+        let from = session_state.reverse_path.clone();
+        let peer = self.params.peer_addr;
+
+        // Structured observability signal for every delivery outcome.
+        // Target `aimx::smtp` matches the convention used by the other
+        // daemon subsystems; fields mirror the PRD §7.3 contract so
+        // `aimx logs` can filter on a stable shape.
+        tracing::info!(
+            target: "aimx::smtp",
+            peer = %peer,
+            from = %from,
+            rcpts = rcpt_count,
+            succeeded = succeeded,
+            failed = failed,
+            size = size,
+            "data delivery outcome"
+        );
+
+        if failed == 0 && succeeded > 0 {
             session_state.message_count += 1;
             session_state.total_bytes += size;
-            if failed > 0 {
-                eprintln!(
-                    "[{}] Message partially accepted from={} rcpts={} succeeded={} failed={} size={}",
-                    self.params.peer_addr,
-                    session_state.reverse_path,
-                    rcpt_count,
-                    succeeded,
-                    failed,
-                    size
-                );
-            } else {
-                eprintln!(
-                    "[{}] Message accepted from={} rcpts={} size={}",
-                    self.params.peer_addr, session_state.reverse_path, rcpt_count, size
-                );
-            }
+            eprintln!("[{peer}] Message accepted from={from} rcpts={rcpt_count} size={size}");
             Ok("250 OK message accepted\r\n".to_string())
+        } else if succeeded > 0 {
+            // S2-2 / §6.3: any post-354 failure is surfaced as 451 so
+            // the sending MTA retries the message rather than treating
+            // partial loss as success. Both the per-recipient files
+            // that did land and the session counters are updated — the
+            // retry will re-deliver duplicates but that is the price of
+            // lossless semantics.
+            session_state.message_count += 1;
+            session_state.total_bytes += size;
+            eprintln!(
+                "[{peer}] Message partially accepted from={from} rcpts={rcpt_count} succeeded={succeeded} failed={failed} size={size}"
+            );
+            Ok("451 4.3.0 Temporary failure on partial accept; please retry\r\n".to_string())
         } else {
             eprintln!(
-                "[{}] Message rejected from={} rcpts={} all_failed size={}",
-                self.params.peer_addr, session_state.reverse_path, rcpt_count, size
+                "[{peer}] Message rejected from={from} rcpts={rcpt_count} all_failed size={size}"
             );
             Ok("451 Temporary failure, please retry\r\n".to_string())
         }

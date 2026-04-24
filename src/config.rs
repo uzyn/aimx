@@ -1477,14 +1477,6 @@ impl Config {
     pub fn sent_dir(&self, name: &str) -> PathBuf {
         self.data_dir.join("sent").join(name)
     }
-
-    pub fn resolve_mailbox(&self, local_part: &str) -> String {
-        if self.mailboxes.contains_key(local_part) {
-            local_part.to_string()
-        } else {
-            "catchall".to_string()
-        }
-    }
 }
 
 /// Shared, swappable handle to the daemon's in-memory `Config`.
@@ -2180,18 +2172,6 @@ dangerously_support_untrusted = true
         config.save(&path).unwrap();
         let loaded = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(config, loaded);
-    }
-
-    #[test]
-    fn resolve_mailbox_known() {
-        let config: Config = toml::from_str(sample_toml()).unwrap();
-        assert_eq!(config.resolve_mailbox("support"), "support");
-    }
-
-    #[test]
-    fn resolve_mailbox_unknown_falls_to_catchall() {
-        let config: Config = toml::from_str(sample_toml()).unwrap();
-        assert_eq!(config.resolve_mailbox("unknown"), "catchall");
     }
 
     #[test]
