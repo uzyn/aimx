@@ -131,13 +131,13 @@ At the DNS verification step:
 
 ### Uninstalling
 
-To reverse `aimx setup`, stop the daemon and remove its init-system service file:
+To reverse `aimx setup`, stop the daemon, remove its init-system service file, and delete the installed `aimx` binary:
 
 ```bash
 sudo aimx uninstall
 ```
 
-Pass `--yes` to skip the confirmation prompt. Uninstall is intentionally non-destructive: it leaves your config (`/etc/aimx/`) and mailbox data (`/var/lib/aimx/`) in place so a subsequent `aimx setup` reuses them. If you also want to wipe those, remove them manually with `rm -rf`.
+Pass `--yes` to skip the confirmation prompt. Uninstall is intentionally scoped: it removes the service and the binary so a subsequent `install.sh` run starts fresh, but leaves your config (`/etc/aimx/`) and mailbox data (`/var/lib/aimx/`) in place so a subsequent `aimx setup` reuses them. If you also want to wipe those, remove them manually with `rm -rf`.
 
 ## DNS configuration
 

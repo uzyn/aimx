@@ -39,7 +39,7 @@ See [Setup](setup.md) for the full walkthrough.
 
 ### `aimx uninstall`
 
-Stop the daemon and remove the installed init-system service file. Non-destructive. Leaves `/etc/aimx/` and `/var/lib/aimx/` intact.
+Stop the daemon, remove the init-system service file, and delete the installed `aimx` binary itself so a subsequent `install.sh` run starts from a clean slate. Leaves `/etc/aimx/` and `/var/lib/aimx/` intact — wipe them manually with `sudo rm -rf /etc/aimx /var/lib/aimx` if you want a full purge.
 
 | Flag | Description |
 |------|-------------|

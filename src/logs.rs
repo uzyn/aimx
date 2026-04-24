@@ -143,6 +143,9 @@ mod tests {
         fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
             unreachable!("logs::run must not touch uninstall_service_file")
         }
+        fn remove_file(&self, _path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("logs::run must not touch remove_file")
+        }
         fn wait_for_service_ready(&self) -> bool {
             unreachable!("logs::run must not touch wait_for_service_ready")
         }

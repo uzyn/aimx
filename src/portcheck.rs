@@ -308,6 +308,9 @@ mod tests {
         fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
             Ok(())
         }
+        fn remove_file(&self, _path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+            unreachable!("portcheck::run must not touch remove_file")
+        }
         fn wait_for_service_ready(&self) -> bool {
             true
         }
