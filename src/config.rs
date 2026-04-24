@@ -107,6 +107,14 @@ pub struct Config {
     #[serde(default)]
     pub enable_ipv6: bool,
 
+    /// Optional EHLO / HELO identity the outbound SMTP transport
+    /// presents to recipient MXs. Defaults to `config.domain` when
+    /// unset. Operators on multi-tenant VPSes whose sending host has a
+    /// different FQDN from `config.domain` (e.g., a dedicated relay)
+    /// set this explicitly. Hardening PRD §6.2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub smtp_helo_name: Option<String>,
+
     /// Optional `[upgrade]` section. Overrides the release-manifest URL used
     /// by `aimx upgrade` (PRD FR-4.6). The `AIMX_RELEASE_MANIFEST_URL` env
     /// var takes precedence over this value when both are set.
@@ -1322,6 +1330,58 @@ fn validate_trust_values(config: &Config) -> Result<(), String> {
     Ok(())
 }
 
+/// Validate an RFC 1123–ish DNS hostname used for EHLO identity.
+///
+/// Rules:
+/// - Non-empty, ≤ 253 bytes total.
+/// - Each dot-separated label is 1–63 bytes, `[A-Za-z0-9-]`, and cannot
+///   start or end with a hyphen.
+/// - At least one label; trailing dot is not allowed (matches what an
+///   SMTP peer will accept as an EHLO parameter).
+///
+/// Used only for `Config.smtp_helo_name` at this point. Keeping it
+/// local to the module (rather than exporting) means the validator
+/// stays private to the load-time path.
+fn validate_helo_name(value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err("smtp_helo_name is empty; set a valid hostname or remove the field".into());
+    }
+    if value.len() > 253 {
+        return Err(format!(
+            "smtp_helo_name '{value}' exceeds 253 bytes (RFC 1035 cap)"
+        ));
+    }
+    if value.ends_with('.') {
+        return Err(format!(
+            "smtp_helo_name '{value}' has a trailing dot; drop it"
+        ));
+    }
+    for label in value.split('.') {
+        if label.is_empty() {
+            return Err(format!(
+                "smtp_helo_name '{value}' has an empty label (double dot or leading dot)"
+            ));
+        }
+        if label.len() > 63 {
+            return Err(format!(
+                "smtp_helo_name '{value}' has a label longer than 63 bytes: '{label}'"
+            ));
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return Err(format!(
+                "smtp_helo_name '{value}' has a label starting/ending with '-': '{label}'"
+            ));
+        }
+        if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            return Err(format!(
+                "smtp_helo_name '{value}' has an invalid label '{label}'; \
+                 labels must match [A-Za-z0-9-]"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Load and validate a `config.toml`. Returns both the parsed
     /// `Config` and a vector of non-fatal warnings (orphan mailbox
@@ -1357,6 +1417,9 @@ impl Config {
             }
         }
         validate_trust_values(&config).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        if let Some(helo) = config.smtp_helo_name.as_deref() {
+            validate_helo_name(helo).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        }
         let mut warnings = validate_hook_templates(&config.hook_templates)
             .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
         let mailbox_warnings = validate_mailbox_owners(&config)
@@ -1379,6 +1442,17 @@ impl Config {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
         Ok(())
+    }
+
+    /// Effective EHLO / HELO identity for outbound SMTP. Returns the
+    /// operator-supplied `smtp_helo_name` when set, else falls back to
+    /// `config.domain`. The value is validated at load time (see
+    /// [`validate_helo_name`]) so callers may use it verbatim.
+    ///
+    /// Hardening PRD §6.2: outbound mail must introduce itself with
+    /// the sender's own hostname, never the dialed MX.
+    pub fn smtp_helo_name(&self) -> &str {
+        self.smtp_helo_name.as_deref().unwrap_or(&self.domain)
     }
 
     /// Load the config from the canonical path returned by [`config_path`].
@@ -2174,6 +2248,7 @@ dangerously_support_untrusted = true
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
 
@@ -2333,6 +2408,7 @@ trusted_senders = []
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         config.save(&path).unwrap();
@@ -2374,6 +2450,7 @@ trusted_senders = []
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         config.save(&path).unwrap();
@@ -2394,6 +2471,160 @@ trusted_senders = []
             !mailbox_section.contains("trusted_senders"),
             "unset mailbox trusted_senders should not serialize: {mailbox_section}"
         );
+    }
+
+    // ----- Sprint 1 S1-3: smtp_helo_name field + validator -----
+
+    #[test]
+    fn smtp_helo_name_helper_defaults_to_domain() {
+        let toml_str = "domain = \"example.com\"\n[mailboxes]\n";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.smtp_helo_name(), "example.com");
+    }
+
+    #[test]
+    fn smtp_helo_name_helper_returns_override_when_set() {
+        let toml_str =
+            "domain = \"example.com\"\nsmtp_helo_name = \"mail.example.com\"\n[mailboxes]\n";
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.smtp_helo_name(), "mail.example.com");
+    }
+
+    #[test]
+    fn smtp_helo_name_roundtrips_byte_stable_when_set() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let cfg = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            smtp_helo_name: Some("relay.test.com".to_string()),
+            upgrade: None,
+        };
+        cfg.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("smtp_helo_name = \"relay.test.com\""),
+            "serialized config must contain the helo override: {on_disk}"
+        );
+        let loaded = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(loaded.smtp_helo_name.as_deref(), Some("relay.test.com"));
+    }
+
+    #[test]
+    fn smtp_helo_name_omitted_when_unset() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        let cfg = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes: HashMap::new(),
+            verify_host: None,
+            enable_ipv6: false,
+            smtp_helo_name: None,
+            upgrade: None,
+        };
+        cfg.save(&path).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !on_disk.contains("smtp_helo_name"),
+            "unset smtp_helo_name must not serialize: {on_disk}"
+        );
+    }
+
+    #[test]
+    fn validate_helo_name_accepts_valid_hostnames() {
+        for good in [
+            "example.com",
+            "mail.example.com",
+            "aimx-relay.internal",
+            "mx1.sub.example.co.uk",
+            "a",
+            "A1.B2.C3",
+        ] {
+            assert!(
+                super::validate_helo_name(good).is_ok(),
+                "expected valid: {good}"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_helo_name_rejects_invalid_hostnames() {
+        let cases = [
+            "",
+            "example..com",
+            ".example.com",
+            "example.com.",
+            "-bad.example.com",
+            "bad-.example.com",
+            "has space.example.com",
+            "has/slash.example.com",
+        ];
+        for bad in cases {
+            assert!(
+                super::validate_helo_name(bad).is_err(),
+                "expected invalid: {bad}"
+            );
+        }
+        // Overlong label (>63 chars).
+        let long_label = "a".repeat(64);
+        assert!(super::validate_helo_name(&long_label).is_err());
+        // Overlong total (>253 chars) — build by joining labels.
+        let long = (0..30).map(|_| "abcdefghij").collect::<Vec<_>>().join(".");
+        assert!(long.len() > 253);
+        assert!(super::validate_helo_name(&long).is_err());
+    }
+
+    #[test]
+    fn load_rejects_invalid_smtp_helo_name() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "domain = \"test.com\"\nsmtp_helo_name = \"bad helo!\"\n[mailboxes]\n",
+        )
+        .unwrap();
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("smtp_helo_name"),
+            "expected helo error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_valid_smtp_helo_name() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "domain = \"test.com\"\nsmtp_helo_name = \"mail.test.com\"\n[mailboxes]\n",
+        )
+        .unwrap();
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.smtp_helo_name(), "mail.test.com");
     }
 
     #[test]
@@ -3440,6 +3671,7 @@ allow_root_catchall = true
             },
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         };
         let toml_str = toml::to_string_pretty(&cfg).unwrap();
@@ -3563,6 +3795,7 @@ allow_root_catchall = true
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            smtp_helo_name: None,
             upgrade: None,
         }
     }

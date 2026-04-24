@@ -55,6 +55,7 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 | `trusted_senders` | array | `[]` | Default allowlist of glob patterns applied to every mailbox. Per-mailbox `trusted_senders` replaces this list (no merging). |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
+| `smtp_helo_name` | string | *(defaults to `domain`)* | Advanced. EHLO / HELO identity the outbound SMTP transport presents to recipient MXs. Leave unset on a single-host install — the default uses `domain`, which matches your DKIM / SPF / DMARC keys. Set this explicitly only when your sending host's FQDN differs from `domain` (e.g., a dedicated outbound relay named `mail.example.com` delivering mail for `domain = "agent.example.com"`). Must be a valid DNS hostname. |
 
 `aimx setup` asks for a list of trusted sender addresses interactively on
 the first run (comma-separated, accepts plain addresses and globs like
