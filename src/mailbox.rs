@@ -143,20 +143,56 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
-    // Remove both inbox and sent directories.
+    // Hardening PRD §6.4 / S3-2: save-then-delete ordering.
+    //
+    // 1. Clone the config and drop the mailbox entry in memory.
+    // 2. Persist the new config atomically (temp-then-rename). If this
+    //    fails, the data dirs on disk are untouched, so the operator can
+    //    retry without first resurrecting the mailbox files.
+    // 3. Only after the save succeeds do we `remove_dir_all` the inbox
+    //    and sent dirs. If step 3 fails the config is already authoritative;
+    //    warn the operator by name+error so they can clean up the
+    //    leftover directories, and propagate the error so the CLI exits
+    //    non-zero.
+    let mut new_config = config.clone();
+    new_config.mailboxes.remove(name);
+    new_config.save(&crate::config::config_path())?;
+
     let inbox = config.inbox_dir(name);
-    if inbox.exists() {
-        std::fs::remove_dir_all(&inbox)?;
-    }
     let sent = config.sent_dir(name);
-    if sent.exists() {
-        std::fs::remove_dir_all(&sent)?;
+    let mut leftover_error: Option<std::io::Error> = None;
+    if inbox.exists()
+        && let Err(e) = std::fs::remove_dir_all(&inbox)
+    {
+        tracing::warn!(
+            path = %inbox.display(),
+            error = %e,
+            "mailbox '{name}' config removed but inbox dir cleanup failed; \
+             remove manually to reclaim space",
+        );
+        leftover_error = Some(e);
+    }
+    if sent.exists()
+        && let Err(e) = std::fs::remove_dir_all(&sent)
+    {
+        tracing::warn!(
+            path = %sent.display(),
+            error = %e,
+            "mailbox '{name}' config removed but sent dir cleanup failed; \
+             remove manually to reclaim space",
+        );
+        // Keep the first error if inbox also failed, otherwise record this one.
+        if leftover_error.is_none() {
+            leftover_error = Some(e);
+        }
     }
 
-    let mut config = config.clone();
-    config.mailboxes.remove(name);
-
-    config.save(&crate::config::config_path())?;
+    if let Some(e) = leftover_error {
+        return Err(format!(
+            "mailbox '{name}' removed from config.toml but filesystem cleanup failed: {e}",
+        )
+        .into());
+    }
 
     Ok(())
 }
@@ -893,6 +929,66 @@ mod tests {
         assert!(!tmp.path().join("sent").join("alice").exists());
         let reloaded = Config::load_resolved_ignore_warnings().unwrap();
         assert!(!reloaded.mailboxes.contains_key("alice"));
+    }
+
+    /// Hardening PRD §6.4 / S3-2: when the atomic config save fails,
+    /// `delete_mailbox` must leave both `inbox/<name>/` and `sent/<name>/`
+    /// byte-for-byte untouched so the operator can retry. We induce a
+    /// save failure by pointing `AIMX_CONFIG_DIR` at a nonexistent
+    /// directory — `write_atomic` then hits ENOENT on `File::create`
+    /// for the temp file before any rename runs.
+    #[test]
+    fn delete_mailbox_preserves_data_dirs_on_save_failure() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let guard = setup_config_file(tmp.path(), &config);
+
+        create_mailbox(&config, "alice", "ops").unwrap();
+        let config = Config::load_resolved_ignore_warnings().unwrap();
+        assert!(config.mailboxes.contains_key("alice"));
+
+        // Seed some data in both inbox and sent so the save-first ordering
+        // is observable.
+        let inbox = tmp.path().join("inbox").join("alice");
+        let sent = tmp.path().join("sent").join("alice");
+        std::fs::create_dir_all(&inbox).unwrap();
+        std::fs::create_dir_all(&sent).unwrap();
+        let inbox_file = inbox.join("2025-01-01-120000-hello.md");
+        let sent_file = sent.join("2025-01-01-120001-reply.md");
+        std::fs::write(&inbox_file, b"inbox body").unwrap();
+        std::fs::write(&sent_file, b"sent body").unwrap();
+
+        let config_path = crate::config::config_path();
+        let config_bytes_before = std::fs::read(&config_path).unwrap();
+
+        // Swap the config-dir override to a nonexistent path so the
+        // next `config_path()` resolves into a missing parent dir.
+        drop(guard);
+        let bad_dir = tmp.path().join("does").join("not").join("exist");
+        let _bad_guard = ConfigDirOverride::set(&bad_dir);
+
+        let err = delete_mailbox(&config, "alice")
+            .expect_err("delete_mailbox must fail when config save fails");
+        drop(_bad_guard);
+        // The original error message surface is implementation-defined;
+        // just require non-empty so operators see something.
+        assert!(!err.to_string().is_empty());
+
+        // Reinstate the real config path so we can re-read it.
+        let _guard = ConfigDirOverride::set(tmp.path());
+
+        // Data dirs are byte-for-byte unchanged.
+        assert!(inbox.exists(), "inbox dir must survive save failure");
+        assert!(sent.exists(), "sent dir must survive save failure");
+        assert_eq!(std::fs::read(&inbox_file).unwrap(), b"inbox body");
+        assert_eq!(std::fs::read(&sent_file).unwrap(), b"sent body");
+
+        // config.toml is byte-for-byte unchanged.
+        let config_bytes_after = std::fs::read(&config_path).unwrap();
+        assert_eq!(
+            config_bytes_after, config_bytes_before,
+            "config.toml must not be truncated or rewritten on save failure",
+        );
     }
 
     #[test]

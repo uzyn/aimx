@@ -754,7 +754,12 @@ fn apply_create_direct(
     // next daemon restart.
     validate_hooks(&new_config, &OrphanSkipContext::strict())
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    new_config.save(&crate::config::config_path())?;
+    // Use the same temp-then-rename helper the pruner and daemon use so
+    // the CLI fallback path is crash-safe (hardening PRD §6.4 / S3-3).
+    let path = crate::config::config_path();
+    crate::mailbox_handler::write_config_atomic(&path, &new_config).map_err(
+        |e| -> Box<dyn std::error::Error> { format!("failed to rewrite config.toml: {e}").into() },
+    )?;
     Ok(())
 }
 
@@ -774,7 +779,12 @@ fn apply_delete_direct(config: &Config, name: &str) -> Result<(), Box<dyn std::e
     if !removed {
         return Err(format!("Hook '{name}' not found").into());
     }
-    new_config.save(&crate::config::config_path())?;
+    // Atomic write-temp-then-rename; symmetric with apply_create_direct
+    // and the pruner at the top of this module (hardening PRD §6.4).
+    let path = crate::config::config_path();
+    crate::mailbox_handler::write_config_atomic(&path, &new_config).map_err(
+        |e| -> Box<dyn std::error::Error> { format!("failed to rewrite config.toml: {e}").into() },
+    )?;
     Ok(())
 }
 
@@ -1505,5 +1515,93 @@ mod tests {
             "expected ORPHAN-TEMPLATE-RUN_AS in findings, got: {findings:?}"
         );
         super::prune_preflight_check(&cfg).expect("orphan-only findings must not block prune");
+    }
+
+    /// Build a minimal raw-cmd `Hook` for the save-failure tests. The
+    /// `run_as: Some("root")` is deliberate so the post-apply invariant
+    /// check (`validate_hooks` with a strict orphan context) always
+    /// resolves — `root` is a reserved run_as name.
+    fn raw_cmd_hook(cmd: &str) -> crate::hook::Hook {
+        crate::hook::Hook {
+            name: None,
+            event: HookEvent::OnReceive,
+            r#type: "cmd".into(),
+            cmd: cmd.into(),
+            dangerously_support_untrusted: false,
+            origin: crate::hook::HookOrigin::Operator,
+            template: None,
+            params: std::collections::BTreeMap::new(),
+            run_as: Some("root".into()),
+        }
+    }
+
+    /// Hardening PRD §6.4 / S3-3: `apply_create_direct` must write
+    /// `config.toml` via temp-then-rename and must NOT truncate or
+    /// otherwise mutate the file when the underlying write fails.
+    #[test]
+    fn apply_create_direct_preserves_config_on_save_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        let cfg = base_config();
+        {
+            // Seed the file at the real config path.
+            let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+            cfg.save(&crate::config::config_path()).unwrap();
+        }
+        let real_path = tmp.path().join("config.toml");
+        let bytes_before = std::fs::read(&real_path).unwrap();
+
+        // Point config_path() at a nonexistent parent so write_atomic
+        // fails on `File::create` for the temp file.
+        let bad_dir = tmp.path().join("does").join("not").join("exist");
+        let _bad_guard = crate::config::test_env::ConfigDirOverride::set(&bad_dir);
+
+        let err = super::apply_create_direct(&cfg, "alice", raw_cmd_hook("echo hi")).unwrap_err();
+        assert!(
+            !err.to_string().is_empty(),
+            "non-empty error message expected on write failure",
+        );
+
+        drop(_bad_guard);
+        // Original file on disk is byte-for-byte unchanged.
+        let bytes_after = std::fs::read(&real_path).unwrap();
+        assert_eq!(
+            bytes_after, bytes_before,
+            "failed apply_create_direct must not rewrite config.toml",
+        );
+    }
+
+    /// Hardening PRD §6.4 / S3-3: same invariant as above, for the
+    /// delete-hook direct path. Prove the pre-existing hook survives
+    /// untouched on save failure.
+    #[test]
+    fn apply_delete_direct_preserves_config_on_save_failure() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Start from a config that already carries a hook so delete has
+        // something to find.
+        let mut cfg = base_config();
+        let hook = raw_cmd_hook("echo hi");
+        let hook_name = effective_hook_name(&hook);
+        cfg.mailboxes.get_mut("alice").unwrap().hooks.push(hook);
+
+        {
+            let _guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+            cfg.save(&crate::config::config_path()).unwrap();
+        }
+        let real_path = tmp.path().join("config.toml");
+        let bytes_before = std::fs::read(&real_path).unwrap();
+
+        let bad_dir = tmp.path().join("nope").join("nah");
+        let _bad_guard = crate::config::test_env::ConfigDirOverride::set(&bad_dir);
+
+        let err = super::apply_delete_direct(&cfg, &hook_name).unwrap_err();
+        assert!(!err.to_string().is_empty());
+
+        drop(_bad_guard);
+        let bytes_after = std::fs::read(&real_path).unwrap();
+        assert_eq!(
+            bytes_after, bytes_before,
+            "failed apply_delete_direct must not rewrite config.toml",
+        );
     }
 }
