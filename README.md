@@ -1,5 +1,8 @@
 # AIMX — AI Mail Exchange
 
+> [!CAUTION]
+> **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes and unstable operations in v0 releases.
+
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
@@ -47,8 +50,16 @@ Read the [Book](book/) to learn more. See also [Frequently Asked Questions](book
 aimx ships as a single prebuilt binary for Linux (x86_64 and aarch64, glibc and musl). You need `sudo` rights — port 25 is a [privileged port](https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html).
 
 ```bash
+
 # 1. Install the latest release into /usr/local/bin
-curl -fsSL https://aimx.email/install.sh | sh
+# !! DO NOT use installer script yet. Compile aimx in the mean time if you are installing !!
+# curl -fsSL https://aimx.email/install.sh | sh
+
+# or compile and install it from source
+git clone https://github.com/uzyn/aimx.git
+cd aimx
+cargo build --release
+sudo cp target/release/aimx /usr/local/bin/
 
 # 2. Run setup and follow the guided instructions
 sudo aimx setup
