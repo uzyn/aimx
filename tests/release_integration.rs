@@ -10,11 +10,10 @@
 //! sums ever drift (e.g. because the release was re-published), update
 //! the table below **and** `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt`.
 //!
-//! The four sums are populated post-PR once the `0.0.0-fixture` tag is
-//! pushed and CI materialises the tarballs. Until then the `expected_sums`
-//! table may be all-zeros placeholders — the test skips any target whose
-//! placeholder is still present instead of failing, so the PR can land
-//! before the fixture rebuild completes.
+//! The four sums below are pinned against the `0.0.0-fixture` release
+//! rebuilt by Sprint 8.0.1's tag push; keep
+//! `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt` in lockstep if
+//! the fixture is ever re-published.
 
 #![cfg(feature = "integration")]
 
@@ -23,28 +22,26 @@ use std::collections::HashMap;
 const FIXTURE_TAG: &str = "0.0.0-fixture";
 const FIXTURE_RELEASE_URL: &str =
     "https://api.github.com/repos/uzyn/aimx/releases/tags/0.0.0-fixture";
-const PLACEHOLDER_SUM: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
-/// Expected SHA-256 checksums for the four fixture tarballs. Populated
-/// once Sprint 8.0.1 pushes the rebuilt `0.0.0-fixture` tag and captures
-/// the sums from the generated `SHA256SUMS` asset.
+/// Expected SHA-256 checksums for the four fixture tarballs. Captured
+/// from the Sprint 8.0.1 fixture rebuild's `SHA256SUMS` asset.
 fn expected_sums() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         (
             "aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz",
-            "PLACEHOLDER_AARCH64_GNU",
+            "42562c6dcf55c620ddc83de420da34fbeea3a0f7da771ef0cd867c444cfe2ddd",
         ),
         (
             "aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz",
-            "PLACEHOLDER_X86_64_MUSL",
+            "70de9987ad766bc959fac906acd95ee95343a411c410cc5e44b4c2d85d835ca7",
         ),
         (
             "aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz",
-            "PLACEHOLDER_AARCH64_MUSL",
+            "ffb77b6b86007bd7e38f439c9af9e3e09fecef1f75d4cbc2329185476cc771cd",
         ),
         (
             "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz",
-            "PLACEHOLDER_X86_64_GNU",
+            "08dd37f4d4013ad0d06189be168aeec7fddf56689fe87f2c61034d9b4aba9eff",
         ),
     ])
 }
@@ -57,7 +54,7 @@ fn artifact_target(target: &str) -> String {
     target.replacen("-unknown-", "-", 1)
 }
 
-/// End-to-end: hit the real `v0.0.0-fixture` release, pick the tarball that
+/// End-to-end: hit the real `0.0.0-fixture` release, pick the tarball that
 /// matches the current target triple, download it, and compare its SHA-256
 /// to both the value baked into this test and the `.sha256` asset GitHub
 /// serves.
@@ -113,19 +110,6 @@ fn fixture_release_tarball_sha256_matches() {
             return;
         }
     };
-
-    // Sprint 8.0.1 rebuild-in-progress guard: if the placeholder sum is
-    // still in place, skip the end-to-end asset fetch. Once the rebuilt
-    // `0.0.0-fixture` tag is pushed and the real sums are captured into
-    // `expected_sums()`, this early-return stops firing and the test is
-    // fully live again.
-    if expected_sha.starts_with("PLACEHOLDER_") || expected_sha == PLACEHOLDER_SUM {
-        eprintln!(
-            "skipping — fixture SHA-256 for {tarball_name} has not been captured \
-             yet (Sprint 8.0.1 rebuild in progress); re-enable once sums land"
-        );
-        return;
-    }
 
     // Fetch the release manifest directly so we have the real asset URLs
     // (redirects to release-assets.githubusercontent.com happen under the
@@ -221,7 +205,7 @@ fn fixture_release_tarball_sha256_matches() {
 /// Sprint 4 S4-1 / S4-3 addendum (backlog item from Sprint 2 review):
 /// wire-through check for the `aimx upgrade` verb.
 ///
-/// Asserts that running `aimx upgrade --dry-run --version v0.0.0-fixture`
+/// Asserts that running `aimx upgrade --dry-run --version 0.0.0-fixture`
 /// as a non-root user hits the root check and exits with the expected
 /// refusal message — proving the verb is plumbed through `cli.rs` /
 /// `main.rs` / `upgrade::run` without actually making any network calls.
@@ -278,8 +262,8 @@ fn real_release_ops_wireup_non_root_refuses() {
 }
 
 /// Sprint 4 review NB-1: drives the **production** `RealReleaseOps`
-/// path end-to-end against the live `v0.0.0-fixture` release. Runs
-/// `aimx upgrade --dry-run --version v0.0.0-fixture` as root —
+/// path end-to-end against the live `0.0.0-fixture` release. Runs
+/// `aimx upgrade --dry-run --version 0.0.0-fixture` as root —
 /// `--dry-run` stops after `fetch_asset` and never touches the
 /// filesystem or the service, so the test is safe under sudo.
 ///
