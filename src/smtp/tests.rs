@@ -825,6 +825,21 @@ async fn test_ingest_failure_returns_451() {
     std::fs::write(&blocker, "x").unwrap();
     let bad_data_dir = blocker.join("data");
 
+    // A mailbox entry must exist so the RCPT preflight (S2-1) accepts;
+    // the failure is forced later at `create_dir_all` time because the
+    // data_dir parent is a regular file.
+    let mut mailboxes = HashMap::new();
+    mailboxes.insert(
+        "alice".to_string(),
+        MailboxConfig {
+            address: "alice@test.local".to_string(),
+            owner: "root".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        },
+    );
     let config = Config {
         domain: "test.local".to_string(),
         data_dir: bad_data_dir,
@@ -832,7 +847,7 @@ async fn test_ingest_failure_returns_451() {
         trust: "none".to_string(),
         trusted_senders: vec![],
         hook_templates: Vec::new(),
-        mailboxes: HashMap::new(),
+        mailboxes,
         verify_host: None,
         enable_ipv6: false,
         upgrade: None,
@@ -843,7 +858,8 @@ async fn test_ingest_failure_returns_451() {
 
     client.send_and_read("EHLO test.com").await;
     client.send_and_read("MAIL FROM:<sender@test.com>").await;
-    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    let resp = client.send_and_read("RCPT TO:<alice@test.local>").await;
+    assert!(resp.starts_with("250"), "RCPT should accept: {resp}");
     client.send_and_read("DATA").await;
     client.send(test_email()).await;
     let resp = client.send_and_read(".").await;
@@ -1268,4 +1284,209 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
         content.contains("data.bin"),
         "Frontmatter should reference data.bin attachment"
     );
+}
+
+// ---------------------------------------------------------------------------
+// S2-1: RCPT-time mailbox-routing preflight
+// ---------------------------------------------------------------------------
+
+fn test_config_no_catchall(data_dir: &std::path::Path) -> Config {
+    let mut mailboxes = HashMap::new();
+    mailboxes.insert(
+        "alice".to_string(),
+        MailboxConfig {
+            address: "alice@test.local".to_string(),
+            owner: "root".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        },
+    );
+    Config {
+        domain: "test.local".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        dkim_selector: "aimx".to_string(),
+        trust: "none".to_string(),
+        trusted_senders: vec![],
+        hook_templates: Vec::new(),
+        mailboxes,
+        verify_host: None,
+        enable_ipv6: false,
+        upgrade: None,
+    }
+}
+
+#[tokio::test]
+async fn test_rcpt_rejects_unknown_mailbox_no_catchall() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config_no_catchall(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    let resp = client.send_and_read("RCPT TO:<bob@test.local>").await;
+    assert!(
+        resp.starts_with("550 5.1.1"),
+        "Expected 550 5.1.1 for unknown recipient: {resp}"
+    );
+
+    let resp = client.send_and_read("RCPT TO:<alice@test.local>").await;
+    assert!(
+        resp.starts_with("250"),
+        "Expected 250 for known recipient: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+}
+
+#[tokio::test]
+async fn test_rcpt_catchall_accepts_any_local_part() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+
+    // With a catchall present, an unknown local part still resolves.
+    let resp = client
+        .send_and_read("RCPT TO:<randomuser@test.local>")
+        .await;
+    assert!(
+        resp.starts_with("250"),
+        "Expected 250 with catchall present: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+}
+
+// ---------------------------------------------------------------------------
+// S2-2 / S2-3: DATA partial-success contract
+// ---------------------------------------------------------------------------
+
+fn test_config_two_mailboxes(data_dir: &std::path::Path) -> Config {
+    let mut mailboxes = HashMap::new();
+    mailboxes.insert(
+        "alice".to_string(),
+        MailboxConfig {
+            address: "alice@test.local".to_string(),
+            owner: "root".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        },
+    );
+    mailboxes.insert(
+        "bob".to_string(),
+        MailboxConfig {
+            address: "bob@test.local".to_string(),
+            owner: "root".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        },
+    );
+    Config {
+        domain: "test.local".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        dkim_selector: "aimx".to_string(),
+        trust: "none".to_string(),
+        trusted_senders: vec![],
+        hook_templates: Vec::new(),
+        mailboxes,
+        verify_host: None,
+        enable_ipv6: false,
+        upgrade: None,
+    }
+}
+
+fn mixed_test_email() -> &'static str {
+    "From: sender@example.com\r\nTo: alice@test.local, bob@test.local\r\nSubject: Mixed\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <mixed@example.com>\r\n\r\nHello both\r\n"
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_partial_success_returns_451() {
+    // Serialise env var access because `AIMX_TEST_INGEST_FAIL_FOR` is a
+    // process-wide seam. `serial_test::serial` keeps the other
+    // concurrent SMTP tests from observing the forced failure.
+    unsafe {
+        std::env::set_var("AIMX_TEST_INGEST_FAIL_FOR", "bob@test.local");
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config_two_mailboxes(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    let resp = client.send_and_read("RCPT TO:<alice@test.local>").await;
+    assert!(resp.starts_with("250"), "alice RCPT: {resp}");
+    let resp = client.send_and_read("RCPT TO:<bob@test.local>").await;
+    assert!(resp.starts_with("250"), "bob RCPT: {resp}");
+
+    let resp = client.send_and_read("DATA").await;
+    assert!(resp.starts_with("354"), "DATA preamble: {resp}");
+
+    client.send(mixed_test_email()).await;
+    let resp = client.send_and_read(".").await;
+    assert!(
+        resp.starts_with("451 4.3.0"),
+        "Expected 451 4.3.0 on partial-success: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+
+    // alice succeeded, bob's ingest was forced to fail.
+    let alice_mds = collect_md_files(&inbox(tmp.path(), "alice"));
+    let bob_mds = collect_md_files(&inbox(tmp.path(), "bob"));
+    assert_eq!(alice_mds.len(), 1, "alice should have one message");
+    assert_eq!(bob_mds.len(), 0, "bob should have no message");
+
+    unsafe {
+        std::env::remove_var("AIMX_TEST_INGEST_FAIL_FOR");
+    }
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_multi_rcpt_all_success_returns_250() {
+    // Guard against any lingering env var from parallel-scheduled tests.
+    unsafe {
+        std::env::remove_var("AIMX_TEST_INGEST_FAIL_FOR");
+    }
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config = test_config_two_mailboxes(tmp.path());
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO client.example.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    client.send_and_read("RCPT TO:<bob@test.local>").await;
+    client.send_and_read("DATA").await;
+
+    client.send(mixed_test_email()).await;
+    let resp = client.send_and_read(".").await;
+    assert!(
+        resp.starts_with("250"),
+        "Expected 250 on all-success: {resp}"
+    );
+
+    client.send_and_read("QUIT").await;
+
+    let alice_mds = collect_md_files(&inbox(tmp.path(), "alice"));
+    let bob_mds = collect_md_files(&inbox(tmp.path(), "bob"));
+    assert_eq!(alice_mds.len(), 1);
+    assert_eq!(bob_mds.len(), 1);
 }

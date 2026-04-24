@@ -13,6 +13,30 @@ use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Decide whether a recipient address routes to a configured mailbox.
+///
+/// Returns `Some(mailbox_name)` when either a concrete mailbox matches
+/// the local part or a catchall (`*@<domain>`) exists; `None` when no
+/// mailbox can accept the recipient. Called from both the SMTP
+/// `handle_rcpt_to` preflight (so unknown recipients are rejected at
+/// RCPT time with `550 5.1.1`) and from `ingest_email` itself (so the
+/// RCPT-time decision and the DATA-time decision never drift).
+///
+/// The caller is responsible for checking that the domain matches
+/// `config.domain`; this helper is agnostic about the recipient's
+/// domain and only looks at the local part against the configured
+/// mailboxes.
+pub fn resolve_recipient_mailbox(config: &Config, rcpt: &str) -> Option<String> {
+    let local_part = extract_local_part(rcpt);
+    if config.mailboxes.contains_key(local_part) {
+        return Some(local_part.to_string());
+    }
+    if config.mailboxes.contains_key("catchall") {
+        return Some("catchall".to_string());
+    }
+    None
+}
+
 pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>> {
     // Install the shared tracing subscriber so the INFO/WARN lines emitted
     // below land on stderr for the manual stdin path. `aimx serve` installs
@@ -48,15 +72,33 @@ pub fn ingest_email(
     received_from_ip: IpAddr,
     envelope_mail_from: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let local_part = extract_local_part(rcpt);
-    let mailbox = config.resolve_mailbox(local_part);
+    // Test-only seam: force a synthetic ingest failure for a specific
+    // recipient so we can drive the DATA partial-success contract
+    // (§6.3) in integration tests. Mirrors the shape of
+    // `AIMX_TEST_MAIL_DROP` in `src/transport.rs`. A no-op in
+    // production — any operator setting this in `aimx serve` would see
+    // every matching inbound message rejected, which is louder than
+    // silent.
+    if let Ok(target) = std::env::var("AIMX_TEST_INGEST_FAIL_FOR")
+        && !target.is_empty()
+        && target.eq_ignore_ascii_case(rcpt)
+    {
+        return Err(format!("AIMX_TEST_INGEST_FAIL_FOR forced failure for rcpt={rcpt}").into());
+    }
+
+    let mailbox = match resolve_recipient_mailbox(config, rcpt) {
+        Some(m) => m,
+        None => {
+            return Err(format!("no mailbox routes recipient {rcpt}").into());
+        }
+    };
     let inbox_dir = config.inbox_dir(&mailbox);
 
     std::fs::create_dir_all(&inbox_dir)?;
     // Chown the mailbox directory to the configured owner (PRD §6.3).
-    // Missing mailbox config (which shouldn't happen since resolve_mailbox
-    // falls back to "catchall", which is always present) would make the
-    // chown a silent no-op; `get` returns None in that case.
+    // `resolve_recipient_mailbox` already guaranteed the mailbox entry
+    // exists, so `get` returns `Some` on the happy path; the `if let`
+    // is a belt-and-braces guard.
     if let Some(mb_cfg) = config.mailboxes.get(&mailbox) {
         // The inbox directory may already exist from a prior delivery.
         // We still re-apply the chown/chmod here to heal any drift —
@@ -1256,6 +1298,64 @@ mod tests {
         assert!(inbox(tmp.path(), "catchall").exists());
         let entries = collect_md_files(&inbox(tmp.path(), "catchall"));
         assert_eq!(entries.len(), 1);
+    }
+
+    fn no_catchall_config(tmp: &Path) -> Config {
+        let mut cfg = test_config(tmp);
+        cfg.mailboxes.remove("catchall");
+        cfg
+    }
+
+    #[test]
+    fn resolve_recipient_mailbox_known_local_part() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        assert_eq!(
+            resolve_recipient_mailbox(&config, "alice@test.com"),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_recipient_mailbox_unknown_uses_catchall_when_present() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        assert_eq!(
+            resolve_recipient_mailbox(&config, "nobody@test.com"),
+            Some("catchall".to_string())
+        );
+    }
+
+    #[test]
+    fn resolve_recipient_mailbox_unknown_without_catchall_returns_none() {
+        let tmp = TempDir::new().unwrap();
+        let config = no_catchall_config(tmp.path());
+        assert_eq!(resolve_recipient_mailbox(&config, "nobody@test.com"), None);
+    }
+
+    #[test]
+    fn resolve_recipient_mailbox_known_without_catchall_still_routes() {
+        let tmp = TempDir::new().unwrap();
+        let config = no_catchall_config(tmp.path());
+        assert_eq!(
+            resolve_recipient_mailbox(&config, "alice@test.com"),
+            Some("alice".to_string())
+        );
+    }
+
+    #[test]
+    fn ingest_rejects_unknown_recipient_without_catchall() {
+        let tmp = TempDir::new().unwrap();
+        let config = no_catchall_config(tmp.path());
+        let result = ingest_email(
+            &config,
+            &test_locks(),
+            "nobody@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+        );
+        assert!(result.is_err(), "expected error when no mailbox routes");
     }
 
     #[test]
