@@ -2,46 +2,69 @@
 //!
 //! Gated behind `--features integration` so `cargo test` without the flag
 //! never touches the network. CI runs `cargo test --features integration`
-//! once per PR to exercise these paths against the live
-//! `v0.0.0-fixture` release published by Sprint 1.1.
+//! once per PR to exercise these paths against the live `0.0.0-fixture`
+//! release (rebuilt under the Sprint 8.0.1 naming convention — bare
+//! SemVer tag, no `-unknown-` vendor in tarball filenames).
 //!
-//! The fixture release is **permanent** (never deleted) and pinned against
-//! commit `b9d27ed`. If its SHA-256 sums ever drift (e.g. because the
-//! release was re-published), update the table below **and** the one in
-//! `docs/onboarding-sprint.md#s11-2`.
+//! The fixture release is **permanent** (never deleted). If its SHA-256
+//! sums ever drift (e.g. because the release was re-published), update
+//! the table below **and** `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt`.
+//!
+//! The four sums below are pinned against the `0.0.0-fixture` release
+//! rebuilt by Sprint 8.0.1's tag push; keep
+//! `tests/fixtures/releases/0.0.0-fixture-sha256sums.txt` in lockstep if
+//! the fixture is ever re-published.
 
 #![cfg(feature = "integration")]
 
 use std::collections::HashMap;
 
-const FIXTURE_TAG: &str = "v0.0.0-fixture";
+const FIXTURE_TAG: &str = "0.0.0-fixture";
 const FIXTURE_RELEASE_URL: &str =
-    "https://api.github.com/repos/uzyn/aimx/releases/tags/v0.0.0-fixture";
+    "https://api.github.com/repos/uzyn/aimx/releases/tags/0.0.0-fixture";
 
-/// Expected SHA-256 checksums for the four fixture tarballs. Captured by
-/// Sprint 1.1 operator-run; see `docs/onboarding-sprint.md#s11-2`.
+/// Expected SHA-256 checksums for the four fixture tarballs. Captured
+/// from the Sprint 8.0.1 fixture rebuild's `SHA256SUMS` asset.
 fn expected_sums() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         (
-            "aimx-0.0.0-fixture-aarch64-unknown-linux-gnu.tar.gz",
-            "2a70e0301f9d4da0c3e9569cbca5f5d36d226df7020fa52b37a8f203a9da2cf5",
+            "aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz",
+            "42562c6dcf55c620ddc83de420da34fbeea3a0f7da771ef0cd867c444cfe2ddd",
         ),
         (
-            "aimx-0.0.0-fixture-x86_64-unknown-linux-musl.tar.gz",
-            "6c41b69465a3a5fba5c07cbacba10d38e73af975f453c93be89bee5d2ba840eb",
+            "aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz",
+            "70de9987ad766bc959fac906acd95ee95343a411c410cc5e44b4c2d85d835ca7",
         ),
         (
-            "aimx-0.0.0-fixture-aarch64-unknown-linux-musl.tar.gz",
-            "7c5948fca8161203e87e94f45980e335d45d6e324c64474d3a0bc1a694613e6c",
+            "aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz",
+            "ffb77b6b86007bd7e38f439c9af9e3e09fecef1f75d4cbc2329185476cc771cd",
         ),
         (
-            "aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz",
-            "e1deb0a4eef0bc65c4843c5f20639212f2cc0373c1d7acd2f46e041f10b811c8",
+            "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz",
+            "08dd37f4d4013ad0d06189be168aeec7fddf56689fe87f2c61034d9b4aba9eff",
         ),
     ])
 }
 
-/// End-to-end: hit the real `v0.0.0-fixture` release, pick the tarball that
+/// Map a canonical Rust target triple (`x86_64-unknown-linux-gnu`) to the
+/// Sprint 8.0.1 shortened artifact-target form (`x86_64-linux-gnu`) used
+/// in tarball filenames. The canonical triple is still what
+/// `aimx --version` prints in its `<target>` slot.
+///
+/// NOTE: the same `-unknown-` → `-` mapping is duplicated in four places
+/// on purpose — `release.yml` (bash, drives the CI publish step),
+/// `install.sh` (POSIX sh, drives curl-pipe installs), `src/upgrade.rs`
+/// (Rust, drives `aimx upgrade`), and this file (Rust, drives the Tier-2
+/// integration test). aimx ships as a single binary with no library crate
+/// so the Rust sites can't share a helper; the sh and bash sites can't
+/// reuse Rust at all. Keep all four in lockstep. See also the pinned
+/// contract test `tarball_inner_dir_matches_artifact_target` in
+/// `src/upgrade.rs`.
+fn artifact_target(target: &str) -> String {
+    target.replacen("-unknown-", "-", 1)
+}
+
+/// End-to-end: hit the real `0.0.0-fixture` release, pick the tarball that
 /// matches the current target triple, download it, and compare its SHA-256
 /// to both the value baked into this test and the `.sha256` asset GitHub
 /// serves.
@@ -84,7 +107,8 @@ fn fixture_release_tarball_sha256_matches() {
         .and_then(|s| s.split(" built ").next())
         .expect("target triple in --version");
 
-    let tarball_name = format!("aimx-0.0.0-fixture-{target}.tar.gz");
+    let artifact = artifact_target(target);
+    let tarball_name = format!("aimx-0.0.0-fixture-{artifact}.tar.gz");
     let expected = expected_sums();
     let expected_sha = match expected.get(tarball_name.as_str()) {
         Some(s) => *s,
@@ -191,7 +215,7 @@ fn fixture_release_tarball_sha256_matches() {
 /// Sprint 4 S4-1 / S4-3 addendum (backlog item from Sprint 2 review):
 /// wire-through check for the `aimx upgrade` verb.
 ///
-/// Asserts that running `aimx upgrade --dry-run --version v0.0.0-fixture`
+/// Asserts that running `aimx upgrade --dry-run --version 0.0.0-fixture`
 /// as a non-root user hits the root check and exits with the expected
 /// refusal message — proving the verb is plumbed through `cli.rs` /
 /// `main.rs` / `upgrade::run` without actually making any network calls.
@@ -230,7 +254,7 @@ fn real_release_ops_wireup_non_root_refuses() {
     }
 
     let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
-        .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
+        .args(["upgrade", "--dry-run", "--version", "0.0.0-fixture"])
         .output()
         .expect("run aimx upgrade --dry-run");
     let combined = format!(
@@ -248,8 +272,8 @@ fn real_release_ops_wireup_non_root_refuses() {
 }
 
 /// Sprint 4 review NB-1: drives the **production** `RealReleaseOps`
-/// path end-to-end against the live `v0.0.0-fixture` release. Runs
-/// `aimx upgrade --dry-run --version v0.0.0-fixture` as root —
+/// path end-to-end against the live `0.0.0-fixture` release. Runs
+/// `aimx upgrade --dry-run --version 0.0.0-fixture` as root —
 /// `--dry-run` stops after `fetch_asset` and never touches the
 /// filesystem or the service, so the test is safe under sudo.
 ///
@@ -299,7 +323,8 @@ fn real_release_ops_end_to_end_against_fixture_as_root() {
         .and_then(|s| s.split(" built ").next())
         .expect("target in --version");
 
-    let tarball_name = format!("aimx-0.0.0-fixture-{target}.tar.gz");
+    let artifact = artifact_target(target);
+    let tarball_name = format!("aimx-0.0.0-fixture-{artifact}.tar.gz");
     let expected = expected_sums();
     if !expected.contains_key(tarball_name.as_str()) {
         eprintln!("skipping — target {target:?} is not a fixture-release target");
@@ -325,7 +350,7 @@ fn real_release_ops_end_to_end_against_fixture_as_root() {
     // to `.../tags/<tag>`. Passing the per-tag URL directly would
     // double-append `/tags/<tag>` and 404.
     let out = Command::new(assert_cmd::cargo::cargo_bin("aimx"))
-        .args(["upgrade", "--dry-run", "--version", "v0.0.0-fixture"])
+        .args(["upgrade", "--dry-run", "--version", "0.0.0-fixture"])
         .env(
             "AIMX_RELEASE_MANIFEST_URL",
             "https://api.github.com/repos/uzyn/aimx/releases/latest",
@@ -339,7 +364,7 @@ fn real_release_ops_end_to_end_against_fixture_as_root() {
     );
     assert!(out.status.success(), "dry-run failed: {combined}");
     assert!(
-        combined.contains("v0.0.0-fixture"),
+        combined.contains("0.0.0-fixture"),
         "expected target tag in dry-run output: {combined}"
     );
     assert!(

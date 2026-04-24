@@ -1,0 +1,4 @@
+08dd37f4d4013ad0d06189be168aeec7fddf56689fe87f2c61034d9b4aba9eff  aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz
+42562c6dcf55c620ddc83de420da34fbeea3a0f7da771ef0cd867c444cfe2ddd  aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz
+70de9987ad766bc959fac906acd95ee95343a411c410cc5e44b4c2d85d835ca7  aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz
+ffb77b6b86007bd7e38f439c9af9e3e09fecef1f75d4cbc2329185476cc771cd  aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz

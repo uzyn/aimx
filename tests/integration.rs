@@ -5473,6 +5473,21 @@ fn aimx_version_renders_full_metadata() {
         "duplicate `aimx` prefix reintroduced (FR-6.1 violation): {line:?}"
     );
     assert!(!second.is_empty(), "tag token must be non-empty: {line:?}");
+    // S8.0.1-1 AC: tags are bare SemVer post-Sprint 8.0.1 — the baked
+    // `RELEASE_TAG` goes through `build.rs::strip_legacy_v_prefix`, so a
+    // leading `v` on this token would signal a regression in either
+    // `build.rs` or the release tagging convention. Reject it loudly.
+    assert!(
+        !second.starts_with('v'),
+        "tag token must not carry a leading `v` (bare SemVer per Sprint 8.0.1): {line:?}"
+    );
+    // The tag must either begin with a digit (bare SemVer like `0.1.0`,
+    // `0.0.0-fixture`, `0.0.0-fixture-12-gabcdef1-dirty`) or equal `dev`
+    // (the build.rs fallback when `git describe` finds no tag).
+    assert!(
+        second == "dev" || second.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "tag token must be bare SemVer or `dev`: {second:?} in {line:?}"
+    );
 
     // Remainder must match: `<tag> (<hex-sha>) <target> built <YYYY-MM-DD>`.
     let rest = &line["aimx ".len()..];

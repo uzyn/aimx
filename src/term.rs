@@ -25,7 +25,7 @@
 //!
 //! [`pass_badge`], [`fail_badge`], [`warn_badge`], and [`missing_badge`] return
 //! the legacy `PASS`/`FAIL`/`WARN`/`MISSING` string tokens. They are preserved
-//! as thin wrappers for one minor release and slated for removal in v1.1.
+//! as thin wrappers for one minor release and slated for removal in 0.2.
 //! New code should use the `*_mark()` helpers instead.
 //!
 //! # Convention
@@ -134,33 +134,45 @@ pub fn prompt_mark() -> ColoredString {
 }
 
 /// Deprecated: use [`success_mark`] instead. Retained as a thin wrapper for
-/// one minor release; slated for removal in v1.1.
+/// one minor release; slated for removal in 0.2.
 #[allow(dead_code)]
-#[deprecated(since = "1.0.0", note = "use `term::success_mark()` instead")]
+#[deprecated(
+    since = "0.1.0",
+    note = "use `term::success_mark()` instead; will be removed in 0.2.0"
+)]
 pub fn pass_badge() -> ColoredString {
     "PASS".green()
 }
 
 /// Deprecated: use [`fail_mark`] instead. Retained as a thin wrapper for one
-/// minor release; slated for removal in v1.1.
+/// minor release; slated for removal in 0.2.
 #[allow(dead_code)]
-#[deprecated(since = "1.0.0", note = "use `term::fail_mark()` instead")]
+#[deprecated(
+    since = "0.1.0",
+    note = "use `term::fail_mark()` instead; will be removed in 0.2.0"
+)]
 pub fn fail_badge() -> ColoredString {
     "FAIL".red()
 }
 
 /// Deprecated: use [`warn_mark`] instead. Retained as a thin wrapper for one
-/// minor release; slated for removal in v1.1.
+/// minor release; slated for removal in 0.2.
 #[allow(dead_code)]
-#[deprecated(since = "1.0.0", note = "use `term::warn_mark()` instead")]
+#[deprecated(
+    since = "0.1.0",
+    note = "use `term::warn_mark()` instead; will be removed in 0.2.0"
+)]
 pub fn warn_badge() -> ColoredString {
     "WARN".yellow()
 }
 
 /// Deprecated: use [`fail_mark`] instead. Retained as a thin wrapper for one
-/// minor release; slated for removal in v1.1.
+/// minor release; slated for removal in 0.2.
 #[allow(dead_code)]
-#[deprecated(since = "1.0.0", note = "use `term::fail_mark()` instead")]
+#[deprecated(
+    since = "0.1.0",
+    note = "use `term::fail_mark()` instead; will be removed in 0.2.0"
+)]
 pub fn missing_badge() -> ColoredString {
     "MISSING".red()
 }

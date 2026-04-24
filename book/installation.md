@@ -12,12 +12,14 @@ This downloads the latest release for your platform, installs `aimx` into `/usr/
 
 aimx is Linux-only. Every release ships four prebuilt targets:
 
-| Target | Typical distros |
-|---|---|
-| `x86_64-unknown-linux-gnu`   | Debian, Ubuntu, Fedora, RHEL, Rocky, Arch |
-| `aarch64-unknown-linux-gnu`  | 64-bit ARM on any glibc distro (e.g. Ubuntu on Raspberry Pi 4/5, AWS Graviton, Hetzner CAX) |
-| `x86_64-unknown-linux-musl`  | Alpine, statically-linked containers |
-| `aarch64-unknown-linux-musl` | Alpine ARM, statically-linked ARM containers |
+| Canonical target triple | Tarball filename target | Typical distros |
+|---|---|---|
+| `x86_64-unknown-linux-gnu`   | `x86_64-linux-gnu`   | Debian, Ubuntu, Fedora, RHEL, Rocky, Arch |
+| `aarch64-unknown-linux-gnu`  | `aarch64-linux-gnu`  | 64-bit ARM on any glibc distro (e.g. Ubuntu on Raspberry Pi 4/5, AWS Graviton, Hetzner CAX) |
+| `x86_64-unknown-linux-musl`  | `x86_64-linux-musl`  | Alpine, statically-linked containers |
+| `aarch64-unknown-linux-musl` | `aarch64-linux-musl` | Alpine ARM, statically-linked ARM containers |
+
+The canonical Rust target triple (with the `-unknown-` vendor field) is still what `cargo build --target` and `aimx --version` use. Tarball filenames drop `-unknown-` for readability — the installer composes both forms automatically.
 
 The install script auto-detects your OS, CPU arch (`uname -m`), and libc flavor (glibc vs. musl) and picks the matching tarball. Non-Linux platforms are refused with a single-line error — aimx is Linux-only by policy.
 
@@ -43,7 +45,7 @@ Everything is optional; defaults cover the common case.
 
 | Flag | Env var | Purpose |
 |---|---|---|
-| `--tag <VERSION>` | `AIMX_VERSION` | Install a specific release tag (e.g. `v1.2.3`). Flag wins if both are set. |
+| `--tag <VERSION>` | `AIMX_VERSION` | Install a specific release tag (e.g. `0.1.0`). Tags are bare SemVer (no `v` prefix); a caller-supplied `v` is stripped leniently. Flag wins if both are set. |
 | `--target <TRIPLE>` | — | Override platform auto-detection. Useful for installing the musl build on a glibc box. |
 | `--to <DIR>` | `AIMX_PREFIX` | Install into `<DIR>/aimx` instead of `/usr/local/bin/aimx`. |
 | `--force` | — | Re-install even if the target version is already present. |
@@ -56,7 +58,7 @@ Examples:
 
 ```bash
 # Install a specific version
-curl -fsSL https://aimx.email/install.sh | sh -s -- --tag v1.0.0
+curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 0.1.0
 
 # Install into /opt/aimx/bin instead of /usr/local/bin
 curl -fsSL https://aimx.email/install.sh | AIMX_PREFIX=/opt/aimx/bin sh
@@ -84,16 +86,18 @@ The drop-through to `aimx agent-setup` also uses `/proc/self/exe`, so a non-defa
 If you would rather not pipe a remote script into `sh`, every tarball is published with an accompanying `.sha256` file and a release-wide `SHA256SUMS` aggregate. Verify manually before extracting anything:
 
 ```bash
-TAG=v1.0.0
-TARGET=x86_64-unknown-linux-gnu
-TARBALL=aimx-${TAG}-${TARGET}.tar.gz
+# Tags are bare SemVer (no `v` prefix). Tarball filenames drop the
+# `-unknown-` vendor field from the canonical target triple.
+TAG=0.1.0
+TARBALL_TARGET=x86_64-linux-gnu
+TARBALL=aimx-${TAG}-${TARBALL_TARGET}.tar.gz
 
 curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}"
 curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}.sha256"
 sha256sum -c "${TARBALL}.sha256"
 
 tar -xzf "${TARBALL}"
-sudo install -m 0755 aimx /usr/local/bin/aimx
+sudo install -m 0755 "aimx-${TAG}-${TARBALL_TARGET}/aimx" /usr/local/bin/aimx
 aimx --version
 ```
 
@@ -190,7 +194,7 @@ journalctl -u aimx -n 50
 
 Then file an issue with the service log.
 
-**Binary installs but `aimx --version` prints the wrong tag.**  `--version` is baked at build time from `git describe --tags`. If you built from source and the working tree is dirty or ahead of the last tag, the output will reflect that (e.g. `v1.0.0-12-gabcdef1-dirty`). Released tarballs always print the exact tag.
+**Binary installs but `aimx --version` prints the wrong tag.**  `--version` is baked at build time from `git describe --tags`. If you built from source and the working tree is dirty or ahead of the last tag, the output will reflect that (e.g. `0.1.0-12-gabcdef1-dirty`). Released tarballs always print the exact tag.
 
 ## Building from source (contributors)
 

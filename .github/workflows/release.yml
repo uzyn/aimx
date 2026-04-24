@@ -5,18 +5,20 @@ name: Release
 # and publish them as assets on a GitHub Release with a templated body
 # that includes a verbatim `curl + sha256sum -c` verify block.
 #
-# Trigger glob requires the SemVer-shaped `vMAJOR.MINOR.PATCH` core
-# (with an optional pre-release / build suffix) — e.g. `v1.0.0`,
-# `v1.2.3-rc1`, `v0.0.0-fixture`. GitHub ref filters use fnmatch (not
-# regex), so `[0-9]*` enforces "digit followed by anything" and the two
-# literal dots enforce the three-segment shape. This keeps malformed
-# tags like `v1`, `v1-beta`, `v1.2`, or `test` from spending CI minutes
-# before the pre-release regex (`^v[0-9]+\.[0-9]+\.[0-9]+-`) rejects
-# them further down.
+# Trigger glob requires the SemVer-shaped `MAJOR.MINOR.PATCH` core (with
+# an optional pre-release / build suffix) — e.g. `1.0.0`, `1.2.3-rc1`,
+# `0.0.0-fixture`. Tags are **bare** (no `v` prefix) per Sprint 8.0.1,
+# matching the Rust-toolchain convention (`rustc 1.95.0`, not
+# `rustc v1.95.0`). GitHub ref filters use fnmatch (not regex), so
+# `[0-9]*` enforces "digit followed by anything" and the two literal
+# dots enforce the three-segment shape. This keeps malformed tags like
+# `1`, `1-beta`, `1.2`, or `test` from spending CI minutes before the
+# pre-release regex (`^[0-9]+\.[0-9]+\.[0-9]+-`) rejects them further
+# down.
 on:
   push:
     tags:
-      - 'v[0-9]*.[0-9]*.[0-9]*'
+      - '[0-9]*.[0-9]*.[0-9]*'
 
 permissions:
   contents: write
@@ -46,6 +48,8 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME}"
+          # Tags are bare SemVer post-Sprint 8.0.1, but be lenient about a
+          # caller-supplied `v` prefix in case a legacy tag ever reappears.
           version="${tag#v}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -71,7 +75,14 @@ jobs:
       - name: Stage tarball contents
         run: |
           set -euo pipefail
-          stage="aimx-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          # Artifact name drops the `-unknown-` vendor field per Sprint 8.0.1
+          # (Helix-style readability). The canonical target triple
+          # (`x86_64-unknown-linux-gnu`) is still used for `cargo build
+          # --target`, `aimx --version`, and the `TARGET` build-time env —
+          # only the artifact filename is shortened.
+          artifact_target="${{ matrix.target }}"
+          artifact_target="${artifact_target/-unknown-/-}"
+          stage="aimx-${{ steps.version.outputs.version }}-${artifact_target}"
           mkdir -p "${stage}"
           cp "target/${{ matrix.target }}/release/aimx" "${stage}/aimx"
           chmod 0755 "${stage}/aimx"
@@ -81,6 +92,7 @@ jobs:
           mkdir -p "${stage}/hook-templates"
           cp hook-templates/defaults.toml "${stage}/hook-templates/defaults.toml"
           echo "stage=${stage}" >> "$GITHUB_ENV"
+          echo "artifact_target=${artifact_target}" >> "$GITHUB_ENV"
 
       - name: Create tarball and per-asset SHA-256
         run: |
@@ -140,6 +152,8 @@ jobs:
           cd dist
           # Normalise per-asset .sha256 files (strip any path prefix left by
           # matrix stages) and assemble the release-wide SHA256SUMS file.
+          # Artifact names here are Sprint 8.0.1 shortened form
+          # (no `-unknown-` vendor field).
           : > SHA256SUMS
           for t in aimx-*.tar.gz; do
             digest="$(sha256sum "${t}" | awk '{print $1}')"
@@ -147,7 +161,10 @@ jobs:
             printf '%s  %s\n' "${digest}" "${t}" > "${t}.sha256"
           done
           sort -o SHA256SUMS SHA256SUMS
-          # Expose each target digest for the release-notes template.
+          # Expose each target digest for the release-notes template. The
+          # `sha_<triple>` output key still uses the canonical target triple
+          # (stable contract for the body-template step); the composed
+          # tarball filename drops `-unknown-` for the on-disk lookup.
           {
             for target in \
               x86_64-unknown-linux-gnu \
@@ -155,7 +172,8 @@ jobs:
               x86_64-unknown-linux-musl \
               aarch64-unknown-linux-musl
             do
-              tarball="aimx-${{ steps.version.outputs.version }}-${target}.tar.gz"
+              artifact_target="${target/-unknown-/-}"
+              tarball="aimx-${{ steps.version.outputs.version }}-${artifact_target}.tar.gz"
               if [ -f "${tarball}" ]; then
                 digest="$(sha256sum "${tarball}" | awk '{print $1}')"
                 echo "sha_${target}=${digest}"
@@ -189,8 +207,9 @@ jobs:
           # root commit so first releases still produce a sensible log.
           # Keep this glob in lockstep with the trigger glob up top so
           # only SemVer-shaped tags count as candidate "previous" tags
-          # for the changelog range.
-          prev_tag="$(git tag --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+          # for the changelog range. Tags are bare SemVer post-Sprint
+          # 8.0.1 (no `v` prefix).
+          prev_tag="$(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
             | grep -v -x "${TAG}" | head -n1 || true)"
           if [ -n "${prev_tag}" ]; then
             range="${prev_tag}..${TAG}"
@@ -216,12 +235,15 @@ jobs:
             echo
             echo "## SHA-256 checksums"
             echo
-            echo "| Target | SHA-256 |"
-            echo "| --- | --- |"
-            echo "| \`x86_64-unknown-linux-gnu\`   | \`${SHA_X86_GNU:-unavailable}\` |"
-            echo "| \`aarch64-unknown-linux-gnu\`  | \`${SHA_ARM_GNU:-unavailable}\` |"
-            echo "| \`x86_64-unknown-linux-musl\`  | \`${SHA_X86_MUSL:-unavailable}\` |"
-            echo "| \`aarch64-unknown-linux-musl\` | \`${SHA_ARM_MUSL:-unavailable}\` |"
+            echo "Tarball names drop the \`-unknown-\` vendor field (Sprint 8.0.1);"
+            echo "the canonical Rust target triple is shown for reference."
+            echo
+            echo "| Tarball | Target triple | SHA-256 |"
+            echo "| --- | --- | --- |"
+            echo "| \`aimx-${VERSION}-x86_64-linux-gnu.tar.gz\`   | \`x86_64-unknown-linux-gnu\`   | \`${SHA_X86_GNU:-unavailable}\` |"
+            echo "| \`aimx-${VERSION}-aarch64-linux-gnu.tar.gz\`  | \`aarch64-unknown-linux-gnu\`  | \`${SHA_ARM_GNU:-unavailable}\` |"
+            echo "| \`aimx-${VERSION}-x86_64-linux-musl.tar.gz\`  | \`x86_64-unknown-linux-musl\`  | \`${SHA_X86_MUSL:-unavailable}\` |"
+            echo "| \`aimx-${VERSION}-aarch64-linux-musl.tar.gz\` | \`aarch64-unknown-linux-musl\` | \`${SHA_ARM_MUSL:-unavailable}\` |"
             echo
             echo "The release-wide \`SHA256SUMS\` file is attached as an asset."
             echo
@@ -231,24 +253,24 @@ jobs:
             echo
             echo '```sh'
             echo "# x86_64 glibc"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
-            echo "sha256sum -c aimx-${VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-linux-gnu.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-linux-gnu.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-x86_64-linux-gnu.tar.gz.sha256"
             echo
             echo "# aarch64 glibc"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256"
-            echo "sha256sum -c aimx-${VERSION}-aarch64-unknown-linux-gnu.tar.gz.sha256"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-linux-gnu.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-linux-gnu.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-aarch64-linux-gnu.tar.gz.sha256"
             echo
             echo "# x86_64 musl"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256"
-            echo "sha256sum -c aimx-${VERSION}-x86_64-unknown-linux-musl.tar.gz.sha256"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-linux-musl.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-x86_64-linux-musl.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-x86_64-linux-musl.tar.gz.sha256"
             echo
             echo "# aarch64 musl"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz"
-            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256"
-            echo "sha256sum -c aimx-${VERSION}-aarch64-unknown-linux-musl.tar.gz.sha256"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-linux-musl.tar.gz"
+            echo "curl -fsSLO ${base_url}/aimx-${VERSION}-aarch64-linux-musl.tar.gz.sha256"
+            echo "sha256sum -c aimx-${VERSION}-aarch64-linux-musl.tar.gz.sha256"
             echo '```'
             echo
             echo "Or verify every tarball at once with the aggregate file:"
@@ -269,8 +291,10 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           # Treat any tag that carries a hyphen after the SemVer core as
-          # a pre-release (e.g. v0.0.0-rc1, v0.0.0-fixture, v1.2.3-rc1).
-          if printf '%s' "${TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-'; then
+          # a pre-release (e.g. 0.0.0-rc1, 0.0.0-fixture, 1.2.3-rc1). Tags
+          # are bare post-Sprint 8.0.1, but a leading `v` is tolerated for
+          # legacy compatibility.
+          if printf '%s' "${TAG}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+-'; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else
             echo "prerelease=false" >> "$GITHUB_OUTPUT"

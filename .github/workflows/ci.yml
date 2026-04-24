@@ -28,8 +28,9 @@ jobs:
         run: cargo test
 
       # Sprint 2 S2-3: Tier-2 integration tests that hit the live
-      # `v0.0.0-fixture` GitHub release. Feature-gated so the default
-      # `cargo test` above stays offline and free of rate-limit flakes.
+      # `0.0.0-fixture` GitHub release (bare SemVer post-Sprint 8.0.1).
+      # Feature-gated so the default `cargo test` above stays offline
+      # and free of rate-limit flakes.
       - name: Run release integration tests
         run: cargo test --features integration --test release_integration
 
@@ -100,12 +101,12 @@ jobs:
             concurrent_mailbox_create_and_ingest_does_not_deadlock
 
       # Sprint 4 review NB-1: drives `RealReleaseOps::fetch_asset`
-      # end-to-end against the live `v0.0.0-fixture` release. The
-      # non-root test in `tests/release_integration.rs` only asserts
-      # the root-check refusal; this sudo-gated step is what actually
-      # exercises the rustls + HTTPS production path in CI so a
-      # regression in `fetch_asset` or the rustls-provider install
-      # surfaces here.
+      # end-to-end against the live `0.0.0-fixture` release (bare
+      # SemVer post-Sprint 8.0.1). The non-root test in
+      # `tests/release_integration.rs` only asserts the root-check
+      # refusal; this sudo-gated step is what actually exercises the
+      # rustls + HTTPS production path in CI so a regression in
+      # `fetch_asset` or the rustls-provider install surfaces here.
       - name: Run release end-to-end integration test (root)
         run: |
           sudo -E env "PATH=$PATH" AIMX_INTEGRATION_SUDO=1 \
@@ -126,9 +127,10 @@ jobs:
 
   # Onboarding Sprint 3 (S3-3): lint + exercise `install.sh` under dash
   # (debian:stable-slim) and busybox sh (alpine:latest). The happy-path
-  # runs fetch the real `v0.0.0-fixture` GitHub Release — that tag is
-  # permanent per Sprint 1.3 tag discipline, carries all four target
-  # tarballs, and exercises the exact curl-to-shell flow operators hit.
+  # runs fetch the real `0.0.0-fixture` GitHub Release (bare SemVer
+  # post-Sprint 8.0.1) — that tag is permanent per Sprint 1.3 tag
+  # discipline, carries all four target tarballs, and exercises the
+  # exact curl-to-shell flow operators hit.
   #
   # No checksum-verification test path here: `install.sh` v1 does not
   # verify SHA-256 (PRD FR-2.4 — trust anchor is HTTPS). Skeptical
@@ -164,14 +166,14 @@ jobs:
         env:
           AIMX_DRY_RUN: '1'
         run: |
-          dash install.sh --tag v0.0.0-fixture \
+          dash install.sh --tag 0.0.0-fixture \
             --target x86_64-unknown-linux-gnu --to /tmp/aimx-dry
 
       - name: Dry-run under dash (fixture release, aarch64 musl target override)
         env:
           AIMX_DRY_RUN: '1'
         run: |
-          dash install.sh --tag v0.0.0-fixture \
+          dash install.sh --tag 0.0.0-fixture \
             --target aarch64-unknown-linux-musl --to /tmp/aimx-dry
 
       - name: Fresh install under alpine:latest (busybox sh)
@@ -180,7 +182,7 @@ jobs:
             apk add --no-cache curl tar >/dev/null
             mkdir -p /tmp/aimx-alpine
             # alpine is musl; let detection resolve target triple.
-            sh install.sh --tag v0.0.0-fixture --to /tmp/aimx-alpine
+            sh install.sh --tag 0.0.0-fixture --to /tmp/aimx-alpine
             test -x /tmp/aimx-alpine/aimx
             /tmp/aimx-alpine/aimx --version
           '
@@ -192,7 +194,7 @@ jobs:
             apt-get install -y --no-install-recommends curl ca-certificates tar dash >/dev/null
             mkdir -p /tmp/aimx-deb
             # Run explicitly under dash for POSIX purity.
-            dash install.sh --tag v0.0.0-fixture \
+            dash install.sh --tag 0.0.0-fixture \
               --target x86_64-unknown-linux-gnu --to /tmp/aimx-deb
             test -x /tmp/aimx-deb/aimx
             /tmp/aimx-deb/aimx --version
@@ -218,13 +220,13 @@ jobs:
             # on the fixture tarballs self-reporting (they predate Sprint 2
             # build.rs metadata). Use printf (not HEREDOC) so YAML indentation
             # does not leak into the file.
-            printf "%s\n" "#!/bin/sh" "echo \"aimx v0.0.0-fixture (stubshad) x86_64-unknown-linux-gnu built 2026-04-23\"" > /tmp/aimx-same/aimx
+            printf "%s\n" "#!/bin/sh" "echo \"aimx 0.0.0-fixture (stubshad) x86_64-unknown-linux-gnu built 2026-04-23\"" > /tmp/aimx-same/aimx
             chmod 0755 /tmp/aimx-same/aimx
             _before="$(stat -c %Y /tmp/aimx-same/aimx)"
             sleep 1
             # Without --force: installed == target short-circuits. Exit 0,
             # log "already installed", binary untouched.
-            if ! dash install.sh --tag v0.0.0-fixture \
+            if ! dash install.sh --tag 0.0.0-fixture \
                 --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same.log 2>&1; then
               cat /tmp/same.log
               echo "expected same-version no-force install to exit 0" >&2
@@ -240,7 +242,7 @@ jobs:
             # With --force: install.sh proceeds through the upgrade path and
             # swaps the stub for the real fixture binary. mtime must change.
             sleep 1
-            if ! dash install.sh --tag v0.0.0-fixture --force \
+            if ! dash install.sh --tag 0.0.0-fixture --force \
                 --target x86_64-unknown-linux-gnu --to /tmp/aimx-same >/tmp/same-force.log 2>&1; then
               cat /tmp/same-force.log
               echo "expected same-version --force install to exit 0" >&2
@@ -267,7 +269,7 @@ jobs:
             chmod 0755 /tmp/aimx-down/aimx
             # install.sh must refuse to overwrite with the older fixture tag,
             # even under --force, and emit the "aimx upgrade ... --force" hint.
-            if dash install.sh --tag v0.0.0-fixture --force \
+            if dash install.sh --tag 0.0.0-fixture --force \
                 --target x86_64-unknown-linux-gnu --to /tmp/aimx-down >/tmp/down.log 2>&1; then
               cat /tmp/down.log
               echo "expected downgrade refusal to exit non-zero" >&2

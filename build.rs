@@ -12,6 +12,12 @@ fn main() {
 
     // `git describe --tags --always --dirty` → release tag or `dev` fallback.
     // Non-git checkouts (e.g. published crate tarball extract) fall back to `dev`.
+    //
+    // Tags are bare SemVer post-Sprint 8.0.1 (`1.95.0`, matching Rust's own
+    // release convention). If git returns a legacy `v`-prefixed tag, strip
+    // the leading `v` leniently so `aimx --version` renders the bare form
+    // for one release cycle. Non-tag describe output (`dev`, `g<sha>`,
+    // `<tag>-N-g<sha>-dirty`) is passed through unchanged.
     let tag = Command::new("git")
         .args(["describe", "--tags", "--always", "--dirty"])
         .output()
@@ -19,6 +25,7 @@ fn main() {
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty())
+        .map(strip_legacy_v_prefix)
         .unwrap_or_else(|| "dev".to_string());
 
     let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
@@ -30,6 +37,20 @@ fn main() {
     println!("cargo:rustc-env=BUILD_DATE={build_date}");
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/refs");
+}
+
+/// Strip a single leading `v` only when it is immediately followed by a
+/// digit — i.e. treat `v1.2.3`, `v0.0.0-fixture`, and `v1.0.0-12-gabcdef1`
+/// as legacy-prefixed SemVer and return the bare form (`1.2.3`,
+/// `0.0.0-fixture`, `1.0.0-12-gabcdef1`). Leaves short-hash describe output
+/// (`g<hex>`), `dev`, and arbitrary non-tag strings untouched.
+fn strip_legacy_v_prefix(s: String) -> String {
+    if let Some(rest) = s.strip_prefix('v')
+        && rest.chars().next().is_some_and(|c| c.is_ascii_digit())
+    {
+        return rest.to_string();
+    }
+    s
 }
 
 /// Format a `SystemTime` as a UTC `YYYY-MM-DD` date string without pulling in
