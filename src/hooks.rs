@@ -896,7 +896,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         }
     }
@@ -1421,7 +1420,6 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
-            smtp_helo_name: None,
             upgrade: None,
         }
     }
