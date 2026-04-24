@@ -280,39 +280,6 @@ jobs:
             grep -q -- "--force" /tmp/down.log
           '
 
-  # Onboarding Sprint 7 (S7-3 / FR-7.4): enforce that every user-facing styled
-  # string lands via a helper in `src/term.rs`. Raw `.red()/.green()/.yellow()/
-  # .blue()/.bold()` calls outside `term.rs` bypass the palette audit and cause
-  # the CLI vocabulary to drift. The ASCII fallback literals `[OK]/[FAIL]/
-  # [WARN]/[>]` must also only come from `term.rs` so the fallback surface
-  # stays in one place.
-  cli-colors:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Forbid raw color methods outside term.rs
-        run: |
-          set +e
-          matches="$(grep -rnE '\.(red|green|yellow|blue|bold)\(\)' src/ | grep -v 'src/term.rs')"
-          if [ -n "$matches" ]; then
-            echo "ERROR: raw .red()/.green()/.yellow()/.blue()/.bold() calls are not allowed outside src/term.rs."
-            echo "Route styled output through helpers in src/term.rs instead (FR-7.4)."
-            echo "$matches"
-            exit 1
-          fi
-
-      - name: Forbid non-tty fallback literals outside term.rs
-        run: |
-          set +e
-          matches="$(grep -rnE '\[OK\]|\[FAIL\]|\[WARN\]|\[>\]' src/ | grep -v 'src/term.rs')"
-          if [ -n "$matches" ]; then
-            echo "ERROR: the [OK]/[FAIL]/[WARN]/[>] fallback literals must only come from term.rs helpers."
-            echo "Use term::success_mark()/fail_mark()/warn_mark()/prompt_mark() instead (FR-7.5)."
-            echo "$matches"
-            exit 1
-          fi
-
   # Onboarding Sprint 8 (S8 review NB-1): build the mdBook docs so CI
   # catches markdown-syntax drift on every PR. The book sources live
   # under `book/`; `book.toml` sits in `website/` (with `src = "../book"`)

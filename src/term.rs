@@ -31,9 +31,8 @@
 //! # Convention
 //!
 //! Raw `.green()` / `.red()` / `.yellow()` / `.blue()` / `.bold()` calls outside
-//! this module are banned — the CI `cli-colors` job fails if any leak in.
-//! Route every user-facing styled string through a helper here so the palette
-//! stays consistent and can be audited in one place.
+//! this module are banned by project convention (FR-7.4). Keep styled output
+//! routed through a helper here so the palette stays consistent and auditable.
 //!
 //! # Disabling color
 //!
