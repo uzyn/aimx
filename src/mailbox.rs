@@ -160,7 +160,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
 
     let inbox = config.inbox_dir(name);
     let sent = config.sent_dir(name);
-    let mut leftover_error: Option<std::io::Error> = None;
+    let mut leftovers: Vec<String> = Vec::new();
     if inbox.exists()
         && let Err(e) = std::fs::remove_dir_all(&inbox)
     {
@@ -170,7 +170,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
             "mailbox '{name}' config removed but inbox dir cleanup failed; \
              remove manually to reclaim space",
         );
-        leftover_error = Some(e);
+        leftovers.push(format!("  - {}: {e}", inbox.display()));
     }
     if sent.exists()
         && let Err(e) = std::fs::remove_dir_all(&sent)
@@ -181,15 +181,13 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
             "mailbox '{name}' config removed but sent dir cleanup failed; \
              remove manually to reclaim space",
         );
-        // Keep the first error if inbox also failed, otherwise record this one.
-        if leftover_error.is_none() {
-            leftover_error = Some(e);
-        }
+        leftovers.push(format!("  - {}: {e}", sent.display()));
     }
 
-    if let Some(e) = leftover_error {
+    if !leftovers.is_empty() {
         return Err(format!(
-            "mailbox '{name}' removed from config.toml but filesystem cleanup failed: {e}",
+            "mailbox '{name}' removed from config.toml but filesystem cleanup failed:\n{}",
+            leftovers.join("\n"),
         )
         .into());
     }

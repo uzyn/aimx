@@ -1412,15 +1412,42 @@ fn mixed_test_email() -> &'static str {
     "From: sender@example.com\r\nTo: alice@test.local, bob@test.local\r\nSubject: Mixed\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <mixed@example.com>\r\n\r\nHello both\r\n"
 }
 
+/// RAII guard for the `AIMX_TEST_INGEST_FAIL_FOR` process-wide env
+/// seam. Sets the var on construction and clears it on drop — even if
+/// an assertion panics mid-test — so the var can never leak into a
+/// subsequent serial test and force spurious failures. Pair with
+/// `#[serial_test::serial]` on the test function.
+struct IngestFailForGuard;
+
+impl IngestFailForGuard {
+    fn new(rcpt: &str) -> Self {
+        // SAFETY: env mutation is process-wide; callers gate their
+        // tests with `#[serial_test::serial]` so no other thread is
+        // concurrently reading the var.
+        unsafe {
+            std::env::set_var("AIMX_TEST_INGEST_FAIL_FOR", rcpt);
+        }
+        Self
+    }
+}
+
+impl Drop for IngestFailForGuard {
+    fn drop(&mut self) {
+        // SAFETY: same as above. Runs on normal exit AND on panic
+        // unwind, which is the whole point of the guard.
+        unsafe {
+            std::env::remove_var("AIMX_TEST_INGEST_FAIL_FOR");
+        }
+    }
+}
+
 #[tokio::test]
 #[serial_test::serial]
 async fn test_partial_success_returns_451() {
-    // Serialise env var access because `AIMX_TEST_INGEST_FAIL_FOR` is a
-    // process-wide seam. `serial_test::serial` keeps the other
-    // concurrent SMTP tests from observing the forced failure.
-    unsafe {
-        std::env::set_var("AIMX_TEST_INGEST_FAIL_FOR", "bob@test.local");
-    }
+    // `AIMX_TEST_INGEST_FAIL_FOR` is a process-wide seam. The RAII
+    // guard clears it on drop even if an assertion panics mid-test,
+    // so the var can never leak into the next serial test.
+    let _fail_guard = IngestFailForGuard::new("bob@test.local");
     let tmp = tempfile::TempDir::new().unwrap();
     let config = test_config_two_mailboxes(tmp.path());
     let (port, _shutdown) = start_server(config).await;
@@ -1451,16 +1478,13 @@ async fn test_partial_success_returns_451() {
     let bob_mds = collect_md_files(&inbox(tmp.path(), "bob"));
     assert_eq!(alice_mds.len(), 1, "alice should have one message");
     assert_eq!(bob_mds.len(), 0, "bob should have no message");
-
-    unsafe {
-        std::env::remove_var("AIMX_TEST_INGEST_FAIL_FOR");
-    }
 }
 
 #[tokio::test]
 #[serial_test::serial]
 async fn test_multi_rcpt_all_success_returns_250() {
-    // Guard against any lingering env var from parallel-scheduled tests.
+    // Defensive: if an earlier test somehow bypassed `IngestFailForGuard`
+    // and left the seam set, clear it before we start.
     unsafe {
         std::env::remove_var("AIMX_TEST_INGEST_FAIL_FOR");
     }

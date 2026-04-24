@@ -79,6 +79,15 @@ pub fn ingest_email(
     // production — any operator setting this in `aimx serve` would see
     // every matching inbound message rejected, which is louder than
     // silent.
+    //
+    // WARNING for future test authors: this env var is process-wide.
+    // Any concurrently-running SMTP test that ingests the matching
+    // recipient (e.g., `bob@test.local` — the fixture used in
+    // `src/smtp/tests.rs`) will observe the forced failure and flake.
+    // Gate tests that set this with `#[serial_test::serial]`, and
+    // prefer the `IngestFailForGuard` RAII guard in `src/smtp/tests.rs`
+    // over raw `set_var` / `remove_var` so a panicked assertion can't
+    // leak the var into the next test.
     if let Ok(target) = std::env::var("AIMX_TEST_INGEST_FAIL_FOR")
         && !target.is_empty()
         && target.eq_ignore_ascii_case(rcpt)
