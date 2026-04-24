@@ -50,6 +50,12 @@ pub trait SystemOps {
     /// stopped); file removal is the authoritative step. Returns an error when
     /// the init system is unsupported.
     fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>>;
+    /// Remove a file on disk. Thin seam over `std::fs::remove_file` so
+    /// tests can observe deletion without touching the real filesystem.
+    /// Used by `aimx uninstall` to delete the installed binary after the
+    /// service unit is gone, so a subsequent `install.sh` run sees a
+    /// clean slate rather than tripping the monotonic-upgrade check.
+    fn remove_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>>;
     /// Poll `127.0.0.1:25` until a TCP connection succeeds or the timeout
     /// elapses. Returns `true` if the port became reachable, `false` on timeout.
     fn wait_for_service_ready(&self) -> bool;
@@ -534,6 +540,11 @@ impl SystemOps for RealSystemOps {
                     .into());
             }
         }
+        Ok(())
+    }
+
+    fn remove_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::remove_file(path)?;
         Ok(())
     }
 
@@ -2473,6 +2484,9 @@ pub(crate) mod tests {
         /// `start_service` call succeeds, and the service is left
         /// running on the previous binary.
         pub(crate) start_service_failures_remaining: std::cell::Cell<u32>,
+        /// Ordered list of paths passed to `remove_file`. Used by the
+        /// uninstall tests to assert the installed binary is deleted.
+        pub(crate) removed_files: RefCell<Vec<PathBuf>>,
     }
 
     impl Default for MockSystemOps {
@@ -2496,6 +2510,7 @@ pub(crate) mod tests {
                 stop_service_fails: false,
                 start_service_fails: false,
                 start_service_failures_remaining: std::cell::Cell::new(0),
+                removed_files: RefCell::new(vec![]),
             }
         }
     }
@@ -2567,6 +2582,10 @@ pub(crate) mod tests {
         }
         fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
             *self.service_file_installed.borrow_mut() = false;
+            Ok(())
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+            self.removed_files.borrow_mut().push(path.to_path_buf());
             Ok(())
         }
         fn wait_for_service_ready(&self) -> bool {
