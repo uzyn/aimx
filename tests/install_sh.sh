@@ -1,0 +1,398 @@
+#!/bin/sh
+# Shell-level tests for install.sh helpers.
+#
+# Run as: sh tests/install_sh.sh
+#
+# Exercises the pure-shell helper functions (detect_invoker,
+# backup_existing_config, ensure_sudo, parse_args) without touching the
+# real filesystem or network. Sourcing install.sh under INSTALL_SH_TEST=1
+# skips the auto-invocation of `main` at the bottom of the script.
+
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+INSTALL_SH="${ROOT_DIR}/install.sh"
+
+PASS=0
+FAIL=0
+FAILED_NAMES=""
+
+assert_eq() {
+    _label="$1"
+    _want="$2"
+    _got="$3"
+    if [ "${_want}" = "${_got}" ]; then
+        PASS=$((PASS + 1))
+        printf '  ok  %s\n' "${_label}"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} ${_label}"
+        printf '  FAIL %s\n' "${_label}" >&2
+        printf '       want: %s\n' "${_want}" >&2
+        printf '       got:  %s\n' "${_got}" >&2
+    fi
+}
+
+assert_contains() {
+    _label="$1"
+    _hay="$2"
+    _needle="$3"
+    case "${_hay}" in
+        *"${_needle}"*)
+            PASS=$((PASS + 1))
+            printf '  ok  %s\n' "${_label}"
+            ;;
+        *)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} ${_label}"
+            printf '  FAIL %s\n' "${_label}" >&2
+            printf '       needle: %s\n' "${_needle}" >&2
+            printf '       hay:    %s\n' "${_hay}" >&2
+            ;;
+    esac
+}
+
+assert_not_contains() {
+    _label="$1"
+    _hay="$2"
+    _needle="$3"
+    case "${_hay}" in
+        *"${_needle}"*)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} ${_label}"
+            printf '  FAIL %s\n' "${_label}" >&2
+            printf '       forbidden needle: %s\n' "${_needle}" >&2
+            printf '       hay:              %s\n' "${_hay}" >&2
+            ;;
+        *)
+            PASS=$((PASS + 1))
+            printf '  ok  %s\n' "${_label}"
+            ;;
+    esac
+}
+
+assert_zero() {
+    _label="$1"
+    _code="$2"
+    if [ "${_code}" = "0" ]; then
+        PASS=$((PASS + 1))
+        printf '  ok  %s\n' "${_label}"
+    else
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} ${_label}"
+        printf '  FAIL %s (rc=%s)\n' "${_label}" "${_code}" >&2
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 1. Syntax checks
+# ---------------------------------------------------------------------------
+
+echo "# syntax"
+
+_rc=0
+sh -n "${INSTALL_SH}" 2>/dev/null || _rc=$?
+assert_zero "sh -n install.sh" "${_rc}"
+
+if command -v dash >/dev/null 2>&1; then
+    _rc=0
+    dash -n "${INSTALL_SH}" 2>/dev/null || _rc=$?
+    assert_zero "dash -n install.sh" "${_rc}"
+else
+    echo "  skip dash -n (no dash on PATH)"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. shellcheck (optional)
+# ---------------------------------------------------------------------------
+
+echo "# shellcheck"
+if command -v shellcheck >/dev/null 2>&1; then
+    _rc=0
+    shellcheck "${INSTALL_SH}" || _rc=$?
+    assert_zero "shellcheck install.sh" "${_rc}"
+    _rc=0
+    shellcheck -s sh "${SCRIPT_DIR}/install_sh.sh" || _rc=$?
+    assert_zero "shellcheck tests/install_sh.sh" "${_rc}"
+else
+    echo "  skip (shellcheck not installed)"
+fi
+
+# ---------------------------------------------------------------------------
+# 3. Sourcing the script under INSTALL_SH_TEST=1 must not invoke main
+# ---------------------------------------------------------------------------
+
+echo "# source guard"
+
+# If the guard is honored, the sourced script defines helpers but never
+# reaches the filesystem-mutating main path. We run it under a subshell
+# so side effects (sets, traps, cleanup) don't leak into the outer harness.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        # If we got here, main() did not auto-fire.
+        echo "SOURCED_OK"
+        # Probe for helpers.
+        type detect_invoker >/dev/null 2>&1 && echo "HAS detect_invoker"
+        type ensure_sudo >/dev/null 2>&1 && echo "HAS ensure_sudo"
+        type backup_existing_config >/dev/null 2>&1 && echo "HAS backup_existing_config"
+        type print_welcome_banner >/dev/null 2>&1 && echo "HAS print_welcome_banner"
+        type parse_args >/dev/null 2>&1 && echo "HAS parse_args"
+        type ui_info >/dev/null 2>&1 && echo "HAS ui_info"
+        type ui_warn >/dev/null 2>&1 && echo "HAS ui_warn"
+        type ui_error >/dev/null 2>&1 && echo "HAS ui_error"
+        type ui_success >/dev/null 2>&1 && echo "HAS ui_success"
+        type ui_section >/dev/null 2>&1 && echo "HAS ui_section"
+    ' 2>&1
+)"
+assert_contains "INSTALL_SH_TEST=1 suppresses main" "${_out}" "SOURCED_OK"
+assert_contains "helper: detect_invoker"           "${_out}" "HAS detect_invoker"
+assert_contains "helper: ensure_sudo"              "${_out}" "HAS ensure_sudo"
+assert_contains "helper: backup_existing_config"   "${_out}" "HAS backup_existing_config"
+assert_contains "helper: print_welcome_banner"     "${_out}" "HAS print_welcome_banner"
+assert_contains "helper: parse_args"               "${_out}" "HAS parse_args"
+assert_contains "helper: ui_info"                  "${_out}" "HAS ui_info"
+assert_contains "helper: ui_warn"                  "${_out}" "HAS ui_warn"
+assert_contains "helper: ui_error"                 "${_out}" "HAS ui_error"
+assert_contains "helper: ui_success"               "${_out}" "HAS ui_success"
+assert_contains "helper: ui_section"               "${_out}" "HAS ui_section"
+
+# ---------------------------------------------------------------------------
+# 4. detect_invoker
+# ---------------------------------------------------------------------------
+
+echo "# detect_invoker"
+
+# Case A: SUDO_USER="alice" → prints "alice" and returns 0.
+_out="$(
+    INSTALL_SH_TEST=1 SUDO_USER=alice sh -c '
+        . "'"${INSTALL_SH}"'"
+        if detect_invoker; then
+            printf "\nRC=0"
+        else
+            printf "\nRC=%d" $?
+        fi
+    '
+)"
+assert_contains "SUDO_USER=alice → prints alice" "${_out}" "alice"
+assert_contains "SUDO_USER=alice → rc 0"         "${_out}" "RC=0"
+
+# Case B: SUDO_USER="root" → treated as "no sudo indirection".
+# Whether it succeeds depends on euid; the key is that the stdout
+# is NOT "root".
+_out="$(
+    INSTALL_SH_TEST=1 SUDO_USER=root sh -c '
+        . "'"${INSTALL_SH}"'"
+        _x="$(detect_invoker 2>/dev/null || true)"
+        printf "INVOKER=[%s]" "${_x}"
+    '
+)"
+assert_not_contains "SUDO_USER=root → does not echo root" "${_out}" "INVOKER=[root]"
+
+# Case C: SUDO_USER unset, running as non-root user → prints current id -un.
+_me="$(id -un 2>/dev/null || echo '')"
+if [ "${_me}" != "root" ] && [ -n "${_me}" ]; then
+    _out="$(
+        INSTALL_SH_TEST=1 sh -c '
+            unset SUDO_USER
+            . "'"${INSTALL_SH}"'"
+            detect_invoker
+        '
+    )"
+    assert_eq "non-root user → prints current user" "${_me}" "${_out}"
+fi
+
+# ---------------------------------------------------------------------------
+# 5. backup_existing_config
+# ---------------------------------------------------------------------------
+
+echo "# backup_existing_config"
+
+_tmp="$(mktemp -d 2>/dev/null || mktemp -d -t aimxtest)"
+trap 'rm -rf "'"${_tmp}"'"' EXIT INT TERM
+
+mkdir -p "${_tmp}/etc/aimx" "${_tmp}/bin"
+printf 'domain = "example.com"\n' > "${_tmp}/etc/aimx/config.toml"
+
+# Stub `sudo` on PATH: passthrough, stripping leading flags. The tests
+# inject this PATH so the helper doesn't touch real /etc/aimx.
+cat > "${_tmp}/bin/sudo" <<'SUDOEOF'
+#!/bin/sh
+# Passthrough stub: discard leading sudo flags, exec the command.
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|-v|-S|-H|-i|-p|--preserve-env|--non-interactive) shift ;;
+        -u) shift 2 ;;
+        -*) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+SUDOEOF
+chmod +x "${_tmp}/bin/sudo"
+
+# Drive the helper with a custom config path via an env override we add
+# to install.sh specifically for testability (AIMX_INSTALL_CONFIG_PATH).
+_out="$(
+    INSTALL_SH_TEST=1 \
+    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
+    PATH="${_tmp}/bin:${PATH}" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        backup_existing_config
+    ' 2>&1
+)"
+# Original file must now be gone.
+if [ ! -f "${_tmp}/etc/aimx/config.toml" ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  original config.toml removed\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} backup-original-removed"
+    printf '  FAIL original config.toml still present\n' >&2
+fi
+# Some config.toml.bak-* must exist.
+_bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
+assert_contains "backup file created" "${_bak}" "config.toml.bak-"
+
+# Re-run with no config present: helper must be a no-op and exit clean.
+rm -f "${_tmp}/etc/aimx/"*
+_rc=0
+INSTALL_SH_TEST=1 \
+AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
+PATH="${_tmp}/bin:${PATH}" \
+sh -c '
+    . "'"${INSTALL_SH}"'"
+    backup_existing_config
+' >/dev/null 2>&1 || _rc=$?
+assert_zero "backup no-op when config missing" "${_rc}"
+
+# ---------------------------------------------------------------------------
+# 6. ensure_sudo (with mocked sudo)
+# ---------------------------------------------------------------------------
+
+echo "# ensure_sudo"
+
+# Mock sudo that always succeeds on -n true (passwordless).
+cat > "${_tmp}/bin/sudo" <<'SUDOEOF'
+#!/bin/sh
+case "$1" in
+    -n)
+        shift
+        case "$1" in true) exit 0 ;; esac
+        exec "$@"
+        ;;
+    -v) exit 0 ;;
+esac
+exec "$@"
+SUDOEOF
+chmod +x "${_tmp}/bin/sudo"
+
+_rc=0
+INSTALL_SH_TEST=1 \
+PATH="${_tmp}/bin:${PATH}" \
+sh -c '
+    . "'"${INSTALL_SH}"'"
+    ensure_sudo
+' >/dev/null 2>&1 || _rc=$?
+assert_zero "ensure_sudo passwordless branch" "${_rc}"
+
+# Mock sudo that fails -n true but succeeds on -v (password prompt path).
+cat > "${_tmp}/bin/sudo" <<'SUDOEOF'
+#!/bin/sh
+case "$1" in
+    -n) exit 1 ;;
+    -v) exit 0 ;;
+esac
+exit 0
+SUDOEOF
+chmod +x "${_tmp}/bin/sudo"
+
+# Password-prompt branch: the key contract is that we print the
+# "Administrator privileges required" hint before invoking `sudo -v`.
+# Whether `sudo -v` itself returns 0 depends on /dev/tty availability
+# in the host environment, which we cannot portably mock, so only the
+# user-visible message is asserted.
+_out="$(
+    INSTALL_SH_TEST=1 \
+    PATH="${_tmp}/bin:${PATH}" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        ensure_sudo || true
+    ' 2>&1
+)"
+assert_contains "ensure_sudo prompts user on password branch" "${_out}" "Administrator privileges required"
+
+# No sudo at all → hard error (run in a fake empty PATH).
+_rc=0
+INSTALL_SH_TEST=1 \
+PATH="${_tmp}/empty-bin" \
+sh -c '
+    mkdir -p "'"${_tmp}"'/empty-bin"
+    . "'"${INSTALL_SH}"'"
+    ensure_sudo
+' >/dev/null 2>&1 && _rc=0 || _rc=$?
+if [ "${_rc}" -ne 0 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  ensure_sudo errors when no sudo available\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} ensure_sudo-no-sudo"
+    printf '  FAIL ensure_sudo should have errored\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 7. parse_args
+# ---------------------------------------------------------------------------
+
+echo "# parse_args"
+
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --tag 1.2.3 --to /tmp/x --force
+        printf "TAG=%s PREFIX=%s FORCE=%s" "${TAG}" "${PREFIX}" "${FORCE}"
+    '
+)"
+assert_contains "parse_args --tag" "${_out}" "TAG=1.2.3"
+assert_contains "parse_args --to"  "${_out}" "PREFIX=/tmp/x"
+assert_contains "parse_args --force" "${_out}" "FORCE=1"
+
+# ---------------------------------------------------------------------------
+# 8. AIMX_DRY_RUN smoke — banner + ordered step list, no sudo/download
+# ---------------------------------------------------------------------------
+
+echo "# dry-run smoke"
+
+# Point PATH at our sudo stub so nothing real is ever invoked.
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_PREFIX="${_tmp}/bin" \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)"
+assert_contains "dry-run prints welcome banner (AIMX)" "${_out}" "AIMX"
+assert_contains "dry-run lists step 1" "${_out}" "Preflight checks on port 25"
+assert_contains "dry-run lists step 2" "${_out}" "Set up domain and DNS"
+assert_contains "dry-run lists step 3" "${_out}" "Set up TLS certificate"
+assert_contains "dry-run lists step 4" "${_out}" "Set up trust policy"
+assert_contains "dry-run lists step 5" "${_out}" "Install AIMX"
+assert_contains "dry-run lists step 6" "${_out}" "Set up MCP for agent"
+assert_contains "dry-run notes no FS changes" "${_out}" "no filesystem changes"
+
+# ---------------------------------------------------------------------------
+# Report
+# ---------------------------------------------------------------------------
+
+echo
+TOTAL=$((PASS + FAIL))
+if [ "${FAIL}" -eq 0 ]; then
+    printf '%s/%s tests passed\n' "${PASS}" "${TOTAL}"
+    exit 0
+else
+    printf '%s/%s tests passed — FAIL:%s\n' "${PASS}" "${TOTAL}" "${FAILED_NAMES}" >&2
+    exit 1
+fi
