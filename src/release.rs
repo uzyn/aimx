@@ -208,7 +208,7 @@ impl RealReleaseOps {
 /// `.../tag-<tag>.json`. Test fixtures that want per-tag resolution via
 /// `RealReleaseOps::release_by_tag_url` MUST be named accordingly — e.g.
 /// a fixture set at `tests/fixtures/releases/latest.json` implies a peer
-/// file `tests/fixtures/releases/tag-v1-2-3.json` resolves `v1.2.3`.
+/// file `tests/fixtures/releases/tag-1-2-3.json` resolves `1.2.3`.
 /// Any other `.json` filename is passed through unchanged.
 #[allow(dead_code)]
 fn rewrite_to_tag(url: &str, tag: &str) -> String {
@@ -547,15 +547,15 @@ mod tests {
     use super::*;
 
     const LATEST_JSON: &str = r#"{
-        "tag_name": "v0.0.0-fixture",
+        "tag_name": "0.0.0-fixture",
         "published_at": "2026-04-20T00:00:00Z",
         "assets": [
             {
-                "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz",
+                "name": "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz",
                 "browser_download_url": "https://example.invalid/a.tar.gz"
             },
             {
-                "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz.sha256",
+                "name": "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz.sha256",
                 "browser_download_url": "https://example.invalid/a.tar.gz.sha256"
             },
             {
@@ -583,7 +583,7 @@ mod tests {
     fn asset_url_happy() {
         let manifest = parse_release_json(LATEST_JSON.as_bytes()).unwrap();
         let url = manifest
-            .asset_url("aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz")
+            .asset_url("aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz")
             .unwrap();
         assert_eq!(url, "https://example.invalid/a.tar.gz");
     }
@@ -591,7 +591,7 @@ mod tests {
     #[test]
     fn parse_release_json_happy() {
         let manifest = parse_release_json(LATEST_JSON.as_bytes()).unwrap();
-        assert_eq!(manifest.tag, "v0.0.0-fixture");
+        assert_eq!(manifest.tag, "0.0.0-fixture");
         assert_eq!(manifest.published_at, "2026-04-20T00:00:00Z");
         assert_eq!(manifest.asset_urls.len(), 3);
         assert!(manifest.asset_urls.contains_key("SHA256SUMS"));
@@ -612,7 +612,7 @@ mod tests {
         let _guard = ReleaseManifestUrlOverride::set_file(&path);
         let ops = RealReleaseOps::default();
         let manifest = ops.latest_release().unwrap();
-        assert_eq!(manifest.tag, "v0.0.0-fixture");
+        assert_eq!(manifest.tag, "0.0.0-fixture");
     }
 
     #[test]
@@ -622,13 +622,13 @@ mod tests {
         std::fs::write(&latest, LATEST_JSON).unwrap();
 
         // rewrite_to_tag maps `.../latest.json` → `.../tag-<tag>.json`
-        let tag_path = tmp.path().join("tag-v0.0.0-fixture.json");
+        let tag_path = tmp.path().join("tag-0.0.0-fixture.json");
         std::fs::write(&tag_path, LATEST_JSON).unwrap();
 
         let _guard = ReleaseManifestUrlOverride::set_file(&latest);
         let ops = RealReleaseOps::default();
-        let manifest = ops.release_by_tag("v0.0.0-fixture").unwrap();
-        assert_eq!(manifest.tag, "v0.0.0-fixture");
+        let manifest = ops.release_by_tag("0.0.0-fixture").unwrap();
+        assert_eq!(manifest.tag, "0.0.0-fixture");
     }
 
     #[test]
@@ -745,20 +745,27 @@ mod tests {
 
     #[test]
     fn rewrite_to_tag_handles_known_shapes() {
+        // Bare SemVer tags (post-Sprint 8.0.1 canonical form).
         assert_eq!(
             rewrite_to_tag(
                 "https://api.github.com/repos/uzyn/aimx/releases/latest",
-                "v1.0.0"
+                "0.0.0-fixture"
             ),
-            "https://api.github.com/repos/uzyn/aimx/releases/tags/v1.0.0"
+            "https://api.github.com/repos/uzyn/aimx/releases/tags/0.0.0-fixture"
         );
+        assert_eq!(
+            rewrite_to_tag("file:///tmp/latest.json", "0.0.0-fixture"),
+            "file:///tmp/tag-0.0.0-fixture.json"
+        );
+        assert_eq!(
+            rewrite_to_tag("https://api.example/releases", "1.2.3"),
+            "https://api.example/releases/tags/1.2.3"
+        );
+        // Legacy `v`-prefixed tags still rewrite cleanly for one release
+        // cycle so old operator scripts don't silently break.
         assert_eq!(
             rewrite_to_tag("file:///tmp/latest.json", "v1.0.0"),
             "file:///tmp/tag-v1.0.0.json"
-        );
-        assert_eq!(
-            rewrite_to_tag("https://api.example/releases", "v1.0.0"),
-            "https://api.example/releases/tags/v1.0.0"
         );
     }
 }

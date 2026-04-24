@@ -372,19 +372,34 @@ pub fn resolve_install_path(sys: &dyn SystemOps) -> Result<PathBuf, UpgradeError
     Ok(canonical)
 }
 
-/// Standard tarball filename per PRD FR-1.2: `aimx-<version>-<target>.tar.gz`.
+/// Standard tarball filename per PRD FR-1.2: `aimx-<version>-<artifact-target>.tar.gz`.
+///
 /// The leading `v` is stripped from the tag — `v1.2.3` → version `1.2.3` —
-/// matching `.github/workflows/release.yml`.
+/// and the canonical Rust target triple is shortened by dropping the
+/// `-unknown-` vendor field (`x86_64-unknown-linux-gnu` →
+/// `x86_64-linux-gnu`) per Sprint 8.0.1. Both transformations match
+/// `.github/workflows/release.yml`.
 pub fn tarball_filename(tag: &str, target: &str) -> String {
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    format!("aimx-{version}-{target}.tar.gz")
+    let artifact_target = artifact_target(target);
+    format!("aimx-{version}-{artifact_target}.tar.gz")
 }
 
 /// Expected directory inside the tarball (flat layout produced by the
 /// release pipeline). Kept as a separate helper for testability.
 pub fn tarball_inner_dir(tag: &str, target: &str) -> String {
     let version = tag.strip_prefix('v').unwrap_or(tag);
-    format!("aimx-{version}-{target}")
+    let artifact_target = artifact_target(target);
+    format!("aimx-{version}-{artifact_target}")
+}
+
+/// Shorten a canonical Rust target triple for release-artifact filenames
+/// per Sprint 8.0.1 (`x86_64-unknown-linux-gnu` → `x86_64-linux-gnu`).
+/// The canonical triple is still used for `cargo build --target`, the
+/// `TARGET` build-time env, and `aimx --version`'s target slot — only the
+/// artifact filename drops the `-unknown-` vendor field.
+fn artifact_target(target: &str) -> String {
+    target.replacen("-unknown-", "-", 1)
 }
 
 fn prev_path(install_path: &Path) -> PathBuf {
@@ -623,11 +638,12 @@ mod tests {
         }
     }
 
-    /// Build a minimal well-formed `aimx-<version>-<target>/aimx` tarball
-    /// (a placeholder binary) as gzipped bytes.
+    /// Build a minimal well-formed `aimx-<version>-<artifact-target>/aimx`
+    /// tarball (a placeholder binary) as gzipped bytes. Uses
+    /// [`tarball_inner_dir`] directly so the test tarballs track the same
+    /// shortening rules as the production release pipeline.
     fn make_tarball(tag: &str, target: &str, body: &[u8]) -> Vec<u8> {
-        let version = tag.strip_prefix('v').unwrap_or(tag);
-        let inner = format!("aimx-{version}-{target}");
+        let inner = tarball_inner_dir(tag, target);
         let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         {
             let mut builder = tar::Builder::new(&mut gz);
@@ -1038,15 +1054,25 @@ mod tests {
     }
 
     #[test]
-    fn tarball_filename_strips_leading_v() {
+    fn tarball_filename_strips_leading_v_and_vendor() {
+        // Legacy `v`-prefixed tag: strip the `v` and the `-unknown-` vendor.
         assert_eq!(
             tarball_filename("v1.2.3", "x86_64-unknown-linux-gnu"),
-            "aimx-1.2.3-x86_64-unknown-linux-gnu.tar.gz"
+            "aimx-1.2.3-x86_64-linux-gnu.tar.gz"
         );
-        // Tags without the leading v are taken verbatim.
+        // Bare SemVer tags (post-Sprint 8.0.1): taken verbatim for the
+        // version segment; `-unknown-` is still dropped from the target.
         assert_eq!(
             tarball_filename("1.2.3", "aarch64-unknown-linux-musl"),
-            "aimx-1.2.3-aarch64-unknown-linux-musl.tar.gz"
+            "aimx-1.2.3-aarch64-linux-musl.tar.gz"
+        );
+    }
+
+    #[test]
+    fn tarball_inner_dir_matches_artifact_target() {
+        assert_eq!(
+            tarball_inner_dir("0.0.0-fixture", "x86_64-unknown-linux-gnu"),
+            "aimx-0.0.0-fixture-x86_64-linux-gnu"
         );
     }
 

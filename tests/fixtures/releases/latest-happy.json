@@ -1,45 +1,45 @@
 {
-  "tag_name": "v0.0.0-fixture",
-  "name": "v0.0.0-fixture",
+  "tag_name": "0.0.0-fixture",
+  "name": "0.0.0-fixture",
   "published_at": "2026-04-20T00:00:00Z",
   "prerelease": true,
   "draft": false,
   "assets": [
     {
-      "name": "aimx-0.0.0-fixture-aarch64-unknown-linux-gnu.tar.gz",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-aarch64-unknown-linux-gnu.tar.gz"
+      "name": "aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz"
     },
     {
-      "name": "aimx-0.0.0-fixture-aarch64-unknown-linux-gnu.tar.gz.sha256",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-aarch64-unknown-linux-gnu.tar.gz.sha256"
+      "name": "aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz.sha256",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-aarch64-linux-gnu.tar.gz.sha256"
     },
     {
-      "name": "aimx-0.0.0-fixture-aarch64-unknown-linux-musl.tar.gz",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-aarch64-unknown-linux-musl.tar.gz"
+      "name": "aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz"
     },
     {
-      "name": "aimx-0.0.0-fixture-aarch64-unknown-linux-musl.tar.gz.sha256",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-aarch64-unknown-linux-musl.tar.gz.sha256"
+      "name": "aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz.sha256",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-aarch64-linux-musl.tar.gz.sha256"
     },
     {
-      "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz"
+      "name": "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz"
     },
     {
-      "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz.sha256",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-x86_64-unknown-linux-gnu.tar.gz.sha256"
+      "name": "aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz.sha256",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-x86_64-linux-gnu.tar.gz.sha256"
     },
     {
-      "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-musl.tar.gz",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-x86_64-unknown-linux-musl.tar.gz"
+      "name": "aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz"
     },
     {
-      "name": "aimx-0.0.0-fixture-x86_64-unknown-linux-musl.tar.gz.sha256",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/aimx-0.0.0-fixture-x86_64-unknown-linux-musl.tar.gz.sha256"
+      "name": "aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz.sha256",
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/aimx-0.0.0-fixture-x86_64-linux-musl.tar.gz.sha256"
     },
     {
       "name": "SHA256SUMS",
-      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/v0.0.0-fixture/SHA256SUMS"
+      "browser_download_url": "https://github.com/uzyn/aimx/releases/download/0.0.0-fixture/SHA256SUMS"
     }
   ]
 }

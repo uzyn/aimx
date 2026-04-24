@@ -3,7 +3,7 @@
 #
 # Usage:
 #   curl -fsSL https://aimx.email/install.sh | sh
-#   curl -fsSL https://aimx.email/install.sh | sh -s -- --tag v1.2.3
+#   curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 1.2.3
 #
 # Modelled on `just.systems/install.sh` — `say` / `err` / `need` / `download`
 # helper idioms, no bashisms, HTTPS-only trust anchor. Implements PRD
@@ -103,8 +103,10 @@ USAGE:
 
 FLAGS:
     -h, --help               Print this help and exit
-        --tag <VERSION>      Install a specific release tag (e.g. v1.2.3);
-                             overrides AIMX_VERSION env var
+        --tag <VERSION>      Install a specific release tag (e.g. 1.2.3);
+                             overrides AIMX_VERSION env var. Tags are bare
+                             SemVer (no `v` prefix); a caller-supplied `v`
+                             is stripped leniently.
         --target <TRIPLE>    Override target auto-detection
                              (x86_64-unknown-linux-gnu,
                               aarch64-unknown-linux-gnu,
@@ -115,7 +117,7 @@ FLAGS:
         --force              Re-install even if target version already present
 
 ENVIRONMENT:
-    AIMX_VERSION             Release tag to install (e.g. v1.2.3)
+    AIMX_VERSION             Release tag to install (e.g. 1.2.3)
     AIMX_PREFIX              Install directory (default /usr/local/bin)
     AIMX_DRY_RUN=1           Print every step without downloading or installing
     AIMX_VERBOSE=1           Trace HTTP requests and filesystem actions
@@ -126,7 +128,7 @@ EXAMPLES:
     curl -fsSL https://aimx.email/install.sh | sh
 
     # Pin a specific tag
-    curl -fsSL https://aimx.email/install.sh | sh -s -- --tag v1.2.3
+    curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 1.2.3
 
     # Dry-run: see what would happen without installing
     curl -fsSL https://aimx.email/install.sh | AIMX_DRY_RUN=1 sh
@@ -180,6 +182,15 @@ compose_target() {
     printf '%s-unknown-linux-%s' "${_arch}" "${_libc}"
 }
 
+# Map a canonical Rust target triple (e.g. `x86_64-unknown-linux-gnu`) to the
+# shortened artifact-filename form used by release tarballs since Sprint 8.0.1
+# (`x86_64-linux-gnu`). The canonical triple is still used for
+# `cargo build --target`, `aimx --version`, and operator-facing error
+# messages — only the tarball filename drops the `-unknown-` vendor field.
+artifact_target() {
+    printf '%s' "$1" | sed 's/-unknown-/-/'
+}
+
 # ---------------------------------------------------------------------------
 # Version resolution
 # ---------------------------------------------------------------------------
@@ -200,7 +211,8 @@ resolve_latest_tag() {
 }
 
 # Strip the leading "v" from a tag (v1.2.3 -> 1.2.3) since tarball asset
-# names embed the bare version per release.yml (FR-1.2).
+# names embed the bare version per release.yml (FR-1.2). Tags are bare
+# SemVer post-Sprint 8.0.1, but this stays lenient against legacy inputs.
 tag_to_version() {
     printf '%s' "$1" | sed 's/^v//'
 }
@@ -446,8 +458,9 @@ main() {
         TAG="$(resolve_latest_tag)"
     fi
     _version="$(tag_to_version "${TAG}")"
+    _artifact_target="$(artifact_target "${TARGET}")"
 
-    _asset="aimx-${_version}-${TARGET}.tar.gz"
+    _asset="aimx-${_version}-${_artifact_target}.tar.gz"
     _url="${GITHUB_DL}/${TAG}/${_asset}"
     _install_path="${PREFIX}/aimx"
 
@@ -522,7 +535,7 @@ main() {
     download "${_url}" "${_tarball}"
     verbose "extracting ${_tarball}"
     (cd "${_td}" && tar -xzf "${_asset}") || err "tar extract failed"
-    _staged="${_td}/aimx-${_version}-${TARGET}/aimx"
+    _staged="${_td}/aimx-${_version}-${_artifact_target}/aimx"
     if [ ! -x "${_staged}" ]; then
         err "extracted tarball missing executable aimx at expected path"
     fi

@@ -2,9 +2,9 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
-## v1.0.0 — first public release
+## 0.1.0 — first public release
 
-aimx ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl`. One-line install:
+aimx ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (canonical Rust target triples; tarball filenames drop the `-unknown-` vendor field per Sprint 8.0.1, e.g. `aimx-0.1.0-x86_64-linux-gnu.tar.gz`). One-line install:
 
 ```bash
 curl -fsSL https://aimx.email/install.sh | sh
@@ -18,7 +18,7 @@ sudo aimx upgrade
 
 ### What landed on the onboarding track
 
-- **Release pipeline.** `.github/workflows/release.yml` builds all four tarballs + per-tarball `.sha256` + release-wide `SHA256SUMS` on every `v*.*.*` tag. Release notes include a verbatim `curl + sha256sum -c` block for skeptical operators. No signing in v1 (deferred to v2).
+- **Release pipeline.** `.github/workflows/release.yml` builds all four tarballs + per-tarball `.sha256` + release-wide `SHA256SUMS` on every bare SemVer tag (e.g. `0.1.0`, `1.2.3-rc1`). Release notes include a verbatim `curl + sha256sum -c` block for skeptical operators. No signing in v1 (deferred to v2).
 - **`install.sh`.** Plain POSIX `sh` installer at `https://aimx.email/install.sh`. Auto-detects OS / arch / libc, supports `--tag` / `--target` / `--to` / `--force` plus `AIMX_VERSION` / `AIMX_PREFIX` / `AIMX_DRY_RUN` / `AIMX_VERBOSE` / `GITHUB_TOKEN`. Upgrade path is wizard-free: stop → swap → start.
 - **`aimx upgrade`.** Single-verb subcommand; flags `--dry-run`, `--version <tag>`, `--force`. Atomic `rename(2)` binary swap with automatic rollback to `/usr/local/bin/aimx.prev` on failure.
 - **Setup wizard refactor.** Wizard asks two decisions (domain, trusted senders) instead of five-plus. Removed: hook-template checkbox, Gmail / deliverability section, `none | verified` trust toggle. Added: loud warning when trusted-senders list is empty, prominent `q`-to-skip on the DNS loop, drop-through to `aimx agent-setup` as `$SUDO_USER` on completion.

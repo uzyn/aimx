@@ -70,16 +70,19 @@ No wizard re-run, no DNS re-verify; the binary is swapped atomically and the ser
 If you would rather not `curl | sh`, every release ships a `.sha256` per tarball and a release-wide `SHA256SUMS`. The trust anchor in v1 is HTTPS on the GitHub Releases domain — signed releases are deferred to v2. Verify manually:
 
 ```bash
-TAG=v1.0.0
-TARGET=x86_64-unknown-linux-gnu
-TARBALL=aimx-${TAG}-${TARGET}.tar.gz
+# Tags are bare SemVer (no `v` prefix). Tarball filenames drop the
+# `-unknown-` vendor field; the canonical target triple is still what
+# `aimx --version` prints in its target slot.
+TAG=0.1.0
+TARBALL_TARGET=x86_64-linux-gnu
+TARBALL=aimx-${TAG}-${TARBALL_TARGET}.tar.gz
 
 curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}"
 curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}.sha256"
 sha256sum -c "${TARBALL}.sha256"
 
 tar -xzf "${TARBALL}"
-sudo install -m 0755 aimx /usr/local/bin/aimx
+sudo install -m 0755 "aimx-${TAG}-${TARBALL_TARGET}/aimx" /usr/local/bin/aimx
 aimx --version
 ```
 
