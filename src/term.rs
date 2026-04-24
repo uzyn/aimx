@@ -25,7 +25,7 @@
 //!
 //! [`pass_badge`], [`fail_badge`], [`warn_badge`], and [`missing_badge`] return
 //! the legacy `PASS`/`FAIL`/`WARN`/`MISSING` string tokens. They are preserved
-//! as thin wrappers for one minor release and slated for removal in v1.1.
+//! as thin wrappers for one minor release and slated for removal in 0.2.
 //! New code should use the `*_mark()` helpers instead.
 //!
 //! # Convention
