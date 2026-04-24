@@ -118,7 +118,7 @@ Caddy auto-provisions TLS certificates via ACME (Let's Encrypt). The `caddy_data
 
 ### Why `network_mode: host`?
 
-The verifier service's security model (Sprint 12) enforces a Layer 3 trust boundary: the HTTP listener binds `127.0.0.1:3025` by default, and the app only reads the `X-AIMX-Client-IP` header when the TCP peer is loopback. Combined with Caddy in front (which injects that header authoritatively), this is the only trust path the app recognises.
+The verifier service's security model enforces a Layer 3 trust boundary: the HTTP listener binds `127.0.0.1:3025` by default, and the app only reads the `X-AIMX-Client-IP` header when the TCP peer is loopback. Combined with Caddy in front (which injects that header authoritatively), this is the only trust path the app recognises.
 
 The "obvious" docker-compose shape (`ports: "3025:3025"` plus `BIND_ADDR=0.0.0.0:3025` inside the container) **breaks** this model. Docker's userland proxy rewrites connections so the TCP peer the app sees is the bridge gateway (a private RFC 1918 address), which:
 

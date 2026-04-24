@@ -36,10 +36,10 @@ mod term;
 mod transport;
 mod trust;
 mod uds_authz;
-// Sprint 2 lands release metadata + ReleaseOps ahead of the Sprint 4
-// consumer (`aimx upgrade`). Per-item `#[allow(dead_code)]` attributes
-// inside the module scope the lint narrowly so any future genuinely-unused
-// item still surfaces.
+// `release` lands the release-metadata + ReleaseOps used by
+// `aimx upgrade`. Per-item `#[allow(dead_code)]` attributes inside the
+// module scope the lint narrowly so any future genuinely-unused item
+// still surfaces.
 mod release;
 mod uninstall;
 mod upgrade;
@@ -51,7 +51,7 @@ use cli::{Cli, Command};
 
 fn main() {
     // Handle `aimx --version` / `aimx -V` manually so the output is
-    // exactly the FR-6.1 banner (`aimx <tag> (<sha>) <target> built <date>`)
+    // exactly the version banner (`aimx <tag> (<sha>) <target> built <date>`)
     // without clap's binary-name prefix.
     if cli::handle_version_flag(std::env::args_os()) {
         return;

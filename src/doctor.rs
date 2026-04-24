@@ -35,7 +35,7 @@ pub struct StatusInfo {
     pub default_trusted_senders: Vec<String>,
     pub mailboxes: Vec<MailboxStatus>,
     pub dns: Option<DnsSection>,
-    /// Hook templates section (S6-4). Always present even when empty so
+    /// Hook templates section. Always present even when empty so
     /// operators can confirm "no templates enabled" rather than wonder if
     /// doctor failed to gather the data.
     pub hook_templates: HookTemplatesSection,
@@ -927,8 +927,8 @@ fn render_hook_templates_table(section: &HookTemplatesSection) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FindingSeverity {
     /// Reserved for checks that want to emit a positive PASS line in
-    /// the rendered Checks section. Current Sprint 7 checks stay
-    /// silent on success; retained so future checks (e.g. a
+    /// the rendered Checks section. Current checks stay silent on
+    /// success; retained so future checks (e.g. a
     /// "mailbox storage chowned correctly" PASS banner) can opt in
     /// without widening the enum.
     #[allow(dead_code)]
@@ -992,7 +992,7 @@ pub const ORPHAN_CHECK_IDS: &[&str] = &[
     "ORPHAN-HOOK-RUN_AS",
 ];
 
-/// Run every Sprint 7 doctor check against `config`, merging in
+/// Run every doctor check against `config`, merging in
 /// `load_warnings` returned by [`Config::load`]. The returned vector is
 /// in deterministic section order (mailbox ownership → templates →
 /// hook invariants → catchall presence → load warnings → legacy user).
@@ -1015,7 +1015,7 @@ fn run_checks_with_runner(
     out
 }
 
-/// S7-1: validate that every mailbox owner resolves and its storage
+/// Validate that every mailbox owner resolves and its storage
 /// directories exist + are chowned `owner:owner` mode `0700`.
 pub fn check_mailbox_ownership(config: &Config) -> Vec<DoctorFinding> {
     let mut out = Vec::new();
@@ -1201,7 +1201,7 @@ pub fn check_mailbox_ownership(config: &Config) -> Vec<DoctorFinding> {
     out
 }
 
-/// S7-2: validate every `[[hook_template]]`: `run_as` resolves, `cmd[0]`
+/// Validate every `[[hook_template]]`: `run_as` resolves, `cmd[0]`
 /// exists + is executable, and the `run_as` user can `access(X_OK)` it.
 ///
 /// Production callers go through [`run_checks`] / [`run_checks_with_runner`],
@@ -1306,7 +1306,7 @@ fn check_templates_with_runner(config: &Config, runner: &dyn AccessRunner) -> Ve
     out
 }
 
-/// S7-3 part 1: re-run the hook/owner invariant against every hook in
+/// Re-run the hook/owner invariant against every hook in
 /// `config`. This is a safety net against hand-edits to `config.toml`
 /// that bypass `validate_hooks` (e.g. orphan downgrades at load time).
 pub fn check_hook_invariants(config: &Config) -> Vec<DoctorFinding> {
@@ -1344,7 +1344,7 @@ pub fn check_hook_invariants(config: &Config) -> Vec<DoctorFinding> {
     out
 }
 
-/// S7-3 part 2: when a catchall mailbox is owned by the reserved
+/// When a catchall mailbox is owned by the reserved
 /// `aimx-catchall` user (the default from `aimx setup`), verify that
 /// user actually resolves. Without it, catchall inbound ingest cannot
 /// chown mail into place. If the operator has deliberately assigned a
@@ -1376,7 +1376,7 @@ pub fn check_catchall_user(config: &Config) -> Vec<DoctorFinding> {
     ]
 }
 
-/// S7-3 part 3: surface `LoadWarning`s from `Config::load` as doctor
+/// Surface `LoadWarning`s from `Config::load` as doctor
 /// findings so warnings the daemon logged on start-up are visible
 /// without scraping the journal.
 pub fn translate_load_warnings(warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
@@ -1453,7 +1453,7 @@ pub fn translate_load_warnings(warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
     out
 }
 
-/// S7-3 part 4: emit an `info` note when the legacy `aimx-hook` system
+/// Emit an `info` note when the legacy `aimx-hook` system
 /// user is still present. aimx no longer creates this user; doctor just
 /// reminds the operator it can be removed.
 pub fn check_legacy_aimx_hook_user() -> Vec<DoctorFinding> {
@@ -1820,10 +1820,10 @@ mod tests {
         }
     }
 
-    /// Minimal mock that exercises `is_service_running` and the new
-    /// `tail_service_logs` / `user_exists` / `lookup_user_uid_gid` calls
-    /// added in S6-4. All other `SystemOps` methods panic; they must
-    /// not be reached by `gather_status`.
+    /// Minimal mock that exercises `is_service_running` and the
+    /// `tail_service_logs` / `user_exists` / `lookup_user_uid_gid`
+    /// calls. All other `SystemOps` methods panic; they must not be
+    /// reached by `gather_status`.
     struct FakeServiceOps {
         running: bool,
         log_tail_calls: Cell<u32>,
@@ -1966,7 +1966,7 @@ mod tests {
         assert!(!info.smtp_running);
     }
 
-    // Manual verification note (S43-2): on OpenRC hosts (Alpine) the real
+    // Manual verification note: on OpenRC hosts (Alpine) the real
     // `RealSystemOps::is_service_running` dispatches to `rc-service aimx status`
     // via `crate::serve::service::is_service_running_command`. The previous
     // hardcoded `systemctl is-active` call always returned false on OpenRC.
@@ -2656,7 +2656,7 @@ mod tests {
     fn gather_status_does_not_tail_service_logs_when_no_templates_enabled() {
         // When no hook templates are enabled, doctor must not pay the cost
         // of shelling out to journalctl just to compute fire counts on
-        // an empty set. Sprint 6's hook-templates section short-circuits
+        // an empty set. The hook-templates section short-circuits
         // in that case; this test pins the contract.
         let tmp = tempfile::TempDir::new().unwrap();
         let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
@@ -2707,7 +2707,7 @@ mod tests {
         );
     }
 
-    // ----- S48-2 config path + per-mailbox trust + hooks summary -----
+    // ----- config path + per-mailbox trust + hooks summary -----------
 
     #[test]
     fn format_status_renders_config_file_path() {
@@ -2978,7 +2978,7 @@ mod tests {
         );
     }
 
-    // ----- S6-4 Hook templates section --------------------------------
+    // ----- Hook templates section -------------------------------------
 
     fn template_for_test(name: &str, cmd_path: &str) -> crate::config::HookTemplate {
         crate::config::HookTemplate {
@@ -3348,7 +3348,7 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
         out
     }
 
-    // -------------------- Sprint 7 checks --------------------
+    // -------------------- doctor checks --------------------
     //
     // The checks below use `user_resolver::set_test_resolver` to drop in a
     // fake `getpwnam` so tests don't depend on the running host's
@@ -3613,9 +3613,8 @@ template=valid-two exit_code=missing-digits timed_out=false\n\
     #[test]
     fn mailbox_ownership_flags_group_drift() {
         // Resolver returns the current uid (so owner check passes) but
-        // a bogus gid (so the group check fires). Pinned as Warn — the
-        // sprint plan classifies group drift as recoverable, not an
-        // isolation break.
+        // a bogus gid (so the group check fires). Pinned as Warn —
+        // group drift is recoverable, not an isolation break.
         fn fake(name: &str) -> Option<ResolvedUser> {
             if name == "testowner" || name == "root" {
                 let (uid, gid) = current_uid_gid();

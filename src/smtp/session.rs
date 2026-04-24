@@ -381,7 +381,7 @@ impl SmtpSession {
             );
             return "550 5.7.1 relay not permitted\r\n".to_string();
         }
-        // S2-1: mailbox-routing preflight. Reject at RCPT time when no
+        // Mailbox-routing preflight. Reject at RCPT time when no
         // mailbox (concrete or catchall) can accept the address. Keeps
         // the RCPT-time and DATA-time decisions in sync via the shared
         // `resolve_recipient_mailbox` helper.
@@ -586,7 +586,7 @@ impl SmtpSession {
             eprintln!("[{peer}] Message accepted from={from} rcpts={rcpt_count} size={size}");
             Ok("250 OK message accepted\r\n".to_string())
         } else if succeeded > 0 {
-            // S2-2 / §6.3: any post-354 failure is surfaced as 451 so
+            // Any post-354 failure is surfaced as 451 so
             // the sending MTA retries the message rather than treating
             // partial loss as success. Both the per-recipient files
             // that did land and the session counters are updated — the

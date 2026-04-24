@@ -27,7 +27,7 @@ pub trait SystemOps {
     /// Required trait method — every `SystemOps` impl must provide it.
     /// Test mocks in modules that never reach the upgrade path
     /// (`doctor.rs`, `logs.rs`, `portcheck.rs`, `uninstall.rs`) are
-    /// expected to `unreachable!()` here; a future sprint that teaches
+    /// expected to `unreachable!()` here; future work that teaches
     /// those modules to stop/start the service will then surface a
     /// clear panic rather than a silent `Err` string.
     fn stop_service(&self, service: &str) -> Result<(), Box<dyn std::error::Error>>;
@@ -230,7 +230,7 @@ pub trait SystemOps {
 /// only when the operator configures a catchall mailbox — no
 /// speculative user creation on a setup that never configures one.
 /// Regular mailbox owners are real Linux users picked by the operator
-/// (Sprint 3 S3-2); `aimx-catchall` exists purely so the catchall has
+/// at setup time; `aimx-catchall` exists purely so the catchall has
 /// a privilege-dropped uid that still lets hooks read its mail.
 pub const CATCHALL_SERVICE_USER: &str = "aimx-catchall";
 
@@ -408,7 +408,7 @@ impl SystemOps for RealSystemOps {
     }
 
     fn get_aimx_binary_path(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        // Sprint 5 S5-4: canonicalize so the generated unit file's
+        // Canonicalize so the generated unit file's
         // `ExecStart=` line points at the real binary rather than a
         // symlink — systemd best practice, and what closes PRD §11's
         // "non-/usr/local prefixes" open question. An operator who
@@ -443,7 +443,7 @@ impl SystemOps for RealSystemOps {
             InitSystem, detect_init_system, generate_openrc_script, generate_systemd_unit,
         };
 
-        // Sprint 5 S5-4: derive `ExecStart=` from the canonicalized
+        // Derive `ExecStart=` from the canonicalized
         // current-exe path. Abort hard if we cannot resolve it —
         // writing a unit whose ExecStart points at a non-existent or
         // non-executable binary silently is worse than failing fast
@@ -1301,9 +1301,9 @@ pub fn dns_verification_record_lines(
                         rec.value
                     ));
                 }
-                // S44-2: DKIM failures have an operator-silent consequence
-                // that bit us in finding #10. A single FAIL line in a
-                // column of PASS lines is too easy to skim past, so print a
+                // DKIM failures have an operator-silent consequence: a
+                // single FAIL line in a column of PASS lines is too
+                // easy to skim past, so print a
                 // second, semantically-red line spelling out that outbound
                 // signatures will not verify at receivers until the DNS
                 // key matches the on-disk public key.
@@ -1505,7 +1505,7 @@ pub fn finalize_setup(
 }
 
 fn announce_setup_complete(domain: &str) {
-    // FR-3.5 step 8: the wizard closes with a single-line success
+    // The wizard closes with a single-line success
     // banner naming the domain. Intentionally terse — the operator just
     // sat through TLS, DKIM, DNS, and systemctl start; they don't need
     // more ceremony.
@@ -1623,7 +1623,7 @@ pub(crate) const MAX_TRUSTED_SENDERS_ATTEMPTS: usize = 5;
 
 /// Warning printed when the operator leaves the trusted-senders prompt
 /// blank. Also logged (at `warn` level) under `AIMX_NONINTERACTIVE=1`
-/// where the interactive surface is skipped (FR-3.8). Kept as a
+/// where the interactive surface is skipped. Kept as a
 /// module-level constant so tests can assert the exact wording.
 pub(crate) const EMPTY_TRUSTED_SENDERS_WARNING: &str = "No trusted senders configured. Hooks will NOT fire for inbound email. \
 Add senders later by editing `/etc/aimx/config.toml` under `[trust]` / `trusted_senders`, \
@@ -1692,7 +1692,7 @@ pub(crate) fn parse_trusted_senders_line(line: &str) -> Result<Vec<String>, (Str
     Ok(entries)
 }
 
-/// Interactively prompt for the `trusted_senders` allowlist (FR-3.2).
+/// Interactively prompt for the `trusted_senders` allowlist.
 ///
 /// Returns `(policy, senders)`:
 /// - Non-empty list → `("verified", senders)`; no warning printed.
@@ -1744,8 +1744,8 @@ fn print_empty_trusted_senders_warning() {
     println!();
 }
 
-/// Resolve the trust defaults for the non-interactive setup path
-/// (FR-3.8). The scripted-install branch of [`run_setup`] defaults to
+/// Resolve the trust defaults for the non-interactive setup path.
+/// The scripted-install branch of [`run_setup`] defaults to
 /// an empty trusted-senders list and must *log* the operator-visible
 /// warning (not display it on the TTY) so automated pipelines surface
 /// the misconfiguration in their journald / log collectors.
@@ -1794,7 +1794,7 @@ pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::er
 /// True iff the on-disk `config.toml` has a mailbox whose address is
 /// the wildcard catchall for its domain. Used by [`run_setup`] to gate
 /// `aimx-catchall` system-user creation — no catchall mailbox means no
-/// speculative user/home-dir provisioning (PRD §6.4 / S3-1). Returns
+/// speculative user/home-dir provisioning. Returns
 /// `false` if `config.toml` is missing or unreadable so fresh installs
 /// skip the user-create step until `finalize_setup` has written the
 /// file (in practice `finalize_setup` always runs first, but the
@@ -1831,7 +1831,7 @@ pub(crate) fn is_noninteractive_env() -> bool {
 }
 
 /// Prompt the operator for the Linux user that should own mail for
-/// `address` (S3-2). Default = local-part of the address when
+/// `address`. Default = local-part of the address when
 /// `getpwnam(local_part)` resolves on the host; otherwise no default
 /// and explicit input is required.
 ///
@@ -1842,11 +1842,10 @@ pub(crate) fn is_noninteractive_env() -> bool {
 /// — scripted installs never block on a prompt.
 ///
 /// The catchall mailbox never goes through this helper; its owner is
-/// hard-coded to `aimx-catchall` by [`finalize_setup`] (S3-2 AC).
+/// hard-coded to `aimx-catchall` by [`finalize_setup`].
 ///
 /// Live caller: `aimx mailboxes create` invokes this when the operator
-/// omits `--owner` (see `mailbox::resolve_create_owner`). Sprints 6+ will
-/// share the same seam from `aimx agent-setup`.
+/// omits `--owner` (see `mailbox::resolve_create_owner`).
 pub fn prompt_mailbox_owner(
     address: &str,
     sys: &dyn SystemOps,
@@ -1966,13 +1965,13 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Sprint 6 S6-3: capture the operator's *explicit* `--data-dir`
-    // choice (distinct from the `/var/lib/aimx` default resolved below)
-    // so the `runuser` re-exec passes `--data-dir <path>` through only
-    // when the operator named a path on the command line.
+    // Capture the operator's *explicit* `--data-dir` choice (distinct
+    // from the `/var/lib/aimx` default resolved below) so the `runuser`
+    // re-exec passes `--data-dir <path>` through only when the operator
+    // named a path on the command line.
     let explicit_data_dir: Option<PathBuf> = data_dir.map(|p| p.to_path_buf());
     // Install the shared tracing subscriber up front so structured
-    // warnings emitted from this path (notably the FR-3.8
+    // warnings emitted from this path (notably the
     // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
     // actually reach stderr. Matches the pattern in `serve::run` /
     // `ingest::run`. `logging::init` is idempotent so in-process tests
@@ -2046,12 +2045,11 @@ pub fn run_setup(
         );
     }
 
-    // Step 3 (FR-3.5): Trusted-senders prompt. Runs BEFORE TLS cert and
-    // DKIM keygen so the operator is not asked a decision question
-    // after the wizard has started mutating /etc. Re-entry skips the
-    // prompt (existing values preserved — FR-3.7). Non-interactive
-    // installs default to an empty list with the warning logged, not
-    // displayed (FR-3.8).
+    // Step 3: Trusted-senders prompt. Runs BEFORE TLS cert and DKIM
+    // keygen so the operator is not asked a decision question after
+    // the wizard has started mutating /etc. Re-entry skips the prompt
+    // (existing values preserved). Non-interactive installs default
+    // to an empty list with the warning logged, not displayed.
     let trust_defaults = if config_path.exists() {
         None
     } else if is_noninteractive_env() {
@@ -2062,7 +2060,7 @@ pub fn run_setup(
         Some(prompt_trusted_senders(&mut reader)?)
     };
 
-    // Step 4 (FR-3.5): Generate TLS cert, then write config.toml + DKIM
+    // Step 4: Generate TLS cert, then write config.toml + DKIM
     // keys. Idempotent on re-entry (handles domain changes). Must
     // happen before the aimx.service install at the end, because the
     // daemon refuses to start without a loadable config and DKIM key.
@@ -2079,8 +2077,8 @@ pub fn run_setup(
 
     finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
 
-    // Step 4b: Create `aimx-catchall` service user (PRD §6.4, S3-1) —
-    // but only when the operator's configured mailboxes include a
+    // Step 4b: Create `aimx-catchall` service user — but only when
+    // the operator's configured mailboxes include a
     // catchall, so installs that skip the catchall don't bloat
     // `/etc/passwd` with a service user they'll never use. Re-entrant
     // setup passes through the same guard so a host that once had a
@@ -2090,7 +2088,7 @@ pub fn run_setup(
     }
 
     // Step 6: DNS guidance and verification (section [DNS])
-    // Single `hostname -I` invocation (S32-4): derive both families from one call.
+    // Single `hostname -I` invocation: derive both families from one call.
     let (ipv4_detected, ipv6_detected) = net.get_server_ips()?;
     let server_ipv4 = ipv4_detected
         .ok_or::<Box<dyn std::error::Error>>("Could not determine server IPv4 address".into())?;
@@ -2120,7 +2118,7 @@ pub fn run_setup(
         &dkim_selector,
     );
 
-    // Step 6 (FR-3.5): DNS verify loop. The "press q to skip and run
+    // Step 6: DNS verify loop. The "press q to skip and run
     // `aimx doctor` later" escape is surfaced as a prominent standalone
     // line, not buried as a parenthetical, so an operator who hasn't
     // finished propagating records doesn't feel trapped in the wizard.
@@ -2172,27 +2170,25 @@ pub fn run_setup(
     // Write (or refresh) the agent-facing README inside the data directory.
     crate::datadir_readme::write(data_dir)?;
 
-    // Step 7 (FR-3.5): Install and start aimx.service once DNS guidance
+    // Step 7: Install and start aimx.service once DNS guidance
     // is out of the way. Setup concludes with the daemon bound to :25
     // and verified healthy, or a loud error.
     if !already_configured {
         install_and_verify_service(sys, data_dir)?;
     }
 
-    // Section [MCP] — informational summary per FR-3.4. The actual
-    // agent-setup drop-through lands in Sprint 6; for now the wizard
-    // closes with the placeholder message pointing operators at
-    // `aimx agent-setup`.
+    // Section [MCP] — informational summary. The wizard closes with
+    // a placeholder message pointing operators at `aimx agent-setup`.
     display_mcp_section(data_dir);
 
-    // Step 8 (FR-3.5): one-line success banner.
+    // Step 8: one-line success banner.
     announce_setup_complete(&domain);
 
-    // Sprint 6 S6-3: drop through to `aimx agent-setup` as `$SUDO_USER`
-    // per FR-3.6. Skipped under AIMX_NONINTERACTIVE=1 (FR-3.8) so
-    // scripted installs don't hang on a TUI no one's watching. When
-    // `$SUDO_USER` is unset (direct root login) we fall back to the
-    // placeholder guidance so the operator still knows where to go.
+    // Drop through to `aimx agent-setup` as `$SUDO_USER`. Skipped
+    // under AIMX_NONINTERACTIVE=1 so scripted installs don't hang on
+    // a TUI no one's watching. When `$SUDO_USER` is unset (direct
+    // root login) we fall back to the placeholder guidance so the
+    // operator still knows where to go.
     if !is_noninteractive_env() {
         drop_through_to_agent_setup(explicit_data_dir.as_deref());
     }
@@ -2210,15 +2206,16 @@ pub fn run_setup(
 /// ```text
 /// [exe, "agent-setup",
 ///  // --data-dir is only appended when the operator explicitly named a
-///  // path on the `aimx setup` command line (per S6-3 AC). The default
+///  // path on the `aimx setup` command line. The default
 ///  // `/var/lib/aimx` is left implicit so it matches what a standalone
 ///  // `aimx agent-setup` invocation would resolve.
 ///  "--data-dir", <path>]
 /// ```
 ///
 /// `--dangerously-allow-root` is *never* appended — the drop-through
-/// fires only when `$SUDO_USER` is set, and FR-5.1.a explicitly forbids
-/// implicit `--dangerously-allow-root` (operators must opt in by hand).
+/// fires only when `$SUDO_USER` is set, and implicit
+/// `--dangerously-allow-root` is forbidden (operators must opt in by
+/// hand).
 pub(crate) fn build_agent_setup_argv(
     exe: &Path,
     explicit_data_dir: Option<&Path>,
@@ -2234,14 +2231,13 @@ pub(crate) fn build_agent_setup_argv(
     argv
 }
 
-/// Drive the Sprint 6 drop-through:
+/// Drive the drop-through to `aimx agent-setup`:
 /// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
 ///    /proc/self/exe agent-setup [--data-dir …]` via
 ///    `CommandExt::exec`. `exec` replaces the current process so the
 ///    TUI takes over the terminal cleanly.
-/// 2. If `$SUDO_USER` is unset → print the FR-3.6 guidance message
-///    (naming `--dangerously-allow-root` as the root-login option) and
-///    return.
+/// 2. If `$SUDO_USER` is unset → print the guidance message (naming
+///    `--dangerously-allow-root` as the root-login option) and return.
 ///
 /// On `exec` failure (e.g. `runuser` not installed on a stripped
 /// container image) we fall back to the same guidance message so the
@@ -2441,7 +2437,7 @@ pub(crate) mod tests {
         pub(crate) existing_files: HashMap<PathBuf, String>,
         pub(crate) restarted_services: RefCell<Vec<String>>,
         /// Ordered list of services passed to `stop_service`. Used by
-        /// the Sprint 4 `aimx upgrade` tests to assert the stop → swap
+        /// the `aimx upgrade` tests to assert the stop → swap
         /// → start sequence.
         pub(crate) stopped_services: RefCell<Vec<String>>,
         /// Ordered list of services passed to `start_service`.
@@ -2456,16 +2452,14 @@ pub(crate) mod tests {
         /// a `create_system_user` call creating the user.
         pub(crate) existing_users: RefCell<std::collections::HashSet<String>>,
         /// Ordered list of `(user, home)` pairs passed to
-        /// `create_system_user`. Sprint 3 renames the helper's caller
-        /// from `ensure_hook_user` to `ensure_catchall_user`; tests
-        /// assert both the user name AND its home-dir arg.
+        /// `create_system_user`. Tests assert both the user name AND
+        /// its home-dir arg.
         pub(crate) created_users: RefCell<Vec<(String, PathBuf)>>,
         /// Ordered list of `(path, owner, group, mode)` tuples passed to
-        /// `ensure_owned_directory`. Sprint 3 replaces the recursive
-        /// `chown_group_readable` with a single-path, explicit-mode
+        /// `ensure_owned_directory`. A single-path, explicit-mode
         /// helper scoped to the `aimx-catchall` home dir.
         pub(crate) owned_dirs: RefCell<Vec<(PathBuf, String, String, u32)>>,
-        /// Override for [`SystemOps::get_aimx_binary_path`] so the Sprint 4
+        /// Override for [`SystemOps::get_aimx_binary_path`] so the
         /// `aimx upgrade` tests can route the swap through a tempdir
         /// instead of the real `/usr/local/bin/aimx`.
         pub(crate) override_aimx_binary_path: Option<PathBuf>,
@@ -2635,7 +2629,7 @@ pub(crate) mod tests {
         }
     }
 
-    // ----- Sprint 3 S3-1: ensure_catchall_user ---------------------------
+    // ----- ensure_catchall_user ------------------------------------------
 
     #[test]
     fn ensure_catchall_user_creates_user_when_absent() {
@@ -2689,7 +2683,7 @@ pub(crate) mod tests {
 
     #[test]
     fn run_setup_skips_catchall_user_when_no_catchall_configured() {
-        // S3-1 AC: `ensure_catchall_user` is gated on whether the
+        // `ensure_catchall_user` is gated on whether the
         // on-disk config contains a catchall mailbox. A synthetic
         // config with only a named (non-wildcard) mailbox must not
         // trigger user creation.
@@ -2734,7 +2728,7 @@ owner = "aimx-catchall"
         assert!(super::config_has_catchall(&cfg_path));
     }
 
-    // ----- Sprint 3 S3-2: prompt_mailbox_owner ---------------------------
+    // ----- prompt_mailbox_owner ------------------------------------------
 
     /// Serialize `AIMX_NONINTERACTIVE` env-var mutations across tests
     /// that toggle it; cargo runs tests in parallel threads and env is
@@ -2805,7 +2799,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn prompt_mailbox_owner_reprompts_until_valid_user_entered() {
-        // Sprint 7.5 S7.5-3: exercise the re-prompt loop with a scripted
+        // Exercise the re-prompt loop with a scripted
         // stdin. Two bad entries (users that don't exist) followed by a
         // good one — the helper must re-prompt after each bad entry and
         // return the good entry without burning the full 5-attempt
@@ -2834,7 +2828,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn prompt_mailbox_owner_errors_after_five_rejected_attempts() {
-        // Sprint 7.5 S7.5-3: when every scripted attempt is a bad user,
+        // When every scripted attempt is a bad user,
         // the helper must give up after `MAX_OWNER_PROMPT_ATTEMPTS` and
         // return the documented useradd error.
         use crate::user_resolver::{ResolvedUser, set_test_resolver};
@@ -2862,17 +2856,16 @@ owner = "aimx-catchall"
         );
     }
 
-    // ----- Sprint 3 S3-3: legacy-template-phase removal regression ------
+    // ----- legacy-template-phase removal regression --------------------
 
     #[test]
     fn legacy_template_phase_is_absent_from_setup() {
-        // Regression guard: the Sprint 3 interactive-checkbox phase
-        // and the `aimx-hook` group plumbing must stay gone. This
-        // check uses a structural `syn` walk over the parsed AST of
+        // Regression guard: the legacy interactive-checkbox phase and
+        // the `aimx-hook` group plumbing must stay gone. This check
+        // uses a structural `syn` walk over the parsed AST of
         // `src/setup.rs` rather than a substring grep over the source,
         // so future string literals and comments that happen to mention
-        // the retired names cannot trip the assertion (Sprint 7.5
-        // S7.5-4 — replaced the Sprint 3 `include_str!` + grep).
+        // the retired names cannot trip the assertion.
         use syn::visit::Visit;
 
         let source = include_str!("setup.rs");
@@ -2937,7 +2930,7 @@ owner = "aimx-catchall"
         );
         assert!(
             walker.found_banned.is_empty(),
-            "`{BANNED_PREFIX}*` helper(s) were removed in Sprint 3 S3-3 and must \
+            "`{BANNED_PREFIX}*` helper(s) were removed and must \
              not come back: {:?}",
             walker.found_banned
         );
@@ -3426,7 +3419,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn dns_verification_lines_dkim_fail_includes_loud_consequence_note() {
-        // S44-2: a single PASS/FAIL line is too easy to skim past. When
+        // A single PASS/FAIL line is too easy to skim past. When
         // DKIM fails the verifier, the operator must see an explicit note
         // that every outbound signature will break until DNS matches.
         let results = vec![
@@ -3681,7 +3674,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn reentrant_setup_does_not_wait_for_service_ready() {
-        // S42-2: the wait-for-ready loop is gated on the fresh-install branch.
+        // The wait-for-ready loop is gated on the fresh-install branch.
         // A re-entrant run (cert + DKIM already present, service already
         // running) must skip both `install_service_file` and the wait loop.
         let tmp = TempDir::new().unwrap();
@@ -3891,7 +3884,7 @@ owner = "aimx-catchall"
         assert!(validate_domain("example-.com").is_err());
     }
 
-    // S11.1: Root Check + MTA Conflict Detection tests
+    // Root Check + MTA Conflict Detection tests
 
     #[test]
     fn non_root_detection() {
@@ -3991,7 +3984,7 @@ owner = "aimx-catchall"
         );
     }
 
-    // S11.2: Reorder Setup Flow tests
+    // Reorder Setup Flow tests
 
     #[test]
     fn derive_smtp_addr_from_https_url() {
@@ -4065,7 +4058,7 @@ owner = "aimx-catchall"
         let _ = &net as &dyn NetworkOps;
     }
 
-    // Sprint 5 S5-2: Trusted-senders prompt tests
+    // Trusted-senders prompt tests
 
     #[test]
     fn validate_trusted_sender_accepts_plain_address() {
@@ -4191,9 +4184,9 @@ owner = "aimx-catchall"
 
     #[test]
     fn empty_trusted_senders_warning_text_is_stable() {
-        // The operator-visible warning wording is load-bearing (PRD
-        // FR-3.2). Guard against silent edits that drop the
-        // "NOT fire" / "Add senders later" language.
+        // The operator-visible warning wording is load-bearing.
+        // Guard against silent edits that drop the "NOT fire" /
+        // "Add senders later" language.
         assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("No trusted senders"));
         assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("NOT fire"));
         assert!(EMPTY_TRUSTED_SENDERS_WARNING.contains("/etc/aimx/config.toml"));
@@ -4212,7 +4205,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn prompt_trusted_senders_skipped_under_noninteractive_env() {
-        // FR-3.8: under AIMX_NONINTERACTIVE=1 the trusted-senders prompt
+        // Under AIMX_NONINTERACTIVE=1 the trusted-senders prompt
         // is NOT read. `run_setup` short-circuits before calling
         // `prompt_trusted_senders`, so this test documents the contract
         // by way of the shared helper: `is_noninteractive_env()` returns
@@ -4228,7 +4221,7 @@ owner = "aimx-catchall"
     #[test]
     fn resolve_noninteractive_trust_defaults_emits_logged_warning() {
         // PR #138 regression (B1): under AIMX_NONINTERACTIVE=1 the
-        // FR-3.8 contract requires the empty-trusted-senders warning
+        // The contract requires the empty-trusted-senders warning
         // to be *logged* (not displayed). Before the fix the call site
         // was a bare `tracing::warn!` with no subscriber ever
         // installed on the setup path — a no-op. The helper below
@@ -4277,16 +4270,16 @@ owner = "aimx-catchall"
         let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
         assert!(
             captured.contains("No trusted senders"),
-            "FR-3.8: empty-trusted-senders warning must reach the tracing layer. \
+            "empty-trusted-senders warning must reach the tracing layer. \
              Captured:\n{captured}"
         );
         assert!(
             captured.contains("NOT fire"),
-            "FR-3.8: warning body must explain that hooks will NOT fire. Captured:\n{captured}"
+            "warning body must explain that hooks will NOT fire. Captured:\n{captured}"
         );
         assert!(
             captured.contains("/etc/aimx/config.toml"),
-            "FR-3.2: warning must point at a real remediation path. Captured:\n{captured}"
+            "warning must point at a real remediation path. Captured:\n{captured}"
         );
     }
 
@@ -4294,7 +4287,7 @@ owner = "aimx-catchall"
     fn resolve_noninteractive_trust_defaults_installs_tracing_subscriber() {
         // PR #138 regression (B1, structural guard): the helper must
         // call `crate::logging::init()` before emitting the warn. If
-        // a refactor drops the subscriber-install the FR-3.8 warning
+        // a refactor drops the subscriber-install the warning
         // becomes a silent no-op in production (cargo tests
         // themselves cannot catch that — see the unit test above for
         // the emit-reaches-layer proof). This source-level check
@@ -4322,7 +4315,7 @@ owner = "aimx-catchall"
         assert!(
             has_live_init,
             "resolve_noninteractive_trust_defaults must install the tracing \
-             subscriber before emitting the FR-3.8 warning (uncommented call). \
+             subscriber before emitting the warning (uncommented call). \
              Window:\n{window}"
         );
         let init_idx = window.find("crate::logging::init()").unwrap();
@@ -4343,7 +4336,7 @@ owner = "aimx-catchall"
         // install + warn-emit pair stay co-located. A future refactor
         // that inlines the `tracing::warn!` back into `run_setup`
         // without re-adding a `logging::init()` call in that branch
-        // would silently regress the FR-3.8 contract again.
+        // would silently regress the warning contract again.
         let source = std::fs::read_to_string(std::path::Path::new(file!())).unwrap();
         let run_setup_start = source
             .find("pub fn run_setup(")
@@ -4359,7 +4352,7 @@ owner = "aimx-catchall"
         assert!(
             window.contains("resolve_noninteractive_trust_defaults"),
             "run_setup non-interactive branch must delegate to \
-             resolve_noninteractive_trust_defaults (FR-3.8). Window:\n{window}"
+             resolve_noninteractive_trust_defaults. Window:\n{window}"
         );
     }
 
@@ -4579,7 +4572,7 @@ owner = "aimx-catchall"
         );
     }
 
-    // S18.4: Re-entrant setup tests
+    // Re-entrant setup tests
 
     #[test]
     fn is_already_configured_all_present() {
@@ -4635,7 +4628,7 @@ owner = "aimx-catchall"
         assert!(!is_already_configured(&sys, tmp.path()));
     }
 
-    // S26-2: IPv6 DNS record generation tests
+    // IPv6 DNS record generation tests
 
     #[test]
     fn dns_record_generation_with_ipv6() {
@@ -4701,7 +4694,7 @@ owner = "aimx-catchall"
         );
     }
 
-    // S26-3: ip6: SPF verification tests
+    // ip6: SPF verification tests
 
     #[test]
     fn spf_contains_ip_ipv6_pass() {
@@ -5114,11 +5107,11 @@ owner = "aimx-catchall"
         }
     }
 
-    // ----- Sprint 5 S5-4: systemd/OpenRC ExecStart respects binary -------
+    // ----- systemd/OpenRC ExecStart respects binary ---------------------
 
     #[test]
     fn mock_get_aimx_binary_path_honours_override() {
-        // `MockSystemOps::override_aimx_binary_path` is the Sprint 5
+        // `MockSystemOps::override_aimx_binary_path` is the
         // seam: when an operator installed via `AIMX_PREFIX=/opt/aimx`
         // the canonicalized current-exe path is `/opt/aimx/bin/aimx`,
         // not `/usr/local/bin/aimx`. Verify the mock returns the
@@ -5133,7 +5126,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn generated_systemd_unit_reflects_custom_prefix() {
-        // End-to-end of the S5-4 contract: the path returned by
+        // End-to-end contract: the path returned by
         // `get_aimx_binary_path` flows directly into
         // `generate_systemd_unit`'s `ExecStart=` line. When the install
         // prefix is `/opt/aimx`, the unit file carries
@@ -5173,7 +5166,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn install_service_file_has_no_silent_fallback() {
-        // Regression guard (S5-4): the Sprint 5 rewrite replaces the
+        // Regression guard: the rewrite replaces the
         // `.unwrap_or_else(|_| "/usr/local/bin/aimx".to_string())`
         // silent fallback in `install_service_file` with a hard-fail.
         // Walk the parsed AST and verify that the only occurrences of
@@ -5226,16 +5219,16 @@ owner = "aimx-catchall"
             walker.hits.is_empty(),
             "production code in setup.rs must NOT hardcode \
              /usr/local/bin/aimx — the path must flow from \
-             `get_aimx_binary_path()` (S5-4). Hits: {:?}",
+             `get_aimx_binary_path()`. Hits: {:?}",
             walker.hits
         );
     }
 
-    // ----- Sprint 5 S5-3: wizard flow / success banner polish -------------
+    // ----- wizard flow / success banner polish ---------------------------
 
     #[test]
     fn success_banner_is_single_line_and_names_domain() {
-        // FR-3.5 step 8: the wizard closes with `aimx is running for
+        // The wizard closes with `aimx is running for
         // <domain>.` on a single line. Capture stdout via the
         // `announce_setup_complete` helper and verify.
         // (Direct stdout capture is finicky under cargo test; instead
@@ -5244,13 +5237,13 @@ owner = "aimx-catchall"
         let source = include_str!("setup.rs");
         assert!(
             source.contains("aimx is running for {domain}."),
-            "announce_setup_complete must emit the FR-3.5 single-line banner"
+            "announce_setup_complete must emit the single-line banner"
         );
     }
 
     #[test]
     fn wizard_does_not_display_deliverability_section() {
-        // S5-1 regression: `display_deliverability_section` and
+        // Regression: `display_deliverability_section` and
         // `gmail_whitelist_instructions` must stay deleted from the
         // wizard surface. Walk the parsed AST for any function with
         // those names (regardless of visibility) — a substring grep
@@ -5283,12 +5276,12 @@ owner = "aimx-catchall"
         walker.visit_file(&parsed);
         assert!(
             walker.found.is_empty(),
-            "Sprint 5 S5-1 retired helpers must stay gone: {:?}",
+            "Retired helpers must stay gone: {:?}",
             walker.found
         );
     }
 
-    // ----- Sprint 6 S6-3: drop-through argv construction --------------------
+    // ----- drop-through argv construction -----------------------------------
 
     #[test]
     fn build_agent_setup_argv_without_data_dir() {
@@ -5315,7 +5308,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn build_agent_setup_argv_never_includes_dangerously_allow_root() {
-        // FR-5.1.a: the drop-through MUST NOT pass
+        // The drop-through MUST NOT pass
         // `--dangerously-allow-root` implicitly. Regression guard — if
         // someone adds the flag in the future, this test fails loudly.
         let exe = Path::new("/proc/self/exe");
@@ -5331,7 +5324,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn build_agent_setup_argv_uses_proc_self_exe_shape() {
-        // Sprint 6 §8.5: `/proc/self/exe` is preferred over hardcoding
+        // `/proc/self/exe` is preferred over hardcoding
         // `/usr/local/bin/aimx` so custom-prefix installs
         // (`AIMX_PREFIX=/opt/aimx`) still re-exec the right binary.
         // Assert the call-site in `drop_through_to_agent_setup` still
@@ -5345,7 +5338,7 @@ owner = "aimx-catchall"
 
     #[test]
     fn dns_verify_loop_has_prominent_q_escape() {
-        // FR-3.5 step 6: the "press `q` to skip and run `aimx doctor`
+        // The "press `q` to skip and run `aimx doctor`
         // later" escape must be a prominent standalone line, not a
         // parenthetical. Assert both the `aimx doctor` hint and the
         // literal `q` key appear near a line-start marker so future

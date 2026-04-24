@@ -1,4 +1,4 @@
-//! Sprint 2 S2-4: per-mailbox isolation integration test.
+//! Per-mailbox isolation integration test.
 //!
 //! This test creates two real Linux users (`aimx-it-alice`, `aimx-it-bob`)
 //! via `useradd`, delivers an email to alice's inbox, and asserts that a

@@ -115,7 +115,7 @@ pub struct EmailReplyParams {
     pub body: String,
 }
 
-// ---- Hook-template MCP tool params (Sprint 5) -----------------------------
+// ---- Hook-template MCP tool params ----------------------------------------
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
 pub struct HookCreateParams {
@@ -240,7 +240,7 @@ impl AimxMcpServer {
         // CLI where operators see prompts and can't be triggered
         // remotely by an agent. On NONEMPTY we rewrite the daemon's
         // error into a structured hint that names the exact CLI command
-        // (S48-6). The fallback direct-on-disk path runs only when the
+        // The fallback direct-on-disk path runs only when the
         // daemon is unreachable.
         match submit_mailbox_crud_via_daemon(&params.name, false, None) {
             Ok(()) => Ok(format!(
@@ -319,7 +319,7 @@ impl AimxMcpServer {
 
         let folder = resolve_folder(params.folder.as_deref())?;
         let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
-        // Sprint 1 S1-2: read paths audit — `email_read` goes through
+        // Read paths audit — `email_read` goes through
         // the strict resolver so a planted symlink or escape path
         // cannot exfiltrate another mailbox's mail via `email_read`,
         // not just via the MARK verbs.
@@ -400,7 +400,7 @@ impl AimxMcpServer {
         }
 
         let mailbox_dir = config.inbox_dir(&params.mailbox);
-        // Sprint 1 S1-2: `email_reply` reads the parent message to
+        // `email_reply` reads the parent message to
         // inherit threading headers; route through the strict resolver
         // so a symlink cannot leak another mailbox's message into a
         // reply composition.
@@ -454,7 +454,7 @@ impl AimxMcpServer {
         submit_via_daemon(&args)
     }
 
-    // ---- Hook-template MCP tools (Sprint 5) -------------------------------
+    // ---- Hook-template MCP tools ------------------------------------------
 
     #[tool(
         name = "hook_list_templates",
@@ -646,7 +646,7 @@ impl AimxMcpServer {
     }
 }
 
-// ---- Hook-template MCP tool helpers (Sprint 5) ----------------------------
+// ---- Hook-template MCP tool helpers ---------------------------------------
 
 /// JSON shape returned by `hook_list_templates`. Kept as an explicit
 /// view struct (rather than reusing [`HookTemplate`]) so the wire
@@ -892,7 +892,7 @@ pub(crate) enum MailboxCrudFallback {
 }
 
 /// Submit a `MAILBOX-CREATE` / `MAILBOX-DELETE` request over UDS.
-/// `owner` is required on CREATE (Sprint 2 §6.3); ignored on DELETE.
+/// `owner` is required on CREATE; ignored on DELETE.
 pub(crate) fn submit_mailbox_crud_via_daemon(
     name: &str,
     create: bool,
@@ -1015,7 +1015,7 @@ pub(crate) fn parse_ack_response(buf: &[u8]) -> MarkOutcome {
     }
     if let Some(err_body) = rest.strip_prefix("ERR ") {
         let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
-        // Sprint 4: prefer the structured `Code:` header if the daemon
+        // Prefer the structured `Code:` header if the daemon
         // emitted one, fall back to the legacy inline token.
         let header = parse_ack_code_header(text);
         let code = match (header, ErrCode::from_str(code_str)) {
@@ -1839,7 +1839,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let server = AimxMcpServer::new(Some(tmp.path().to_path_buf()));
         let tools = server.tool_router.list_all();
-        // 9 mail/mailbox tools + 4 hook tools (Sprint 5).
+        // 9 mail/mailbox tools + 4 hook tools.
         assert_eq!(tools.len(), 13);
     }
 
@@ -1860,7 +1860,7 @@ mod tests {
         assert!(names.contains(&"email_send"));
         assert!(names.contains(&"email_reply"));
 
-        // Sprint 5 additions.
+        // Hook-tool additions.
         assert!(names.contains(&"hook_list_templates"));
         assert!(names.contains(&"hook_create"));
         assert!(names.contains(&"hook_list"));
@@ -1941,7 +1941,7 @@ mod tests {
         assert!(result.unwrap_err().contains("invalid characters"));
     }
 
-    // ----- S48-6 NONEMPTY → CLI hint rewrite ---------------------------
+    // ----- NONEMPTY → CLI hint rewrite ---------------------------------
 
     #[test]
     fn rewrite_nonempty_error_carries_counts_and_cli_command() {
@@ -2079,7 +2079,7 @@ mod tests {
         assert!(args.attachments.is_empty());
     }
 
-    // ---- Sprint 5 hook-template tool helpers -----------------------------
+    // ---- hook-template tool helpers --------------------------------------
 
     use crate::config::{HookTemplate, HookTemplateStdin};
     use crate::hook::Hook;
@@ -2381,7 +2381,7 @@ mod tests {
         assert_eq!(json["substituted_argv"][1], "hi");
     }
 
-    // ----- Sprint 1 S1-1: resolve_email_path_strict -----
+    // ----- resolve_email_path_strict -----
 
     fn write_flat_email(dir: &std::path::Path, id: &str) {
         std::fs::create_dir_all(dir).unwrap();

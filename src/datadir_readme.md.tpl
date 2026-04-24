@@ -124,7 +124,7 @@ Set the defaults once at the top of `config.toml` and override per-mailbox
 only when a mailbox needs a different policy.
 
 Trust only gates `on_receive` hook execution. All email is stored
-regardless of the `trusted` result. A Sprint 50 hook fires iff
+regardless of the `trusted` result. A hook fires iff
 `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`.
 See `book/hooks.md` for the full hook schema (`[[mailboxes.<name>.hooks]]`
 with `event = "on_receive" | "after_send"` and a globally-unique 12-char

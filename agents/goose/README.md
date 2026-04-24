@@ -80,5 +80,6 @@ Goose's native integration shape is different from the skills-based
 agents (Claude Code, Codex, OpenCode, Gemini). A recipe bundles both the
 MCP extension config AND the agent-facing instructions in one YAML
 file, so there is no separate "paste this JSON snippet" step. Running
-the recipe starts the aimx MCP server automatically. This matches FR-49:
-the installer writes one file and prints one activation command.
+the recipe starts the aimx MCP server automatically: the installer
+writes one file and prints one activation command, so aimx never
+mutates an agent's primary config file.

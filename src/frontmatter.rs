@@ -59,7 +59,7 @@ pub struct InboundFrontmatter {
     /// RFC 3339 UTC timestamp written by the `MARK-READ` handler when
     /// the email is marked read. Removed entirely on `MARK-UNREAD`.
     /// Re-marking read overwrites with a new timestamp: "most recent
-    /// read", not "first read" (FR-13).
+    /// read", not "first read".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub read_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -94,7 +94,7 @@ impl Default for AuthResults {
     }
 }
 
-/// Delivery status for outbound sent files (FR-19c).
+/// Delivery status for outbound sent files.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryStatus {
     Delivered,
@@ -147,7 +147,7 @@ impl<'de> Deserialize<'de> for DeliveryStatus {
     }
 }
 
-/// Outbound frontmatter for sent-copy `.md` files (FR-19c).
+/// Outbound frontmatter for sent-copy `.md` files.
 ///
 /// Composes the same inbound fields (Identity/Parties/Content/Threading/
 /// Auth/Storage) at the top, plus an outbound block at the end containing
@@ -725,7 +725,7 @@ mod tests {
         let toml_str = toml::to_string(&fm).unwrap();
         assert!(
             !toml_str.contains("read_at"),
-            "read_at must be omitted when None (FR-19d); got:\n{toml_str}"
+            "read_at must be omitted when None; got:\n{toml_str}"
         );
     }
 
@@ -838,7 +838,7 @@ mod tests {
 
         // Inbound block first, then outbound block at the end.
         // `received_at` is omitted because it is empty on outbound messages
-        // (S41-1: skip_serializing_if = "String::is_empty").
+        // (skip_serializing_if = "String::is_empty").
         let expected_keys = vec![
             "id",
             "message_id",

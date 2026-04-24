@@ -5,7 +5,7 @@
 //! definitions without digging through Rust struct literals. The file
 //! is embedded via `include_str!` and parsed on demand.
 //!
-//! Sprint 8 (S8-1) stripped every `invoke-<agent>` block from the
+//! Every `invoke-<agent>` block has been stripped from the
 //! bundled TOML — per-agent templates are now created on demand by
 //! `aimx agent-setup` so they bind to the caller's `$PATH` and uid
 //! rather than a hardcoded path. Only the agent-neutral `webhook`
@@ -45,8 +45,8 @@ pub fn default_templates() -> Vec<HookTemplate> {
 }
 
 /// Names of all default templates, in the order they appear in the
-/// embedded TOML. Retained as a test helper; see the module-level note
-/// on Sprint 3 retiring the interactive consumer of this list.
+/// embedded TOML. Retained as a test helper; the interactive consumer
+/// of this list has been retired.
 #[cfg(test)]
 fn default_template_names() -> Vec<String> {
     default_templates().into_iter().map(|t| t.name).collect()
@@ -72,11 +72,11 @@ mod tests {
         );
     }
 
-    /// PRD §6.7 pins the exact argv shape and stdin mode for the
-    /// `webhook` template — the only default template bundled after
-    /// Sprint 8 stripped the per-agent `invoke-*` blocks. This test is
-    /// a forcing function: drift in `defaults.toml` must be an explicit
-    /// update to the PRD, not a silent change in the shipped binary.
+    /// Pin the exact argv shape and stdin mode for the `webhook`
+    /// template — the only default template bundled after the
+    /// per-agent `invoke-*` blocks were stripped. This test is a
+    /// forcing function: drift in `defaults.toml` must be explicit,
+    /// not a silent change in the shipped binary.
     #[test]
     fn default_templates_match_prd_spec() {
         let templates = default_templates();
@@ -143,11 +143,11 @@ mod tests {
         assert_eq!(
             names,
             vec!["webhook"],
-            "default template ordering must match PRD §6.7 (webhook only after Sprint 8)",
+            "default template ordering must place the webhook template last",
         );
     }
 
-    /// Regression guard for Sprint 8 S8-1: no `invoke-*` blocks should
+    /// Regression guard: no `invoke-*` blocks should
     /// ever re-enter the bundled defaults. Per-agent templates belong
     /// to `aimx agent-setup`, which registers them on demand.
     #[test]

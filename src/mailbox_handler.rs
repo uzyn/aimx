@@ -92,7 +92,7 @@ pub async fn handle_mailbox_crud(
         };
     }
 
-    // Sprint 4 §6.5: MAILBOX-CREATE / MAILBOX-DELETE are root-only.
+    // MAILBOX-CREATE / MAILBOX-DELETE are root-only.
     // Non-root callers get EACCES before any lock is acquired.
     let verb = if req.create {
         "MAILBOX-CREATE"
@@ -124,7 +124,7 @@ pub async fn handle_mailbox_crud(
             None => {
                 return AckResponse::Err {
                     code: ErrCode::Validation,
-                    reason: "MAILBOX-CREATE requires an Owner: header (Sprint 2 §6.3)".into(),
+                    reason: "MAILBOX-CREATE requires an Owner: header".into(),
                 };
             }
         };
@@ -134,7 +134,7 @@ pub async fn handle_mailbox_crud(
     }
 }
 
-/// Resolve `owner` via the same helpers Sprint 1 ships for `MailboxConfig`.
+/// Resolve `owner` via the same helpers used for `MailboxConfig`.
 /// Using [`MailboxConfig::owner_uid`] / [`MailboxConfig::owner_gid`] keeps
 /// the reserved-name short-circuits (`root` → uid 0 without hitting
 /// `getpwnam`, `aimx-catchall` → routed through the resolver) in one code
@@ -161,19 +161,17 @@ fn resolve_owner_ids(owner: &str) -> Result<(u32, u32), String> {
     Ok((uid, gid))
 }
 
-// Sprint 7.5 S7.5-5 re-evaluation: Sprint 2 review proposed collapsing
-// the repeated `AckResponse::Err { code: ErrCode::Io, reason: format!(...) }`
-// pattern inside `handle_create` into a small `io_err(path, op, e)`
-// helper. A second pass after three more sprints of on-disk evidence
-// confirms the original decision: the six Io-error sites carry four
-// distinct operation verbs (`failed to create`, `failed to chown`,
-// `failed to write`, `stat … failed`) and two of them include
-// site-specific guidance (the chown site names the syscall, the rename
-// site names the config path). A shared helper would either force the
-// verbs into a uniform template (losing the distinct framing the
-// messages currently carry) or accept a `&str` verb argument that
-// reintroduces the same `format!` chain at every call site. Deferred
-// indefinitely; the spelled-out pattern stays more scannable.
+// The repeated `AckResponse::Err { code: ErrCode::Io, reason:
+// format!(...) }` pattern inside `handle_create` is intentionally not
+// collapsed into a small `io_err(path, op, e)` helper: the six Io-error
+// sites carry four distinct operation verbs (`failed to create`,
+// `failed to chown`, `failed to write`, `stat … failed`) and two of
+// them include site-specific guidance (the chown site names the
+// syscall, the rename site names the config path). A shared helper
+// would either force the verbs into a uniform template (losing the
+// distinct framing the messages currently carry) or accept a `&str`
+// verb argument that reintroduces the same `format!` chain at every
+// call site. The spelled-out pattern stays more scannable.
 fn handle_create(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
@@ -709,7 +707,7 @@ mod tests {
     #[tokio::test]
     async fn create_failure_at_disk_write_leaves_handle_and_disk_unchanged() {
         let _r = install_tester_resolver();
-        // S47-3: this test used to force failure by pointing config_path
+        // This test used to force failure by pointing config_path
         // at a non-existent parent directory, which tripped
         // `File::create` before the temp write even started, so the
         // rename-rollback branch was never exercised. The rewritten form
@@ -765,7 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_stanza_is_dropped_on_rewrite() {
-        // S47-3: this pins the **documented** v1 behaviour of
+        // This pins the **documented** v1 behaviour of
         // `write_config_atomic`. The rewrite goes through
         // `toml::to_string_pretty(&Config)`, so any stanza the operator
         // added that isn't modeled in `Config` is not preserved. If this
@@ -974,7 +972,7 @@ mod tests {
         }
     }
 
-    // ----- Sprint 2 S2-1: Owner:-header behaviour -----------------------
+    // ----- Owner:-header behaviour --------------------------------------
 
     #[tokio::test]
     async fn create_missing_owner_header_is_validation_error() {
@@ -1081,7 +1079,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_conflict_on_preexisting_dir_with_wrong_owner_preserves_operator_data() {
-        // Sprint 7.5 S7.5-2: this test pins the `Conflict` short-circuit
+        // This test pins the `Conflict` short-circuit
         // in `check_preexisting_dirs`, NOT the chown-failure rollback
         // path. By pre-creating `inbox/alice` owned by the current uid
         // while asking the handler to chown for `nobody` (uid 65534),
@@ -1158,7 +1156,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_rollback_on_chown_failure_removes_only_self_created_dirs() {
-        // Sprint 2 S2-1 / Sprint 7.5 S7.5-2: when the post-create chown
+        // When the post-create chown
         // fails the handler must roll back the directories IT created
         // in this call. To deterministically hit the chown-failure
         // branch (NOT the preexistence Conflict short-circuit), we

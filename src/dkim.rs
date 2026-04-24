@@ -164,7 +164,7 @@ pub fn public_key_spki_base64(dkim_root: &Path) -> Result<String, Box<dyn std::e
 /// resolvers).
 ///
 /// Shared between `aimx setup`'s verify_dkim check and `aimx serve`'s
-/// startup DNS sanity check (S44-2). Keeping a single parser prevents the
+/// startup DNS sanity check. Keeping a single parser prevents the
 /// two checks from drifting and producing contradictory verdicts.
 pub fn extract_dkim_p_value(record: &str) -> Option<String> {
     for part in record.split(';') {

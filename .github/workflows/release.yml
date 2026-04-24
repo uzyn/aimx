@@ -33,8 +33,8 @@ jobs:
         id: version
         run: |
           tag="${GITHUB_REF_NAME}"
-          # Tags are bare SemVer post-Sprint 8.0.1, but be lenient about a
-          # caller-supplied `v` prefix in case a legacy tag ever reappears.
+          # Tags are bare SemVer, but be lenient about a caller-supplied
+          # `v` prefix in case a legacy tag ever reappears.
           version="${tag#v}"
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
@@ -60,7 +60,7 @@ jobs:
       - name: Stage tarball contents
         run: |
           set -euo pipefail
-          # Artifact name drops the `-unknown-` vendor field per Sprint 8.0.1
+          # Artifact name drops the `-unknown-` vendor field
           # (Helix-style readability). The canonical target triple
           # (`x86_64-unknown-linux-gnu`) is still used for `cargo build
           # --target`, `aimx --version`, and the `TARGET` build-time env —
@@ -137,7 +137,7 @@ jobs:
           cd dist
           # Normalise per-asset .sha256 files (strip any path prefix left by
           # matrix stages) and assemble the release-wide SHA256SUMS file.
-          # Artifact names here are Sprint 8.0.1 shortened form
+          # Artifact names here are the shortened form
           # (no `-unknown-` vendor field).
           : > SHA256SUMS
           for t in aimx-*.tar.gz; do
@@ -192,8 +192,8 @@ jobs:
           # root commit so first releases still produce a sensible log.
           # Keep this glob in lockstep with the trigger glob up top so
           # only SemVer-shaped tags count as candidate "previous" tags
-          # for the changelog range. Tags are bare SemVer post-Sprint
-          # 8.0.1 (no `v` prefix).
+          # for the changelog range. Tags are bare SemVer (no `v`
+          # prefix).
           prev_tag="$(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
             | grep -v -x "${TAG}" | head -n1 || true)"
           if [ -n "${prev_tag}" ]; then
@@ -220,7 +220,7 @@ jobs:
             echo
             echo "## SHA-256 checksums"
             echo
-            echo "Tarball names drop the \`-unknown-\` vendor field (Sprint 8.0.1);"
+            echo "Tarball names drop the \`-unknown-\` vendor field;"
             echo "the canonical Rust target triple is shown for reference."
             echo
             echo "| Tarball | Target triple | SHA-256 |"
@@ -277,8 +277,8 @@ jobs:
         run: |
           # Treat any tag that carries a hyphen after the SemVer core as
           # a pre-release (e.g. 0.0.0-rc1, 0.0.0-fixture, 1.2.3-rc1). Tags
-          # are bare post-Sprint 8.0.1, but a leading `v` is tolerated for
-          # legacy compatibility.
+          # are bare, but a leading `v` is tolerated for legacy
+          # compatibility.
           if printf '%s' "${TAG}" | grep -Eq '^v?[0-9]+\.[0-9]+\.[0-9]+-'; then
             echo "prerelease=true" >> "$GITHUB_OUTPUT"
           else

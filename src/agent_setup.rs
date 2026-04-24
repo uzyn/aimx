@@ -27,7 +27,7 @@ pub struct AgentSpec {
     /// Destination template, with `$HOME` / `$XDG_CONFIG_HOME` placeholders.
     pub dest_template: &'static str,
     /// Top-level config directory for the agent itself (e.g. `$HOME/.claude`).
-    /// `detect_install_state` (Sprint 6 S6-1) uses this to distinguish
+    /// `detect_install_state` uses this to distinguish
     /// "agent not installed on this machine" (directory missing) from
     /// "agent installed but aimx not wired in yet" (directory exists but
     /// `dest_template` does not). Always an ancestor of `dest_template`.
@@ -73,7 +73,7 @@ pub struct AgentSpec {
 /// Static registry of supported agents.
 ///
 /// v1 roster: `claude-code`, `codex`, `opencode`, `gemini`, `goose`,
-/// `openclaw`, `hermes` (PRD §6.10 FR-50). Source-tree layout asymmetry is by
+/// `openclaw`, `hermes`. Source-tree layout asymmetry is by
 /// design; `assemble_plugin_files` walks each source tree relative to its
 /// root and handles all three shapes. Do not "normalize" the layout;
 /// the destination template determines the depth.
@@ -354,8 +354,8 @@ fn hermes_hint(data_dir: Option<&Path>) -> String {
     // without restarting.
     //
     // The snippet is hand-rendered as YAML rather than serialized via a YAML
-    // library so we avoid a serde_yaml dependency (FR-49 principle: never
-    // mutate agent config files; print snippets instead). The args list uses
+    // library so we avoid a serde_yaml dependency. aimx never mutates an
+    // agent's config file; we print snippets instead. The args list uses
     // YAML inline-flow syntax so the rendered block stays compact.
     //
     // YAML flow sequences treat `,`, `[`, `]`, and `#` as structural, so any
@@ -444,8 +444,8 @@ pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
 
 /// Reasons `derive_template_name` refuses an input.
 ///
-/// Sprint 5 §6.1 / §8.2: both parts of `invoke-<agent>-<username>` must
-/// match `[a-z0-9-]+` because the template-name validator used by
+/// Both parts of `invoke-<agent>-<username>` must match
+/// `[a-z0-9-]+` because the template-name validator used by
 /// `Config::load` rejects anything else. Usernames that fall outside the
 /// charset can still own mailboxes (operators can hand-author templates
 /// in `config.toml`), but they cannot use `agent-setup`'s template
@@ -586,8 +586,8 @@ impl AgentEnv for RealAgentEnv {
 }
 
 /// Wrapper around an inner [`AgentEnv`] that shadows `home_dir()` and
-/// `xdg_config_home()` with a fixed home path. Used by the Sprint 6
-/// `--dangerously-allow-root` code path (FR-5.1.a): with the flag set,
+/// `xdg_config_home()` with a fixed home path. Used by the
+/// `--dangerously-allow-root` code path: with the flag set,
 /// `home_dir()` resolves to the `root` passwd entry's `pw_dir` (not `$HOME`,
 /// which can be unset under `sudo -H`), and XDG defaults to `<home>/.config`.
 /// All other methods (root check, TTY detection, UDS submits) pass through
@@ -672,7 +672,7 @@ pub fn caller_username_from_euid() -> Option<String> {
 }
 
 /// Resolve a Linux user's home directory via `getpwnam(3)`. Used by
-/// `--dangerously-allow-root` (FR-5.1.a) to look up `/root` — or whatever
+/// `--dangerously-allow-root` to look up `/root` — or whatever
 /// the local `root` account's `pw_dir` is — without relying on `$HOME`,
 /// which can be unset or stale under `sudo -H`.
 ///
@@ -794,7 +794,7 @@ pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, Strin
 }
 
 /// Substitute `$HOME` / `$XDG_CONFIG_HOME` in a template against an explicit
-/// home path. Sprint 6 detection (`detect_install_state`) uses this helper
+/// home path. The `detect_install_state` probe uses this helper
 /// to resolve paths against a caller-chosen home — for
 /// `--dangerously-allow-root` that's `/root`, not the ambient env's HOME.
 /// When `xdg` is `None`, defaults to `<home>/.config` per the XDG Base
@@ -807,7 +807,7 @@ pub fn resolve_template_in_home(template: &str, home: &Path, xdg: Option<PathBuf
     PathBuf::from(substituted)
 }
 
-/// Per-agent install state used to render the Sprint 6 checkbox TUI.
+/// Per-agent install state used to render the checkbox TUI.
 ///
 /// - `InstalledWired`: the plugin destination path we'd write to already
 ///   exists on disk — an earlier `aimx agent-setup <name>` has landed
@@ -827,10 +827,10 @@ pub enum InstallState {
 }
 
 /// Detect the install / wired state of one agent against a concrete home
-/// directory. Sprint 6 S6-1 + FR-5.2.
+/// directory.
 ///
-/// FR-5.2 specifies `InstalledWired` when the destination "exists AND
-/// contains aimx's MCP entry". Content-check strategy (kept intentionally
+/// Returns `InstalledWired` when the destination "exists AND contains
+/// aimx's MCP entry". Content-check strategy (kept intentionally
 /// cheap — no JSON/TOML parse):
 ///
 /// 1. Resolve `dest_template` under `home` / `xdg`.
@@ -930,11 +930,11 @@ pub struct RunOpts<'a> {
     pub print: bool,
     pub no_template: bool,
     pub redetect: bool,
-    /// FR-5.5 — force the plain registry-dump path instead of the Sprint 6
-    /// interactive TUI when no agent argument is passed. Safe to use in
-    /// scripts, non-TTY environments, and tests.
+    /// Force the plain registry-dump path instead of the interactive
+    /// TUI when no agent argument is passed. Safe to use in scripts,
+    /// non-TTY environments, and tests.
     pub no_interactive: bool,
-    /// FR-5.1.a — bypass the root-refusal check and resolve `$HOME` to
+    /// Bypass the root-refusal check and resolve `$HOME` to
     /// `/root`. Applies uniformly to the TUI, per-agent runs, and
     /// `--no-interactive`. Drop-through from `aimx setup` never sets
     /// this; the flag is operator-opt-in only.
@@ -942,7 +942,7 @@ pub struct RunOpts<'a> {
     pub data_dir: Option<&'a Path>,
 }
 
-/// FR-5.1 root-refusal message. Names both escape hatches: re-run as a
+/// Root-refusal message. Names both escape hatches: re-run as a
 /// regular user (`sudo -u <user> aimx agent-setup`) **or** pass
 /// `--dangerously-allow-root` for single-user root-login VPS setups that
 /// genuinely want aimx wired into root's home.
@@ -980,13 +980,12 @@ pub fn run_with_env(
     run_with_env_to_writer(opts, env, &mut io::stdout())
 }
 
-/// Run the non-`--list`, post-root-gate install path directly. Used by
-/// the Sprint 6 TUI's per-agent sub-calls so the root gate (and its
+/// Run the non-`--list`, post-root-gate install path directly. Used
+/// by the TUI's per-agent sub-calls so the root gate (and its
 /// `OverrideHomeEnv` wrap) runs exactly once per top-level invocation
 /// instead of re-wrapping a fresh override for every selected agent.
-/// Non-blocker N6 from PR #139 review. Callers must have already applied
-/// the root gate if the ambient env is root; passing a plain root env
-/// here bypasses the refusal.
+/// Callers must have already applied the root gate if the ambient env
+/// is root; passing a plain root env here bypasses the refusal.
 pub fn run_with_env_post_gate(
     opts: RunOpts<'_>,
     env: &dyn AgentEnv,
@@ -1008,7 +1007,7 @@ pub fn run_with_env_to_writer(
         return Ok(());
     }
 
-    // FR-5.1 / FR-5.1.a — root gate. Applies uniformly to the TUI, per-agent
+    // Root gate. Applies uniformly to the TUI, per-agent
     // runs, and `--no-interactive`. With `--dangerously-allow-root`, swap in
     // an `OverrideHomeEnv` that points at `/root` (via `getpwnam("root")`) so
     // every downstream path — detection, `resolve_dest`, the TUI, the
@@ -1063,14 +1062,14 @@ fn run_with_env_to_writer_inner(
             // registry dump so scripts / `--print` without an agent get
             // deterministic, non-interactive output:
             //
-            //   1. `--no-interactive` passed explicitly (FR-5.5).
+            //   1. `--no-interactive` passed explicitly.
             //   2. stdout is not a TTY (script / piped invocation).
             //   3. `--print` with no agent — `--print` is a dry-run hint
             //      on a specific agent's install; with no agent there is
             //      nothing to preview, so launching the TUI would be
             //      surprising. Print the registry and exit.
             //
-            // Otherwise launch the Sprint 6 checkbox TUI per FR-5.5.
+            // Otherwise launch the checkbox TUI.
             if opts.no_interactive || opts.print || !is_tty_for_tui() {
                 print_registry_to_writer(env, out)?;
                 if opts.print {
@@ -1095,12 +1094,12 @@ fn run_with_env_to_writer_inner(
     install_to_writer(spec, &install_opts, env, out)
 }
 
-/// TTY detection used to decide whether to launch the Sprint 6 checkbox
-/// TUI. The TUI draws to `console::Term::stderr()` and reads keystrokes
+/// TTY detection used to decide whether to launch the checkbox TUI.
+/// The TUI draws to `console::Term::stderr()` and reads keystrokes
 /// from the controlling terminal, so the right check is "is stderr a
-/// TTY" — if stderr is a pipe, the rendered menu would go to `/dev/null`
-/// (or wherever stderr was redirected) even though stdout might still
-/// be a terminal. Non-blocker N7 from PR #139 review.
+/// TTY" — if stderr is a pipe, the rendered menu would go to
+/// `/dev/null` (or wherever stderr was redirected) even though stdout
+/// might still be a terminal.
 fn is_tty_for_tui() -> bool {
     use std::io::IsTerminal;
     io::stderr().is_terminal()
@@ -1191,8 +1190,8 @@ fn install_to_writer(
     )?;
     writeln!(out, "{hint}")?;
 
-    // Template registration (Sprint 6, PRD §6.6). One status line,
-    // picked from the three cases in the sprint spec.
+    // Template registration. One status line, picked from the three
+    // cases below.
     writeln!(out)?;
     let outcome = register_template(spec, opts, env);
     match outcome {
@@ -1249,7 +1248,7 @@ fn install_to_writer(
 
 /// Compose the `UdsTemplatePayload` the current invocation would submit
 /// and return it rendered as TOML. Used by `--print` to give operators
-/// a dry-run view of the template (PRD §6.6 + sprint S6-3).
+/// a dry-run view of the template.
 fn print_template_preview(spec: &AgentSpec, env: &dyn AgentEnv) -> Result<String, String> {
     let username = env.caller_username().unwrap_or_else(|| "<username>".into());
     // Allow the placeholder-username case through render so `--print` on
@@ -1266,7 +1265,7 @@ fn print_template_preview(spec: &AgentSpec, env: &dyn AgentEnv) -> Result<String
 
 /// Outcome categories for the template-registration status line printed
 /// after a successful plugin install. Every case maps to exactly one
-/// line of on-screen output per Sprint 6 §S6-4.
+/// line of on-screen output.
 enum TemplateOutcome {
     /// Happy path: `TEMPLATE-CREATE` accepted.
     Registered { name: String, path: PathBuf },
@@ -1867,9 +1866,9 @@ mod tests {
     use std::cell::RefCell;
     use tempfile::TempDir;
 
-    /// Behavior a `MockEnv` test harness can inject for the Sprint 6 probe
-    /// + UDS path. `None` on `probe_result` means "act like the binary is
-    ///   missing from `$PATH`". `submit_*_result` defaults to `Ok(())`.
+    /// Behavior a `MockEnv` test harness can inject for the probe +
+    /// UDS path. `None` on `probe_result` means "act like the binary
+    /// is missing from `$PATH`". `submit_*_result` defaults to `Ok(())`.
     struct TemplateStub {
         probe_result: Option<PathBuf>,
         submit_create_result: Result<(), TemplateCrudFallback>,
@@ -1993,7 +1992,7 @@ mod tests {
         }
     }
 
-    /// Test-scope wrapper matching the pre-Sprint-6 `run_with_env`
+    /// Test-scope wrapper matching the pre-TUI `run_with_env`
     /// signature so legacy tests keep their intent (plugin-install
     /// behavior). Every legacy caller exercised the install + plugin
     /// side of the flow; we default `no_template=true` so these tests
@@ -2104,7 +2103,7 @@ mod tests {
         assert!(find_agent("not-a-real-agent").is_none());
     }
 
-    // ----- Sprint 6 S6-1: detect_install_state -------------------------------
+    // ----- detect_install_state ---------------------------------------------
 
     #[test]
     fn detect_install_state_not_installed_on_empty_home() {
@@ -2134,7 +2133,7 @@ mod tests {
 
     #[test]
     fn detect_install_state_installed_wired_when_dest_exists() {
-        // FR-5.2: destination must exist AND contain aimx's MCP entry.
+        // Destination must exist AND contain aimx's MCP entry.
         // An empty plugin directory reports NotWired; a directory holding
         // a file that references "aimx" reports Wired.
         let tmp = TempDir::new().unwrap();
@@ -2157,7 +2156,7 @@ mod tests {
 
     #[test]
     fn detect_install_state_orphan_empty_dest_is_not_wired() {
-        // Regression guard for FR-5.2 content check: an orphan empty
+        // Regression guard for the content check: an orphan empty
         // destination directory must not mis-report as wired.
         let tmp = TempDir::new().unwrap();
         let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
@@ -2203,7 +2202,7 @@ mod tests {
     #[test]
     fn detect_install_state_flags_goose_recipe_file() {
         // Goose's dest_template points at the recipes directory
-        // (`$XDG_CONFIG_HOME/goose/recipes`). FR-5.2 content check:
+        // (`$XDG_CONFIG_HOME/goose/recipes`). Content check:
         // "wired" means `aimx.yaml` exists inside that directory. A bare
         // recipes dir (no aimx.yaml) reports NotWired.
         let tmp = TempDir::new().unwrap();
@@ -2221,7 +2220,7 @@ mod tests {
         assert_eq!(state_wired, InstallState::InstalledWired);
     }
 
-    // ----- Sprint 6 S6-2: OverrideHomeEnv / root override --------------------
+    // ----- OverrideHomeEnv / root override ----------------------------------
 
     #[test]
     fn override_home_env_replaces_home_only() {
@@ -2259,7 +2258,7 @@ mod tests {
         assert_eq!(state, InstallState::InstalledNotWired);
     }
 
-    // ----- Sprint 6 S6-1/S6-2: root-refusal gate -----------------------------
+    // ----- root-refusal gate ------------------------------------------------
 
     #[test]
     fn run_with_env_refuses_root_without_flag() {
@@ -2339,7 +2338,7 @@ mod tests {
         );
     }
 
-    // ----- Sprint 6 S6-4: Template-registration section ------------------
+    // ----- Template-registration section ---------------------------------
 
     #[test]
     fn install_prints_template_registered_line_on_happy_path() {
@@ -2724,8 +2723,8 @@ mod tests {
     }
 
     // Make sure the legacy `sudo` ... `aimx setup` copy cannot reappear
-    // in `agent_setup.rs`. This is the grep AC in S6-4 translated to a
-    // compile-time assertion. The forbidden literal is assembled from
+    // in `agent_setup.rs`. The grep rule is translated to a compile-
+    // time assertion. The forbidden literal is assembled from
     // runtime pieces so this test file itself does not contain the exact
     // byte sequence the rest of the module is forbidden from carrying.
     #[test]
@@ -3101,9 +3100,8 @@ mod tests {
 
     #[test]
     fn claude_code_activation_hint_instructs_claude_mcp_add() {
-        // S44-3: Claude Code does NOT auto-activate MCP servers from
-        // plugins/installed_plugins.json (confirmed with claude -p against
-        // aimx plugin on the 2026-04-17 test VPS). The hint must instruct
+        // Claude Code does NOT auto-activate MCP servers from
+        // plugins/installed_plugins.json. The hint must instruct
         // the operator to run `claude mcp add --scope user aimx ...`, mirroring
         // Codex's hint shape.
         let spec = find_agent("claude-code").unwrap();
@@ -3255,7 +3253,7 @@ mod tests {
         let printed = String::from_utf8(buf).unwrap();
 
         // Extract the activation section and confirm it parses as JSON.
-        // Sprint 4 added a `=== hook templates ===` section after the
+        // There is a `=== hook templates ===` section after the
         // activation block, so stop at the next `=== ` marker to keep
         // the JSON body uncontaminated.
         let (_, after) = printed.split_once("=== activation ===\n").unwrap();
@@ -4048,11 +4046,10 @@ mod tests {
         let text = std::str::from_utf8(primer).unwrap();
         assert!(
             text.contains("/var/lib/aimx/"),
-            "primer must document the datadir layout plainly (FR-50c)"
+            "primer must document the datadir layout plainly"
         );
         assert!(text.contains("inbox/"));
         assert!(text.contains("sent/"));
-        assert!(text.contains("FR-50c"));
     }
 
     #[test]
@@ -4070,7 +4067,7 @@ mod tests {
         assert!(text.contains("/var/lib/aimx/README.md"));
     }
 
-    /// S5-5: every bundled agent (progressive_disclosure or not) picks
+    /// Every bundled agent (progressive_disclosure or not) picks
     /// up the primer text, so the "Creating hooks" section must be
     /// visible from the primer alone. A missing section means the
     /// primer edit got lost or reverted.
@@ -4095,7 +4092,7 @@ mod tests {
         );
     }
 
-    /// S5-5: new reference file must be present in the embedded bundle
+    /// New reference file must be present in the embedded bundle
     /// and cover the four new tools end-to-end.
     #[test]
     fn hooks_reference_file_bundled_and_comprehensive() {
@@ -4120,7 +4117,7 @@ mod tests {
         assert!(text.contains("Troubleshooting"), "{text}");
     }
 
-    /// S5-5: progressive-disclosure bundles (Claude Code, Codex,
+    /// Progressive-disclosure bundles (Claude Code, Codex,
     /// OpenClaw, Hermes) copy every references/*.md, so the new
     /// `hooks.md` lands alongside the existing four.
     #[test]
@@ -4449,7 +4446,7 @@ mod tests {
         assert!(rendered.contains("aimx agent-setup <agent>"));
     }
 
-    // ----- Sprint 6 S6-1: $PATH probe --------------------------------------
+    // ----- $PATH probe -----------------------------------------------------
 
     /// Shell `$PATH`-style OsString from a slice of paths. Helper so tests
     /// don't embed `:` separators by hand.
@@ -4628,7 +4625,7 @@ mod tests {
 
     #[test]
     fn canonical_binary_maps_per_prd_section_six_six() {
-        // Spot check the explicit mappings per Sprint 6 S6-1:
+        // Spot check the explicit mappings:
         // claude-code → claude, codex → codex, opencode → opencode,
         // gemini-cli / gemini → gemini, goose → goose, openclaw → openclaw.
         let expect: &[(&str, &str)] = &[

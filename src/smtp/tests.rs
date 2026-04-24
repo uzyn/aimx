@@ -179,7 +179,7 @@ fn test_email() -> &'static str {
     "From: sender@example.com\r\nTo: alice@test.local\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <test@example.com>\r\n\r\nHello World\r\n"
 }
 
-// --- S19.1: SMTP state machine tests ---
+// --- SMTP state machine tests ---
 
 #[tokio::test]
 async fn test_ehlo_response() {
@@ -543,7 +543,7 @@ async fn test_rcpt_accepts_case_insensitive_domain() {
     assert_eq!(alice_mds.len(), 1);
 }
 
-// --- S19.1: Size limit tests ---
+// --- Size limit tests ---
 
 #[tokio::test]
 async fn test_message_size_limit() {
@@ -568,7 +568,7 @@ async fn test_message_size_limit() {
     assert!(resp.starts_with("552"), "Expected 552 but got: {resp}");
 }
 
-// --- S19.1: Timeout tests ---
+// --- Timeout tests ---
 
 #[tokio::test]
 async fn test_idle_timeout() {
@@ -597,7 +597,7 @@ async fn test_idle_timeout() {
     );
 }
 
-// --- S19.2: STARTTLS tests ---
+// --- STARTTLS tests ---
 
 #[tokio::test]
 async fn test_starttls_advertised_in_ehlo() {
@@ -786,7 +786,7 @@ async fn test_starttls_upgrade() {
     assert!(buf.starts_with("221"));
 }
 
-// --- S19.3: Ingest integration tests ---
+// --- Ingest integration tests ---
 
 #[tokio::test]
 async fn test_ingest_creates_markdown_file() {
@@ -825,7 +825,7 @@ async fn test_ingest_failure_returns_451() {
     std::fs::write(&blocker, "x").unwrap();
     let bad_data_dir = blocker.join("data");
 
-    // A mailbox entry must exist so the RCPT preflight (S2-1) accepts;
+    // A mailbox entry must exist so the RCPT preflight accepts;
     // the failure is forced later at `create_dir_all` time because the
     // data_dir parent is a regular file.
     let mut mailboxes = HashMap::new();
@@ -869,7 +869,7 @@ async fn test_ingest_failure_returns_451() {
     );
 }
 
-// --- S19.4: Connection hardening tests ---
+// --- Connection hardening tests ---
 
 #[tokio::test]
 async fn test_connection_limit() {
@@ -1287,7 +1287,7 @@ async fn test_mixed_text_and_binary_attachments_with_body() {
 }
 
 // ---------------------------------------------------------------------------
-// S2-1: RCPT-time mailbox-routing preflight
+// RCPT-time mailbox-routing preflight
 // ---------------------------------------------------------------------------
 
 fn test_config_no_catchall(data_dir: &std::path::Path) -> Config {
@@ -1367,7 +1367,7 @@ async fn test_rcpt_catchall_accepts_any_local_part() {
 }
 
 // ---------------------------------------------------------------------------
-// S2-2 / S2-3: DATA partial-success contract
+// DATA partial-success contract
 // ---------------------------------------------------------------------------
 
 fn test_config_two_mailboxes(data_dir: &std::path::Path) -> Config {

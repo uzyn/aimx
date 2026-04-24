@@ -81,4 +81,4 @@ merge into `settings.json`. We intentionally do NOT mutate
 2. `settings.json` may already contain other MCP servers or personal
    customisations we would risk disturbing.
 3. Making the activation step explicit is self-documenting and audit-safe.
-4. It matches FR-49: never mutate an agent's primary config file.
+4. aimx never mutates an agent's primary config file.

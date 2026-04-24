@@ -11,7 +11,7 @@ use crate::state_handler::StateContext;
 use crate::term;
 use crate::transport::{FileDropTransport, LettreTransport, MailTransport};
 
-/// Resolve DKIM TXT records for the startup sanity check (S44-2). Separated
+/// Resolve DKIM TXT records for the startup sanity check. Separated
 /// into a trait so tests can inject a resolver that returns a mismatched
 /// `p=` value without reaching real DNS.
 pub trait DkimTxtResolver {
@@ -31,7 +31,7 @@ impl DkimTxtResolver for HickoryDkimResolver {
         &self,
         fqdn: &str,
     ) -> Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> {
-        // S47-1: `block_in_place` + `Handle::current().block_on(...)` only
+        // `block_in_place` + `Handle::current().block_on(...)` only
         // works from a multi-threaded tokio runtime. `aimx serve` always
         // uses the multi-thread flavour via `tokio::runtime::Runtime::new()`,
         // but a future caller that switches to the current-thread flavour
@@ -50,7 +50,7 @@ impl DkimTxtResolver for HickoryDkimResolver {
              trait instead."
         );
 
-        // S47-1 (test-only): `AIMX_TEST_DKIM_RESOLVER_OVERRIDE` lets the
+        // Test-only: `AIMX_TEST_DKIM_RESOLVER_OVERRIDE` lets the
         // integration test spin a real `aimx serve` against a canned
         // resolver result without touching DNS. Format:
         //   `"ok:<txt1>||<txt2>"`  -> resolver returns Ok(vec![...])
@@ -267,7 +267,7 @@ pub fn aimx_socket_path() -> PathBuf {
 
 /// Outcome of a SIGHUP-reload attempt from the CLI to a running daemon.
 ///
-/// Used by `aimx hooks create --cmd` (Sprint 3 S3-4) and any other CLI
+/// Used by `aimx hooks create --cmd` and any other CLI
 /// path that writes `config.toml` directly and wants the daemon to pick
 /// up the change without a full restart.
 #[derive(Debug, PartialEq, Eq)]
@@ -288,7 +288,7 @@ pub enum SighupOutcome {
 /// succeed when the caller is root or owns the daemon process; in
 /// production `aimx serve` always runs as root.
 ///
-/// Discovery strategy (Sprint 3 S3-4):
+/// Discovery strategy:
 /// 1. The UDS socket at `<runtime_dir>/aimx.sock` must exist — this
 ///    anchors "is a daemon running" to the runtime dir the caller
 ///    was configured for, so per-test `AIMX_RUNTIME_DIR` overrides
@@ -347,7 +347,7 @@ pub struct ReloadSummary {
 /// swap `handle` atomically on success. On validation failure the
 /// previous config stays in place and the error is returned.
 ///
-/// Used by the SIGHUP handler in [`run_serve`] (Sprint 3 S3-5) to hot-
+/// Used by the SIGHUP handler in [`run_serve`] to hot-
 /// reload operator edits without restarting the daemon.
 pub fn reload_config(
     path: &Path,
@@ -430,7 +430,7 @@ async fn run_serve(
     // subscriber; the first init wins.
     crate::logging::init();
 
-    // Sprint 2 S2-2: clamp the process umask so freshly-created files
+    // Clamp the process umask so freshly-created files
     // default to `0o600` / directories to `0o700` *before* any explicit
     // chown lands. Defense in depth — if a code path forgets the
     // post-write `chown_as_owner`, the file is still not world-readable.
@@ -479,10 +479,8 @@ async fn run_serve(
         }
     };
 
-    // S44-2: compare the on-disk public key to the DNS-published `p=` value.
-    // Never fatal. DNS may not have propagated yet after a fresh setup. A
-    // mismatch was the silent root cause of finding #10 in the 2026-04-17
-    // manual test run.
+    // Compare the on-disk public key to the DNS-published `p=` value.
+    // Never fatal. DNS may not have propagated yet after a fresh setup.
     let resolver = HickoryDkimResolver;
     let outcome =
         run_dkim_startup_check(&resolver, &config.domain, &config.dkim_selector, &dkim_root);
@@ -744,7 +742,7 @@ async fn run_send_listener(
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _addr)) => {
-                        // Sprint 4 S4-1: capture SO_PEERCRED at accept
+                        // Capture SO_PEERCRED at accept
                         // time so every verb handler sees the caller's
                         // uid/gid/pid before any body bytes are read.
                         let caller = match crate::uds_authz::caller_from_stream(&stream) {
@@ -1056,7 +1054,7 @@ pub mod service {
     /// Pure dispatch table for `stop_service`: returns the `(program,
     /// args)` the real implementation will invoke. Split out so the
     /// systemd-vs-OpenRC routing can be unit-tested without shelling out.
-    /// Used by `aimx upgrade` (Sprint 4) to express the strict stop →
+    /// Used by `aimx upgrade` to express the strict stop →
     /// swap → start sequence that `restart_service` alone can't.
     pub fn stop_service_command(
         init: &InitSystem,
@@ -1343,7 +1341,7 @@ mod tests {
         assert!(unit.contains("[Install]"));
         assert!(unit.contains("WantedBy=multi-user.target"));
         // Intentionally omitted directives. The daemon installs its own
-        // SIGHUP handler inside `run_serve` (Sprint 3 S3-5), so we do
+        // SIGHUP handler inside `run_serve`, so we do
         // not declare `ExecReload=` in the unit file: `systemctl reload
         // aimx` works out-of-the-box by delivering SIGHUP to the main
         // PID (systemd default) without us needing to wire a separate
@@ -1642,7 +1640,7 @@ mod tests {
         }
     }
 
-    // ----- S44-2 DKIM startup DNS sanity check ------------------------
+    // ----- DKIM startup DNS sanity check ------------------------------
 
     struct FakeDkimResolver {
         result: Result<Vec<String>, String>,
@@ -1990,7 +1988,7 @@ mod tests {
             });
             let transport: Arc<dyn MailTransport + Send + Sync> = captor.clone();
 
-            // Sprint 4: the UDS now enforces per-mailbox ownership via
+            // The UDS enforces per-mailbox ownership via
             // SO_PEERCRED, so the mailbox owner must match the uid the
             // test client connects under. Resolve the running uid back
             // to a username so this test passes for any CI user (root
@@ -2157,7 +2155,7 @@ mod tests {
     /// Crypto-verify a DKIM-signed message against a specific public key by
     /// populating a `mail-auth` TXT cache with a synthetic DKIM1 record and
     /// running the verifier. Panics on any verification failure; used by
-    /// the S34-3 integration test.
+    /// the DKIM integration test.
     async fn verify_dkim_with_pubkey(signed: &[u8], pub_pem: &str, domain: &str, selector: &str) {
         use base64::Engine;
         use mail_auth::{
@@ -2240,7 +2238,7 @@ mod tests {
         );
     }
 
-    // ---- S3-5: SIGHUP / reload_config -----------------------------
+    // ---- SIGHUP / reload_config -----------------------------------
 
     /// Happy path: a valid `config.toml` edit swaps the in-memory
     /// handle in place.

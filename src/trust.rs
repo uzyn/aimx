@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Result of per-mailbox trust evaluation, surfaced as the `trusted`
-/// frontmatter field on every inbound email (FR-37b).
+/// frontmatter field on every inbound email.
 ///
 /// Three-valued:
 ///
@@ -73,7 +73,7 @@ impl<'de> Deserialize<'de> for TrustedValue {
 ///   `trusted_senders` AND DKIM pass -> `TrustedValue::True`
 /// - effective `trust == "verified"`, any other outcome -> `TrustedValue::False`
 ///
-/// Note: Sprint 50 moves hook gating off this value. An `on_receive`
+/// Note: hook gating is decoupled from this value. An `on_receive`
 /// hook fires iff `trusted == "true"` OR the hook opts in via
 /// `dangerously_support_untrusted`. See `hook::should_fire_on_receive`.
 pub fn evaluate_trust(
@@ -381,8 +381,8 @@ mod tests {
         }
     }
 
-    /// Parity test (Sprint 50 rewrite): for `trust: verified`, an
-    /// `on_receive` hook fires iff `trusted == TrustedValue::True`
+    /// Parity test: for `trust: verified`, an `on_receive` hook fires
+    /// iff `trusted == TrustedValue::True`
     /// OR `dangerously_support_untrusted = true`. `evaluate_trust` is
     /// the sole source of truth for the `trusted` value.
     #[test]

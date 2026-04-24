@@ -79,6 +79,7 @@ Hermes does not currently expose a shell-side CLI for registering
 external MCP servers. `hermes mcp serve` runs Hermes itself as an MCP
 server (the opposite direction), and the canonical registration path per
 the official docs is editing `~/.hermes/config.yaml` directly. aimx
-follows FR-49: the installer writes the skill to disk and prints the
-exact YAML block you paste into your config, mirroring the Gemini CLI /
-OpenCode integrations rather than the OpenClaw `mcp set` pattern.
+keeps to the same pattern: the installer writes the skill to disk and
+prints the exact YAML block you paste into your config, mirroring the
+Gemini CLI / OpenCode integrations rather than the OpenClaw `mcp set`
+pattern.

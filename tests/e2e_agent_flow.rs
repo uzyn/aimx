@@ -1,4 +1,4 @@
-//! Sprint 8 S8-4: end-to-end happy path for the agent flow.
+//! End-to-end happy path for the agent flow.
 //!
 //! Runs the full `aimx setup` (non-interactive, via direct config
 //! layout) → `aimx agent-setup` (with a fake `claude` binary on a
@@ -199,7 +199,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // validation before submitting over UDS). Relax to 0644 so the
     // test-user-initiated CLI reads succeed without having to create
     // an `aimx-hook`-style shared group. Note: the daemon clamps its
-    // own umask to 0o077 at startup (`serve.rs`, Sprint 2 S2-2), so
+    // own umask to 0o077 at startup (`serve.rs`), so
     // every atomic `config.toml` rewrite from the daemon resets this
     // back to 0600 — `ensure_config_readable()` re-applies 0644
     // before each test-user CLI invocation that needs to read it.

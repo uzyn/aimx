@@ -81,5 +81,6 @@ OpenClaw provides a first-class `openclaw mcp set <name> <json>` CLI
 that registers an MCP server non-interactively. aimx uses that command
 as the activation step rather than asking users to hand-edit
 `~/.openclaw/openclaw.json` (a JSON5 file aimx does not want to parse
-and rewrite). This matches FR-49: the installer writes the skill to
-disk and prints one exact command the user runs.
+and rewrite). The installer writes the skill to disk and prints one
+exact command the user runs, so aimx never mutates an agent's primary
+config file.

@@ -1,4 +1,4 @@
-//! Interactive checkbox TUI for `aimx agent-setup` (Sprint 6 / FR-5.1–5.5).
+//! Interactive checkbox TUI for `aimx agent-setup`.
 //!
 //! Hand-rolled renderer on top of `console::Term` / `console::Key`. Used
 //! instead of `dialoguer::MultiSelect` because:
@@ -10,8 +10,7 @@
 //!    item is either togglable or absent. We need an `[-] (not
 //!    detected)` row that the cursor skips over.
 //!
-//! The target visual (sprint S6-1 "Claude Code / OpenClaw multi-select
-//! look") is:
+//! The target visual ("Claude Code / OpenClaw multi-select look") is:
 //!
 //! ```text
 //!   Wire aimx into your AI agents — Space toggles, Enter confirms, q cancels.
@@ -443,7 +442,7 @@ mod tests {
     #[test]
     fn build_rows_already_wired_is_unselected_but_selectable() {
         // Create `~/.claude/plugins/aimx` with a real aimx-content file
-        // so detection reports InstalledWired (FR-5.2 content check). Row
+        // so detection reports InstalledWired. Row
         // is selectable (operator can choose to re-wire / overwrite) but
         // defaults to unselected to avoid unnecessary re-installs.
         let tmp = TempDir::new().unwrap();

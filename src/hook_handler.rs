@@ -1,13 +1,13 @@
 //! Daemon-side handlers for the `HOOK-CREATE` and `HOOK-DELETE` verbs of
 //! the `AIMX/1` UDS protocol.
 //!
-//! `HOOK-CREATE` over UDS is template-only (Sprint 3 S3-1). The verb never
+//! `HOOK-CREATE` over UDS is template-only. The verb never
 //! accepts a raw `cmd`, `run_as`, `timeout_secs`, `stdin`, or
 //! `dangerously_support_untrusted`. Those live on the `[[hook_template]]`
 //! block the operator installed at setup time. A local user on the
 //! world-writable `aimx.sock` can only wire up pre-vetted commands.
 //!
-//! `HOOK-DELETE` is origin-protected (Sprint 3 S3-2): MCP may delete hooks
+//! `HOOK-DELETE` is origin-protected: MCP may delete hooks
 //! it created (`origin = "mcp"`) but cannot touch operator-origin hooks —
 //! those can only be removed by `sudo aimx hooks delete` or by editing
 //! `config.toml` directly.
@@ -98,7 +98,7 @@ pub async fn handle_hook_create(
 
     let current = mb_ctx.config_handle.load();
 
-    // --- Resolve mailbox. Sprint 4 §6.5: unknown mailbox returns
+    // --- Resolve mailbox. Unknown mailbox returns
     // `ENOENT` (not `EACCES`) so the authz check itself cannot leak
     // which mailboxes exist. Authz runs after the mailbox is found.
     let mailbox_cfg = match current.mailboxes.get(&req.mailbox) {
@@ -260,7 +260,7 @@ pub async fn handle_hook_create(
 /// the owning mailbox once it has been resolved, plus the global
 /// `CONFIG_WRITE_LOCK`.
 ///
-/// Origin-protected (Sprint 3 S3-2): refuses to delete operator-origin
+/// Origin-protected: refuses to delete operator-origin
 /// hooks. Those can only be removed via `sudo aimx hooks delete` or by
 /// editing `config.toml` directly.
 pub async fn handle_hook_delete(
@@ -304,7 +304,7 @@ pub async fn handle_hook_delete(
         }
     };
 
-    // Sprint 4 §6.5: the caller must own the target mailbox OR be
+    // The caller must own the target mailbox OR be
     // root. Runs before the origin check so a non-owner never learns
     // whether the hook is MCP- or operator-origin.
     //
@@ -696,8 +696,8 @@ fn enforce_run_as_matches_caller(
 /// rename leaves the handle untouched so the daemon continues against
 /// the pre-call snapshot. A swap cannot fail in the present
 /// implementation (the handle's `store` is infallible), but the
-/// semantics documented in Sprint 5 require a loud failure path here
-/// should it ever become fallible — keep the panic-free surface.
+/// semantics here require a loud failure path should `store` ever
+/// become fallible — keep the panic-free surface.
 fn commit_config(mb_ctx: &MailboxContext, new_config: Config) -> AckResponse {
     if let Err(e) = write_config_atomic(&mb_ctx.config_path, &new_config) {
         return AckResponse::Err {
@@ -762,7 +762,7 @@ mod tests {
             cmd: vec!["/usr/bin/echo".into(), "{prompt}".into()],
             params: vec!["prompt".into()],
             stdin: HookTemplateStdin::Email,
-            // Sprint 1 S1-3 invariant: hook.run_as must equal
+            // Invariant: hook.run_as must equal
             // mailbox.owner OR "root". The alice fixture is owned by
             // `root`, so `root` satisfies the invariant on every host.
             run_as: "root".into(),
@@ -1168,7 +1168,7 @@ mod tests {
 
         // NUL bytes in a param value would truncate argv entries when
         // they traverse `execvp`; our substitution validator rejects
-        // them up front (tabs and newlines are permitted per Sprint 2).
+        // them up front (tabs and newlines are permitted).
         let req = HookCreateRequest {
             mailbox: "alice".into(),
             event: "on_receive".into(),
@@ -1241,7 +1241,7 @@ mod tests {
         assert!(live.mailboxes["alice"].hooks.is_empty());
     }
 
-    /// S3-2: operator-origin hooks must refuse deletion over UDS.
+    /// Operator-origin hooks must refuse deletion over UDS.
     #[tokio::test]
     async fn hook_delete_refuses_operator_origin() {
         let tmp = TempDir::new().unwrap();

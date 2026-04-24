@@ -37,8 +37,8 @@ pub const MAX_PARAM_BYTES: usize = 8 * 1024;
 /// Mirrors `HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS` in `config.rs` — kept
 /// duplicated rather than imported so `hook_substitute.rs` stays free of
 /// cross-module coupling beyond the `Hook` / `HookTemplate` types.
-/// Exported for downstream consumers (MCP `hook_create` validation in
-/// Sprint 3 needs the same list); unused today.
+/// Exported for downstream consumers (MCP `hook_create` validation
+/// needs the same list); unused today.
 #[allow(dead_code)]
 pub const BUILTIN_PLACEHOLDERS: &[&str] = &["event", "mailbox", "message_id", "from", "subject"];
 
@@ -481,9 +481,9 @@ mod tests {
 
     #[test]
     fn fuzz_like_loop_preserves_argv_length() {
-        // Hand-rolled fuzz to satisfy S2-1's 10K-iter requirement in the
-        // default `cargo test` run (property-style, without pulling in
-        // proptest). Each input is a deterministic permutation of a fixed
+        // Hand-rolled fuzz with a 10K-iter sweep in the default
+        // `cargo test` run (property-style, without pulling in proptest).
+        // Each input is a deterministic permutation of a fixed
         // metacharacter palette so the test is reproducible.
         let tmpl = vec![
             "/bin/x".into(),
@@ -582,10 +582,10 @@ mod tests {
         }
     }
 
-    /// Generate a random parameter value for S6-2 fuzz iterations.
+    /// Generate a random parameter value for fuzz iterations.
     ///
-    /// The generator intentionally produces inputs from every class flagged
-    /// in the PRD §10 risk table and sprint S6-2 AC:
+    /// The generator intentionally produces inputs from every class
+    /// flagged as risky:
     ///
     /// * empty strings (edge case: zero-length slot)
     /// * 8 KiB strings (edge case: MAX_PARAM_BYTES boundary)
@@ -708,7 +708,7 @@ mod tests {
         }
     }
 
-    /// S6-2: PRD §10 critical-severity risk. 10K random inputs over a
+    /// Critical-severity argv-injection risk. 10K random inputs over a
     /// fixture template; assert either success with the argv count
     /// unchanged OR deterministic rejection via a typed error variant.
     /// Panic on any other outcome (e.g. an unexpected argv split).
@@ -770,7 +770,7 @@ mod tests {
         );
     }
 
-    /// S6-2: NUL bytes, control chars, and oversize payloads must be
+    /// NUL bytes, control chars, and oversize payloads must be
     /// rejected with the corresponding typed error every single time —
     /// not "mostly". Directed test to prove the fuzz generator actually
     /// lands on each path.
@@ -805,7 +805,7 @@ mod tests {
         }
     }
 
-    /// S6-2: end-to-end check that high-bit Unicode (emoji, RTL,
+    /// End-to-end check that high-bit Unicode (emoji, RTL,
     /// combining marks, private-use area, max scalar U+10FFFF) all
     /// round-trip through the substituter without corruption.
     #[test]
@@ -827,7 +827,7 @@ mod tests {
         }
     }
 
-    /// S6-2: substitution against an 8 KiB value exactly at the cap must
+    /// Substitution against an 8 KiB value exactly at the cap must
     /// succeed and produce exactly one argv entry carrying the full
     /// payload. Hand-rolled regression check complementing the fuzz loop.
     #[test]
