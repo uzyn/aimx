@@ -10,8 +10,20 @@ pub fn run(yes: bool, sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Err
     let config_dir = crate::config::config_dir();
     let data_dir = resolve_data_dir_for_display();
 
+    // Resolve the binary path up front so the confirmation prompt can name
+    // the exact path we are about to delete. The removal itself happens
+    // after `uninstall_service_file` below; reusing this same value keeps
+    // the prompt and the action in sync.
+    let binary_path = sys.get_aimx_binary_path().ok();
+    let binary_path_hint = binary_path
+        .as_ref()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the installed aimx binary".to_string());
+
     println!("\n{}", term::header("Uninstall"));
-    println!("This will stop the aimx daemon and remove its service file.");
+    println!(
+        "This will stop the aimx daemon, remove its service file, and delete {binary_path_hint}."
+    );
     println!(
         "Config ({}) and mailbox data ({}) will be kept.",
         config_dir.display(),
@@ -31,8 +43,15 @@ pub fn run(yes: bool, sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Err
     // and refuses to "downgrade" to the newly-fetched tag. Linux permits
     // unlinking a running executable — the kernel keeps the inode mapped
     // until this process exits — so the self-delete here is safe.
-    let binary_removed = match sys.get_aimx_binary_path() {
-        Ok(path) => match sys.remove_file(&path) {
+    //
+    // Note: `get_aimx_binary_path` canonicalises via `current_exe`, so if
+    // the operator installed via an intervening symlink (e.g. a distro
+    // package at `/usr/bin/aimx -> /opt/aimx/bin/aimx`), the real target is
+    // removed but the symlink is left dangling. `install.sh`'s `[ -x … ]`
+    // check evaluates false on a dangling symlink so reinstall still
+    // proceeds; the operator may want to `rm` the stale symlink manually.
+    let binary_removed = match binary_path {
+        Some(path) => match sys.remove_file(&path) {
             Ok(()) => Some(path),
             Err(e) => {
                 println!(
@@ -44,9 +63,9 @@ pub fn run(yes: bool, sys: &dyn SystemOps) -> Result<(), Box<dyn std::error::Err
                 None
             }
         },
-        Err(e) => {
+        None => {
             println!(
-                "{} could not resolve the aimx binary path: {e}",
+                "{} could not resolve the aimx binary path; remove it manually if needed.",
                 term::warn_mark()
             );
             None
