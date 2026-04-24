@@ -314,14 +314,16 @@ chmod +x "${_tmp}/bin/sudo"
 # "Administrator privileges required" hint before invoking `sudo -v`.
 # Whether `sudo -v` itself returns 0 depends on /dev/tty availability
 # in the host environment, which we cannot portably mock, so only the
-# user-visible message is asserted.
+# user-visible message is asserted. The outer `|| true` shields the
+# assignment from dash's set-e-on-failed-subst behavior when the helper
+# exits 1 due to the unmockable tty redirect.
 _out="$(
     INSTALL_SH_TEST=1 \
     PATH="${_tmp}/bin:${PATH}" \
     sh -c '
         . "'"${INSTALL_SH}"'"
         ensure_sudo || true
-    ' 2>&1
+    ' 2>&1 || true
 )"
 assert_contains "ensure_sudo prompts user on password branch" "${_out}" "Administrator privileges required"
 
@@ -359,6 +361,205 @@ _out="$(
 assert_contains "parse_args --tag" "${_out}" "TAG=1.2.3"
 assert_contains "parse_args --to"  "${_out}" "PREFIX=/tmp/x"
 assert_contains "parse_args --force" "${_out}" "FORCE=1"
+
+# Equals-form: --tag=VAL / --to=VAL / --target=VAL.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --tag=1.2.3 --to=/tmp/x --target=x86_64-unknown-linux-gnu
+        printf "TAG=%s PREFIX=%s TARGET=%s" "${TAG}" "${PREFIX}" "${TARGET}"
+    '
+)"
+assert_contains "parse_args --tag=VAL" "${_out}" "TAG=1.2.3"
+assert_contains "parse_args --to=VAL"  "${_out}" "PREFIX=/tmp/x"
+assert_contains "parse_args --target=VAL" "${_out}" "TARGET=x86_64-unknown-linux-gnu"
+
+# ---------------------------------------------------------------------------
+# 7b. run_agent_setup_as_invoker — sudo invoked with -H and HOME pinned
+# ---------------------------------------------------------------------------
+
+echo "# run_agent_setup_as_invoker"
+
+# Stub `sudo` that records its argv (and env) into a log file, then exits 0
+# without actually exec'ing anything. We also stub `id` to report euid 0 so
+# the helper takes the root->invoker branch unconditionally.
+_argvlog="${_tmp}/sudo-argv.log"
+_envlog="${_tmp}/sudo-env.log"
+rm -f "${_argvlog}" "${_envlog}"
+
+cat > "${_tmp}/bin/sudo" <<SUDOEOF
+#!/bin/sh
+# Record argv and selected env on invocation, then succeed without exec.
+{
+    printf 'ARGV:'
+    for _a in "\$@"; do printf ' [%s]' "\$_a"; done
+    printf '\n'
+} >> "${_argvlog}"
+printf 'HOME=%s\n' "\${HOME:-}" >> "${_envlog}"
+exit 0
+SUDOEOF
+chmod +x "${_tmp}/bin/sudo"
+
+# Stub `id` so euid always reads 0. A dedicated wrapper takes over `id -u`
+# while leaving `id -un` working via the real binary.
+_real_id="$(command -v id)"
+cat > "${_tmp}/bin/id" <<IDEOF
+#!/bin/sh
+case "\$1" in
+    -u) echo 0 ;;
+    *) exec "${_real_id}" "\$@" ;;
+esac
+IDEOF
+chmod +x "${_tmp}/bin/id"
+
+# Stub `getent` so we can pin an invoker home directory deterministically.
+# passwd-entry fields are colon-separated: name:pw:uid:gid:gecos:home:shell.
+cat > "${_tmp}/bin/getent" <<GETENTEOF
+#!/bin/sh
+if [ "\$1" = "passwd" ] && [ "\$2" = "alice" ]; then
+    printf 'alice:x:1000:1000:Alice:/home/alice:/bin/sh\n'
+    exit 0
+fi
+exit 2
+GETENTEOF
+chmod +x "${_tmp}/bin/getent"
+
+# Provide a /dev/tty presence — use /dev/null as a proxy: the helper only
+# checks -e and -r on /dev/tty, but we cannot mint one. Skip the [ -e /dev/tty ]
+# path by calling the helper in a test wrapper that stubs has_tty.
+_out="$(
+    INSTALL_SH_TEST=1 \
+    SUDO_USER=alice \
+    HOME=/tmp/bogus-outer-home \
+    PATH="${_tmp}/bin:${PATH}" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        # Force has_tty to true so the helper reaches the sudo branch.
+        has_tty() { return 0; }
+        run_agent_setup_as_invoker
+    ' 2>&1 || true
+)"
+
+_argv="$(cat "${_argvlog}" 2>/dev/null || true)"
+assert_contains "sudo invoked at all" "${_argv}" "ARGV:"
+assert_contains "sudo called with -H" "${_argv}" "[-H]"
+assert_contains "sudo called with -u alice" "${_argv}" "[-u] [alice]"
+# HOME must be pinned to the invoker's passwd home via env HOME=... in argv.
+assert_contains "HOME pinned in argv to invoker home" "${_argv}" "[HOME=/home/alice]"
+assert_not_contains "outer HOME is NOT passed through argv" "${_argv}" "HOME=/tmp/bogus-outer-home"
+
+# ---------------------------------------------------------------------------
+# 7c. SUDO prefix resolution — root-without-sudo path must succeed
+# ---------------------------------------------------------------------------
+
+echo "# SUDO prefix (root without sudo)"
+
+# Tear down the prior stubs; rebuild a PATH that has NO sudo binary.
+rm -f "${_tmp}/bin/sudo"
+
+# Re-create a config file to back up.
+mkdir -p "${_tmp}/etc/aimx"
+printf 'domain = "example.com"\n' > "${_tmp}/etc/aimx/config.toml"
+
+# Stub `id` so euid always reads 0 (simulates running as root).
+_real_id="$(command -v id)"
+cat > "${_tmp}/bin/id" <<IDEOF
+#!/bin/sh
+case "\$1" in
+    -u) echo 0 ;;
+    *) exec "${_real_id}" "\$@" ;;
+esac
+IDEOF
+chmod +x "${_tmp}/bin/id"
+
+# `id -u` stubbed to 0; sudo is absent from PATH. resolve_sudo_prefix must
+# set SUDO="" and all call sites must succeed without invoking sudo.
+_rc=0
+_out="$(
+    INSTALL_SH_TEST=1 \
+    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
+    PATH="${_tmp}/bin:/usr/bin:/bin" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        resolve_sudo_prefix
+        # Non-colon form: distinguish empty-string from truly-unset.
+        printf "SUDO=[%s]\n" "${SUDO-UNSET}"
+        backup_existing_config
+    ' 2>&1
+)" || _rc=$?
+assert_zero "backup_existing_config succeeds with empty SUDO (root, no sudo)" "${_rc}"
+assert_contains "SUDO is empty on root" "${_out}" "SUDO=[]"
+# The backup file should exist even though sudo was never called.
+_bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
+assert_contains "backup created via empty SUDO" "${_bak}" "config.toml.bak-"
+
+# Clean up for later sections.
+rm -f "${_tmp}/etc/aimx/"*
+rm -f "${_tmp}/bin/id"
+rm -f "${_tmp}/bin/getent"
+
+# Rebuild passthrough sudo for remaining tests.
+cat > "${_tmp}/bin/sudo" <<'SUDOEOF'
+#!/bin/sh
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -n|-v|-S|-H|-i|-p|--preserve-env|--non-interactive) shift ;;
+        -u) shift 2 ;;
+        -*) shift ;;
+        --) shift; break ;;
+        *) break ;;
+    esac
+done
+exec "$@"
+SUDOEOF
+chmod +x "${_tmp}/bin/sudo"
+
+# ---------------------------------------------------------------------------
+# 7d. extract_domain — reads domain from config.toml
+# ---------------------------------------------------------------------------
+
+echo "# extract_domain"
+
+mkdir -p "${_tmp}/etc/aimx"
+printf 'domain = "mail.example.com"\n' > "${_tmp}/etc/aimx/config.toml"
+_out="$(
+    INSTALL_SH_TEST=1 \
+    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
+    PATH="${_tmp}/bin:${PATH}" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        extract_domain
+    '
+)"
+assert_eq "extract_domain reads domain" "mail.example.com" "${_out}"
+
+# Missing config → placeholder fallback.
+rm -f "${_tmp}/etc/aimx/config.toml"
+_out="$(
+    INSTALL_SH_TEST=1 \
+    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
+    PATH="${_tmp}/bin:${PATH}" \
+    sh -c '
+        . "'"${INSTALL_SH}"'"
+        extract_domain
+    '
+)"
+assert_eq "extract_domain falls back to placeholder" "<your-domain>" "${_out}"
+
+# ---------------------------------------------------------------------------
+# 7e. print_closing_message — substitutes the domain
+# ---------------------------------------------------------------------------
+
+echo "# print_closing_message"
+
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        print_closing_message "mail.example.com"
+    ' 2>&1
+)"
+assert_contains "closing message substitutes domain" "${_out}" "@mail.example.com"
+assert_contains "closing message mentions success" "${_out}" "has been set up successfully"
 
 # ---------------------------------------------------------------------------
 # 8. AIMX_DRY_RUN smoke — banner + ordered step list, no sudo/download

@@ -220,6 +220,29 @@ print_welcome_banner() {
 # Privilege / invoker helpers
 # ---------------------------------------------------------------------------
 
+# SUDO holds the prefix to use for privileged commands. It is either
+# empty (when running as root) or "sudo" (when a non-root invoker has
+# sudo on PATH). Populated by resolve_sudo_prefix, which must be called
+# once early in main(). Defined here so sourced test harnesses see it.
+SUDO=""
+
+# resolve_sudo_prefix — set $SUDO to the right privilege prefix:
+#   - already root (euid 0)      → SUDO=""  (run commands directly)
+#   - non-root with sudo on PATH → SUDO="sudo"
+#   - non-root without sudo      → SUDO=""  (call sites will fail with a
+#                                  useful error via ensure_sudo before
+#                                  ever running a privileged command)
+resolve_sudo_prefix() {
+    _euid="$(id -u 2>/dev/null || echo 0)"
+    if [ "${_euid}" -eq 0 ]; then
+        SUDO=""
+    elif command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+}
+
 ensure_sudo() {
     _euid="$(id -u 2>/dev/null || echo 0)"
     if [ "${_euid}" -eq 0 ]; then
@@ -229,10 +252,18 @@ ensure_sudo() {
         if ! sudo -n true >/dev/null 2>&1; then
             ui_info "Administrator privileges required; enter your password"
             # Reattach /dev/tty so `curl | sh` still gets a password prompt.
+            # Wrap in a subshell + rc capture so a failing redirect or
+            # wrong password yields a user-visible error instead of a
+            # silent `set -e` abort.
+            _sudo_rc=0
             if [ -e /dev/tty ] && [ -r /dev/tty ]; then
-                sudo -v </dev/tty
+                (sudo -v </dev/tty) || _sudo_rc=$?
             else
-                sudo -v
+                sudo -v || _sudo_rc=$?
+            fi
+            if [ "${_sudo_rc}" -ne 0 ]; then
+                ui_error "failed to obtain sudo credentials"
+                exit 1
             fi
         fi
         return 0
@@ -261,15 +292,17 @@ detect_invoker() {
 
 # backup_existing_config
 #   If /etc/aimx/config.toml exists, rename it to
-#   config.toml.bak-YYYYMMDD-HHMMSS (UTC). On failure, err out rather
-#   than silently continuing. Only config.toml is backed up — DKIM keys
-#   and TLS certs are left in place so deliverability survives re-runs.
+#   config.toml.bak-YYYYMMDD-HHMMSS-<pid> (UTC). On failure, err out
+#   rather than silently continuing. Only config.toml is backed up —
+#   DKIM keys and TLS certs are left in place so deliverability survives
+#   re-runs. The $$ (pid) suffix prevents collision between concurrent
+#   invocations that land in the same second.
 backup_existing_config() {
     _cfg="${AIMX_CONFIG_TOML}"
     if [ -f "${_cfg}" ]; then
         _ts="$(date -u +%Y%m%d-%H%M%S)"
-        _bak="${_cfg}.bak-${_ts}"
-        if sudo mv -f "${_cfg}" "${_bak}"; then
+        _bak="${_cfg}.bak-${_ts}-$$"
+        if ${SUDO} mv -f "${_cfg}" "${_bak}"; then
             ui_info "backed up existing config to ${_bak}"
         else
             err "failed to back up existing ${_cfg}"
@@ -447,7 +480,7 @@ stop_service() {
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet aimx 2>/dev/null; then
             verbose "systemctl stop aimx"
-            systemctl stop aimx || err "systemctl stop aimx failed"
+            ${SUDO} systemctl stop aimx || err "systemctl stop aimx failed"
             printf 'systemd'
             return 0
         fi
@@ -455,7 +488,7 @@ stop_service() {
     fi
     if command -v rc-service >/dev/null 2>&1; then
         verbose "rc-service aimx stop"
-        rc-service aimx stop 2>/dev/null || true
+        ${SUDO} rc-service aimx stop 2>/dev/null || true
         printf 'openrc'
         return 0
     fi
@@ -468,11 +501,11 @@ start_service() {
     case "${_init}" in
         systemd)
             verbose "systemctl start aimx"
-            systemctl start aimx
+            ${SUDO} systemctl start aimx
             ;;
         openrc)
             verbose "rc-service aimx start"
-            rc-service aimx start
+            ${SUDO} rc-service aimx start
             ;;
         unknown)
             say "warning: unrecognized init system; not starting aimx.service"
@@ -551,7 +584,7 @@ run_aimx_setup() {
     ui_section "Steps 1-5: aimx setup (preflight, DNS, TLS, trust, service)"
     backup_existing_config
     if has_tty; then
-        if ! sudo aimx setup </dev/tty; then
+        if ! ${SUDO} aimx setup </dev/tty; then
             ui_error "aimx setup failed"
             say "  Inspect 'aimx doctor' output and re-run 'sudo aimx setup'."
             exit 1
@@ -559,7 +592,7 @@ run_aimx_setup() {
     else
         # No TTY available (e.g. CI). Run without reattaching; setup
         # will respect AIMX_NONINTERACTIVE=1 if set, or error.
-        if ! sudo aimx setup; then
+        if ! ${SUDO} aimx setup; then
             ui_error "aimx setup failed (no TTY for interactive prompts)"
             say "  Re-run with a terminal attached, or export AIMX_NONINTERACTIVE=1"
             say "  along with the required mailbox defaults. See book/setup.md."
@@ -587,8 +620,17 @@ run_agent_setup_as_invoker() {
     fi
     _euid="$(id -u 2>/dev/null || echo 0)"
     if [ "${_euid}" -eq 0 ]; then
-        # Started as root; drop to the invoker.
-        sudo -u "${_invoker}" -- sh -c 'aimx agent-setup </dev/tty' || {
+        # Started as root; drop to the invoker. `sudo -H` resets HOME
+        # to the target user's passwd-entry home, and we also pin HOME
+        # explicitly via `env HOME=...` because some sudoers
+        # configurations do not honor `-H` reliably. The agent plugin
+        # bundles (Claude Code, Codex CLI, etc.) end up under the
+        # invoker's home, not /root.
+        _inv_home="$(getent passwd "${_invoker}" 2>/dev/null | cut -d: -f6)"
+        if [ -z "${_inv_home}" ]; then
+            _inv_home="/home/${_invoker}"
+        fi
+        sudo -H -u "${_invoker}" env HOME="${_inv_home}" sh -c 'aimx agent-setup </dev/tty' || {
             ui_warn "Step 6: aimx agent-setup returned non-zero (continuing)"
             say "  Re-run as ${_invoker}: aimx agent-setup"
             return 0
@@ -605,15 +647,16 @@ run_agent_setup_as_invoker() {
 
 # extract_domain — pull the configured domain from /etc/aimx/config.toml.
 # Falls back to the literal placeholder "<your-domain>" when the file is
-# unreadable. sudo is used to step past the 0640 root-only config mode.
+# unreadable. $SUDO is used to step past the 0640 root-only config mode
+# (empty when we're already root, "sudo" otherwise).
 extract_domain() {
     _cfg="${AIMX_CONFIG_TOML}"
     _dom=""
     if [ -r "${_cfg}" ]; then
         _dom="$(awk -F'"' '/^[[:space:]]*domain[[:space:]]*=/{print $2; exit}' "${_cfg}" 2>/dev/null || true)"
     fi
-    if [ -z "${_dom}" ] && command -v sudo >/dev/null 2>&1; then
-        _dom="$(sudo awk -F'"' '/^[[:space:]]*domain[[:space:]]*=/{print $2; exit}' "${_cfg}" 2>/dev/null || true)"
+    if [ -z "${_dom}" ]; then
+        _dom="$(${SUDO} awk -F'"' '/^[[:space:]]*domain[[:space:]]*=/{print $2; exit}' "${_cfg}" 2>/dev/null || true)"
     fi
     if [ -z "${_dom}" ]; then
         _dom="<your-domain>"
@@ -763,11 +806,14 @@ main() {
     fi
 
     # From here on we touch the filesystem; acquire sudo up front so the
-    # operator is prompted once rather than sprinkled across steps.
+    # operator is prompted once rather than sprinkled across steps. Then
+    # resolve the $SUDO prefix so every privileged call site uses the
+    # right form (empty when root, "sudo" otherwise).
     ensure_sudo
+    resolve_sudo_prefix
 
     if [ ! -d "${PREFIX}" ]; then
-        if ! sudo mkdir -p "${PREFIX}" 2>/dev/null; then
+        if ! ${SUDO} mkdir -p "${PREFIX}" 2>/dev/null; then
             err "install prefix ${PREFIX} does not exist and cannot be created"
         fi
     fi
@@ -786,46 +832,32 @@ main() {
     if [ "${_is_upgrade}" -eq 1 ]; then
         # Upgrade path: non-interactive by design. Steps 1-4 and 6 are
         # skipped because the previous setup is preserved.
-        _init="$(sudo sh -c 'stop_service() {
-            if command -v systemctl >/dev/null 2>&1; then
-                if systemctl is-active --quiet aimx 2>/dev/null; then
-                    systemctl stop aimx && printf systemd && return 0
-                fi
-                return 0
-            fi
-            if command -v rc-service >/dev/null 2>&1; then
-                rc-service aimx stop 2>/dev/null || true
-                printf openrc
-                return 0
-            fi
-            printf unknown
-        }
-        stop_service' 2>/dev/null || echo unknown)"
+        _init="$(stop_service || echo unknown)"
 
         _prev="${_install_path}.prev"
 
         if [ -f "${_install_path}" ]; then
-            if ! sudo mv -f "${_install_path}" "${_prev}"; then
+            if ! ${SUDO} mv -f "${_install_path}" "${_prev}"; then
                 say "✗ failed to preserve ${_install_path} as ${_prev}"
-                sudo sh -c "case '${_init}' in systemd) systemctl start aimx ;; openrc) rc-service aimx start ;; esac" || true
+                start_service "${_init}" || true
                 err "aborting upgrade; previous binary still in place"
             fi
         fi
 
-        if ! sudo install -m 0755 "${_staged}" "${_install_path}"; then
+        if ! ${SUDO} install -m 0755 "${_staged}" "${_install_path}"; then
             say "✗ install failed; rolling back"
             if [ -f "${_prev}" ]; then
-                sudo mv -f "${_prev}" "${_install_path}" || true
+                ${SUDO} mv -f "${_prev}" "${_install_path}" || true
             fi
-            sudo sh -c "case '${_init}' in systemd) systemctl start aimx ;; openrc) rc-service aimx start ;; esac" || true
+            start_service "${_init}" || true
             err "upgrade failed at install step; service restored"
         fi
 
-        if ! sudo sh -c "case '${_init}' in systemd) systemctl start aimx ;; openrc) rc-service aimx start ;; esac"; then
+        if ! start_service "${_init}"; then
             say "✗ service start failed; rolling back"
             if [ -f "${_prev}" ]; then
-                sudo mv -f "${_prev}" "${_install_path}" || true
-                sudo sh -c "case '${_init}' in systemd) systemctl start aimx ;; openrc) rc-service aimx start ;; esac" || true
+                ${SUDO} mv -f "${_prev}" "${_install_path}" || true
+                start_service "${_init}" || true
             fi
             err "upgrade failed at start step; service restored if possible"
         fi
@@ -845,7 +877,7 @@ main() {
     fi
 
     # Fresh install path.
-    sudo install -m 0755 "${_staged}" "${_install_path}" \
+    ${SUDO} install -m 0755 "${_staged}" "${_install_path}" \
         || err "install failed writing ${_install_path}"
     ui_success "aimx ${TAG} installed to ${_install_path}"
 
