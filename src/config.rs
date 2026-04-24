@@ -62,6 +62,54 @@ pub fn dkim_dir() -> PathBuf {
     config_dir().join("dkim")
 }
 
+/// Atomically replace `path` with the TOML serialization of `config`.
+///
+/// Writes to a sibling `.<filename>.tmp.<pid>` file in the same parent
+/// directory as `path`, fsyncs it, then renames over the target. On
+/// POSIX `rename(2)` is atomic for same-filesystem targets, so readers
+/// see either the old snapshot or the new one; never a truncated file.
+/// On failure the temp file is cleaned up best-effort so subsequent
+/// retries don't trip over stale state.
+///
+/// This is the single source of truth for config-file durability used
+/// by both the daemon (`mailbox_handler::write_config_atomic` delegates
+/// here) and the CLI (`Config::save` delegates here).
+///
+/// **Unknown-key / comment behaviour (v1):** re-serializes `config`
+/// through `toml::to_string_pretty`, so any TOML fields the operator
+/// added that are not modeled in the `Config` struct are dropped on
+/// rewrite, and human-authored comments are erased. v1 assumes
+/// `config.toml` is machine-authored (edits go through `aimx setup` /
+/// `aimx mailboxes create|delete` / `aimx hooks ...`).
+pub fn write_atomic(path: &Path, config: &Config) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let serialized = toml::to_string_pretty(config)
+        .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))?;
+
+    let parent = path.parent().unwrap_or(Path::new("."));
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("config.toml");
+    let tmp_name = format!(".{file_name}.tmp.{}", std::process::id());
+    let tmp_path = parent.join(tmp_name);
+
+    // Scope the file handle so it closes before rename (paranoia on
+    // platforms where an open handle can block a rename).
+    {
+        let mut f = std::fs::File::create(&tmp_path)?;
+        f.write_all(serialized.as_bytes())?;
+        f.sync_all()?;
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, path) {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(e);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Config {
     pub domain: String,
@@ -1375,10 +1423,18 @@ impl Config {
         Ok((config, warnings))
     }
 
+    /// Persist the config to `path` atomically via temp-then-rename.
+    ///
+    /// Delegates to [`write_atomic`] so CLI fallback callers (`mailbox
+    /// create/delete`, `hooks create/delete`) get the same crash-safety
+    /// guarantee the daemon already had via
+    /// [`crate::mailbox_handler::write_config_atomic`]. Either the new
+    /// snapshot is fully durable or the existing file is left byte-for-byte
+    /// unchanged; a `config.toml` is never truncated mid-write.
     pub fn save(&self, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let content = toml::to_string_pretty(self)?;
-        std::fs::write(path, content)?;
-        Ok(())
+        write_atomic(path, self).map_err(|e| -> Box<dyn std::error::Error> {
+            format!("failed to write {}: {e}", path.display()).into()
+        })
     }
 
     /// Load the config from the canonical path returned by [`config_path`].
@@ -2172,6 +2228,127 @@ dangerously_support_untrusted = true
         config.save(&path).unwrap();
         let loaded = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(config, loaded);
+    }
+
+    /// Hardening PRD §6.4 / S3-1: `Config::save` must be crash-safe.
+    /// When the underlying write fails (here: parent dir missing, so
+    /// `File::create` on the temp file returns ENOENT), the on-disk
+    /// target file must remain byte-for-byte unchanged.
+    #[test]
+    fn save_is_atomic_and_preserves_original_on_failure() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let original = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            upgrade: None,
+        };
+        // Seed the file via the happy path first.
+        original.save(&path).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+
+        // Mutate a copy, then force `save` to fail by pointing at a path
+        // whose parent directory does not exist. `write_atomic` creates
+        // the temp file in that (missing) parent, so `File::create`
+        // returns ENOENT before any rename can run.
+        let mut mutated = original.clone();
+        mutated.domain = "changed.example".to_string();
+        let bad_parent = tmp.path().join("does").join("not").join("exist");
+        let bad_target = bad_parent.join("config.toml");
+        let err = mutated.save(&bad_target).unwrap_err();
+        assert!(
+            err.to_string().contains("config.toml") || err.to_string().contains("No such"),
+            "save error should mention the target or the missing-path cause: {err}"
+        );
+
+        // Original file on disk is untouched.
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(
+            after, original_bytes,
+            "failed save must not disturb the original config.toml",
+        );
+
+        // No stray temp file in the original parent dir.
+        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with(".config.toml.tmp.")
+            })
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "temp file must not leak into the happy-path parent dir",
+        );
+    }
+
+    /// `write_atomic` drops the temp file in the *target's* parent so
+    /// `rename(2)` stays on one filesystem. A successful write over an
+    /// existing target replaces the inode contents; a failed write
+    /// leaves the target bytes alone.
+    #[test]
+    fn write_atomic_uses_target_parent_for_temp_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+
+        let mut mailboxes = HashMap::new();
+        mailboxes.insert(
+            "catchall".to_string(),
+            MailboxConfig {
+                address: "*@test.com".to_string(),
+                owner: "aimx-catchall".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let cfg = Config {
+            domain: "test.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            hook_templates: Vec::new(),
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            upgrade: None,
+        };
+        super::write_atomic(&path, &cfg).unwrap();
+        assert!(path.exists());
+        // On success the temp file is renamed; no `.tmp.` stragglers.
+        let leftover: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "temp file should be renamed, not left behind"
+        );
     }
 
     #[test]

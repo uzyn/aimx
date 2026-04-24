@@ -35,7 +35,6 @@
 //! interleave their loads + writes, clobbering one stanza on disk and in
 //! memory. Always outer → inner.
 
-use std::io::Write;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -434,30 +433,11 @@ fn count_files_if_exists(dir: &Path) -> usize {
 /// tracked for v2; see the test `unknown_stanza_is_dropped_on_rewrite`
 /// below for the contract check.
 pub(crate) fn write_config_atomic(path: &Path, config: &Config) -> std::io::Result<()> {
-    let serialized = toml::to_string_pretty(config)
-        .map_err(|e| std::io::Error::other(format!("toml serialize: {e}")))?;
-
-    let parent = path.parent().unwrap_or(Path::new("."));
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or("config.toml");
-    let tmp_name = format!(".{file_name}.tmp.{}", std::process::id());
-    let tmp_path = parent.join(tmp_name);
-
-    // Scope the file handle so it closes before rename (paranoia on
-    // platforms where an open handle can block a rename).
-    {
-        let mut f = std::fs::File::create(&tmp_path)?;
-        f.write_all(serialized.as_bytes())?;
-        f.sync_all()?;
-    }
-
-    if let Err(e) = std::fs::rename(&tmp_path, path) {
-        let _ = std::fs::remove_file(&tmp_path);
-        return Err(e);
-    }
-    Ok(())
+    // Shared implementation lives in `config::write_atomic` so the
+    // daemon path (this function) and the CLI fallback path
+    // (`Config::save` — used by `mailbox create/delete` and
+    // `hooks create/delete`) share one durability contract.
+    crate::config::write_atomic(path, config)
 }
 
 #[cfg(test)]
