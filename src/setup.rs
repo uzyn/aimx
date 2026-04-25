@@ -1719,6 +1719,20 @@ pub(crate) fn parse_trusted_senders_line(line: &str) -> Result<Vec<String>, (Str
 /// <label>: <value>
 /// Confirm? [Y/n] _
 /// ```
+/// Parse a `[Y/n]` answer with default-yes semantics.
+///
+/// Returns `true` on blank Enter or any non-`n`/`N` first character;
+/// returns `false` only when the trimmed input begins with `n` or `N`.
+/// Shared by [`prompt_confirm`], [`prompt_confirm_list`], and
+/// [`read_yn_line`] so the parsing rule lives in exactly one place.
+fn parse_yn(input: &str) -> bool {
+    !input
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N')
+}
+
 fn prompt_confirm(
     reader: &mut dyn BufRead,
     label: &str,
@@ -1730,11 +1744,7 @@ fn prompt_confirm(
     io::stdout().flush()?;
     let mut buf = String::new();
     reader.read_line(&mut buf)?;
-    Ok(!buf
-        .trim()
-        .chars()
-        .next()
-        .is_some_and(|c| c == 'n' || c == 'N'))
+    Ok(parse_yn(&buf))
 }
 
 /// Multi-value variant of [`prompt_confirm`] for prompts whose parsed
@@ -1755,11 +1765,7 @@ fn prompt_confirm_list(
     io::stdout().flush()?;
     let mut buf = String::new();
     reader.read_line(&mut buf)?;
-    Ok(!buf
-        .trim()
-        .chars()
-        .next()
-        .is_some_and(|c| c == 'n' || c == 'N'))
+    Ok(parse_yn(&buf))
 }
 
 /// Read a `[Y/n]` line WITHOUT a value preview. Used when the caller
@@ -1773,11 +1779,7 @@ fn read_yn_line(
     io::stdout().flush()?;
     let mut buf = String::new();
     reader.read_line(&mut buf)?;
-    Ok(!buf
-        .trim()
-        .chars()
-        .next()
-        .is_some_and(|c| c == 'n' || c == 'N'))
+    Ok(parse_yn(&buf))
 }
 
 /// Interactively prompt for the `trusted_senders` allowlist.
@@ -4864,6 +4866,36 @@ owner = "aimx-catchall"
     }
 
     // ----- Cycle 5: confirm-after-prompt helpers ----------------------------
+
+    #[test]
+    fn parse_yn_handles_default_yes_and_n_first_char() {
+        // Blank / Enter → yes (default).
+        assert!(super::parse_yn(""));
+        assert!(super::parse_yn("\n"));
+        assert!(super::parse_yn("   "));
+        assert!(super::parse_yn("   \n"));
+
+        // Anything starting with non-`n` → yes.
+        assert!(super::parse_yn("y"));
+        assert!(super::parse_yn("Y"));
+        assert!(super::parse_yn("yes"));
+        assert!(super::parse_yn("yes\n"));
+        assert!(super::parse_yn("Yeah"));
+        assert!(super::parse_yn("ok"));
+        assert!(super::parse_yn("1"));
+
+        // Anything starting with `n` or `N` → no.
+        assert!(!super::parse_yn("n"));
+        assert!(!super::parse_yn("N"));
+        assert!(!super::parse_yn("no"));
+        assert!(!super::parse_yn("NO"));
+        assert!(!super::parse_yn("nope\n"));
+
+        // Leading whitespace is trimmed before the first-char check.
+        assert!(!super::parse_yn("  n"));
+        assert!(!super::parse_yn("\tno\n"));
+        assert!(!super::parse_yn("   N   "));
+    }
 
     #[test]
     fn prompt_confirm_yn_defaults_to_yes_on_blank() {

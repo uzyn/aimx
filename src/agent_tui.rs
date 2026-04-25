@@ -127,7 +127,9 @@ pub fn run_tui(
     // Resolve the invoking user via `getpwuid(geteuid())` so the TUI
     // header can show whose home directory the integration is being
     // wired into. This is best-effort — under unusual env (containers
-    // with no passwd entry) we fall back to a literal `<user>` token.
+    // with no passwd entry) we drop the trailing `for `<user>`` clause
+    // entirely and just render `Setting up MCP integration for AI
+    // agents.` instead of leaving an ugly placeholder behind.
     let username = env.caller_username();
     let selected_rows = match interact(&term_handle, &rows, username.as_deref()) {
         Ok(Some(rs)) => rs,
@@ -342,13 +344,11 @@ fn render(
     cursor: usize,
     username: Option<&str>,
 ) -> io::Result<()> {
-    let user_token = username.unwrap_or("<user>");
-    term_handle.write_line(
-        &term::header(&format!(
-            "Setting up MCP integration for AI agents for `{user_token}`."
-        ))
-        .to_string(),
-    )?;
+    let header_line = match username {
+        Some(u) => format!("Setting up MCP integration for AI agents for `{u}`."),
+        None => "Setting up MCP integration for AI agents.".to_string(),
+    };
+    term_handle.write_line(&term::header(&header_line).to_string())?;
     term_handle.write_line("Select which AI agents you want to set up AIMX MCP for:")?;
     term_handle.write_line("")?;
     for (i, row) in rows.iter().enumerate() {
@@ -677,18 +677,56 @@ mod tests {
     #[test]
     fn render_threads_username_into_header() {
         // The username comes from `AgentEnv::caller_username()` and
-        // gets formatted as a backtick-quoted token in the header.
-        // The literal `<user>` fallback only appears when the lookup
-        // returns None (containers / no passwd entry).
+        // gets formatted as a backtick-quoted token in the header
+        // when present. When `caller_username()` returns None, the
+        // header drops the trailing `for `<user>`` clause entirely —
+        // no placeholder is shown.
         let source = include_str!("agent_tui.rs");
         assert!(
             source.contains("env.caller_username()"),
             "run_tui must surface the invoking username via AgentEnv"
         );
         assert!(
-            source.contains("`{user_token}`"),
+            source.contains("for `{u}`."),
             "render must format the username as a backtick-quoted token"
         );
+    }
+
+    #[test]
+    fn render_omits_for_clause_when_username_is_none() {
+        // When `caller_username()` returns None we render the clean
+        // header line `Setting up MCP integration for AI agents.` —
+        // no backtick, no placeholder, no trailing `for ...` clause.
+        // Walk just the `render` body (top-level `fn render(` to its
+        // matching closing `}` at column 1) so test code that mentions
+        // the old placeholder doesn't self-trip.
+        let source = include_str!("agent_tui.rs");
+        let render_start = source.find("fn render(").expect("render fn must exist");
+        // First column-1 `}\n` after the opening — that's where the
+        // function body closes (private fns in this module sit at
+        // column 0, so a `}` at column 0 reliably terminates).
+        let render_end = source[render_start..]
+            .find("\n}\n")
+            .map(|off| render_start + off + "\n}\n".len())
+            .expect("render body must close with `}` at column 1");
+        let body = &source[render_start..render_end];
+        // The no-username branch must produce the clean fallback
+        // header string (no `for ...` clause, no placeholder).
+        assert!(
+            body.contains("Setting up MCP integration for AI agents."),
+            "render body must include the no-username fallback header: {body}"
+        );
+        // The forbidden `<user>` placeholder, built at runtime so this
+        // test's source doesn't trip its own check.
+        let forbidden = ["<", "user", ">"].concat();
+        assert!(
+            !body.contains(&forbidden),
+            "render body must not carry the literal placeholder anymore: {body}"
+        );
+        // Smoke: render(.., username=None, ..) must not panic.
+        let term_handle = Term::stdout();
+        let rows: Vec<Row> = Vec::new();
+        let _ = render(&term_handle, &rows, 0, None);
     }
 
     #[test]
