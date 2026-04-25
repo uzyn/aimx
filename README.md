@@ -11,14 +11,14 @@
 </p>
 
 
-<h3 align="center">SMTP for AI agents. No middleman.</h2>
+<h3 align="center">SMTP for AI agents. No middleman.</h3>
 
-<p align="center">
-The internet's oldest protocol, rebuilt for agents.<br>
+<p align="center"><em>
+The internet's oldest protocol, rebuilt for AI agents.<br>
 Runs entirely on your box. No third parties.<br>
 Your mail, your machine, end to end.<br>
-Human-friendly setup. LLM-friendly everything else.  
-</p>
+Human-friendly setup. LLM-friendly everything else.
+</em></p>
 
 
 AIMX (AI Mail Exchange) is a self-hosted mail server for AI agents. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted means full sovereignty.
@@ -27,7 +27,7 @@ Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capa
 
 
 - **Single binary.** One binary, no other dependencies.
-- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. aimx turns it back into direct server-to-server delivery. Feels like an API call.
+- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery. Feels like an API call.
 - **Push, not poll.** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
 - **Markdown emails.** No `.eml`, no database. Just Markdown with TOML frontmatter, LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
 - **Trust modeling.** Built-in DKIM-based trust model. Widely compatible. Minimizes prompt injection attacks.
@@ -103,7 +103,7 @@ Or inspect the installer itself before running it: `curl -fsSL https://aimx.emai
 
 ```text
 $ aimx
-SMTP for agents. No middleman.
+SMTP for AI agents. No middleman.
 
 Usage: aimx [OPTIONS] <COMMAND>
 

@@ -102,7 +102,7 @@ When you configure a catchall mailbox, setup creates the `aimx-catchall` system 
 
 Per-agent hook templates (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, etc.) are not ticked from a checkbox during setup. Instead, the `aimx agent-setup` drop-through (step 11) runs after the wizard completes — as your regular user, not as root — and presents an interactive checkbox picker. For each selected agent, it lays down plugin files under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching `invoke-<agent>-<username>` template over the UDS. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
 
-If you logged in directly as root (no `sudo`), the wizard prints a message pointing you at the same tool. You can either re-run `aimx agent-setup` as a regular user on the box, or pass `--dangerously-allow-root` if this is a single-user VPS where you genuinely want aimx wired into `root`'s home.
+If you logged in directly as root (no `sudo`), the wizard prints a message pointing you at the same tool. You can either re-run `aimx agent-setup` as a regular user on the box, or pass `--dangerously-allow-root` if this is a single-user VPS where you genuinely want AIMX wired into `root`'s home.
 
 ### Non-interactive setup
 
@@ -120,7 +120,7 @@ Re-run `aimx setup` on an existing install to re-verify DNS or wire an additiona
 sudo aimx setup agent.yourdomain.com
 ```
 
-When aimx detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install / configure and runs the port 25 preflight, DNS verification, and the `[MCP]` summary as a quick verification pass — and still drops through to `aimx agent-setup` at the end. Re-entry is the natural "I want to wire another agent" checkpoint; the TUI's `[x] (already wired)` state is self-documenting so you will not double-wire anything by accident.
+When AIMX detects an existing configuration (`aimx serve` running, TLS cert present, DKIM key present), it skips install / configure and runs the port 25 preflight, DNS verification, and the `[MCP]` summary as a quick verification pass — and still drops through to `aimx agent-setup` at the end. Re-entry is the natural "I want to wire another agent" checkpoint; the TUI's `[x] (already wired)` state is self-documenting so you will not double-wire anything by accident.
 
 ### DNS retry loop
 
@@ -152,7 +152,7 @@ After the setup wizard displays the required DNS records, add them at your domai
 | TXT | `aimx._domainkey.agent.yourdomain.com` | `v=DKIM1; k=rsa; p=...` | Domain registrar |
 | TXT | `_dmarc.agent.yourdomain.com` | `v=DMARC1; p=reject` | Domain registrar |
 
-Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup`. It is out of scope for aimx. A correct PTR record pointing to your domain does improve deliverability. See the VPS provider's documentation for how to set it.
+Reverse DNS (PTR) is configured at your VPS provider's control panel and is **not** covered by `aimx setup`. It is out of scope for AIMX. A correct PTR record pointing to your domain does improve deliverability. See the VPS provider's documentation for how to set it.
 
 The `AAAA` record and SPF `ip6:` mechanism are only shown and verified by `aimx setup` when `enable_ipv6 = true` is set in `config.toml`. See [IPv6 delivery (advanced)](configuration.md#ipv6-delivery-advanced). By default, `aimx serve` delivers over IPv4 only and the single `ip4:` SPF mechanism is sufficient. Any existing AAAA record in DNS is left alone.
 

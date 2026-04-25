@@ -71,7 +71,7 @@ rc-service aimx restart
 
 ## Where are the logs?
 
-aimx does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
+AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
 
 ```bash
 # Tail the last 50 lines (default)
