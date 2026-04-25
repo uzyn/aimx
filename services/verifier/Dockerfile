@@ -3,7 +3,7 @@
 # ---------- Builder ----------
 # Pinned to a specific minor tag so upstream re-tags of `rust:1-bookworm` do
 # not silently change the compiler used for builds. Bump this deliberately.
-FROM rust:1.94-bookworm AS builder
+FROM rust:1.95-bookworm AS builder
 
 WORKDIR /build
 
