@@ -502,37 +502,60 @@ impl SystemOps for RealSystemOps {
 
     fn uninstall_service_file(&self) -> Result<(), Box<dyn std::error::Error>> {
         use crate::serve::service::{InitSystem, detect_init_system};
+        use std::process::Stdio;
 
         match detect_init_system() {
             InitSystem::Systemd => {
+                let unit_path = Path::new("/etc/systemd/system/aimx.service");
+                if !unit_path.exists() {
+                    println!(
+                        "{}",
+                        term::dim("aimx.service is not installed; skipping service teardown.")
+                    );
+                    return Ok(());
+                }
                 let _ = std::process::Command::new("systemctl")
                     .args(["stop", "aimx"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 let _ = std::process::Command::new("systemctl")
                     .args(["disable", "aimx"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
-                let unit_path = Path::new("/etc/systemd/system/aimx.service");
-                if unit_path.exists() {
-                    std::fs::remove_file(unit_path)?;
-                }
+                std::fs::remove_file(unit_path)?;
                 let _ = std::process::Command::new("systemctl")
                     .args(["daemon-reload"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 let _ = std::process::Command::new("systemctl")
                     .args(["reset-failed", "aimx"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
             }
             InitSystem::OpenRC => {
+                let script_path = Path::new("/etc/init.d/aimx");
+                if !script_path.exists() {
+                    println!(
+                        "{}",
+                        term::dim("aimx.service is not installed; skipping service teardown.")
+                    );
+                    return Ok(());
+                }
                 let _ = std::process::Command::new("rc-service")
                     .args(["aimx", "stop"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
                 let _ = std::process::Command::new("rc-update")
                     .args(["del", "aimx", "default"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status();
-                let script_path = Path::new("/etc/init.d/aimx");
-                if script_path.exists() {
-                    std::fs::remove_file(script_path)?;
-                }
+                std::fs::remove_file(script_path)?;
             }
             InitSystem::Unknown => {
                 return Err("Could not detect init system (systemd or OpenRC). \
