@@ -2198,10 +2198,10 @@ mod tests {
         }
 
         let dk = DomainKey::parse(txt_record.as_bytes()).expect("parse DKIM1 record");
-        let txt_cache: InMemCache<String, Txt> = InMemCache(Mutex::new(HashMap::new()));
+        let txt_cache: InMemCache<Box<str>, Txt> = InMemCache(Mutex::new(HashMap::new()));
         // mail-auth's `IntoFqdn` normalizes to `<selector>._domainkey.<domain>.`
         // with a trailing dot: match it.
-        let key = format!("{selector}._domainkey.{domain}.");
+        let key: Box<str> = format!("{selector}._domainkey.{domain}.").into_boxed_str();
         txt_cache.0.lock().unwrap().insert(
             key,
             Txt::DomainKey(std::sync::Arc::new(dk)),
