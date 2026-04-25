@@ -1,6 +1,6 @@
 # Mailboxes & Email
 
-Mailboxes are the core organizational unit in aimx. Each mailbox maps an email address to a directory on disk.
+Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email address to a directory on disk.
 
 > **CLI alias:** Examples below use `aimx mailboxes`. The singular `aimx mailbox` is retained as a clap alias for muscle-memory and works identically.
 
@@ -31,9 +31,9 @@ as a sibling file when attachments are present.
 
 ### Routing logic
 
-When an email arrives, aimx matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
+When an email arrives, AIMX matches the local part of the recipient address (the part before `@`) against mailbox names in the config. If a mailbox with that exact name exists, the email is delivered there. Otherwise it falls through to the `catchall` mailbox.
 
-RCPT TO addresses whose domain is not the configured `domain` (case-insensitive exact match) are rejected at SMTP time with `550 5.7.1 relay not permitted` and never reach storage. aimx is not an open relay: `catchall` only covers unrecognized local parts *at your configured domain*, not unrelated domains or subdomains.
+RCPT TO addresses whose domain is not the configured `domain` (case-insensitive exact match) are rejected at SMTP time with `550 5.7.1 relay not permitted` and never reach storage. AIMX is not an open relay: `catchall` only covers unrecognized local parts *at your configured domain*, not unrelated domains or subdomains.
 
 For example, with mailboxes `support` and `catchall` configured:
 - `support@agent.yourdomain.com` -> delivered to the `support` mailbox
@@ -220,7 +220,7 @@ Deferred (4xx) sends are not persisted. The submitting client is expected to ret
 
 ## Attachments
 
-When an email carries one or more attachments, aimx writes a Zola-style
+When an email carries one or more attachments, AIMX writes a Zola-style
 bundle directory whose name matches the `.md` file's stem:
 
 ```text

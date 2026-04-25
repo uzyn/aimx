@@ -2,17 +2,17 @@
 
 ## Deployment
 
-### Why do we need port 25 open for both inbound and outbound?
+### Why does AIMX need port 25 open for both inbound and outbound?
 
 Inbound: every receiving MTA listens on port 25. It is the SMTP port defined by RFC 5321. Your MX record points at your server and delivering MTAs connect on 25 to hand mail over.
 
-Outbound: aimx delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay. aimx *is* the MTA, so they do not apply.
+Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay. AIMX *is* the MTA, so they do not apply.
 
-### Can I run aimx in Docker or behind NAT?
+### Can I run AIMX in Docker or behind NAT?
 
-Docker works if you map port 25 and persist `/etc/aimx`, `/var/lib/aimx`, and `/run/aimx` on the host. Behind NAT you must port-forward 25/tcp both ways and the MX record must resolve to the public IP. aimx learns the sender IP from the TCP peer, so any proxy in front of port 25 has to be transparent (PROXY protocol is not supported).
+Docker works if you map port 25 and persist `/etc/aimx`, `/var/lib/aimx`, and `/run/aimx` on the host. Behind NAT you must port-forward 25/tcp both ways and the MX record must resolve to the public IP. AIMX learns the sender IP from the TCP peer, so any proxy in front of port 25 has to be transparent (PROXY protocol is not supported).
 
-### Can I run two aimx instances on one host?
+### Can I run two AIMX instances on one host?
 
 Only if each binds a different IP on port 25. Two listeners cannot share the same `ip:25`. Point each instance at its own `AIMX_CONFIG_DIR` and `AIMX_DATA_DIR`, run each from its own systemd unit, and give each its own UDS path (the default `/run/aimx/aimx.sock` is hard-coded today. A second instance needs a source patch).
 
@@ -28,11 +28,11 @@ Same domain, new server: `rsync -a /etc/aimx/ /var/lib/aimx/` to the new host, i
 
 ### What is PTR record? Do I actually need it?
 
-PTR (Pointer Record) is a reverse-DNS record. It maps an IP back to a hostname, the opposite of an A/AAAA record. Setting one improves outbound deliverability and is usually configured at your hosting provider's control panel rather than at your normal DNS registrar. Because aimx is not meant for bulk sending, **a PTR is optional**. If you are only mailing a handful of targeted recipients (often yourself), having DKIM/SPF/DMARC pass, and if needed whitelisting the sender in your mail client, is usually enough.
+PTR (Pointer Record) is a reverse-DNS record. It maps an IP back to a hostname, the opposite of an A/AAAA record. Setting one improves outbound deliverability and is usually configured at your hosting provider's control panel rather than at your normal DNS registrar. Because AIMX is not meant for bulk sending, **a PTR is optional**. If you are only mailing a handful of targeted recipients (often yourself), having DKIM/SPF/DMARC pass, and if needed whitelisting the sender in your mail client, is usually enough.
 
 ### How do I rotate the DKIM key without a delivery gap?
 
-aimx today supports one active selector at a time. To rotate without bounces:
+AIMX today supports one active selector at a time. To rotate without bounces:
 
 1. `sudo aimx dkim-keygen --selector aimx2` (generates a new keypair under a second selector).
 2. Publish the new TXT record at `aimx2._domainkey.<domain>`, wait for propagation.
@@ -51,7 +51,7 @@ No. The catchall is inbound-only. Outbound `From` must resolve to a concrete, no
 
 ### What happens on a deferred or failed MX delivery?
 
-aimx does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted. The client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. aimx does not generate DSNs. This keeps the delivery result visible to the calling agent in real time. No send-and-pray.
+AIMX does not run a retry queue. A transient (4xx) failure returns `Deferred` to the client and is **not** persisted. The client (e.g. `aimx send`, an agent) is expected to retry. A permanent (5xx) failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the SMTP reason in `delivery_details`. AIMX does not generate DSNs. This keeps the delivery result visible to the calling agent in real time. No send-and-pray.
 
 ### Can I send with attachments, a custom Reply-To, or a custom Message-Id?
 
@@ -107,7 +107,7 @@ The operator keeps the full-power escape hatch: `sudo aimx hooks create --cmd ".
 
 ### Env var vs. `{id}`/`{date}` placeholder: when do I use which?
 
-Env vars (`$AIMX_FROM`, `$AIMX_SUBJECT`, …) carry sender-controlled header content. Always expand them inside double quotes. Never splice them into the `cmd` string. Placeholders (`{id}`, `{date}`) are aimx-generated (slug and ISO-8601 date) and are substituted into `cmd` directly. Use them when you need the value in a filename or path literal, where a shell variable would not expand.
+Env vars (`$AIMX_FROM`, `$AIMX_SUBJECT`, …) carry sender-controlled header content. Always expand them inside double quotes. Never splice them into the `cmd` string. Placeholders (`{id}`, `{date}`) are AIMX-generated (slug and ISO-8601 date) and are substituted into `cmd` directly. Use them when you need the value in a filename or path literal, where a shell variable would not expand.
 
 ### Can an `after_send` hook distinguish a deferral from a permanent failure?
 
@@ -131,17 +131,17 @@ When the hook's side effect is safe regardless of sender. A logger, a metric cou
 
 > The canonical write-up lives at [Security](security.md). The entries below are the common questions; that page has the full model.
 
-### Can I use aimx in place of Postfix or Stalwart?
+### Can I use AIMX in place of Postfix or Stalwart?
 
-No, and that is intentional. aimx is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
+No, and that is intentional. AIMX is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
 
 ### `aimx.sock` is mode `0666`, why is that fine?
 
-Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run aimx on a dedicated host.
+Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run AIMX on a dedicated host.
 
 ### The mailbox tree is world-readable, why is that fine?
 
-aimx assumes a single-operator server where every local user and agent is inside the trust boundary. If you need per-user mailbox isolation, aimx is the wrong tool. Run a general-purpose MTA like Postfix or Stalwart instead (see [Can I use aimx in place of Postfix or Stalwart?](#can-i-use-aimx-in-place-of-postfix-or-stalwart) above). The trade-off is documented in [Security model](getting-started.md#security-model).
+AIMX assumes a single-operator server where every local user and agent is inside the trust boundary. If you need per-user mailbox isolation, AIMX is the wrong tool. Run a general-purpose MTA like Postfix or Stalwart instead (see [Can I use AIMX in place of Postfix or Stalwart?](#can-i-use-aimx-in-place-of-postfix-or-stalwart) above). The trade-off is documented in [Security model](getting-started.md#security-model).
 
 ### Who can read the DKIM private key, and what happens if it leaks?
 
@@ -155,9 +155,9 @@ No. `aimx mcp` uses stdio transport. Each MCP client spawns and owns its own pro
 
 ### How do I scope an agent to a single mailbox?
 
-aimx does not implement MCP-level access control today. Every MCP tool call sees every mailbox. If you need isolation, run a second aimx instance on a different host (or different IP + config dir) and give each agent its own.
+AIMX does not implement MCP-level access control today. Every MCP tool call sees every mailbox. If you need isolation, run a second AIMX instance on a different host (or different IP + config dir) and give each agent its own.
 
-### How do I update the installed agent plugin after upgrading aimx?
+### How do I update the installed agent plugin after upgrading AIMX?
 
 `aimx agent-setup <agent> --force`. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. Re-running with `--force` overwrites whatever is at the destination.
 

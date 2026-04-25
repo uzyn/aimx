@@ -1,6 +1,6 @@
 # Installation
 
-aimx ships as a single statically-compiled binary. Install it in one line on any supported Linux box:
+AIMX ships as a single statically-compiled binary. Install it in one line on any supported Linux box:
 
 ```bash
 curl -fsSL https://aimx.email/install.sh | sh
@@ -10,7 +10,7 @@ This downloads the latest release for your platform, installs `aimx` into `/usr/
 
 ## Supported platforms
 
-aimx is Linux-only. Every release ships four prebuilt targets:
+AIMX is Linux-only. Every release ships four prebuilt targets:
 
 | Canonical target triple | Tarball filename target | Typical distros |
 |---|---|---|
@@ -21,7 +21,7 @@ aimx is Linux-only. Every release ships four prebuilt targets:
 
 The canonical Rust target triple (with the `-unknown-` vendor field) is still what `cargo build --target` and `aimx --version` use. Tarball filenames drop `-unknown-` for readability — the installer composes both forms automatically.
 
-The install script auto-detects your OS, CPU arch (`uname -m`), and libc flavor (glibc vs. musl) and picks the matching tarball. Non-Linux platforms are refused with a single-line error — aimx is Linux-only by policy.
+The install script auto-detects your OS, CPU arch (`uname -m`), and libc flavor (glibc vs. musl) and picks the matching tarball. Non-Linux platforms are refused with a single-line error — AIMX is Linux-only by policy.
 
 ## What the installer does
 

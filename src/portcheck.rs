@@ -185,9 +185,7 @@ pub fn run_with_net(
             if all_pass {
                 println!(
                     "{}",
-                    term::success(
-                        "All checks passed. Port 25 is reachable. Your system is good for aimx setup."
-                    )
+                    term::success("Port 25 reachable. Ready for `aimx setup`.")
                 );
                 println!("Run `sudo aimx setup` to begin.");
                 Ok(())

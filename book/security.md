@@ -1,44 +1,44 @@
 # Security model
 
-aimx is a mail server for a single operator running AI agents on a host they control. This page describes the threat model it is built for, the trust boundaries that hold the design together, and — equally important — what aimx deliberately does not defend against.
+AIMX is a mail server for a single operator running AI agents on a host they control. This page describes the threat model it is built for, the trust boundaries that hold the design together, and — equally important — what AIMX deliberately does not defend against.
 
-If you read only one sentence: **the authorisation boundary in aimx is the root-only DKIM private key, not filesystem ACLs and not the socket permissions**. Everything else on this page is a consequence of that choice.
+If you read only one sentence: **the authorisation boundary in AIMX is the root-only DKIM private key, not filesystem ACLs and not the socket permissions**. Everything else on this page is a consequence of that choice.
 
-The reasoning is narrow: the only thing that lets an actor credibly impersonate your domain on the public internet is a DKIM signature that verifies against the TXT record you published. Local file ACLs and socket modes only decide who on this host gets to *ask* the daemon to sign. They do not, on their own, produce forgeable output. If we let unprivileged local subjects reach the signing oracle but never the key itself, we can design the surrounding system for ergonomics — world-readable mail for LLM parsing, world-writable UDS for agent ergonomics — without weakening the one boundary that matters when the mail leaves the host. This is the single decision every other choice on this page defers to.
+The reasoning is narrow: the only thing that lets an actor credibly impersonate your domain on the public internet is a DKIM signature that verifies against the TXT record you published. Local file ACLs and socket modes only decide who on this host gets to *ask* the daemon to sign. They do not, on their own, produce forgeable output. Letting unprivileged local subjects reach the signing oracle but never the key itself allows the surrounding system to be designed for ergonomics — world-readable mail for LLM parsing, world-writable UDS for agent ergonomics — without weakening the one boundary that matters when the mail leaves the host. This is the single decision every other choice on this page defers to.
 
 ## At a glance
 
-- aimx is a **single-operator, single-host** SMTP server. It assumes one administrator and treats every local user and agent on that host as inside the trust boundary.
+- AIMX is a **single-operator, single-host** SMTP server. It assumes one administrator and treats every local user and agent on that host as inside the trust boundary.
 - `aimx serve` runs as root and owns the DKIM signing key. All other processes (`aimx send`, `aimx mcp`, hook subprocesses) are unprivileged and cannot forge outbound signatures.
 - The Unix socket at `/run/aimx/aimx.sock` is intentionally world-writable (`0666`). It is a signing oracle for the configured mailboxes, nothing more; it cannot be used to run arbitrary commands on the host.
 - Hook subprocesses run as the mailbox's owner (the registering Linux user) by default, never as root. Template hooks (the agent-creatable kind) never invoke a shell and cannot escape their declared argv slots.
 - DKIM / SPF / DMARC results are recorded in every inbound email's frontmatter but only DKIM gates hook execution. Mail is always stored, regardless of the authentication outcome.
-- aimx does not implement per-user mailbox isolation, IMAP / POP3, webmail, SMTP AUTH, a retry queue, DSN bounces, spam filtering, or rate limiting. Those are out of scope by design, not on a roadmap.
+- AIMX does not implement per-user mailbox isolation, IMAP / POP3, webmail, SMTP AUTH, a retry queue, DSN bounces, spam filtering, or rate limiting. Those are out of scope by design, not on a roadmap.
 
 ## Threat model
 
 ### Who you are
 
-The operator owns the host, the domain, and every local user on the box. You are the single administrator of a VPS or home server with port 25 open to the internet. You install aimx to give one or more AI agents their own email addresses on your domain.
+The operator owns the host, the domain, and every local user on the box. You are the single administrator of a VPS or home server with port 25 open to the internet. You install AIMX to give one or more AI agents their own email addresses on your domain.
 
 ### Who the adversaries are
 
-aimx is built to survive the following:
+AIMX is built to survive the following:
 
-- **The public internet on port 25.** Unauthenticated senders, spammers, phishers, and automated scanners will connect. aimx accepts their mail, records the authentication results, and lets the operator (or an agent, via a hook) decide what to do with it.
+- **The public internet on port 25.** Unauthenticated senders, spammers, phishers, and automated scanners will connect. AIMX accepts their mail, records the authentication results, and lets the operator (or an agent, via a hook) decide what to do with it.
 - **A confused or compromised local agent.** An agent might follow a prompt-injected instruction and try to exfiltrate mail, send spam under your domain, or install a hook that runs arbitrary shell. The design prevents the third outright and limits the first two.
 - **A curious local user.** A user on the host with no sudo rights can read every mailbox and submit mail through the world-writable socket, but cannot sign mail as a wildcard sender, forge DKIM, or escape the hook template sandbox.
 
 ### Who the adversaries are not
 
-aimx does **not** attempt to defend against:
+AIMX does **not** attempt to defend against:
 
 - **Hostile code running as root on the same host.** Root can read the DKIM key, edit `config.toml`, and replace the daemon binary. Nothing below that privilege level can stop it.
-- **Multiple mutually-distrustful humans sharing the box.** Mailboxes are world-readable. If two users on one host need private inboxes, aimx is the wrong tool — run [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead.
+- **Multiple mutually-distrustful humans sharing the box.** Mailboxes are world-readable. If two users on one host need private inboxes, AIMX is the wrong tool — run [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead.
 
 ## Trust boundaries
 
-The clearest view of aimx is a table of who-can-reach-what:
+The clearest view of AIMX is a table of who-can-reach-what:
 
 | Subject            | Runs as               | Holds the DKIM key | Can submit to UDS         | Can edit `config.toml` |
 |--------------------|-----------------------|--------------------|---------------------------|------------------------|
@@ -66,7 +66,7 @@ If the DKIM key leaks, anyone can sign mail under your domain until you rotate. 
 
 ## File and socket layout
 
-Everything aimx creates on disk has a deliberate permission choice. The surprising ones are called out below the table.
+Everything AIMX creates on disk has a deliberate permission choice. The surprising ones are called out below the table.
 
 | Path                          | Mode    | Owner             | Purpose                                            |
 |-------------------------------|---------|-------------------|----------------------------------------------------|
@@ -94,19 +94,19 @@ The boundary between these two directories is why the design holds: secrets neve
 
 ## Inbound SMTP
 
-`aimx serve` listens on port 25 and accepts plain SMTP. STARTTLS is advertised and supported but **not required** — remote MTAs that speak plain SMTP are accepted, because that is still the norm for inter-MTA traffic. There is no `AUTH` extension, no `SMTP-AUTH`, and no rate limit. Any sender on the public internet can connect, complete an SMTP dialogue, and hand aimx a message.
+`aimx serve` listens on port 25 and accepts plain SMTP. STARTTLS is advertised and supported but **not required** — remote MTAs that speak plain SMTP are accepted, because that is still the norm for inter-MTA traffic. There is no `AUTH` extension, no `SMTP-AUTH`, and no rate limit. Any sender on the public internet can connect, complete an SMTP dialogue, and hand AIMX a message.
 
-### Port 25 is open, but aimx is not an open relay
+### Port 25 is open, but AIMX is not an open relay
 
 Every MTA on the public internet listens on port 25. That is where RFC 5321 says mail arrives. Exposing it is not a security posture; it is a prerequisite for receiving mail at all. The interesting question is *what the listener is willing to do* with what it receives.
 
-An **open relay** is an MTA that accepts mail over SMTP and then forwards it back out to a third-party destination, typically in service of spam. aimx is not an open relay, by construction:
+An **open relay** is an MTA that accepts mail over SMTP and then forwards it back out to a third-party destination, typically in service of spam. AIMX is not an open relay, by construction:
 
 - **Inbound and outbound paths never cross.** Inbound SMTP writes the message to `inbox/<mailbox>/` on local disk and returns. There is no code path from the SMTP listener to the outbound delivery layer. The outbound path is triggered only by a `SEND` request on the UDS — submitted by a process already on the host, with a validated `From:` that must resolve to a configured local mailbox.
-- **Inbound recipients must be yours.** The recipient domain on every `RCPT TO` is compared case-insensitively against `config.domain` (see `recipient_domain_matches` in `src/smtp/session.rs`). Anything that is not an exact match — an unrelated domain, a subdomain of `config.domain`, or an address with no `@` at all — is refused at SMTP time with `550 5.7.1 relay not permitted` and never reaches storage. Subdomains are rejected on purpose: aimx is one-domain-per-instance, so `sub.yourdomain.com` has to be its own aimx install with its own DKIM key. The local-part-to-mailbox routing (including the `catchall` fallback for unknown local parts) only runs *after* the domain check passes, so `catchall` only ever covers unknown locals on *your* domain and is never the landing pad for relay attempts.
-- **Outbound senders must be yours.** The daemon parses `From:` from the submitted body and refuses to sign anything whose domain is not exactly `config.domain`, and whose local part is not a concrete (non-wildcard) configured mailbox. Even a local user with access to the world-writable UDS cannot cause aimx to sign mail as `someone-else@someone-elses-domain`.
+- **Inbound recipients must be yours.** The recipient domain on every `RCPT TO` is compared case-insensitively against `config.domain` (see `recipient_domain_matches` in `src/smtp/session.rs`). Anything that is not an exact match — an unrelated domain, a subdomain of `config.domain`, or an address with no `@` at all — is refused at SMTP time with `550 5.7.1 relay not permitted` and never reaches storage. Subdomains are rejected on purpose: AIMX is one-domain-per-instance, so `sub.yourdomain.com` has to be its own AIMX install with its own DKIM key. The local-part-to-mailbox routing (including the `catchall` fallback for unknown local parts) only runs *after* the domain check passes, so `catchall` only ever covers unknown locals on *your* domain and is never the landing pad for relay attempts.
+- **Outbound senders must be yours.** The daemon parses `From:` from the submitted body and refuses to sign anything whose domain is not exactly `config.domain`, and whose local part is not a concrete (non-wildcard) configured mailbox. Even a local user with access to the world-writable UDS cannot cause AIMX to sign mail as `someone-else@someone-elses-domain`.
 
-So: port 25 accepts SMTP from the world, but only to store mail for *your* mailboxes. The daemon will sign outbound only from *your* configured senders. The two together rule out the open-relay class of abuse — an attacker cannot use aimx to launder mail, and cannot cause aimx to sign mail they composed under a domain you do not own.
+So: port 25 accepts SMTP from the world, but only to store mail for *your* mailboxes. The daemon will sign outbound only from *your* configured senders. The two together rule out the open-relay class of abuse — an attacker cannot use AIMX to launder mail, and cannot cause AIMX to sign mail they composed under a domain you do not own.
 
 ### What the daemon does with an inbound message
 
@@ -124,7 +124,7 @@ Notice what is *missing*: a spam filter, a rate limiter, a greylist, a bounce ge
 - **No spam filter**, because the agent is the spam filter. An LLM reading a mailbox can reason about whether a message is spam, phishing, a cold outreach, or legitimate correspondence, far more accurately than a rule-based scorer. Dropping a message at the MTA layer hides it from the one tenant that can actually evaluate it. Storing it and flagging `trusted = "false"` is the right split.
 - **No rate limiter**, because the design assumption is a single-operator host receiving mail at human-agent volumes, not a multi-tenant relay. Rate limiting has real operational costs (false positives from legitimate bursts, greylist ping-pong with senders that never retry) and the threat it addresses — inbound DoS — is better handled at the network edge with a firewall or a cloud WAF, if at all.
 - **No greylisting**, because agents are supposed to react to mail in real time. Deferring a first-time sender for ten minutes is exactly the wrong behaviour for a mailbox whose purpose is to trigger an agent.
-- **No bounce / DSN generation**, because delivery failures on aimx's inbound side (unknown recipient domain, malformed address) are reported synchronously in the SMTP dialogue as a 5xx reply. Standard senders handle that correctly. Generating asynchronous DSNs is how backscatter happens; declining to do it is the safer choice.
+- **No bounce / DSN generation**, because delivery failures on AIMX's inbound side (unknown recipient domain, malformed address) are reported synchronously in the SMTP dialogue as a 5xx reply. Standard senders handle that correctly. Generating asynchronous DSNs is how backscatter happens; declining to do it is the safer choice.
 - **No retry queue on outbound**, because every outbound send is initiated by a live caller (an agent or the CLI), and that caller can retry with better context than a blind queue. 4xx failures are returned to the caller; 5xx failures are persisted with their reason. The calling agent always knows the outcome.
 
 Each of those is an intentional trade, not a missing feature. The bounds that *do* exist are sized for accidental misuse, not a determined DoS attacker:
@@ -133,7 +133,7 @@ Each of those is an intentional trade, not a missing feature. The bounds that *d
 - `MAX_HEADER_LINE` = 8 KiB (to bound memory on malformed headers).
 - `UDS_REQUEST_TIMEOUT` = 30 s per UDS connection.
 
-If your threat model does include hostile volumes of inbound mail, front aimx with a firewall that understands port 25 or a small MTA that does greylisting.
+If your threat model does include hostile volumes of inbound mail, front AIMX with a firewall that understands port 25 or a small MTA that does greylisting.
 
 ## Outbound SMTP
 
@@ -147,7 +147,7 @@ The `From:` validation is strict:
 
 This means a local user who submits mail over the socket can sign as any configured mailbox, but cannot invent new senders or hide behind the wildcard. A compromised agent can send under its own mailbox (that is the point) but cannot impersonate another configured mailbox unless your agents share a mailbox — a configuration choice you make, not a design flaw.
 
-Delivery is direct: aimx resolves the recipient's MX records via hickory-resolver (falling back to A per RFC 5321) and connects to port 25. Opportunistic TLS is attempted on the outbound leg. There is no relay, no submission server, no queued retry. A 4xx transient failure is returned to the caller and is *not* persisted; the calling agent is expected to retry. A 5xx permanent failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the reason in `delivery_details`. No DSN is ever generated.
+Delivery is direct: AIMX resolves the recipient's MX records via hickory-resolver (falling back to A per RFC 5321) and connects to port 25. Opportunistic TLS is attempted on the outbound leg. There is no relay, no submission server, no queued retry. A 4xx transient failure is returned to the caller and is *not* persisted; the calling agent is expected to retry. A 5xx permanent failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the reason in `delivery_details`. No DSN is ever generated.
 
 This trades reliability for visibility. The calling agent always knows whether its message went out, failed, or deferred — no background queue quietly burns retries.
 
@@ -157,14 +157,14 @@ This trades reliability for visibility. The calling agent always knows whether i
 
 `/run/aimx/aimx.sock` is bound by `aimx serve` at mode `0o666`. Any local user can `connect()`.
 
-This is deliberate, and the rationale is a direct consequence of the one-sentence summary at the top of this page: the socket is a *signing oracle for the configured mailboxes*, and nothing reachable through it can produce externally-verifiable fraud that the DKIM boundary wouldn't already block. Given that, tightening the socket mode buys us very little security and costs us real ergonomics.
+This is deliberate, and the rationale is a direct consequence of the one-sentence summary at the top of this page: the socket is a *signing oracle for the configured mailboxes*, and nothing reachable through it can produce externally-verifiable fraud that the DKIM boundary wouldn't already block. Given that, tightening the socket mode buys very little security and costs real ergonomics.
 
-The common case is "an agent running as a normal user wants to send mail". Agents are launched by humans (MCP clients, terminal sessions, cron jobs) under ordinary unprivileged UIDs. If we locked the socket down to root only, every `aimx send` call would need sudo, and every MCP client would need to spawn a privileged helper — a far worse security posture than a mode-`0666` socket that can only do a bounded set of things.
+The common case is "an agent running as a normal user wants to send mail". Agents are launched by humans (MCP clients, terminal sessions, cron jobs) under ordinary unprivileged UIDs. Locking the socket down to root only would force every `aimx send` call through sudo and every MCP client to spawn a privileged helper — a far worse security posture than a mode-`0666` socket that can only do a bounded set of things.
 
 The alternatives were considered and rejected:
 
 - **Socket mode `0660` with a shared group.** Requires every agent's UID to be in the same group as the daemon, which is fragile across reinstalls and user-management flows. Forgetting to add a new user to the group silently breaks their agent.
-- **A local auth handshake over the socket.** A mutual-auth protocol on `AF_UNIX` adds failure modes and still doesn't stop a user from running a daemon of their own. The kernel already hands out peer credentials on UDS, but there is nothing aimx wants to *do* with them that the DKIM boundary isn't already doing better.
+- **A local auth handshake over the socket.** A mutual-auth protocol on `AF_UNIX` adds failure modes and still doesn't stop a user from running a daemon of their own. The kernel already hands out peer credentials on UDS, but AIMX has no use for them that the DKIM boundary isn't already doing better.
 - **Requiring sudo for `aimx send`.** Would make the common case (an agent sends mail) gate on root, which defeats the purpose of having an unprivileged agent in the first place.
 
 The combined result: any local process can submit to the socket, but the socket only accepts a narrow, validated verb set, and the daemon's own checks on `From:` + template shapes decide what actually happens. A malicious local user on the box can send mail as a mailbox you configured — which they could also do by logging into your agent's shell session and using the MCP tool, so gating the socket wouldn't have stopped them anyway. What they can't do is forge mail as a domain you don't own, run arbitrary commands, or read the DKIM key. That is the boundary the design is actually defending.
@@ -188,7 +188,7 @@ Combined with the 30 s per-connection timeout and 25 MB body cap, the socket is 
 
 ## Hooks: the two-tier model
 
-Hooks are the one piece of aimx that runs external commands. They are also the one piece where the operator-versus-agent split is visible at the code level.
+Hooks are the one piece of AIMX that runs external commands. They are also the one piece where the operator-versus-agent split is visible at the code level.
 
 ### Template hooks (agent-safe)
 

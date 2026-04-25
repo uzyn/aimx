@@ -6,7 +6,7 @@ pub use crate::version::{build_date, git_hash, release_tag, target_triple, versi
 #[derive(Parser)]
 #[command(
     name = "aimx",
-    about = "SMTP for agents. No middleman.",
+    about = "SMTP for AI agents. No middleman.",
     long_about = "aimx (AI Mail Exchange). Self-hosted email for AI agents.\n\n\
                    One command to give your AI agents their own email addresses.\n\
                    Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\

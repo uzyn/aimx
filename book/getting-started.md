@@ -10,7 +10,7 @@ Install AIMX (AI Mail Exchange) and run your first setup.
 
 ### Compatible VPS providers
 
-aimx requires direct SMTP access on port 25. Not all cloud providers allow this.
+AIMX requires direct SMTP access on port 25. Not all cloud providers allow this.
 
 | Provider | Port 25 | Notes |
 |----------|---------|-------|
@@ -38,11 +38,11 @@ See [Installation](installation.md) for install flags (`--tag`, `--target`, `--t
 
 ## Security model
 
-aimx is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: aimx assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
+AIMX is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: AIMX assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
 
 All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS send socket at `/run/aimx/aimx.sock` is world-writable. Any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
 
-**If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), aimx is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use aimx in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
+**If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), AIMX is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use AIMX in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
 
 See [Security](security.md) for the full threat model, trust boundaries, and non-goals.
 
@@ -67,7 +67,7 @@ The wizard will:
 5. Print the DNS records you need to add, then re-verify on Enter (press `q` to skip and run `aimx doctor` later)
 6. Install and start `aimx.service`, waiting for port 25 to come up
 7. Print a single-line `aimx is running for <domain>.` banner and a short `[MCP]` summary
-8. Drop through to `aimx agent-setup` as your regular user (via `runuser -u $SUDO_USER`) so you can tick the AI agents to wire into aimx
+8. Drop through to `aimx agent-setup` as your regular user (via `runuser -u $SUDO_USER`) so you can tick the AI agents to wire into AIMX
 
 Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips the TLS / DKIM / config-write steps, re-verifies DNS, and drops through to `aimx agent-setup` again so you can wire additional agents.
 
@@ -96,7 +96,7 @@ aimx send --from catchall@agent.yourdomain.com \
 
 ## Connect your AI agent
 
-Install aimx into your agent with one command:
+Install AIMX into your agent with one command:
 
 ```bash
 aimx agent-setup claude-code    # or codex / opencode / gemini / goose / openclaw / hermes
