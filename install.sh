@@ -241,7 +241,13 @@ ensure_sudo() {
             # wrong password yields a user-visible error instead of a
             # silent `set -e` abort.
             _sudo_rc=0
-            if [ -e /dev/tty ] && [ -r /dev/tty ]; then
+            # Same logic as the post-install handoff: only re-point stdin
+            # at /dev/tty when the script's stdin is NOT already a
+            # terminal. Redirecting an already-terminal stdin breaks
+            # sudo's use_pty bridge on modern distros.
+            if [ -t 0 ]; then
+                sudo -v || _sudo_rc=$?
+            elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
                 (sudo -v </dev/tty) || _sudo_rc=$?
             else
                 sudo -v || _sudo_rc=$?
@@ -559,11 +565,6 @@ parse_args() {
 # Post-install handoff (fresh install only)
 # ---------------------------------------------------------------------------
 
-# has_tty — true if /dev/tty is available for interactive prompts.
-has_tty() {
-    [ -e /dev/tty ] && [ -r /dev/tty ]
-}
-
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -767,12 +768,18 @@ main() {
     # message. Use `exec` so the shell is replaced cleanly. Backup any
     # pre-existing config first so the wizard's writes don't clobber it.
     backup_existing_config
-    if has_tty; then
+    # When stdin is already the terminal (./install.sh from a real shell),
+    # leave it alone. Re-pointing it at /dev/tty creates a separate fd
+    # that breaks sudo's `use_pty` bridge on modern distros — the
+    # operator's keystrokes stop registering at the first prompt. Only
+    # re-attach /dev/tty when stdin is a pipe or redirect (curl|sh).
+    if [ -t 0 ]; then
+        exec ${SUDO} aimx setup
+    elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
         exec ${SUDO} aimx setup </dev/tty
     else
-        # No TTY (CI / fully-scripted): run without /dev/tty reattach.
-        # The binary will fall back to AIMX_NONINTERACTIVE=1 semantics
-        # if the operator set it, otherwise it errors out itself.
+        # No TTY at all (CI, fully-scripted): the wizard will respect
+        # AIMX_NONINTERACTIVE=1 if set, or error out itself.
         exec ${SUDO} aimx setup
     fi
 }

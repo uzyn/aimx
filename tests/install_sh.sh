@@ -157,12 +157,14 @@ assert_contains "helper: ui_error"                 "${_out}" "HAS ui_error"
 assert_contains "helper: ui_success"               "${_out}" "HAS ui_success"
 
 # Removed-helper regression: the binary owns the six-step UI now.
+# `has_tty` was removed when the post-install handoff was rewritten to
+# guard on `[ -t 0 ]` (stdin-is-a-tty) instead of `/dev/tty` existence.
 _out="$(
     INSTALL_SH_TEST=1 sh -c '
         . "'"${INSTALL_SH}"'"
         for _h in print_welcome_banner print_final_banner print_step_list \
                   set_step _step_glyph extract_domain print_closing_message \
-                  run_agent_setup_as_invoker run_aimx_setup; do
+                  run_agent_setup_as_invoker run_aimx_setup has_tty; do
             if type "$_h" >/dev/null 2>&1; then
                 echo "STILL_DEFINED $_h"
             fi
@@ -170,6 +172,91 @@ _out="$(
     ' 2>&1
 )"
 assert_not_contains "removed helpers stay gone" "${_out}" "STILL_DEFINED"
+
+# ---------------------------------------------------------------------------
+# 3b. TTY-stdin gate regression: never redirect `</dev/tty` over an
+# already-terminal stdin (sudo's use_pty bridge breaks if you do).
+# Source-grep the guard structure rather than try to pty-test live.
+# ---------------------------------------------------------------------------
+
+echo "# TTY-stdin gate"
+
+# (a) The literal `[ -t 0 ]` test must appear at least twice — once in
+#     ensure_sudo, once in the post-install handoff.
+_t0_count="$(grep -c '\[ -t 0 \]' "${INSTALL_SH}" || true)"
+if [ "${_t0_count:-0}" -ge 2 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  [ -t 0 ] guard present in 2+ sites (count=%s)\n' "${_t0_count}"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} tty-stdin-guard-count"
+    printf '  FAIL [ -t 0 ] guard count=%s, expected >= 2\n' "${_t0_count:-0}" >&2
+fi
+
+# (b) The script must contain an unredirected `exec ${SUDO} aimx setup`
+#     form (the [ -t 0 ] branch) — proves the fix is in place, not just
+#     the legacy redirect form.
+_unredirected="$(grep -c 'exec \${SUDO} aimx setup$' "${INSTALL_SH}" || true)"
+if [ "${_unredirected:-0}" -ge 1 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  unredirected `exec ${SUDO} aimx setup` present (count=%s)\n' "${_unredirected}"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} tty-stdin-unredirected"
+    printf '  FAIL no unredirected `exec ${SUDO} aimx setup` line found\n' >&2
+fi
+
+# (c) The redirected `exec ${SUDO} aimx setup </dev/tty` form must appear
+#     exactly once and its preceding line must be an `elif [ -e /dev/tty`
+#     guard (i.e., reached only when [ -t 0 ] was already false).
+_redirected_line="$(grep -n 'exec \${SUDO} aimx setup </dev/tty' "${INSTALL_SH}" || true)"
+_redirected_count="$(printf '%s\n' "${_redirected_line}" | grep -c . || true)"
+if [ "${_redirected_count:-0}" -eq 1 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  redirected handoff appears exactly once\n'
+    _ln="$(printf '%s' "${_redirected_line}" | cut -d: -f1)"
+    _prev_ln=$((_ln - 1))
+    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    case "${_prev_text}" in
+        *"elif [ -e /dev/tty ]"*)
+            PASS=$((PASS + 1))
+            printf '  ok  redirected handoff is gated behind elif [ -e /dev/tty ]\n'
+            ;;
+        *)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} tty-stdin-redirect-gate"
+            printf '  FAIL redirected handoff not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            ;;
+    esac
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} tty-stdin-redirect-count"
+    printf '  FAIL redirected handoff count=%s, expected 1\n' "${_redirected_count:-0}" >&2
+fi
+
+# (d) Same shape for sudo -v in ensure_sudo: the redirected
+#     `sudo -v </dev/tty` must be inside an `elif [ -e /dev/tty ]` branch.
+_sudov_line="$(grep -n 'sudo -v </dev/tty' "${INSTALL_SH}" || true)"
+if [ -n "${_sudov_line}" ]; then
+    _ln="$(printf '%s' "${_sudov_line}" | head -n1 | cut -d: -f1)"
+    _prev_ln=$((_ln - 1))
+    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    case "${_prev_text}" in
+        *"elif [ -e /dev/tty ]"*)
+            PASS=$((PASS + 1))
+            printf '  ok  sudo -v </dev/tty is gated behind elif [ -e /dev/tty ]\n'
+            ;;
+        *)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} sudo-v-redirect-gate"
+            printf '  FAIL sudo -v </dev/tty not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            ;;
+    esac
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} sudo-v-redirect-missing"
+    printf '  FAIL no sudo -v </dev/tty line found at all\n' >&2
+fi
 
 # ---------------------------------------------------------------------------
 # 4. detect_invoker
