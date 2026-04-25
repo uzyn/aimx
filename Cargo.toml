@@ -63,7 +63,7 @@ dialoguer = { version = "0.12", default-features = false }
 # we drive `console` directly. `console` is already a transitive dep via
 # dialoguer; declaring it here keeps the dependency explicit and avoids
 # relying on a sibling's re-export.
-console = { version = "0.16", default-features = false, features = ["ansi-parsing"] }
+console = { version = "0.16", default-features = false, features = ["ansi-parsing", "std", "alloc"] }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
 # `aimx upgrade` extracts release tarballs produced by
 # `.github/workflows/release.yml`. The shape is well-known (a flat
