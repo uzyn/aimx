@@ -5,10 +5,10 @@
 #   curl -fsSL https://aimx.email/install.sh | sh
 #   curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 1.2.3
 #
-# Drives the full end-to-end install: banner → sudo escalate →
-# download + install binary → `sudo aimx setup` (preflight, DNS, TLS,
-# trust, service install) → drop to the invoking user for
-# `aimx agent-setup` (MCP wiring) → closing message.
+# Thin wrapper around the binary: download → install → exec `aimx setup`.
+# The binary owns the operator-facing wizard (welcome banner, six-step
+# checklist, agent-setup handoff, closing message). Upgrades are
+# non-interactive: stop service → swap binary → start service.
 #
 # Modelled on `just.systems/install.sh` — `say` / `err` / `need` /
 # `download` helper idioms, no bashisms, HTTPS-only trust anchor.
@@ -66,7 +66,8 @@ cleanup() {
 
 # ---------------------------------------------------------------------------
 # UI helpers (color when TTY + !NO_COLOR, plain otherwise).
-# Centralised so banner / step list / closing message share one style.
+# Kept thin: the binary owns the section/step rendering. The shell only
+# emits the install-time progress lines (download / extract / install).
 # ---------------------------------------------------------------------------
 
 _ui_color_enabled() {
@@ -108,9 +109,13 @@ ui_success() {
     printf '%s %s\n' "$(_ui_paint 32 '[ok]')" "${_msg}" >&2
 }
 
-ui_section() {
-    _msg="$1"
-    printf '\n%s\n' "$(_ui_paint '1;36' "== ${_msg} ==")" >&2
+# Thin two-line install banner. The full six-step checklist + per-step
+# ticking lives in the Rust binary's `aimx setup` wizard.
+print_install_banner() {
+    printf '\n' >&2
+    printf '%s\n' "$(_ui_paint '1;35' 'AIMX installer')" >&2
+    printf '%s\n' "$(_ui_paint 2 '  downloading and installing aimx...')" >&2
+    printf '\n' >&2
 }
 
 # download <url> <path>
@@ -197,122 +202,6 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Welcome banner + step list
-# ---------------------------------------------------------------------------
-#
-# Six checklist items, each tracked in STEP{1..6}_STATE and rendered with a
-# glyph picked by _step_glyph. States: pending, running, done, skipped,
-# error. Unicode glyphs are used when the locale advertises UTF-8 and color
-# is enabled; otherwise an ASCII fallback ([ ] / [~] / [x] / [-] / [!]).
-# The banner is printed twice: once up front (all pending) and once at the
-# end with final states, so operators see ☐ flip to ☑/☒.
-
-STEP1_TITLE="Preflight checks on port 25"
-STEP2_TITLE="Set up domain and DNS"
-STEP3_TITLE="Set up TLS certificate"
-STEP4_TITLE="Set up trust policy"
-STEP5_TITLE="Install AIMX"
-STEP6_TITLE="Set up MCP for agent(s)"
-
-STEP1_STATE="pending"
-STEP2_STATE="pending"
-STEP3_STATE="pending"
-STEP4_STATE="pending"
-STEP5_STATE="pending"
-STEP6_STATE="pending"
-
-# _supports_unicode — true when the locale claims UTF-8. Checked once at
-# import time and cached in $_AIMX_UTF8 so banner prints stay cheap.
-_supports_unicode() {
-    _loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
-    case "${_loc}" in
-        *UTF-8* | *UTF8* | *utf-8* | *utf8*) return 0 ;;
-    esac
-    return 1
-}
-
-if _supports_unicode; then
-    _AIMX_UTF8=1
-else
-    _AIMX_UTF8=0
-fi
-
-# _step_glyph <state> — print the colored / fallback glyph for one state
-# to stdout (no newline). Color codes only emit when _ui_color_enabled.
-_step_glyph() {
-    _state="$1"
-    if [ "${_AIMX_UTF8}" = "1" ]; then
-        case "${_state}" in
-            pending)  _g='☐'; _c='2'  ;;
-            running)  _g='◐'; _c='33' ;;
-            done)     _g='☑'; _c='32' ;;
-            skipped)  _g='☒'; _c='36' ;;
-            error)    _g='✗'; _c='31' ;;
-            *)        _g='?'; _c='0'  ;;
-        esac
-    else
-        case "${_state}" in
-            pending)  _g='[ ]'; _c='2'  ;;
-            running)  _g='[~]'; _c='33' ;;
-            done)     _g='[x]'; _c='32' ;;
-            skipped)  _g='[-]'; _c='36' ;;
-            error)    _g='[!]'; _c='31' ;;
-            *)        _g='[?]'; _c='0'  ;;
-        esac
-    fi
-    _ui_paint "${_c}" "${_g}"
-}
-
-# set_step <n> <state> — mutate one of the six STEP{n}_STATE vars.
-set_step() {
-    case "$1" in
-        1) STEP1_STATE="$2" ;;
-        2) STEP2_STATE="$2" ;;
-        3) STEP3_STATE="$2" ;;
-        4) STEP4_STATE="$2" ;;
-        5) STEP5_STATE="$2" ;;
-        6) STEP6_STATE="$2" ;;
-    esac
-}
-
-_print_step_line() {
-    # $1 = state, $2 = title
-    printf '%s %s\n' "$(_step_glyph "$1")" "$2" >&2
-}
-
-# print_step_list — render the six current STEP{n}_STATE/TITLE lines.
-print_step_list() {
-    _print_step_line "${STEP1_STATE}" "${STEP1_TITLE}"
-    _print_step_line "${STEP2_STATE}" "${STEP2_TITLE}"
-    _print_step_line "${STEP3_STATE}" "${STEP3_TITLE}"
-    _print_step_line "${STEP4_STATE}" "${STEP4_TITLE}"
-    _print_step_line "${STEP5_STATE}" "${STEP5_TITLE}"
-    _print_step_line "${STEP6_STATE}" "${STEP6_TITLE}"
-}
-
-print_welcome_banner() {
-    # Title line uses the raven emoji; terminals without glyph support
-    # render tofu and that is acceptable.
-    printf '\n' >&2
-    printf '%s\n' "$(_ui_paint '1;35' '🐦‍⬛ AIMX installer')" >&2
-    printf '%s\n' "$(_ui_paint 2 'Self-hosted email for AI agents. One binary, one setup.')" >&2
-    printf '\n' >&2
-    print_step_list
-    printf '\n' >&2
-}
-
-# print_final_banner — reprint the checklist with current (terminal) states.
-# Called right before the closing message so the operator sees ☐ flip to
-# ☑/☒ as a single, unambiguous summary.
-print_final_banner() {
-    printf '\n' >&2
-    printf '%s\n' "$(_ui_paint '1;35' '🐦‍⬛ AIMX installer — installation complete')" >&2
-    printf '\n' >&2
-    print_step_list
-    printf '\n' >&2
-}
-
-# ---------------------------------------------------------------------------
 # Privilege / invoker helpers
 # ---------------------------------------------------------------------------
 
@@ -372,7 +261,9 @@ ensure_sudo() {
 # detect_invoker
 #   Prints the non-root user that should run `aimx agent-setup`.
 #   Returns 0 with stdout set on success, non-zero when no non-root
-#   user can be identified.
+#   user can be identified. Kept as a helper for tests + possible future
+#   use; the wizard's drop-through reads $SUDO_USER directly so this is
+#   not on the live install path anymore.
 detect_invoker() {
     if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
         printf '%s' "${SUDO_USER}"
@@ -665,129 +556,12 @@ parse_args() {
 }
 
 # ---------------------------------------------------------------------------
-# Post-install orchestration (fresh install only)
+# Post-install handoff (fresh install only)
 # ---------------------------------------------------------------------------
 
 # has_tty — true if /dev/tty is available for interactive prompts.
 has_tty() {
     [ -e /dev/tty ] && [ -r /dev/tty ]
-}
-
-# run_aimx_setup — invokes `sudo aimx setup` with /dev/tty reattached
-# so the interactive wizard (domain prompt, trust, hook picker) works
-# even under `curl | sh`. Exits non-zero with diagnostics on failure.
-run_aimx_setup() {
-    ui_section "Steps 1-5: aimx setup (preflight, DNS, TLS, trust, service)"
-    set_step 1 running
-    set_step 2 running
-    set_step 3 running
-    set_step 4 running
-    set_step 5 running
-    backup_existing_config
-    if has_tty; then
-        if ! ${SUDO} aimx setup </dev/tty; then
-            set_step 1 error; set_step 2 error; set_step 3 error
-            set_step 4 error; set_step 5 error
-            ui_error "aimx setup failed"
-            say "  Inspect 'aimx doctor' output and re-run 'sudo aimx setup'."
-            exit 1
-        fi
-    else
-        # No TTY available (e.g. CI). Run without reattaching; setup
-        # will respect AIMX_NONINTERACTIVE=1 if set, or error.
-        if ! ${SUDO} aimx setup; then
-            set_step 1 error; set_step 2 error; set_step 3 error
-            set_step 4 error; set_step 5 error
-            ui_error "aimx setup failed (no TTY for interactive prompts)"
-            say "  Re-run with a terminal attached, or export AIMX_NONINTERACTIVE=1"
-            say "  along with the required mailbox defaults. See book/setup.md."
-            exit 1
-        fi
-    fi
-    set_step 1 done; set_step 2 done; set_step 3 done
-    set_step 4 done; set_step 5 done
-    ui_success "Steps 1-5 complete (aimx setup finished)"
-}
-
-# run_agent_setup_as_invoker — drops into the original (non-root) user
-# to run `aimx agent-setup`'s interactive TUI picker. If no invoker
-# can be identified the step is skipped with instructions, NOT fatal.
-run_agent_setup_as_invoker() {
-    ui_section "Step 6: aimx agent-setup (MCP wiring for your LLM agent)"
-    set_step 6 running
-    _invoker="$(detect_invoker 2>/dev/null || true)"
-    if [ -z "${_invoker}" ]; then
-        set_step 6 skipped
-        ui_warn "Step 6 skipped: no non-root user detected"
-        say "  Run as your agent user: aimx agent-setup"
-        return 0
-    fi
-    if ! has_tty; then
-        set_step 6 skipped
-        ui_warn "Step 6 skipped: no TTY available for the agent picker"
-        say "  Run as ${_invoker}: aimx agent-setup"
-        return 0
-    fi
-    _euid="$(id -u 2>/dev/null || echo 0)"
-    if [ "${_euid}" -eq 0 ]; then
-        # Started as root; drop to the invoker. `sudo -H` resets HOME
-        # to the target user's passwd-entry home, and we also pin HOME
-        # explicitly via `env HOME=...` because some sudoers
-        # configurations do not honor `-H` reliably. The agent plugin
-        # bundles (Claude Code, Codex CLI, etc.) end up under the
-        # invoker's home, not /root.
-        _inv_home="$(getent passwd "${_invoker}" 2>/dev/null | cut -d: -f6)"
-        if [ -z "${_inv_home}" ]; then
-            _inv_home="/home/${_invoker}"
-        fi
-        sudo -H -u "${_invoker}" env HOME="${_inv_home}" sh -c 'aimx agent-setup </dev/tty' || {
-            set_step 6 skipped
-            ui_warn "Step 6: aimx agent-setup returned non-zero (continuing)"
-            say "  Re-run as ${_invoker}: aimx agent-setup"
-            return 0
-        }
-    else
-        sh -c 'aimx agent-setup </dev/tty' || {
-            set_step 6 skipped
-            ui_warn "Step 6: aimx agent-setup returned non-zero (continuing)"
-            say "  Re-run: aimx agent-setup"
-            return 0
-        }
-    fi
-    set_step 6 done
-    ui_success "Step 6 complete (MCP wired)"
-}
-
-# extract_domain — pull the configured domain from /etc/aimx/config.toml.
-# Falls back to the literal placeholder "<your-domain>" when the file is
-# unreadable. $SUDO is used to step past the 0640 root-only config mode
-# (empty when we're already root, "sudo" otherwise).
-extract_domain() {
-    _cfg="${AIMX_CONFIG_TOML}"
-    _dom=""
-    if [ -r "${_cfg}" ]; then
-        _dom="$(awk -F'"' '/^[[:space:]]*domain[[:space:]]*=/{print $2; exit}' "${_cfg}" 2>/dev/null || true)"
-    fi
-    if [ -z "${_dom}" ]; then
-        _dom="$(${SUDO} awk -F'"' '/^[[:space:]]*domain[[:space:]]*=/{print $2; exit}' "${_cfg}" 2>/dev/null || true)"
-    fi
-    if [ -z "${_dom}" ]; then
-        _dom="<your-domain>"
-    fi
-    printf '%s' "${_dom}"
-}
-
-print_closing_message() {
-    _domain="$1"
-    printf '\n' >&2
-    ui_success "AIMX has been set up successfully."
-    printf '\n' >&2
-    say "Your agents now have access to set up, send and receive emails from @${_domain}."
-    printf '\n' >&2
-    say "Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g."
-    say "  claude -p \"Set up agent@${_domain} and respond to me via email the moment you receive my instructions via email.\""
-    printf '\n' >&2
-    say "Any questions?"
 }
 
 # ---------------------------------------------------------------------------
@@ -808,8 +582,8 @@ main() {
         PREFIX="${DEFAULT_PREFIX}"
     fi
 
-    # Banner first so operators see the plan even before sudo prompts.
-    print_welcome_banner
+    # Thin install banner. Full six-step wizard checklist is the binary's job.
+    print_install_banner
 
     # Platform detection.
     detect_os >/dev/null
@@ -834,6 +608,15 @@ main() {
     need awk
     need sed
     need grep
+
+    # Fail fast on no-sudo: dry-run is honored first so unprivileged
+    # auditors can still see what would happen, then ensure_sudo runs
+    # before any network call so a non-root user without sudo gets a
+    # clear error before we hit the GitHub API.
+    if [ "${DRY_RUN}" != "1" ]; then
+        ensure_sudo
+        resolve_sudo_prefix
+    fi
 
     # Temp dir for downloads.
     _td="$(mktemp -d 2>/dev/null || mktemp -d -t aimx-install)"
@@ -907,23 +690,13 @@ main() {
         say "dry-run: would extract tarball under ${_td}"
         if [ "${_is_upgrade}" -eq 1 ]; then
             say "dry-run: would stop aimx.service, swap binary, restart (upgrade)"
-            say "dry-run: steps 1-4 and 6 would be marked skipped (upgrade)"
         else
             say "dry-run: would ensure_sudo, install to ${_install_path}"
-            say "dry-run: would run 'sudo aimx setup' (steps 1-5)"
-            say "dry-run: would run 'aimx agent-setup' as invoking user (step 6)"
-            say "dry-run: would print closing message with configured domain"
+            say "dry-run: would exec 'sudo aimx setup' (binary owns wizard)"
         fi
         say "dry-run: no filesystem changes made"
         exit 0
     fi
-
-    # From here on we touch the filesystem; acquire sudo up front so the
-    # operator is prompted once rather than sprinkled across steps. Then
-    # resolve the $SUDO prefix so every privileged call site uses the
-    # right form (empty when root, "sudo" otherwise).
-    ensure_sudo
-    resolve_sudo_prefix
 
     if [ ! -d "${PREFIX}" ]; then
         if ! ${SUDO} mkdir -p "${PREFIX}" 2>/dev/null; then
@@ -943,8 +716,8 @@ main() {
     fi
 
     if [ "${_is_upgrade}" -eq 1 ]; then
-        # Upgrade path: non-interactive by design. Steps 1-4 and 6 are
-        # skipped because the previous setup is preserved.
+        # Upgrade path: non-interactive by design. Previous setup is
+        # preserved; just swap the binary and restart the service.
         _init="$(stop_service || echo unknown)"
 
         _prev="${_install_path}.prev"
@@ -975,21 +748,11 @@ main() {
             err "upgrade failed at start step; service restored if possible"
         fi
 
-        set_step 1 skipped; set_step 2 skipped
-        set_step 3 skipped; set_step 4 skipped
-        ui_info "Step 1 skipped (upgrade - previous setup preserved)"
-        ui_info "Step 2 skipped (upgrade - DNS unchanged)"
-        ui_info "Step 3 skipped (upgrade - TLS unchanged)"
-        ui_info "Step 4 skipped (upgrade - trust policy unchanged)"
-        set_step 5 done
         if [ -n "${_installed_tag}" ]; then
-            ui_success "Step 5 complete (aimx upgraded from ${_installed_tag} to ${TAG})"
+            ui_success "aimx upgraded from ${_installed_tag} to ${TAG}"
         else
-            ui_success "Step 5 complete (aimx installed at ${TAG})"
+            ui_success "aimx installed at ${TAG}"
         fi
-        set_step 6 skipped
-        ui_info "Step 6 skipped (upgrade - MCP remains wired as before)"
-        print_final_banner
         say "upgrade complete. Run 'aimx doctor' for health."
         exit 0
     fi
@@ -999,18 +762,19 @@ main() {
         || err "install failed writing ${_install_path}"
     ui_success "aimx ${TAG} installed to ${_install_path}"
 
-    # Steps 1-5: invoke `sudo aimx setup` with TTY reattached.
-    run_aimx_setup
-
-    # Step 6: drop to the invoking user and run `aimx agent-setup`.
-    run_agent_setup_as_invoker
-
-    # Final banner — flips ☐ to ☑/☒ so operators see the summary at a glance.
-    print_final_banner
-
-    # Closing message.
-    _domain="$(extract_domain)"
-    print_closing_message "${_domain}"
+    # Hand off to the binary. `aimx setup` owns the welcome banner, the
+    # six-step checklist, the agent-setup drop-through, and the closing
+    # message. Use `exec` so the shell is replaced cleanly. Backup any
+    # pre-existing config first so the wizard's writes don't clobber it.
+    backup_existing_config
+    if has_tty; then
+        exec ${SUDO} aimx setup </dev/tty
+    else
+        # No TTY (CI / fully-scripted): run without /dev/tty reattach.
+        # The binary will fall back to AIMX_NONINTERACTIVE=1 semantics
+        # if the operator set it, otherwise it errors out itself.
+        exec ${SUDO} aimx setup
+    fi
 }
 
 # Honor INSTALL_SH_TEST=1 so unit tests can source the script to probe

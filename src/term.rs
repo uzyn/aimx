@@ -117,6 +117,49 @@ pub fn warn_mark() -> ColoredString {
     }
 }
 
+/// State of one entry in the setup wizard's six-step checklist. The
+/// rendering for each state is owned by [`step_glyph`] so the binary
+/// emits a consistent banner across every section transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Pending,
+    Running,
+    Done,
+    Skipped,
+    /// Reserved for surfaces that surface a fatal step-level error
+    /// without aborting the wizard. The current `aimx setup` flow never
+    /// reaches this state because hard errors `return Err(...)` and exit
+    /// the process; future surfaces (e.g. `aimx upgrade`'s rollback
+    /// path) may use it to render `✗` next to the failed step.
+    #[allow(dead_code)]
+    Error,
+}
+
+/// Render the checklist glyph for `state`. Unicode (☐ / ◐ / ☑ / ☒ / ✗)
+/// on a TTY with color enabled, ASCII fallback (`[ ]` / `[~]` / `[x]` /
+/// `[-]` / `[!]`) when color is disabled (piped, redirected, `NO_COLOR=1`,
+/// or dumb terminal). Color: pending=dim, running=yellow, done=green,
+/// skipped=cyan, error=red.
+pub fn step_glyph(state: StepState) -> ColoredString {
+    if colorize_active() {
+        match state {
+            StepState::Pending => "☐".dimmed(),
+            StepState::Running => "◐".yellow(),
+            StepState::Done => "☑".green(),
+            StepState::Skipped => "☒".cyan(),
+            StepState::Error => "✗".red(),
+        }
+    } else {
+        match state {
+            StepState::Pending => "[ ]".normal(),
+            StepState::Running => "[~]".normal(),
+            StepState::Done => "[x]".normal(),
+            StepState::Skipped => "[-]".normal(),
+            StepState::Error => "[!]".normal(),
+        }
+    }
+}
+
 /// Copper `→` on a TTY, `[>]` on non-TTY / `NO_COLOR`. The `colored` crate
 /// emits truecolor escapes on truecolor-capable terminals and transparently
 /// falls back to the nearest 256-color ANSI code elsewhere.
@@ -344,5 +387,58 @@ mod tests {
         assert!(fail_badge().to_string().contains("FAIL"));
         assert!(warn_badge().to_string().contains("WARN"));
         assert!(missing_badge().to_string().contains("MISSING"));
+    }
+
+    #[test]
+    fn step_glyphs_use_unicode_on_tty() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        control::set_override(true);
+        let pending = step_glyph(StepState::Pending).to_string();
+        let running = step_glyph(StepState::Running).to_string();
+        let done = step_glyph(StepState::Done).to_string();
+        let skipped = step_glyph(StepState::Skipped).to_string();
+        let error = step_glyph(StepState::Error).to_string();
+        control::unset_override();
+        assert!(
+            pending.contains('☐'),
+            "expected ☐ in pending step glyph on TTY, got {pending:?}"
+        );
+        assert!(
+            running.contains('◐'),
+            "expected ◐ in running step glyph on TTY, got {running:?}"
+        );
+        assert!(
+            done.contains('☑'),
+            "expected ☑ in done step glyph on TTY, got {done:?}"
+        );
+        assert!(
+            skipped.contains('☒'),
+            "expected ☒ in skipped step glyph on TTY, got {skipped:?}"
+        );
+        assert!(
+            error.contains('✗'),
+            "expected ✗ in error step glyph on TTY, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn step_glyphs_use_ascii_fallback_on_non_tty() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        control::set_override(false);
+        let pending = step_glyph(StepState::Pending).to_string();
+        let running = step_glyph(StepState::Running).to_string();
+        let done = step_glyph(StepState::Done).to_string();
+        let skipped = step_glyph(StepState::Skipped).to_string();
+        let error = step_glyph(StepState::Error).to_string();
+        control::unset_override();
+        assert_eq!(pending, "[ ]");
+        assert_eq!(running, "[~]");
+        assert_eq!(done, "[x]");
+        assert_eq!(skipped, "[-]");
+        assert_eq!(error, "[!]");
     }
 }

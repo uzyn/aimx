@@ -137,26 +137,39 @@ _out="$(
         type detect_invoker >/dev/null 2>&1 && echo "HAS detect_invoker"
         type ensure_sudo >/dev/null 2>&1 && echo "HAS ensure_sudo"
         type backup_existing_config >/dev/null 2>&1 && echo "HAS backup_existing_config"
-        type print_welcome_banner >/dev/null 2>&1 && echo "HAS print_welcome_banner"
+        type print_install_banner >/dev/null 2>&1 && echo "HAS print_install_banner"
         type parse_args >/dev/null 2>&1 && echo "HAS parse_args"
         type ui_info >/dev/null 2>&1 && echo "HAS ui_info"
         type ui_warn >/dev/null 2>&1 && echo "HAS ui_warn"
         type ui_error >/dev/null 2>&1 && echo "HAS ui_error"
         type ui_success >/dev/null 2>&1 && echo "HAS ui_success"
-        type ui_section >/dev/null 2>&1 && echo "HAS ui_section"
     ' 2>&1
 )"
 assert_contains "INSTALL_SH_TEST=1 suppresses main" "${_out}" "SOURCED_OK"
 assert_contains "helper: detect_invoker"           "${_out}" "HAS detect_invoker"
 assert_contains "helper: ensure_sudo"              "${_out}" "HAS ensure_sudo"
 assert_contains "helper: backup_existing_config"   "${_out}" "HAS backup_existing_config"
-assert_contains "helper: print_welcome_banner"     "${_out}" "HAS print_welcome_banner"
+assert_contains "helper: print_install_banner"     "${_out}" "HAS print_install_banner"
 assert_contains "helper: parse_args"               "${_out}" "HAS parse_args"
 assert_contains "helper: ui_info"                  "${_out}" "HAS ui_info"
 assert_contains "helper: ui_warn"                  "${_out}" "HAS ui_warn"
 assert_contains "helper: ui_error"                 "${_out}" "HAS ui_error"
 assert_contains "helper: ui_success"               "${_out}" "HAS ui_success"
-assert_contains "helper: ui_section"               "${_out}" "HAS ui_section"
+
+# Removed-helper regression: the binary owns the six-step UI now.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        for _h in print_welcome_banner print_final_banner print_step_list \
+                  set_step _step_glyph extract_domain print_closing_message \
+                  run_agent_setup_as_invoker run_aimx_setup; do
+            if type "$_h" >/dev/null 2>&1; then
+                echo "STILL_DEFINED $_h"
+            fi
+        done
+    ' 2>&1
+)"
+assert_not_contains "removed helpers stay gone" "${_out}" "STILL_DEFINED"
 
 # ---------------------------------------------------------------------------
 # 4. detect_invoker
@@ -346,6 +359,91 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 6b. fail-fast: ensure_sudo runs BEFORE any GitHub network call
+# ---------------------------------------------------------------------------
+
+echo "# ensure_sudo runs before network call"
+
+# Build a hermetic PATH containing only the basic shell tools `need`
+# checks for (`uname tar mkdir rm install awk sed grep`) plus our
+# stubbed `id` and `curl` / `wget`. Crucially the real `sudo` is
+# absent: ensure_sudo must bail with the no-sudo error BEFORE any
+# network call.
+_isobin="${_tmp}/iso-bin"
+mkdir -p "${_isobin}"
+_curlmark="${_tmp}/curl-was-called"
+rm -f "${_curlmark}"
+
+# Symlink each required tool from /usr/bin or /bin into the iso PATH.
+# `sh` is needed because install.sh runs subshells; ensure_sudo also
+# spawns `command` and the script's own helpers. We hunt explicitly
+# under /usr/bin and /bin so a user-shell alias for `command -v grep`
+# doesn't return a bare relative-name.
+for _t in uname tar mkdir rm install awk sed grep cat date mktemp sh head cut sort dirname basename; do
+    for _d in /usr/bin /bin; do
+        if [ -x "${_d}/$_t" ]; then
+            ln -sf "${_d}/$_t" "${_isobin}/$_t"
+            break
+        fi
+    done
+done
+
+# Stub `id` so euid reads as 1000 (non-root) but `id -un` falls back to
+# the real binary so detect_invoker can still resolve a username.
+_real_id="$(command -v id)"
+cat > "${_isobin}/id" <<IDEOF
+#!/bin/sh
+case "\$1" in
+    -u) echo 1000 ;;
+    *) exec "${_real_id}" "\$@" ;;
+esac
+IDEOF
+chmod +x "${_isobin}/id"
+
+cat > "${_isobin}/curl" <<CURLEOF
+#!/bin/sh
+echo "called" > "${_curlmark}"
+exit 7
+CURLEOF
+chmod +x "${_isobin}/curl"
+
+cat > "${_isobin}/wget" <<WGETEOF
+#!/bin/sh
+echo "called" > "${_curlmark}"
+exit 7
+WGETEOF
+chmod +x "${_isobin}/wget"
+
+# Capture stdout+stderr to a temp file so we can read $? from the
+# parent shell (assignment inside `$(...)` lives in a subshell and
+# does not propagate).
+_outfile="${_tmp}/fail-fast.out"
+_rc=0
+PATH="${_isobin}" \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 \
+    >"${_outfile}" 2>&1 || _rc=$?
+_out="$(cat "${_outfile}")"
+if [ "${_rc}" -ne 0 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  ensure_sudo fails fast (rc=%s)\n' "${_rc}"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} ensure_sudo-fail-fast-rc"
+    printf '  FAIL ensure_sudo did not fail fast (rc=0)\n' >&2
+fi
+assert_contains "fail-fast names sudo" "${_out}" "sudo"
+if [ -f "${_curlmark}" ]; then
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} curl-called-before-ensure-sudo"
+    printf '  FAIL curl was invoked before ensure_sudo\n' >&2
+else
+    PASS=$((PASS + 1))
+    printf '  ok  curl never invoked before ensure_sudo\n'
+fi
+
+rm -rf "${_isobin}"
+
+# ---------------------------------------------------------------------------
 # 7. parse_args
 # ---------------------------------------------------------------------------
 
@@ -373,80 +471,6 @@ _out="$(
 assert_contains "parse_args --tag=VAL" "${_out}" "TAG=1.2.3"
 assert_contains "parse_args --to=VAL"  "${_out}" "PREFIX=/tmp/x"
 assert_contains "parse_args --target=VAL" "${_out}" "TARGET=x86_64-unknown-linux-gnu"
-
-# ---------------------------------------------------------------------------
-# 7b. run_agent_setup_as_invoker — sudo invoked with -H and HOME pinned
-# ---------------------------------------------------------------------------
-
-echo "# run_agent_setup_as_invoker"
-
-# Stub `sudo` that records its argv (and env) into a log file, then exits 0
-# without actually exec'ing anything. We also stub `id` to report euid 0 so
-# the helper takes the root->invoker branch unconditionally.
-_argvlog="${_tmp}/sudo-argv.log"
-_envlog="${_tmp}/sudo-env.log"
-rm -f "${_argvlog}" "${_envlog}"
-
-cat > "${_tmp}/bin/sudo" <<SUDOEOF
-#!/bin/sh
-# Record argv and selected env on invocation, then succeed without exec.
-{
-    printf 'ARGV:'
-    for _a in "\$@"; do printf ' [%s]' "\$_a"; done
-    printf '\n'
-} >> "${_argvlog}"
-printf 'HOME=%s\n' "\${HOME:-}" >> "${_envlog}"
-exit 0
-SUDOEOF
-chmod +x "${_tmp}/bin/sudo"
-
-# Stub `id` so euid always reads 0. A dedicated wrapper takes over `id -u`
-# while leaving `id -un` working via the real binary.
-_real_id="$(command -v id)"
-cat > "${_tmp}/bin/id" <<IDEOF
-#!/bin/sh
-case "\$1" in
-    -u) echo 0 ;;
-    *) exec "${_real_id}" "\$@" ;;
-esac
-IDEOF
-chmod +x "${_tmp}/bin/id"
-
-# Stub `getent` so we can pin an invoker home directory deterministically.
-# passwd-entry fields are colon-separated: name:pw:uid:gid:gecos:home:shell.
-cat > "${_tmp}/bin/getent" <<GETENTEOF
-#!/bin/sh
-if [ "\$1" = "passwd" ] && [ "\$2" = "alice" ]; then
-    printf 'alice:x:1000:1000:Alice:/home/alice:/bin/sh\n'
-    exit 0
-fi
-exit 2
-GETENTEOF
-chmod +x "${_tmp}/bin/getent"
-
-# Provide a /dev/tty presence — use /dev/null as a proxy: the helper only
-# checks -e and -r on /dev/tty, but we cannot mint one. Skip the [ -e /dev/tty ]
-# path by calling the helper in a test wrapper that stubs has_tty.
-_out="$(
-    INSTALL_SH_TEST=1 \
-    SUDO_USER=alice \
-    HOME=/tmp/bogus-outer-home \
-    PATH="${_tmp}/bin:${PATH}" \
-    sh -c '
-        . "'"${INSTALL_SH}"'"
-        # Force has_tty to true so the helper reaches the sudo branch.
-        has_tty() { return 0; }
-        run_agent_setup_as_invoker
-    ' 2>&1 || true
-)"
-
-_argv="$(cat "${_argvlog}" 2>/dev/null || true)"
-assert_contains "sudo invoked at all" "${_argv}" "ARGV:"
-assert_contains "sudo called with -H" "${_argv}" "[-H]"
-assert_contains "sudo called with -u alice" "${_argv}" "[-u] [alice]"
-# HOME must be pinned to the invoker's passwd home via env HOME=... in argv.
-assert_contains "HOME pinned in argv to invoker home" "${_argv}" "[HOME=/home/alice]"
-assert_not_contains "outer HOME is NOT passed through argv" "${_argv}" "HOME=/tmp/bogus-outer-home"
 
 # ---------------------------------------------------------------------------
 # 7c. SUDO prefix resolution — root-without-sudo path must succeed
@@ -496,7 +520,6 @@ assert_contains "backup created via empty SUDO" "${_bak}" "config.toml.bak-"
 # Clean up for later sections.
 rm -f "${_tmp}/etc/aimx/"*
 rm -f "${_tmp}/bin/id"
-rm -f "${_tmp}/bin/getent"
 
 # Rebuild passthrough sudo for remaining tests.
 cat > "${_tmp}/bin/sudo" <<'SUDOEOF'
@@ -515,178 +538,7 @@ SUDOEOF
 chmod +x "${_tmp}/bin/sudo"
 
 # ---------------------------------------------------------------------------
-# 7d. extract_domain — reads domain from config.toml
-# ---------------------------------------------------------------------------
-
-echo "# extract_domain"
-
-mkdir -p "${_tmp}/etc/aimx"
-printf 'domain = "mail.example.com"\n' > "${_tmp}/etc/aimx/config.toml"
-_out="$(
-    INSTALL_SH_TEST=1 \
-    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
-    PATH="${_tmp}/bin:${PATH}" \
-    sh -c '
-        . "'"${INSTALL_SH}"'"
-        extract_domain
-    '
-)"
-assert_eq "extract_domain reads domain" "mail.example.com" "${_out}"
-
-# Missing config → placeholder fallback.
-rm -f "${_tmp}/etc/aimx/config.toml"
-_out="$(
-    INSTALL_SH_TEST=1 \
-    AIMX_INSTALL_CONFIG_PATH="${_tmp}/etc/aimx/config.toml" \
-    PATH="${_tmp}/bin:${PATH}" \
-    sh -c '
-        . "'"${INSTALL_SH}"'"
-        extract_domain
-    '
-)"
-assert_eq "extract_domain falls back to placeholder" "<your-domain>" "${_out}"
-
-# ---------------------------------------------------------------------------
-# 7e. print_closing_message — substitutes the domain
-# ---------------------------------------------------------------------------
-
-echo "# print_closing_message"
-
-_out="$(
-    INSTALL_SH_TEST=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        print_closing_message "mail.example.com"
-    ' 2>&1
-)"
-assert_contains "closing message substitutes domain" "${_out}" "@mail.example.com"
-assert_contains "closing message mentions success" "${_out}" "has been set up successfully"
-
-# ---------------------------------------------------------------------------
-# 7f. step glyphs — Unicode under UTF-8 locale, ASCII fallback otherwise
-# ---------------------------------------------------------------------------
-
-echo "# step glyphs"
-
-# UTF-8 locale + NO_COLOR (so escape codes don't interfere with substring
-# match) → expect Unicode box glyphs.
-_out="$(
-    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        _step_glyph pending
-        printf "|"
-        _step_glyph running
-        printf "|"
-        _step_glyph done
-        printf "|"
-        _step_glyph skipped
-        printf "|"
-        _step_glyph error
-    '
-)"
-assert_contains "utf8 pending glyph"  "${_out}" "☐"
-assert_contains "utf8 running glyph"  "${_out}" "◐"
-assert_contains "utf8 done glyph"     "${_out}" "☑"
-assert_contains "utf8 skipped glyph"  "${_out}" "☒"
-assert_contains "utf8 error glyph"    "${_out}" "✗"
-
-# Non-UTF-8 locale → expect ASCII fallbacks. Unset every locale env var so
-# inherited LANG/LC_* don't leak through.
-_out="$(
-    INSTALL_SH_TEST=1 NO_COLOR=1 \
-    env -u LANG -u LC_ALL -u LC_CTYPE -u LC_MESSAGES \
-        sh -c '
-            LC_ALL=C
-            export LC_ALL
-            . "'"${INSTALL_SH}"'"
-            _step_glyph pending
-            printf "|"
-            _step_glyph running
-            printf "|"
-            _step_glyph done
-            printf "|"
-            _step_glyph skipped
-            printf "|"
-            _step_glyph error
-        '
-)"
-assert_contains "ascii pending glyph"  "${_out}" "[ ]"
-assert_contains "ascii running glyph"  "${_out}" "[~]"
-assert_contains "ascii done glyph"     "${_out}" "[x]"
-assert_contains "ascii skipped glyph"  "${_out}" "[-]"
-assert_contains "ascii error glyph"    "${_out}" "[!]"
-
-# ---------------------------------------------------------------------------
-# 7g. set_step + print_step_list — state mutation reflected in banner
-# ---------------------------------------------------------------------------
-
-echo "# set_step + print_step_list"
-
-_out="$(
-    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        set_step 1 done
-        set_step 2 running
-        set_step 6 skipped
-        print_step_list
-    ' 2>&1
-)"
-assert_contains "step 1 shows done glyph"     "${_out}" "☑ Preflight checks on port 25"
-assert_contains "step 2 shows running glyph"  "${_out}" "◐ Set up domain and DNS"
-assert_contains "step 3 still pending"        "${_out}" "☐ Set up TLS certificate"
-assert_contains "step 6 shows skipped glyph"  "${_out}" "☒ Set up MCP for agent(s)"
-
-# ---------------------------------------------------------------------------
-# 7h. print_welcome_banner — initial render is all-pending
-# ---------------------------------------------------------------------------
-
-echo "# print_welcome_banner initial state"
-
-_out="$(
-    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        print_welcome_banner
-    ' 2>&1
-)"
-# All six lines start with the pending glyph, never a checked one.
-assert_contains "welcome banner step 1 pending" "${_out}" "☐ Preflight checks on port 25"
-assert_contains "welcome banner step 6 pending" "${_out}" "☐ Set up MCP for agent(s)"
-case "${_out}" in
-    *"☑"*|*"☒"*|*"◐"*|*"✗"*)
-        FAIL=$((FAIL + 1))
-        FAILED_NAMES="${FAILED_NAMES} welcome-banner-no-final-state"
-        echo "  FAIL  welcome-banner-no-final-state: unexpected non-pending glyph"
-        ;;
-    *)
-        PASS=$((PASS + 1))
-        echo "  ok  welcome-banner-no-final-state"
-        ;;
-esac
-
-# ---------------------------------------------------------------------------
-# 7i. print_final_banner — reflects post-run states
-# ---------------------------------------------------------------------------
-
-echo "# print_final_banner final state"
-
-_out="$(
-    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        set_step 1 done
-        set_step 2 done
-        set_step 3 done
-        set_step 4 done
-        set_step 5 done
-        set_step 6 skipped
-        print_final_banner
-    ' 2>&1
-)"
-assert_contains "final banner has completion title" "${_out}" "installation complete"
-assert_contains "final banner step 1 done"          "${_out}" "☑ Preflight checks on port 25"
-assert_contains "final banner step 5 done"          "${_out}" "☑ Install AIMX"
-assert_contains "final banner step 6 skipped"       "${_out}" "☒ Set up MCP for agent(s)"
-
-# ---------------------------------------------------------------------------
-# 8. AIMX_DRY_RUN smoke — banner + ordered step list, no sudo/download
+# 8. AIMX_DRY_RUN smoke — thin install banner, no checklist (binary owns it)
 # ---------------------------------------------------------------------------
 
 echo "# dry-run smoke"
@@ -699,14 +551,13 @@ _out="$(
     NO_COLOR=1 \
     sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
 )"
-assert_contains "dry-run prints welcome banner (AIMX)" "${_out}" "AIMX"
-assert_contains "dry-run lists step 1" "${_out}" "Preflight checks on port 25"
-assert_contains "dry-run lists step 2" "${_out}" "Set up domain and DNS"
-assert_contains "dry-run lists step 3" "${_out}" "Set up TLS certificate"
-assert_contains "dry-run lists step 4" "${_out}" "Set up trust policy"
-assert_contains "dry-run lists step 5" "${_out}" "Install AIMX"
-assert_contains "dry-run lists step 6" "${_out}" "Set up MCP for agent"
+assert_contains "dry-run prints thin install banner" "${_out}" "AIMX installer"
+assert_contains "dry-run names binary handoff" "${_out}" "aimx setup"
 assert_contains "dry-run notes no FS changes" "${_out}" "no filesystem changes"
+# The shell must NOT print the six checklist titles itself anymore — those
+# are the binary's job. The thin banner is just two lines.
+assert_not_contains "shell does not print checklist" "${_out}" "Preflight checks on port 25"
+assert_not_contains "shell does not print step 6 title" "${_out}" "Set up MCP for agent"
 
 # ---------------------------------------------------------------------------
 # Report
