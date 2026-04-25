@@ -51,7 +51,7 @@ include_dir = "0.7"
 sha2 = "0.10"
 psl = "2"
 unicode-normalization = "0.1"
-rand = "0.9"
+rand = "0.10"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 dialoguer = { version = "0.11", default-features = false }
