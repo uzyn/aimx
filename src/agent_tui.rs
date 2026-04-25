@@ -13,12 +13,15 @@
 //! The target visual ("Claude Code / OpenClaw multi-select look") is:
 //!
 //! ```text
-//!   Wire aimx into your AI agents — Space toggles, Enter confirms, q cancels.
+//! Setting up MCP integration for AI agents for `ubuntu`.
+//! Select which AI agents you want to set up AIMX MCP for:
 //!
 //! ❯ [ ] Claude Code
 //!   [x] Codex CLI  (already wired)
 //!   [-] OpenClaw  (not detected)
 //!   [ ] Gemini CLI
+//!
+//!   → Space toggles, Enter confirms, q cancels.
 //! ```
 //!
 //! - Colored caret (`❯`) on the focused row.
@@ -121,7 +124,12 @@ pub fn run_tui(
     }
 
     let term_handle = Term::stderr();
-    let selected_rows = match interact(&term_handle, &rows) {
+    // Resolve the invoking user via `getpwuid(geteuid())` so the TUI
+    // header can show whose home directory the integration is being
+    // wired into. This is best-effort — under unusual env (containers
+    // with no passwd entry) we fall back to a literal `<user>` token.
+    let username = env.caller_username();
+    let selected_rows = match interact(&term_handle, &rows, username.as_deref()) {
         Ok(Some(rs)) => rs,
         Ok(None) => {
             // User cancelled with `q` or Ctrl-C.
@@ -267,7 +275,11 @@ fn pad_visible(s: &str, width: usize) -> String {
 
 /// Drive the cursor loop. Returns `Ok(Some(rows))` on Enter, `Ok(None)`
 /// on cancel (`q`, `Ctrl-C`, `Esc`), or `Err` on terminal I/O failure.
-fn interact(term_handle: &Term, rows: &[Row]) -> io::Result<Option<Vec<Row>>> {
+fn interact(
+    term_handle: &Term,
+    rows: &[Row],
+    username: Option<&str>,
+) -> io::Result<Option<Vec<Row>>> {
     let mut rows = rows.to_vec();
     // Place the cursor on the first selectable row. If none exist, the
     // operator can only cancel.
@@ -277,12 +289,13 @@ fn interact(term_handle: &Term, rows: &[Row]) -> io::Result<Option<Vec<Row>>> {
     loop {
         if !first_draw {
             // Move the cursor up to redraw the menu in place. The header
-            // takes 2 lines and each row is 1 line.
-            term_handle.clear_last_lines(rows.len() + 2)?;
+            // takes 3 lines (banner + sub-line + blank), each row is 1
+            // line, and the trailing hint above the cursor is 1 line.
+            term_handle.clear_last_lines(rows.len() + 4)?;
         }
         first_draw = false;
 
-        render(term_handle, &rows, cursor)?;
+        render(term_handle, &rows, cursor, username)?;
 
         let key = term_handle.read_key()?;
         match key {
@@ -323,12 +336,21 @@ fn next_selectable(rows: &[Row], start: usize, delta: isize) -> Option<usize> {
     None
 }
 
-fn render(term_handle: &Term, rows: &[Row], cursor: usize) -> io::Result<()> {
-    term_handle.write_line(&term::header("Wire aimx into your AI agents").to_string())?;
-    term_handle.write_line(&format!(
-        "  {} Space toggles, Enter confirms, q cancels.",
-        term::prompt_mark()
-    ))?;
+fn render(
+    term_handle: &Term,
+    rows: &[Row],
+    cursor: usize,
+    username: Option<&str>,
+) -> io::Result<()> {
+    let user_token = username.unwrap_or("<user>");
+    term_handle.write_line(
+        &term::header(&format!(
+            "Setting up MCP integration for AI agents for `{user_token}`."
+        ))
+        .to_string(),
+    )?;
+    term_handle.write_line("Select which AI agents you want to set up AIMX MCP for:")?;
+    term_handle.write_line("")?;
     for (i, row) in rows.iter().enumerate() {
         let spec = &registry()[row.spec_index];
         let caret = if i == cursor && row.is_selectable() {
@@ -363,6 +385,13 @@ fn render(term_handle: &Term, rows: &[Row], cursor: usize) -> io::Result<()> {
         };
         term_handle.write_line(&format!("{caret} {mark} {name}{suffix}"))?;
     }
+    // Hint sits BELOW the rows, right above the cursor — that's where
+    // it's most useful (operators read top-down then act).
+    term_handle.write_line(&format!(
+        "  {} {}",
+        term::prompt_mark(),
+        term::dim("Space toggles, Enter confirms, q cancels.")
+    ))?;
     Ok(())
 }
 
@@ -608,6 +637,83 @@ mod tests {
             measure_text_width(&padded),
             6,
             "padded visible width must equal target"
+        );
+    }
+
+    // ----- Cycle 5: header rewording + username surface ---------------------
+
+    #[test]
+    fn render_header_uses_new_spec_wording() {
+        // The user-visible header must match the cycle-5 wording
+        // exactly so the operator immediately sees what `aimx
+        // agent-setup` is for and whose home it's writing to. We walk
+        // just the `render` body (not the whole file) so this test's
+        // own asserts can mention the new strings without
+        // self-tripping a "old wording must not appear" check.
+        let source = include_str!("agent_tui.rs");
+        let render_start = source.find("fn render(").expect("render fn must exist");
+        let render_end = source[render_start..]
+            .find("\nfn ")
+            .map(|off| render_start + off)
+            .unwrap_or(source.len());
+        let body = &source[render_start..render_end];
+        assert!(
+            body.contains("Setting up MCP integration for AI agents for"),
+            "render must emit the new header wording (line 1): {body}"
+        );
+        assert!(
+            body.contains("Select which AI agents you want to set up AIMX MCP for:"),
+            "render must emit the new selection sub-line (line 2): {body}"
+        );
+        // Build the forbidden literal at runtime so this test's source
+        // doesn't trip its own check.
+        let forbidden = ["Wire", " aimx", " into", " your", " AI", " agents"].concat();
+        assert!(
+            !body.contains(&forbidden),
+            "render must NOT carry the old header wording"
+        );
+    }
+
+    #[test]
+    fn render_threads_username_into_header() {
+        // The username comes from `AgentEnv::caller_username()` and
+        // gets formatted as a backtick-quoted token in the header.
+        // The literal `<user>` fallback only appears when the lookup
+        // returns None (containers / no passwd entry).
+        let source = include_str!("agent_tui.rs");
+        assert!(
+            source.contains("env.caller_username()"),
+            "run_tui must surface the invoking username via AgentEnv"
+        );
+        assert!(
+            source.contains("`{user_token}`"),
+            "render must format the username as a backtick-quoted token"
+        );
+    }
+
+    #[test]
+    fn render_hint_sits_below_rows() {
+        // The "Space toggles, Enter confirms, q cancels." hint moved
+        // from the header band to a line BELOW the rows — right above
+        // the cursor where it's most useful. Source-grep both
+        // invariants: the hint string is present, and it's emitted
+        // AFTER the row loop in `render`.
+        let source = include_str!("agent_tui.rs");
+        let render_start = source.find("fn render(").expect("render fn must exist");
+        let render_end = source[render_start..]
+            .find("\nfn ")
+            .map(|off| render_start + off)
+            .unwrap_or(source.len());
+        let body = &source[render_start..render_end];
+        let hint_pos = body
+            .find("Space toggles, Enter confirms, q cancels.")
+            .expect("hint must exist in render");
+        let row_loop_pos = body
+            .find("for (i, row) in rows.iter().enumerate()")
+            .expect("row loop must exist in render");
+        assert!(
+            hint_pos > row_loop_pos,
+            "hint must come AFTER the row loop (hint @ {hint_pos}, row loop @ {row_loop_pos})"
         );
     }
 }

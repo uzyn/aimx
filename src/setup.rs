@@ -1644,8 +1644,13 @@ or re-run `sudo aimx setup` to prompt again.";
 /// as a constant so unit tests can assert the rendered string is free
 /// of the double-space artifacts that `\`-newline + leading-indent
 /// continuations silently produce.
-pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com, *@company.com) \
-— leave blank to disable hooks: ";
+///
+/// Block form: the question spans three short lines so each line stays
+/// well under terminal-width without wrapping; the input cursor is
+/// emitted on its own line afterwards via `> `.
+pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com,\n\
+*@company.com). Leave blank to disable trust model — this also\n\
+disables hooks.";
 
 /// Validate that a string is a plausible email address or glob pattern
 /// suitable for `trusted_senders`. Delegates final semantics to the
@@ -1703,12 +1708,86 @@ pub(crate) fn parse_trusted_senders_line(line: &str) -> Result<Vec<String>, (Str
     Ok(entries)
 }
 
+/// Read a single `[Y/n]` confirmation line. Default is YES (Enter,
+/// blank, or any leading char that isn't `n`/`N`). Echoes a labeled
+/// value preview before reading so the operator sees the parsed
+/// representation and can back out.
+///
+/// Block form:
+/// ```text
+///
+/// <label>: <value>
+/// Confirm? [Y/n] _
+/// ```
+fn prompt_confirm(
+    reader: &mut dyn BufRead,
+    label: &str,
+    value: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    println!();
+    println!("{label}: {}", term::highlight(value));
+    print!("Confirm? [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(!buf
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N'))
+}
+
+/// Multi-value variant of [`prompt_confirm`] for prompts whose parsed
+/// value is a list (e.g. trusted-senders). Each item is shown on its
+/// own line with a `  - ` bullet so the operator can scan the list
+/// before confirming.
+fn prompt_confirm_list(
+    reader: &mut dyn BufRead,
+    label: &str,
+    items: &[String],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    println!();
+    println!("{label}:");
+    for item in items {
+        println!("  - {}", term::highlight(item));
+    }
+    print!("Confirm? [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(!buf
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N'))
+}
+
+/// Read a `[Y/n]` line WITHOUT a value preview. Used when the caller
+/// has already printed its own context (e.g. the empty-trusted-senders
+/// warning) and just wants the confirmation.
+fn read_yn_line(
+    reader: &mut dyn BufRead,
+    question: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    print!("{question} [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(!buf
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N'))
+}
+
 /// Interactively prompt for the `trusted_senders` allowlist.
 ///
 /// Returns `(policy, senders)`:
-/// - Non-empty list → `("verified", senders)`; no warning printed.
+/// - Non-empty list → `("verified", senders)`; echoed back and confirmed
+///   via `[Y/n]` before returning. Operator can decline to re-enter.
 /// - Empty input  → `("none", vec![])`; a loud warning block is printed
-///   so the operator knows hooks will not fire.
+///   and the operator must explicitly confirm leaving hooks disabled
+///   (declining re-prompts for senders).
 ///
 /// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
 /// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
@@ -1716,17 +1795,35 @@ pub fn prompt_trusted_senders(
     reader: &mut dyn BufRead,
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
-    for attempt in 1..=MAX_TRUSTED_SENDERS_ATTEMPTS {
-        print!("{TRUSTED_SENDERS_PROMPT}");
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        println!("{TRUSTED_SENDERS_PROMPT}");
+        print!("> ");
         io::stdout().flush()?;
         let mut line = String::new();
         reader.read_line(&mut line)?;
         match parse_trusted_senders_line(&line) {
             Ok(senders) if senders.is_empty() => {
                 print_empty_trusted_senders_warning();
-                return Ok(("none".to_string(), vec![]));
+                if read_yn_line(reader, "Leave hooks disabled?")? {
+                    return Ok(("none".to_string(), vec![]));
+                }
+                // Operator wants to re-enter senders — fall through to
+                // the next loop iteration. Reset the attempt counter
+                // so a "no, let me try again" doesn't burn the budget.
+                attempt = 0;
+                continue;
             }
-            Ok(senders) => return Ok(("verified".to_string(), senders)),
+            Ok(senders) => {
+                if prompt_confirm_list(reader, "Trusted senders", &senders)? {
+                    return Ok(("verified".to_string(), senders));
+                }
+                // No → re-prompt. Reset the attempt budget so the
+                // operator can iterate freely.
+                attempt = 0;
+                continue;
+            }
             Err((entry, reason)) => {
                 println!("{} invalid sender '{entry}': {reason}", term::fail_mark());
                 if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
@@ -1739,7 +1836,6 @@ pub fn prompt_trusted_senders(
             }
         }
     }
-    unreachable!("loop exits via return");
 }
 
 /// Print the loud warning block for an empty trusted-senders list.
@@ -1773,33 +1869,40 @@ pub(crate) fn resolve_noninteractive_trust_defaults() -> (String, Vec<String>) {
 }
 
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
-    print!("Enter the domain you want to use for email (e.g. agent.example.com): ");
-    io::stdout().flush()?;
-    let mut domain = String::new();
-    reader.read_line(&mut domain)?;
-    let domain = domain.trim().to_string();
-    if domain.is_empty() {
-        return Err("No domain entered. Setup cancelled.".into());
-    }
-    validate_domain(&domain)?;
+    loop {
+        println!("Enter the domain you want to use for email");
+        println!("(e.g. agent.example.com).");
+        print!("> ");
+        io::stdout().flush()?;
+        let mut domain = String::new();
+        reader.read_line(&mut domain)?;
+        let domain = domain.trim().to_string();
+        if domain.is_empty() {
+            return Err("No domain entered. Setup cancelled.".into());
+        }
+        if let Err(e) = validate_domain(&domain) {
+            println!("{} {e}", term::fail_mark());
+            continue;
+        }
 
-    print!(
-        "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
-         Do you control this domain and have access to its DNS settings? (Y/n) "
-    );
-    io::stdout().flush()?;
-    let mut confirm = String::new();
-    reader.read_line(&mut confirm)?;
-    if confirm
-        .trim()
-        .chars()
-        .next()
-        .is_some_and(|c| c == 'n' || c == 'N')
-    {
-        return Err("Setup cancelled. You need DNS access to proceed.".into());
-    }
+        if !prompt_confirm(reader, "Domain", &domain)? {
+            // Operator wants to re-enter; loop and re-prompt.
+            continue;
+        }
 
-    Ok(domain)
+        // Domain confirmed — keep the existing DNS-control sanity
+        // check so the operator gets one last "do you actually have
+        // DNS access?" gate before the wizard prints DNS records.
+        if !read_yn_line(
+            reader,
+            "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
+             Do you control this domain and have access to its DNS settings?",
+        )? {
+            return Err("Setup cancelled. You need DNS access to proceed.".into());
+        }
+
+        return Ok(domain);
+    }
 }
 
 /// True iff the on-disk `config.toml` has a mailbox whose address is
@@ -2029,6 +2132,30 @@ pub fn print_step_list(checklist: &Checklist) {
     }
 }
 
+/// Emit the post-step status line + the full six-row checklist so the
+/// operator sees both the immediate result of the step they just
+/// finished and the up-to-date overall progress before the wizard
+/// continues. Used after each `Done` step in [`run_setup`].
+pub fn print_step_complete(n: usize, checklist: &Checklist) {
+    println!();
+    println!("{} Step {n} complete.", term::success_mark());
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
+/// Skipped variant of [`print_step_complete`]. The reason is folded
+/// into the status line so the operator can see WHY a step was skipped
+/// (e.g. "existing config preserved", "TLS certificate already exists")
+/// alongside the checklist redraw.
+pub fn print_step_skipped(n: usize, checklist: &Checklist, reason: &str) {
+    println!();
+    println!("{} Step {n} skipped ({reason}).", term::warn_mark());
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
 /// Print the welcome banner that opens `aimx setup`. The branded title
 /// line is followed by a tagline and the all-pending checklist, so the
 /// operator sees the plan before any prompt.
@@ -2108,7 +2235,7 @@ pub fn run_setup(
         sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
     }
     checklist.set(1, term::StepState::Done);
-    println!("\n{} Step 1 complete.", term::success_mark());
+    print_step_complete(1, &checklist);
 
     // ---- Step 2: Set up domain and DNS -------------------------------------
     section_header(2, SETUP_STEPS[1]);
@@ -2241,14 +2368,14 @@ pub fn run_setup(
         }
     }
     checklist.set(2, term::StepState::Done);
-    println!("\n{} Step 2 complete.", term::success_mark());
+    print_step_complete(2, &checklist);
 
     // ---- Step 3: Set up TLS certificate ------------------------------------
     section_header(3, SETUP_STEPS[2]);
     if already_configured {
         println!("\nTLS certificate already exists.");
         checklist.set(3, term::StepState::Skipped);
-        println!("\n{} Step 3 skipped.", term::warn_mark());
+        print_step_skipped(3, &checklist, "TLS certificate already exists");
     } else {
         let cert_dir = Path::new("/etc/ssl/aimx");
         if !sys.file_exists(&cert_dir.join("cert.pem")) {
@@ -2259,7 +2386,7 @@ pub fn run_setup(
             println!("\nTLS certificate already exists.");
         }
         checklist.set(3, term::StepState::Done);
-        println!("\n{} Step 3 complete.", term::success_mark());
+        print_step_complete(3, &checklist);
     }
 
     // ---- Step 4: Set up trust policy ---------------------------------------
@@ -2276,19 +2403,19 @@ pub fn run_setup(
         // skipped (no decision asked of the operator).
         println!("\nExisting trust policy preserved.");
         checklist.set(4, term::StepState::Skipped);
-        println!("\n{} Step 4 skipped.", term::warn_mark());
+        print_step_skipped(4, &checklist, "existing trust policy preserved");
         None
     } else if is_noninteractive_env() {
         let defaults = resolve_noninteractive_trust_defaults();
         checklist.set(4, term::StepState::Done);
-        println!("\n{} Step 4 complete.", term::success_mark());
+        print_step_complete(4, &checklist);
         Some(defaults)
     } else {
         let stdin = io::stdin();
         let mut reader = stdin.lock();
         let defaults = prompt_trusted_senders(&mut reader)?;
         checklist.set(4, term::StepState::Done);
-        println!("\n{} Step 4 complete.", term::success_mark());
+        print_step_complete(4, &checklist);
         Some(defaults)
     };
 
@@ -2304,7 +2431,7 @@ pub fn run_setup(
         }
         crate::datadir_readme::write(data_dir)?;
         checklist.set(5, term::StepState::Skipped);
-        println!("\n{} Step 5 skipped.", term::warn_mark());
+        print_step_skipped(5, &checklist, "aimx already installed");
     } else {
         finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
         if config_has_catchall(&config_path) {
@@ -2313,7 +2440,7 @@ pub fn run_setup(
         crate::datadir_readme::write(data_dir)?;
         install_and_verify_service(sys, data_dir)?;
         checklist.set(5, term::StepState::Done);
-        println!("\n{} Step 5 complete.", term::success_mark());
+        print_step_complete(5, &checklist);
     }
 
     // ---- Step 6: Set up MCP for agent(s) -----------------------------------
@@ -2456,10 +2583,35 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) -> AgentSetupOu
         return AgentSetupOutcome::Skipped;
     }
 
-    // `/proc/self/exe` resolves to the current binary even when it lives
-    // outside `/usr/local/bin` (e.g. `AIMX_PREFIX=/opt/aimx` installs).
-    // Self-canonicalise so the re-exec works from a bare `$PATH`.
-    let exe = std::path::PathBuf::from("/proc/self/exe");
+    // Resolve in OUR context (not runuser's). Passing the literal
+    // string "/proc/self/exe" makes `runuser` `execve` it relative to
+    // its own /proc/self — which points at /usr/sbin/runuser — so the
+    // child re-execs runuser with argv ["exe", "agent-setup"]; the
+    // second runuser parses "agent-setup" as a username and dies with
+    // `exe: user agent-setup does not exist`. Resolve with
+    // `current_exe()` here so the child receives the actual aimx
+    // binary path. On the rare target where `current_exe()` errors
+    // (chroot / no-procfs container) we surface the failure and treat
+    // step 6 as skipped rather than hardcode an install prefix that
+    // may not exist (regression guard:
+    // `install_service_file_has_no_silent_fallback`).
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{} Could not resolve the running aimx binary path: {}",
+                term::warn("warning:"),
+                e
+            );
+            println!(
+                "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
+                term::prompt_mark(),
+                term::highlight("aimx agent-setup"),
+                term::highlight(&sudo_user)
+            );
+            return AgentSetupOutcome::Skipped;
+        }
+    };
     let argv = build_agent_setup_argv(&exe, explicit_data_dir);
 
     println!();
@@ -4572,7 +4724,10 @@ owner = "aimx-catchall"
             !TRUSTED_SENDERS_PROMPT.contains("  "),
             "prompt should not contain leaked double spaces from \\-newline continuations"
         );
-        assert!(TRUSTED_SENDERS_PROMPT.contains("leave blank to disable hooks"));
+        assert!(
+            TRUSTED_SENDERS_PROMPT.contains("disables hooks"),
+            "prompt should still mention that empty input disables hooks"
+        );
         assert!(TRUSTED_SENDERS_PROMPT.contains("*@company.com"));
     }
 
@@ -4633,9 +4788,24 @@ owner = "aimx-catchall"
 
     #[test]
     fn prompt_domain_accepts_valid_domain_with_confirmation() {
-        let input = b"agent.example.com\ny\n";
+        // Cycle 5 confirm-after-prompt UX:
+        // line 1 → domain
+        // line 2 → "y" confirms the parsed domain
+        // line 3 → "y" confirms DNS access
+        let input = b"agent.example.com\ny\ny\n";
         let mut reader = io::Cursor::new(input);
         let domain = prompt_domain(&mut reader).unwrap();
+        assert_eq!(domain, "agent.example.com");
+    }
+
+    #[test]
+    fn prompt_domain_accepts_empty_confirmations_as_yes() {
+        // Both confirms default to YES on Enter — operator can hit
+        // Enter twice to accept the parsed domain and the DNS-access
+        // sanity check.
+        let input = b"agent.example.com\n\n\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).expect("empty confirmation should default to yes");
         assert_eq!(domain, "agent.example.com");
     }
 
@@ -4654,42 +4824,179 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn prompt_domain_rejects_invalid_domain() {
-        let input = b"notvalid\n";
+    fn prompt_domain_loops_on_invalid_then_accepts() {
+        // Cycle 5: invalid input must NOT terminate the prompt. The
+        // wizard re-prompts until either a valid domain is confirmed
+        // or the operator hands in an empty line (= explicit abort).
+        let input = b"notvalid\nagent.example.com\ny\ny\n";
         let mut reader = io::Cursor::new(input);
-        let result = prompt_domain(&mut reader);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn prompt_domain_exits_on_declined_confirmation() {
-        let input = b"agent.example.com\nn\n";
-        let mut reader = io::Cursor::new(input);
-        let result = prompt_domain(&mut reader);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("cancelled"),
-            "should indicate cancellation"
-        );
-    }
-
-    #[test]
-    fn prompt_domain_accepts_empty_confirmation_as_yes() {
-        let input = b"agent.example.com\n\n";
-        let mut reader = io::Cursor::new(input);
-        let domain = prompt_domain(&mut reader).expect("empty confirmation should default to yes");
+        let domain = prompt_domain(&mut reader).expect("invalid input must re-prompt, not abort");
         assert_eq!(domain, "agent.example.com");
     }
 
     #[test]
-    fn prompt_domain_exits_on_uppercase_n() {
-        let input = b"agent.example.com\nN\n";
+    fn prompt_domain_loops_on_no_confirmation() {
+        // Cycle 5 echo+confirm: declining the parsed domain must
+        // re-prompt the operator instead of cancelling setup.
+        let input = b"first.example.com\nn\nsecond.example.com\ny\ny\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).expect("no-confirm must re-prompt, not cancel");
+        assert_eq!(
+            domain, "second.example.com",
+            "second pass after `n` must be the domain that landed"
+        );
+    }
+
+    #[test]
+    fn prompt_domain_cancels_on_dns_access_no() {
+        // The DNS-access sanity check is the LAST prompt; declining
+        // it cancels the wizard with a clear error. Inputs:
+        // line 1 → domain, line 2 → "y" confirms domain, line 3 →
+        // "n" declines DNS access.
+        let input = b"agent.example.com\ny\nn\n";
         let mut reader = io::Cursor::new(input);
         let result = prompt_domain(&mut reader);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("cancelled"),
-            "should indicate cancellation"
+            "DNS-access decline must surface as cancellation"
+        );
+    }
+
+    // ----- Cycle 5: confirm-after-prompt helpers ----------------------------
+
+    #[test]
+    fn prompt_confirm_yn_defaults_to_yes_on_blank() {
+        let input = b"\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes, "blank Enter must default to yes");
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_lowercase_y() {
+        let input = b"y\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_yes_word() {
+        let input = b"yes\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_lowercase_n() {
+        let input = b"n\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_uppercase_n() {
+        let input = b"N\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_no_word() {
+        let input = b"no\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_echoes_parsed_list_and_confirms() {
+        // Cycle 5: parsed list is echoed back, operator confirms with
+        // an empty line (= yes), wizard returns ("verified", senders).
+        let input = b"alice@example.com, *@company.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(
+            senders,
+            vec!["alice@example.com".to_string(), "*@company.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_loops_when_user_declines_echo() {
+        // First parse → echoed back; operator declines (`n`); the
+        // wizard re-prompts; second parse → echoed back; operator
+        // accepts (`\n`).
+        let input = b"oldlist@example.com\nn\nnewlist@example.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(senders, vec!["newlist@example.com".to_string()]);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_empty_input_confirms_disable() {
+        // Empty input → warning + "Leave hooks disabled? [Y/n]"
+        // confirm. `\n` (= yes default) returns ("none", []).
+        let input = b"\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_trusted_senders_empty_input_no_loops_back() {
+        // Empty → confirm "leave disabled?" → operator says `n` →
+        // wizard re-prompts → operator types real list → confirm.
+        let input = b"\nn\nalice@example.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(senders, vec!["alice@example.com".to_string()]);
+    }
+
+    #[test]
+    fn print_step_complete_emits_full_checklist() {
+        // Source-grep: every `Done` step in `run_setup` must call
+        // `print_step_complete` with the live checklist. The helper
+        // emits the success line + the six-row checklist + bracketing
+        // blank lines so the operator sees ☐ flip to ☑ as the wizard
+        // progresses.
+        let source = include_str!("setup.rs");
+        let helper_start = source
+            .find("pub fn print_step_complete(")
+            .expect("print_step_complete helper must exist");
+        let helper_body = &source[helper_start..helper_start + 600];
+        assert!(
+            helper_body.contains("print_step_list(checklist)"),
+            "print_step_complete must redraw the full checklist"
+        );
+        assert!(
+            helper_body.contains("Step {n} complete"),
+            "print_step_complete must mention the step number and \"complete\""
+        );
+
+        // Every Done branch in run_setup wires through the new helper
+        // (no straggling raw `println!` of a step-complete line).
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body_end = source[run_setup_start..]
+            .find("\n}\n")
+            .map(|off| run_setup_start + off)
+            .unwrap();
+        let body = &source[run_setup_start..body_end];
+        assert!(
+            !body.contains("Step 1 complete.\""),
+            "Step 1 must use print_step_complete, not a raw println"
+        );
+        assert!(
+            !body.contains("Step 5 complete.\""),
+            "Step 5 must use print_step_complete, not a raw println"
         );
     }
 
@@ -5601,16 +5908,41 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn build_agent_setup_argv_uses_proc_self_exe_shape() {
-        // `/proc/self/exe` is preferred over hardcoding
-        // `/usr/local/bin/aimx` so custom-prefix installs
-        // (`AIMX_PREFIX=/opt/aimx`) still re-exec the right binary.
-        // Assert the call-site in `drop_through_to_agent_setup` still
-        // uses the `/proc/self/exe` literal.
+    fn build_agent_setup_argv_uses_resolved_exe_path() {
+        // Regression guard for the cycle-5 fix: `runuser` re-execs
+        // `argv[0]` in its own context. Passing the literal string
+        // `/proc/self/exe` makes the child runuser resolve
+        // `/proc/self` → `/usr/sbin/runuser` and treat `agent-setup`
+        // as a username, dying with
+        // `exe: user agent-setup does not exist`. The drop-through
+        // must instead resolve the binary in the parent process via
+        // `std::env::current_exe()`. Lock that invariant in by
+        // source-grep so a future refactor can't silently regress
+        // back to the literal-string shape.
         let source = include_str!("setup.rs");
         assert!(
-            source.contains("\"/proc/self/exe\""),
-            "drop-through must self-reference via /proc/self/exe"
+            source.contains("std::env::current_exe()"),
+            "drop-through must resolve the running binary via \
+             `std::env::current_exe()` so `runuser` receives an \
+             absolute path"
+        );
+        // The literal `"/proc/self/exe"` string is forbidden as the
+        // `runuser` argv[0]. Walk just the `drop_through_to_agent_setup`
+        // body so doc comments / unrelated paths in this file don't
+        // false-positive.
+        let drop_through_start = source
+            .find("fn drop_through_to_agent_setup(")
+            .expect("drop_through_to_agent_setup must exist");
+        let drop_through_end = source[drop_through_start..]
+            .find("\nfn ")
+            .map(|off| drop_through_start + off)
+            .unwrap_or(source.len());
+        let body = &source[drop_through_start..drop_through_end];
+        assert!(
+            !body.contains("PathBuf::from(\"/proc/self/exe\")"),
+            "drop_through_to_agent_setup must NOT pass the literal \
+             string \"/proc/self/exe\" to runuser — runuser would \
+             re-exec itself in its own /proc context"
         );
     }
 
