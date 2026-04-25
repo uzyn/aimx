@@ -1,0 +1,58 @@
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "cargo"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+
+  - package-ecosystem: "cargo"
+    directory: "/services/verifier"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      verifier-minor-and-patch:
+        update-types: ["minor", "patch"]
+    commit-message:
+      prefix: "cargo(verifier)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "rust"
+      - "verifier"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      actions:
+        patterns: ["*"]
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  - package-ecosystem: "docker"
+    directory: "/services/verifier"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "docker(verifier)"
+      include: "scope"
+    labels:
+      - "dependencies"
+      - "docker"
+      - "verifier"
