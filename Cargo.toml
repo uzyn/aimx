@@ -54,7 +54,7 @@ unicode-normalization = "0.1"
 rand = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
-dialoguer = { version = "0.11", default-features = false }
+dialoguer = { version = "0.12", default-features = false }
 # Agent-setup TUI. Hand-rolled checkbox renderer on top of `console::Term`
 # / `console::Key` to match the Claude Code / OpenClaw multi-select look
 # (colored caret + filled/hollow mark + dim non-selectable rows).
