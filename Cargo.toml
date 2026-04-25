@@ -28,7 +28,7 @@ toml = "1"
 mail-parser = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-html2text = "0.16"
+html2text = "0.17"
 rsa = { version = "0.9", features = ["pem"] }
 base64 = "0.22"
 mail-auth = "0.7"
