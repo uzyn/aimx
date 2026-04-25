@@ -562,6 +562,130 @@ assert_contains "closing message substitutes domain" "${_out}" "@mail.example.co
 assert_contains "closing message mentions success" "${_out}" "has been set up successfully"
 
 # ---------------------------------------------------------------------------
+# 7f. step glyphs — Unicode under UTF-8 locale, ASCII fallback otherwise
+# ---------------------------------------------------------------------------
+
+echo "# step glyphs"
+
+# UTF-8 locale + NO_COLOR (so escape codes don't interfere with substring
+# match) → expect Unicode box glyphs.
+_out="$(
+    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _step_glyph pending
+        printf "|"
+        _step_glyph running
+        printf "|"
+        _step_glyph done
+        printf "|"
+        _step_glyph skipped
+        printf "|"
+        _step_glyph error
+    '
+)"
+assert_contains "utf8 pending glyph"  "${_out}" "☐"
+assert_contains "utf8 running glyph"  "${_out}" "◐"
+assert_contains "utf8 done glyph"     "${_out}" "☑"
+assert_contains "utf8 skipped glyph"  "${_out}" "☒"
+assert_contains "utf8 error glyph"    "${_out}" "✗"
+
+# Non-UTF-8 locale → expect ASCII fallbacks. Unset every locale env var so
+# inherited LANG/LC_* don't leak through.
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 \
+    env -u LANG -u LC_ALL -u LC_CTYPE -u LC_MESSAGES \
+        sh -c '
+            LC_ALL=C
+            export LC_ALL
+            . "'"${INSTALL_SH}"'"
+            _step_glyph pending
+            printf "|"
+            _step_glyph running
+            printf "|"
+            _step_glyph done
+            printf "|"
+            _step_glyph skipped
+            printf "|"
+            _step_glyph error
+        '
+)"
+assert_contains "ascii pending glyph"  "${_out}" "[ ]"
+assert_contains "ascii running glyph"  "${_out}" "[~]"
+assert_contains "ascii done glyph"     "${_out}" "[x]"
+assert_contains "ascii skipped glyph"  "${_out}" "[-]"
+assert_contains "ascii error glyph"    "${_out}" "[!]"
+
+# ---------------------------------------------------------------------------
+# 7g. set_step + print_step_list — state mutation reflected in banner
+# ---------------------------------------------------------------------------
+
+echo "# set_step + print_step_list"
+
+_out="$(
+    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        set_step 1 done
+        set_step 2 running
+        set_step 6 skipped
+        print_step_list
+    ' 2>&1
+)"
+assert_contains "step 1 shows done glyph"     "${_out}" "☑ Preflight checks on port 25"
+assert_contains "step 2 shows running glyph"  "${_out}" "◐ Set up domain and DNS"
+assert_contains "step 3 still pending"        "${_out}" "☐ Set up TLS certificate"
+assert_contains "step 6 shows skipped glyph"  "${_out}" "☒ Set up MCP for agent(s)"
+
+# ---------------------------------------------------------------------------
+# 7h. print_welcome_banner — initial render is all-pending
+# ---------------------------------------------------------------------------
+
+echo "# print_welcome_banner initial state"
+
+_out="$(
+    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        print_welcome_banner
+    ' 2>&1
+)"
+# All six lines start with the pending glyph, never a checked one.
+assert_contains "welcome banner step 1 pending" "${_out}" "☐ Preflight checks on port 25"
+assert_contains "welcome banner step 6 pending" "${_out}" "☐ Set up MCP for agent(s)"
+case "${_out}" in
+    *"☑"*|*"☒"*|*"◐"*|*"✗"*)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} welcome-banner-no-final-state"
+        echo "  FAIL  welcome-banner-no-final-state: unexpected non-pending glyph"
+        ;;
+    *)
+        PASS=$((PASS + 1))
+        echo "  ok  welcome-banner-no-final-state"
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 7i. print_final_banner — reflects post-run states
+# ---------------------------------------------------------------------------
+
+echo "# print_final_banner final state"
+
+_out="$(
+    INSTALL_SH_TEST=1 LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        set_step 1 done
+        set_step 2 done
+        set_step 3 done
+        set_step 4 done
+        set_step 5 done
+        set_step 6 skipped
+        print_final_banner
+    ' 2>&1
+)"
+assert_contains "final banner has completion title" "${_out}" "installation complete"
+assert_contains "final banner step 1 done"          "${_out}" "☑ Preflight checks on port 25"
+assert_contains "final banner step 5 done"          "${_out}" "☑ Install AIMX"
+assert_contains "final banner step 6 skipped"       "${_out}" "☒ Set up MCP for agent(s)"
+
+# ---------------------------------------------------------------------------
 # 8. AIMX_DRY_RUN smoke — banner + ordered step list, no sudo/download
 # ---------------------------------------------------------------------------
 

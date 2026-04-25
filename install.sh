@@ -199,6 +199,96 @@ EOF
 # ---------------------------------------------------------------------------
 # Welcome banner + step list
 # ---------------------------------------------------------------------------
+#
+# Six checklist items, each tracked in STEP{1..6}_STATE and rendered with a
+# glyph picked by _step_glyph. States: pending, running, done, skipped,
+# error. Unicode glyphs are used when the locale advertises UTF-8 and color
+# is enabled; otherwise an ASCII fallback ([ ] / [~] / [x] / [-] / [!]).
+# The banner is printed twice: once up front (all pending) and once at the
+# end with final states, so operators see ☐ flip to ☑/☒.
+
+STEP1_TITLE="Preflight checks on port 25"
+STEP2_TITLE="Set up domain and DNS"
+STEP3_TITLE="Set up TLS certificate"
+STEP4_TITLE="Set up trust policy"
+STEP5_TITLE="Install AIMX"
+STEP6_TITLE="Set up MCP for agent(s)"
+
+STEP1_STATE="pending"
+STEP2_STATE="pending"
+STEP3_STATE="pending"
+STEP4_STATE="pending"
+STEP5_STATE="pending"
+STEP6_STATE="pending"
+
+# _supports_unicode — true when the locale claims UTF-8. Checked once at
+# import time and cached in $_AIMX_UTF8 so banner prints stay cheap.
+_supports_unicode() {
+    _loc="${LC_ALL:-${LC_CTYPE:-${LANG:-}}}"
+    case "${_loc}" in
+        *UTF-8* | *UTF8* | *utf-8* | *utf8*) return 0 ;;
+    esac
+    return 1
+}
+
+if _supports_unicode; then
+    _AIMX_UTF8=1
+else
+    _AIMX_UTF8=0
+fi
+
+# _step_glyph <state> — print the colored / fallback glyph for one state
+# to stdout (no newline). Color codes only emit when _ui_color_enabled.
+_step_glyph() {
+    _state="$1"
+    if [ "${_AIMX_UTF8}" = "1" ]; then
+        case "${_state}" in
+            pending)  _g='☐'; _c='2'  ;;
+            running)  _g='◐'; _c='33' ;;
+            done)     _g='☑'; _c='32' ;;
+            skipped)  _g='☒'; _c='36' ;;
+            error)    _g='✗'; _c='31' ;;
+            *)        _g='?'; _c='0'  ;;
+        esac
+    else
+        case "${_state}" in
+            pending)  _g='[ ]'; _c='2'  ;;
+            running)  _g='[~]'; _c='33' ;;
+            done)     _g='[x]'; _c='32' ;;
+            skipped)  _g='[-]'; _c='36' ;;
+            error)    _g='[!]'; _c='31' ;;
+            *)        _g='[?]'; _c='0'  ;;
+        esac
+    fi
+    _ui_paint "${_c}" "${_g}"
+}
+
+# set_step <n> <state> — mutate one of the six STEP{n}_STATE vars.
+set_step() {
+    case "$1" in
+        1) STEP1_STATE="$2" ;;
+        2) STEP2_STATE="$2" ;;
+        3) STEP3_STATE="$2" ;;
+        4) STEP4_STATE="$2" ;;
+        5) STEP5_STATE="$2" ;;
+        6) STEP6_STATE="$2" ;;
+    esac
+}
+
+_print_step_line() {
+    # $1 = state, $2 = title
+    printf '%s %s\n' "$(_step_glyph "$1")" "$2" >&2
+}
+
+# print_step_list — render the six current STEP{n}_STATE/TITLE lines.
+print_step_list() {
+    _print_step_line "${STEP1_STATE}" "${STEP1_TITLE}"
+    _print_step_line "${STEP2_STATE}" "${STEP2_TITLE}"
+    _print_step_line "${STEP3_STATE}" "${STEP3_TITLE}"
+    _print_step_line "${STEP4_STATE}" "${STEP4_TITLE}"
+    _print_step_line "${STEP5_STATE}" "${STEP5_TITLE}"
+    _print_step_line "${STEP6_STATE}" "${STEP6_TITLE}"
+}
 
 print_welcome_banner() {
     # Title line uses the raven emoji; terminals without glyph support
@@ -207,12 +297,18 @@ print_welcome_banner() {
     printf '%s\n' "$(_ui_paint '1;35' '🐦‍⬛ AIMX installer')" >&2
     printf '%s\n' "$(_ui_paint 2 'Self-hosted email for AI agents. One binary, one setup.')" >&2
     printf '\n' >&2
-    printf '%s\n' "( ) Preflight checks on port 25" >&2
-    printf '%s\n' "( ) Set up domain and DNS" >&2
-    printf '%s\n' "( ) Set up TLS certificate" >&2
-    printf '%s\n' "( ) Set up trust policy" >&2
-    printf '%s\n' "( ) Install AIMX" >&2
-    printf '%s\n' "( ) Set up MCP for agent(s)" >&2
+    print_step_list
+    printf '\n' >&2
+}
+
+# print_final_banner — reprint the checklist with current (terminal) states.
+# Called right before the closing message so the operator sees ☐ flip to
+# ☑/☒ as a single, unambiguous summary.
+print_final_banner() {
+    printf '\n' >&2
+    printf '%s\n' "$(_ui_paint '1;35' '🐦‍⬛ AIMX installer — installation complete')" >&2
+    printf '\n' >&2
+    print_step_list
     printf '\n' >&2
 }
 
@@ -582,9 +678,16 @@ has_tty() {
 # even under `curl | sh`. Exits non-zero with diagnostics on failure.
 run_aimx_setup() {
     ui_section "Steps 1-5: aimx setup (preflight, DNS, TLS, trust, service)"
+    set_step 1 running
+    set_step 2 running
+    set_step 3 running
+    set_step 4 running
+    set_step 5 running
     backup_existing_config
     if has_tty; then
         if ! ${SUDO} aimx setup </dev/tty; then
+            set_step 1 error; set_step 2 error; set_step 3 error
+            set_step 4 error; set_step 5 error
             ui_error "aimx setup failed"
             say "  Inspect 'aimx doctor' output and re-run 'sudo aimx setup'."
             exit 1
@@ -593,12 +696,16 @@ run_aimx_setup() {
         # No TTY available (e.g. CI). Run without reattaching; setup
         # will respect AIMX_NONINTERACTIVE=1 if set, or error.
         if ! ${SUDO} aimx setup; then
+            set_step 1 error; set_step 2 error; set_step 3 error
+            set_step 4 error; set_step 5 error
             ui_error "aimx setup failed (no TTY for interactive prompts)"
             say "  Re-run with a terminal attached, or export AIMX_NONINTERACTIVE=1"
             say "  along with the required mailbox defaults. See book/setup.md."
             exit 1
         fi
     fi
+    set_step 1 done; set_step 2 done; set_step 3 done
+    set_step 4 done; set_step 5 done
     ui_success "Steps 1-5 complete (aimx setup finished)"
 }
 
@@ -607,13 +714,16 @@ run_aimx_setup() {
 # can be identified the step is skipped with instructions, NOT fatal.
 run_agent_setup_as_invoker() {
     ui_section "Step 6: aimx agent-setup (MCP wiring for your LLM agent)"
+    set_step 6 running
     _invoker="$(detect_invoker 2>/dev/null || true)"
     if [ -z "${_invoker}" ]; then
+        set_step 6 skipped
         ui_warn "Step 6 skipped: no non-root user detected"
         say "  Run as your agent user: aimx agent-setup"
         return 0
     fi
     if ! has_tty; then
+        set_step 6 skipped
         ui_warn "Step 6 skipped: no TTY available for the agent picker"
         say "  Run as ${_invoker}: aimx agent-setup"
         return 0
@@ -631,17 +741,20 @@ run_agent_setup_as_invoker() {
             _inv_home="/home/${_invoker}"
         fi
         sudo -H -u "${_invoker}" env HOME="${_inv_home}" sh -c 'aimx agent-setup </dev/tty' || {
+            set_step 6 skipped
             ui_warn "Step 6: aimx agent-setup returned non-zero (continuing)"
             say "  Re-run as ${_invoker}: aimx agent-setup"
             return 0
         }
     else
         sh -c 'aimx agent-setup </dev/tty' || {
+            set_step 6 skipped
             ui_warn "Step 6: aimx agent-setup returned non-zero (continuing)"
             say "  Re-run: aimx agent-setup"
             return 0
         }
     fi
+    set_step 6 done
     ui_success "Step 6 complete (MCP wired)"
 }
 
@@ -862,16 +975,21 @@ main() {
             err "upgrade failed at start step; service restored if possible"
         fi
 
+        set_step 1 skipped; set_step 2 skipped
+        set_step 3 skipped; set_step 4 skipped
         ui_info "Step 1 skipped (upgrade - previous setup preserved)"
         ui_info "Step 2 skipped (upgrade - DNS unchanged)"
         ui_info "Step 3 skipped (upgrade - TLS unchanged)"
         ui_info "Step 4 skipped (upgrade - trust policy unchanged)"
+        set_step 5 done
         if [ -n "${_installed_tag}" ]; then
             ui_success "Step 5 complete (aimx upgraded from ${_installed_tag} to ${TAG})"
         else
             ui_success "Step 5 complete (aimx installed at ${TAG})"
         fi
+        set_step 6 skipped
         ui_info "Step 6 skipped (upgrade - MCP remains wired as before)"
+        print_final_banner
         say "upgrade complete. Run 'aimx doctor' for health."
         exit 0
     fi
@@ -886,6 +1004,9 @@ main() {
 
     # Step 6: drop to the invoking user and run `aimx agent-setup`.
     run_agent_setup_as_invoker
+
+    # Final banner — flips ☐ to ☑/☒ so operators see the summary at a glance.
+    print_final_banner
 
     # Closing message.
     _domain="$(extract_domain)"
