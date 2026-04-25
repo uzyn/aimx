@@ -37,6 +37,26 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Hooks not firing | Trust gate | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
 | DKIM verification failing | DNS record mismatch or key regenerated | Ensure DKIM DNS record matches current public key |
 
+## Restarting setup from scratch
+
+`aimx setup` is idempotent: re-running it preserves the operator's prior trust policy and skips TLS / install steps once they are in place. The wizard now generates the DKIM keypair early (step 2, while rendering the DNS guidance table), so a hard reset means clearing more than just `config.toml`.
+
+To wipe a partially-installed host and start from a clean slate:
+
+```bash
+# Stop the daemon if it's running.
+sudo systemctl stop aimx 2>/dev/null || sudo rc-service aimx stop 2>/dev/null || true
+
+# Remove config + DKIM keys + (optionally) the self-signed TLS cert.
+sudo rm -rf /etc/aimx/config.toml /etc/aimx/dkim/
+sudo rm -rf /etc/ssl/aimx/   # only if you want a fresh TLS cert
+
+# Re-run the wizard.
+sudo aimx setup
+```
+
+Mailbox data under `/var/lib/aimx/` is preserved across re-runs by design — delete it explicitly if you want to start with empty `inbox/` and `sent/` trees as well. Aborting the wizard at the trust prompt leaves the DKIM keypair on disk; the next `sudo aimx setup` picks up where you left off, so wiping is only needed when you actually want a fresh DKIM key (e.g. after publishing the wrong public key to DNS).
+
 ## `aimx serve` diagnostics
 
 ```bash

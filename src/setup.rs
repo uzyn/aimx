@@ -2264,6 +2264,13 @@ pub fn run_setup(
 
     // ---- Step 4: Set up trust policy ---------------------------------------
     section_header(4, SETUP_STEPS[3]);
+    // NOTE: Trust prompts are skipped whenever a config exists at all
+    // (preserving operator-entered values), even on partial-install
+    // re-entries where `already_configured` would be false. This is
+    // deliberately broader than the steps 3 and 5 gate (which uses the
+    // composite `already_configured = service_running && cert_exists &&
+    // dkim_exists`): the goal here is to never overwrite an operator's
+    // prior trust decision, regardless of how far the previous run got.
     let trust_defaults = if config_path.exists() {
         // Re-entry: existing trust config is preserved. Treated as
         // skipped (no decision asked of the operator).
@@ -2313,7 +2320,7 @@ pub fn run_setup(
     section_header(6, SETUP_STEPS[5]);
     display_mcp_section(data_dir);
 
-    // Print the final banner BEFORE the drop-through so the operator sees
+    // Print the interim banner BEFORE the drop-through so the operator sees
     // ☑ on 1–5 and ◐ on 6 right before the agent-setup TUI takes over.
     let mut pre_handoff = checklist;
     pre_handoff.set(6, term::StepState::Running);
@@ -2333,6 +2340,10 @@ pub fn run_setup(
         }
     };
     checklist.set(6, mcp_state);
+
+    // Reprint the final banner with all six step states resolved so the
+    // operator sees step 6 flip from ◐ to ☑ / ☒ before the closing message.
+    print_final_banner(&checklist);
 
     // Closing message — final thing the operator sees.
     print_closing_message(&domain);
@@ -2364,7 +2375,7 @@ fn print_closing_message(domain: &str) {
     println!("{}", term::success("AIMX has been set up successfully."));
     println!();
     println!(
-        "Your agents now have access to set up, send and receive emails from {}.",
+        "Your agents now have access to set up, send and receive emails from {} emails.",
         term::highlight(&format!("@{domain}"))
     );
     println!();
@@ -5444,6 +5455,71 @@ owner = "aimx-catchall"
     }
 
     #[test]
+    fn closing_message_preserves_trailing_emails_word() {
+        // Spec wording explicitly ends with "...emails from @<DOMAIN>
+        // emails." with the trailing "emails" word. Lock in both the
+        // template (what's in the source) and the rendered string (what
+        // an operator actually sees with their domain substituted in).
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains(
+                "Your agents now have access to set up, send and receive emails from {} emails."
+            ),
+            "closing message template must keep the trailing `emails.` word \
+             so the rendered line reads `... from @<DOMAIN> emails.`"
+        );
+
+        // Cross-check the rendered substring an operator would see.
+        let domain = "agent.example.com";
+        let rendered = format!(
+            "Your agents now have access to set up, send and receive emails from @{domain} emails."
+        );
+        assert!(
+            rendered.contains(&format!("emails from @{domain} emails.")),
+            "rendered closing message must contain `emails from @{{domain}} emails.`. \
+             Got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn run_setup_reprints_final_banner_after_drop_through() {
+        // Bug #1 from the cycle-3 review: the operator never saw step 6
+        // flip from ◐ to ☑ / ☒ because `print_final_banner` was only
+        // called once — BEFORE the drop-through — and was not reprinted
+        // after `drop_through_to_agent_setup` returned. Lock in the
+        // two-call contract by source-grep so a future refactor can't
+        // silently drop the second call.
+        let source = include_str!("setup.rs");
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body_end = source[run_setup_start..]
+            .find("\n}\n")
+            .map(|off| run_setup_start + off)
+            .expect("run_setup body terminator");
+        let body = &source[run_setup_start..body_end];
+
+        let banner_calls = body.matches("print_final_banner(").count();
+        assert!(
+            banner_calls >= 2,
+            "run_setup must call `print_final_banner` at least twice: once \
+             before the drop-through (step 6 = ◐) and once after \
+             (step 6 in its terminal state). Found {banner_calls} call(s)."
+        );
+
+        // The second call must come AFTER the drop-through call site so
+        // the reprinted banner reflects the resolved step-6 state.
+        let drop_through_pos = body
+            .find("drop_through_to_agent_setup(")
+            .expect("drop_through_to_agent_setup call site");
+        let after_drop_through = &body[drop_through_pos..];
+        assert!(
+            after_drop_through.contains("print_final_banner("),
+            "the second `print_final_banner` call must come AFTER \
+             `drop_through_to_agent_setup` so the operator sees step 6 \
+             flip from ◐ to ☑ / ☒ before the closing message."
+        );
+    }
+
+    #[test]
     fn wizard_does_not_display_deliverability_section() {
         // Regression: `display_deliverability_section` and
         // `gmail_whitelist_instructions` must stay deleted from the
@@ -5675,6 +5751,15 @@ owner = "aimx-catchall"
         );
     }
 
+    // CAVEAT: this test relies on each `section_header(N, ...)` being a
+    // literal call at the top level of `run_setup`. If a future refactor
+    // extracts a section into a helper (e.g. `setup_tls()`), the header
+    // call moves out of `run_setup`'s body and the source-grep below stops
+    // testing runtime order — it will still pass on the surviving
+    // top-level calls but will silently lose coverage of the moved one.
+    // If you extract a section, you must either inline the helper for
+    // this test OR convert it to a stdout-capture invariant against the
+    // actual `run_setup` execution.
     #[test]
     fn run_setup_emits_section_headers_in_spec_order() {
         // Spec order: Preflight → Domain & DNS → TLS → Trust → Install → MCP.
@@ -5720,6 +5805,13 @@ owner = "aimx-catchall"
         assert!(install < mcp, "step 5 must precede step 6");
     }
 
+    // CAVEAT: this test relies on the re-entrant `checklist.set(N,
+    // Skipped)` mutations being literal call sites at the top level of
+    // `run_setup`. Same shape as the section-order test above — extracting
+    // any branch into a helper means the source-grep can no longer prove
+    // the runtime contract. If you refactor, either inline the helper for
+    // this test or convert it to a stdout-capture invariant against the
+    // actual re-entrant execution path.
     #[test]
     fn run_setup_reentrant_path_marks_tls_trust_install_skipped() {
         // Lock in the re-entrant section-skip contract via source-grep:

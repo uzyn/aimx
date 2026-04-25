@@ -73,7 +73,7 @@ After step 6 returns, the wizard prints the final closing message:
 ```
 AIMX has been set up successfully.
 
-Your agents now have access to set up, send and receive emails from @<DOMAIN>.
+Your agents now have access to set up, send and receive emails from @<DOMAIN> emails.
 
 Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g.
   claude -p "Set up agent@<DOMAIN> and respond to me via email the moment you receive my instructions via email."
