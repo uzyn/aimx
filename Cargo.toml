@@ -48,7 +48,7 @@ rustls-pki-types = { version = "1", features = ["alloc"] }
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls-tls"] }
 hickory-resolver = "0.25"
 include_dir = "0.7"
-sha2 = "0.10"
+sha2 = "0.11"
 psl = "2"
 unicode-normalization = "0.1"
 rand = "0.10"
@@ -83,7 +83,7 @@ assert_cmd = "2"
 predicates = "3"
 wait-timeout = "0.2"
 rcgen = "0.14"
-sha2 = "0.10"
+sha2 = "0.11"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tracing-test = "0.2"
 serial_test = "3"
