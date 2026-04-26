@@ -232,7 +232,6 @@ Inverse of `aimx agents setup`. Removes the plugin files under `$HOME` and submi
 | Flag | Description |
 |------|-------------|
 | `<agent>` (positional) | Short name; must match the agent previously passed to `aimx agents setup`. |
-| `-y`, `--yes` | Skip the interactive confirmation prompt. |
 | `--dangerously-allow-root` | Footgun. Bypass the root-refusal check. |
 
 The hyphenated `aimx agent-cleanup <agent>` form (with `--full` to wipe plugin files) is preserved as a hidden alias for back-compat. New scripts should prefer `aimx agents remove`.
