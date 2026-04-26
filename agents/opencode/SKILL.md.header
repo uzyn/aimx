@@ -4,3 +4,45 @@ description: Self-hosted email for AI agents. Send, read, reply to, and manage e
 author: U-Zyn Chua <chua@uzyn.com>
 ---
 
+## Wiring yourself up as a mailbox hook (OpenCode)
+
+When the user asks you to act on inbound mail automatically (for
+example "reply to anything that lands in `support@`"), create an
+`on_receive` hook that re-launches `opencode run` with a fixed prompt
+that tells the agent to fetch the email itself:
+
+```
+hook_create(
+  mailbox: "support",
+  event: "on_receive",
+  cmd: ["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g., email_reply)."],
+  stdin: "none"
+)
+```
+
+Notes:
+
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/opencode`, which is typical
+  for npm/curl installs. Adjust to match `which opencode` on your
+  host if the binary lives elsewhere (e.g. `/usr/bin/opencode`). The
+  inline-prompt argv element is ~200 chars; well under
+  `MAX_ARG_STRLEN` (128 KiB on Linux).
+- `opencode run` does not read stdin in headless mode, so we use
+  `stdin: "none"` and embed the entire instruction as the final argv
+  element. The daemon sets the `AIMX_FILEPATH` environment variable
+  to the absolute path of the inbound email's `.md` file before
+  spawning the hook; OpenCode's filesystem/Bash tools expand it at
+  run time. argv itself is not shell-expanded — the literal token
+  `AIMX_FILEPATH` reaches the agent verbatim.
+- `--dangerously-skip-permissions` is required for unattended tool
+  calls. Without it the headless run blocks on permission prompts.
+- Optional: pass `--format json` to get machine-readable output (the
+  daemon captures stderr / stdout for log purposes regardless).
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup opencode` as
+that user before creating the hook, or the headless invocation will
+start without the skill loaded and the agent won't know what to do
+with the email.
+

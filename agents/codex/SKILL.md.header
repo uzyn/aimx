@@ -4,3 +4,45 @@ description: Self-hosted email for AI agents. Send, read, reply to, and manage e
 author: U-Zyn Chua <chua@uzyn.com>
 ---
 
+## Wiring yourself up as a mailbox hook (Codex CLI)
+
+When the user asks you to act on inbound mail automatically (for example
+"reply to anything that lands in `support@`"), create an `on_receive`
+hook that re-launches `codex exec` with the email piped on stdin as the
+prompt itself:
+
+```
+hook_create(
+  mailbox: "support",
+  event: "on_receive",
+  cmd: ["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"],
+  stdin: "email"
+)
+```
+
+Notes:
+
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/codex`, which is typical for
+  npm/curl installs. Adjust to match `which codex` on your host if
+  the binary lives elsewhere (e.g. `/usr/bin/codex`).
+- The trailing `-` makes Codex read stdin as the prompt — so the email
+  itself becomes Codex's task. You do not embed an instruction in
+  argv; if you need a prefix or framing, the operator can wrap the
+  email with a custom `cmd` that injects boilerplate before piping.
+- `--skip-git-repo-check` is required because hooks fire from
+  `/var/lib/aimx/inbox/<mailbox>/` (not a git repo). Without it Codex
+  refuses to run.
+- `--full-auto` is the safe sandboxed default for unattended runs.
+  The harsher `--dangerously-bypass-approvals-and-sandbox` is only
+  appropriate inside a contained host where escape from the sandbox is
+  acceptable.
+- `stdin: "email"` pipes the raw `.md` (TOML frontmatter + body) to
+  Codex.
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup codex` as that
+user before creating the hook, or the headless invocation will start
+without the skill loaded and the agent won't know what to do with the
+email.
+

@@ -174,14 +174,14 @@ See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate log
 
 ## Hooks
 
-aimx fires shell commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `dangerously_support_untrusted = true`. Hooks may carry an optional `name`; when omitted, aimx derives a stable 12-char hex id from `event + cmd` so `aimx hooks list` / `delete` can still target the hook.
+aimx fires commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `fire_on_untrusted = true`. Hooks may carry an optional `name`; when omitted, aimx derives a stable 12-char hex id from `event + cmd + fire_on_untrusted` so `aimx hooks list` / `delete` can still target the hook. Each hook executes as the mailbox's owning Linux user (`setuid` from root before `exec`); there is no per-hook `run_as` override.
 
 ```toml
 [[mailboxes.support.hooks]]
-# name is optional. A stable 12-char hex id is derived from event+cmd if omitted.
+# name is optional. A stable 12-char hex id is derived from event+cmd+fire_on_untrusted if omitted.
 event = "on_receive"
-cmd = 'ntfy pub agent-mail "$AIMX_SUBJECT from $AIMX_FROM"'
-dangerously_support_untrusted = true
+cmd = ["/usr/bin/ntfy", "pub", "agent-mail", "$AIMX_SUBJECT from $AIMX_FROM"]
+fire_on_untrusted = true
 ```
 
 See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider).

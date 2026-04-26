@@ -6,3 +6,20 @@ version: 1.0.0
 metadata: {"openclaw": {"requires": {"bins": ["aimx"]}}}
 ---
 
+## Wiring yourself up as a mailbox hook (OpenClaw)
+
+Headless mailbox hooks: not currently supported on OpenClaw. The
+OpenClaw CLI does not document a one-shot prompt mode as of Apr 2026
+— its surfaces are interactive (chat-channel, Control-UI dashboard)
+plus admin subcommands. To use OpenClaw with aimx, treat aimx as a
+read source via the MCP server and trigger the agent through
+OpenClaw's documented interactive entry points. If OpenClaw later
+publishes a one-shot CLI, this section will be updated; track
+upstream at https://docs.openclaw.ai.
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup openclaw` as
+that user before creating any agent-driven hook through a different
+runtime, or the headless invocation will start without the skill
+loaded and the agent won't know what to do with the email.
+

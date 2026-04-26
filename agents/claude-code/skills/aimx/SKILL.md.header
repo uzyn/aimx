@@ -4,3 +4,46 @@ description: Self-hosted email for AI agents. Send, read, reply to, and manage e
 author: U-Zyn Chua <chua@uzyn.com>
 ---
 
+## Wiring yourself up as a mailbox hook (Claude Code)
+
+When the user asks you to act on inbound mail automatically (for example
+"reply to anything that lands in `support@`"), create an `on_receive`
+hook that re-launches `claude` with the email piped on stdin. Use this
+exact recipe:
+
+```
+hook_create(
+  mailbox: "support",
+  event: "on_receive",
+  cmd: ["/usr/local/bin/claude", "-p", "<instruction-string>", "--dangerously-skip-permissions"],
+  stdin: "email"
+)
+```
+
+Replace `<instruction-string>` with the prompt you want the headless
+session to follow (for example: `"You are the support agent. Read the
+email on stdin and reply via the aimx MCP server."`). Notes:
+
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/claude`, which is typical
+  for npm/curl installs. Adjust to match `which claude` on your host
+  if the binary lives elsewhere (e.g. `/usr/bin/claude`).
+- `--dangerously-skip-permissions` (alias `--permission-mode
+  bypassPermissions`) is required for autonomous tool calls — without
+  it the headless session will block on the permission prompt and
+  never call MCP. This is the documented Claude Code flag for
+  unattended runs.
+- `stdin: "email"` makes the daemon pipe the raw `.md` (TOML
+  frontmatter + body) to the child process. Your `-p` prompt only
+  needs to tell the agent what to do; the email content arrives on
+  stdin.
+- Optional knobs: pass `--mcp-config <path>` together with
+  `--strict-mcp-config` to pin which MCP servers the headless run
+  loads, or `--model sonnet` to select a model explicitly.
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup claude-code` as
+that user before creating the hook, or the headless invocation will
+start without the skill loaded and the agent won't know what to do
+with the email.
+
