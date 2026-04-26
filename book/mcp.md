@@ -20,7 +20,7 @@ The server runs in stdio mode. It reads from stdin and writes to stdout. It is l
 
 ## Agent integration
 
-See [Agent Integration](agent-integration.md) for one-line `aimx agent-setup <agent>` installers and the manual MCP wiring pattern for clients not yet in the registry.
+See [Agent Integration](agent-integration.md) for one-line `aimx agents setup <agent>` installers and the manual MCP wiring pattern for clients not yet in the registry.
 
 ## Per-user visibility
 
@@ -180,9 +180,9 @@ Enumerate hook templates enabled on this install.
 
 **Parameters:** none
 
-**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are visible — for per-agent templates the caller should run `aimx agent-setup <agent>` (no sudo) to register `invoke-<agent>-<username>`. Templates are filtered to the caller's visibility: only `run_as = <caller_username>` and reserved-`run_as` templates are returned.
+**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are visible — for per-agent templates the caller should run `aimx agents setup <agent>` (no sudo) to register `invoke-<agent>-<username>`. Templates are filtered to the caller's visibility: only `run_as = <caller_username>` and reserved-`run_as` templates are returned.
 
-Example (for alice, after running `aimx agent-setup claude-code`):
+Example (for alice, after running `aimx agents setup claude-code`):
 
 ```json
 [

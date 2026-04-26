@@ -128,7 +128,7 @@ Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](
 | `cmd` | array of strings | *(required)* | Argv for the child process. `cmd[0]` is the binary path; subsequent entries may embed `{name}` placeholders in string values. |
 | `params` | array of strings | `[]` | Declared placeholder names the operator/agent fills at hook-create time. Must be a 1:1 set with the placeholders in `cmd` (minus built-ins). |
 | `stdin` | string | `"email"` | `"email"` (pipe the raw `.md`), `"email_json"` (`{"raw": ...}`), or `"none"`. |
-| `run_as` | string | *(required)* | Linux username the child process runs as. Any user resolvable via `getpwnam(3)` is accepted, plus the reserved `"aimx-catchall"` (for catchall-bound templates) and `"root"` (only settable via root-executed `config.toml` edit; the UDS verb rejects these two values). Templates registered via `aimx agent-setup` default to the registering user's username. |
+| `run_as` | string | *(required)* | Linux username the child process runs as. Any user resolvable via `getpwnam(3)` is accepted, plus the reserved `"aimx-catchall"` (for catchall-bound templates) and `"root"` (only settable via root-executed `config.toml` edit; the UDS verb rejects these two values). Templates registered via `aimx agents setup` default to the registering user's username. |
 | `timeout_secs` | int | `60` | Hard subprocess timeout. Range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `allowed_events` | array of strings | `["on_receive", "after_send"]` | Events the template may be wired to. MCP `hook_create` with a disallowed event is rejected. |
 

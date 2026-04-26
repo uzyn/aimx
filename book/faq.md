@@ -159,7 +159,7 @@ AIMX does not implement MCP-level access control today. Every MCP tool call sees
 
 ### How do I update the installed agent plugin after upgrading AIMX?
 
-`aimx agent-setup <agent> --force`. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. Re-running with `--force` overwrites whatever is at the destination.
+`aimx agents setup <agent> --force`. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. Re-running with `--force` overwrites whatever is at the destination.
 
 ## Operations
 

@@ -66,6 +66,10 @@ ALLOWED_NON_VERBS=(
     # `#[command(... alias = "...")]` attributes.
     hook
     mailbox
+    # Hidden legacy aliases for `aimx agents …` — retained for back-compat per PR #153 / cycle 8.
+    agent
+    agent-setup
+    agent-cleanup
     # Words that appear after `aimx ` inside quoted-output examples
     # rather than as subcommand invocations (e.g. the success banner
     # `aimx is running for <domain>.` and the upgrade banner

@@ -117,7 +117,7 @@ The historical `aimx agent-cleanup <agent>` (with `--full` to also wipe plugin f
 
 ### Template naming and mapping
 
-Every template registered by `aimx agent-setup` follows the pattern `invoke-<agent>-<username>`. Mapping of agent → template prefix:
+Every template registered by `aimx agents setup` follows the pattern `invoke-<agent>-<username>`. Mapping of agent → template prefix:
 
 | Agent | Template name |
 |-------|---------------|
@@ -152,7 +152,7 @@ its MCP registry. The aimx plugin ships two pieces:
 Install:
 
 ```bash
-aimx agent-setup claude-code
+aimx agents setup claude-code
 ```
 
 Then register the MCP server with Claude Code:
@@ -168,11 +168,11 @@ server. Restart Claude Code after registration.
 Custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup claude-code
+aimx --data-dir /custom/path agents setup claude-code
 claude mcp add --scope user aimx /usr/local/bin/aimx --data-dir /custom/path mcp
 ```
 
-The `aimx agent-setup` installer rewrites `mcpServers.aimx.args` in the
+The `aimx agents setup` installer rewrites `mcpServers.aimx.args` in the
 plugin's `plugin.json` and prints a `claude mcp add` command that includes
 the same `--data-dir` override.
 
@@ -189,13 +189,13 @@ plugin ships two pieces:
 Install:
 
 ```bash
-aimx agent-setup codex
+aimx agents setup codex
 ```
 
 Custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup codex
+aimx --data-dir /custom/path agents setup codex
 ```
 
 Like Claude Code, the installer rewrites `mcpServers.aimx.args` in
@@ -217,7 +217,7 @@ not alongside the skill.
 Install:
 
 ```bash
-aimx agent-setup opencode
+aimx agents setup opencode
 ```
 
 The installer writes `~/.config/opencode/skills/aimx/SKILL.md` and prints
@@ -238,7 +238,7 @@ project-level at `<repo>/opencode.json`):
 For a custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup opencode
+aimx --data-dir /custom/path agents setup opencode
 ```
 
 The printed JSONC snippet will have `"--data-dir", "/custom/path"`
@@ -258,7 +258,7 @@ block to merge.
 Install:
 
 ```bash
-aimx agent-setup gemini
+aimx agents setup gemini
 ```
 
 The installer writes `~/.gemini/skills/aimx/SKILL.md` and prints:
@@ -281,7 +281,7 @@ exist, create it with the object above as its full contents. If
 For a custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup gemini
+aimx --data-dir /custom/path agents setup gemini
 ```
 
 The printed `args` array will include `"--data-dir", "/custom/path"`.
@@ -300,7 +300,7 @@ MCP wiring AND the aimx primer. No separate config-file edit is needed.
 Install:
 
 ```bash
-aimx agent-setup goose
+aimx agents setup goose
 ```
 
 The installer writes `~/.config/goose/recipes/aimx.yaml`. Run the recipe
@@ -316,7 +316,7 @@ recipes directory.
 For a custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup goose
+aimx --data-dir /custom/path agents setup goose
 ```
 
 The recipe's stdio extension args will be rewritten to include
@@ -343,7 +343,7 @@ having you hand-edit the JSON5 file, aimx uses OpenClaw's first-class
 Install:
 
 ```bash
-aimx agent-setup openclaw
+aimx agents setup openclaw
 ```
 
 The installer writes `~/.openclaw/skills/aimx/SKILL.md` and prints a
@@ -359,7 +359,7 @@ restart the OpenClaw gateway so the new MCP server is loaded.
 For a custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup openclaw
+aimx --data-dir /custom/path agents setup openclaw
 ```
 
 The printed `openclaw mcp set` command's JSON will include
@@ -382,7 +382,7 @@ config file, mirroring the Gemini CLI / OpenCode flow.
 Install:
 
 ```bash
-aimx agent-setup hermes
+aimx agents setup hermes
 ```
 
 The installer writes `~/.hermes/skills/aimx/SKILL.md` and the bundled
@@ -404,7 +404,7 @@ without restarting.
 For a custom data directory:
 
 ```bash
-aimx --data-dir /custom/path agent-setup hermes
+aimx --data-dir /custom/path agents setup hermes
 ```
 
 The printed YAML's `args` line will become
@@ -456,9 +456,9 @@ You already ran `aimx agents setup <agent>` on this host. There are three paths 
 
 - **Change nothing.** The existing template is still registered and working; nothing to do.
 - **Refresh `cmd[0]`** (your agent binary moved): run `aimx agents setup <agent> --redetect`. This re-probes `$PATH` and updates the existing template's `cmd[0]` to the current path.
-- **Replace entirely.** Run `aimx agent-cleanup <agent>` first to drop the existing template, then `aimx agents setup <agent>` again to register a fresh one.
+- **Replace entirely.** Run `aimx agents remove <agent>` first to drop the existing template, then `aimx agents setup <agent>` again to register a fresh one.
 
-### The agent does not see aimx after `agent-setup` runs
+### The agent does not see aimx after `agents setup` runs
 
 - Confirm the destination was written: `aimx agents setup --list` shows the
   destination path; check that it exists and contains the expected files.
@@ -472,7 +472,7 @@ You already ran `aimx agents setup <agent>` on this host. There are three paths 
 Re-run with `--force` to overwrite when you want to replace the plugin
 files on disk.
 
-### `agent-setup` refuses to run as root
+### `agents setup` refuses to run as root
 
 It is intentional. Per-user agent configuration lives under `$HOME`; if you
 run the installer as root, it would drop files into root's home (or fail in
@@ -483,12 +483,12 @@ configuring.
 
 The plugin's MCP command defaults to `/var/lib/aimx/` for the aimx data
 directory. If you set up aimx with a different path, re-run with
-`aimx --data-dir <path> agent-setup <agent> --force`.
+`aimx --data-dir <path> agents setup <agent> --force`.
 
 ### OpenCode: skill loads but MCP tools do not appear
 
 OpenCode loads skills from `~/.config/opencode/skills/` but MCP servers
-only activate when declared in `opencode.json`. Re-run `aimx agent-setup
+only activate when declared in `opencode.json`. Re-run `aimx agents setup
 opencode`, copy the printed JSONC block into the `mcp` object in your
 `opencode.json`, and restart OpenCode.
 
