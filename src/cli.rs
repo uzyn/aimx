@@ -414,9 +414,12 @@ pub struct HookCreateArgs {
     #[arg(long, value_parser = ["on_receive", "after_send"])]
     pub event: String,
 
-    /// Shell command executed via `sh -c` when the hook fires.
-    /// Hook creation requires root: it writes to `/etc/aimx/config.toml`
-    /// directly and sends SIGHUP to `aimx serve`.
+    /// Argv array exec'd directly when the hook fires, written as a JSON
+    /// string (e.g. `--cmd '["/bin/echo", "hello"]'`). The first element
+    /// must be an absolute path; there is no implicit shell wrapping.
+    /// Spell out `/bin/sh -c "..."` explicitly when shell expansion is
+    /// needed. Hook creation requires root: it writes to
+    /// `/etc/aimx/config.toml` directly and sends SIGHUP to `aimx serve`.
     #[arg(long)]
     pub cmd: String,
 

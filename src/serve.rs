@@ -2302,7 +2302,7 @@ owner = "ops"
 
   [[mailboxes.alice.hooks]]
   event = "on_receive"
-  cmd = ""
+  cmd = []
   name = "bad"
 "#;
         std::fs::write(&path, bad).unwrap();

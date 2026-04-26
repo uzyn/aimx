@@ -70,18 +70,39 @@ pub fn create_mailbox(
         return Err(e.into());
     }
 
+    let new_mb = MailboxConfig {
+        address: format!("{name}@{}", config.domain),
+        owner: owner.to_string(),
+        hooks: vec![],
+        trust: None,
+        trusted_senders: None,
+        allow_root_catchall: false,
+    };
+
+    // Chown to `<owner>:<owner> 0700` so the dir layout matches
+    // the daemon-created path (mailbox_handler.rs). Only attempt the
+    // chown when running as root — the CLI fallback path is invoked
+    // with the daemon stopped, which on a real install means the
+    // operator ran `sudo aimx mailboxes create`. Non-root callers fall
+    // through to chmod-only; the daemon will fix up perms on next boot
+    // via `ensure_mailbox_dirs` in `finalize_setup`.
+    if crate::platform::is_root() {
+        for dir in [&inbox, &sent] {
+            if let Err(e) = crate::ownership::chown_as_owner(dir, &new_mb, 0o700) {
+                let _ = std::fs::remove_dir_all(&inbox);
+                let _ = std::fs::remove_dir_all(&sent);
+                return Err(format!("failed to chown {}: {e}", dir.display()).into());
+            }
+        }
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+        for dir in [&inbox, &sent] {
+            std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        }
+    }
+
     let mut config = config.clone();
-    config.mailboxes.insert(
-        name.to_string(),
-        MailboxConfig {
-            address: format!("{name}@{}", config.domain),
-            owner: owner.to_string(),
-            hooks: vec![],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        },
-    );
+    config.mailboxes.insert(name.to_string(), new_mb);
 
     config.save(&crate::config::config_path())?;
 
@@ -416,7 +437,8 @@ fn push_event_group(lines: &mut Vec<String>, event: &str, hooks: &[&crate::hook:
     }
     lines.push(format!("  {}", term::header(event)));
     for h in hooks {
-        let cmd = truncate_show_cmd(&h.cmd, 60);
+        let cmd_display = serde_json::to_string(&h.cmd).unwrap_or_else(|_| h.cmd.join(" "));
+        let cmd = truncate_show_cmd(&cmd_display, 60);
         let name = crate::hook::effective_hook_name(h);
         let suffix = if h.fire_on_untrusted {
             "   [fire_on_untrusted=true]"
