@@ -8,7 +8,7 @@ aimx includes a built-in MCP (Model Context Protocol) server that gives AI agent
 
 - **Transport:** stdio (launched on-demand, no daemon)
 - **Protocol:** Model Context Protocol (MCP)
-- **Compatible with:** Claude Code, OpenClaw, Codex, and any MCP-compatible client
+- **Compatible clients:** any MCP-compatible client — see [Compatible agent frameworks](#compatible-agent-frameworks) below for the per-agent integration matrix.
 
 ## Running the MCP server
 

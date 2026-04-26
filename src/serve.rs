@@ -273,7 +273,7 @@ pub fn aimx_socket_path() -> PathBuf {
 /// hot-swaps the in-memory `Config` directly; this SIGHUP path is kept
 /// for the daemon-down fallback (root only) where the CLI rewrites
 /// `config.toml` and emits a restart hint to the operator.
-#[allow(dead_code)]
+#[cfg(test)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum SighupOutcome {
     /// Delivered SIGHUP to pid `.0`.
@@ -302,7 +302,7 @@ pub enum SighupOutcome {
 ///    no `pgrep` fallback: matching by process name can return any
 ///    `aimx` binary on the host, including short-lived test
 ///    subprocesses, and SIGHUPing the wrong pid terminates it.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn sighup_running_daemon() -> SighupOutcome {
     #[cfg(unix)]
     {
@@ -382,8 +382,7 @@ pub fn reload_config(
 /// that fallback matched any `aimx` process (including short-lived
 /// test subprocesses) and could deliver SIGHUP to the wrong pid,
 /// terminating unrelated work under parallel tests.
-#[cfg(unix)]
-#[allow(dead_code)]
+#[cfg(all(unix, test))]
 fn find_daemon_pid() -> Option<i32> {
     let pid_path = runtime_dir().join("aimx.pid");
     let s = std::fs::read_to_string(&pid_path).ok()?;

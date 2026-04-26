@@ -250,7 +250,7 @@ pub async fn handle_hook_delete(
 
     // Re-lookup against the same snapshot so the authz check sees a
     // consistent view of the mailbox's owner.
-    let mailbox_cfg = match snapshot.mailboxes.get(&mailbox_name) {
+    let mailbox_cfg = match snapshot.mailboxes.get(mailbox_name) {
         Some(m) => m.clone(),
         None => {
             return AckResponse::Err {
@@ -261,7 +261,7 @@ pub async fn handle_hook_delete(
     };
 
     if let Err(reject) =
-        enforce_mailbox_owner_or_root("HOOK-DELETE", caller, &mailbox_name, &mailbox_cfg)
+        enforce_mailbox_owner_or_root("HOOK-DELETE", caller, mailbox_name, &mailbox_cfg)
     {
         return AckResponse::Err {
             code: reject.code,
@@ -269,7 +269,7 @@ pub async fn handle_hook_delete(
         };
     }
 
-    let lock = state_ctx.lock_for(&mailbox_name);
+    let lock = state_ctx.lock_for(mailbox_name);
     let _guard = lock.lock().await;
     let _config_guard = CONFIG_WRITE_LOCK
         .lock()
@@ -279,7 +279,7 @@ pub async fn handle_hook_delete(
     // the same mailbox doesn't slip past us.
     let current = mb_ctx.config_handle.load();
     let mut new_config: Config = (*current).clone();
-    let mb = match new_config.mailboxes.get_mut(&mailbox_name) {
+    let mb = match new_config.mailboxes.get_mut(mailbox_name) {
         Some(m) => m,
         None => {
             return AckResponse::Err {
@@ -375,11 +375,11 @@ fn parse_event(s: &str) -> Result<HookEvent, String> {
     }
 }
 
-fn find_hook_owner(config: &Config, name: &str) -> Option<String> {
+fn find_hook_owner<'c>(config: &'c Config, name: &str) -> Option<&'c str> {
     for (mailbox_name, mb) in &config.mailboxes {
         for hook in &mb.hooks {
             if effective_hook_name(hook) == name {
-                return Some(mailbox_name.clone());
+                return Some(mailbox_name.as_str());
             }
         }
     }
