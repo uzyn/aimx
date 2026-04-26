@@ -17,7 +17,7 @@
 //! Select which AI agents you want to set up AIMX MCP for:
 //!
 //! ❯ [ ] Claude Code
-//!   [x] Codex CLI  (already wired)
+//!   [x] Codex CLI  (AIMX MCP wired)
 //!   [-] OpenClaw  (not detected)
 //!   [ ] Gemini CLI
 //!
@@ -131,20 +131,39 @@ pub fn run_tui(
     // entirely and just render `Setting up MCP integration for AI
     // agents.` instead of leaving an ugly placeholder behind.
     let username = env.caller_username();
-    let selected_rows = match interact(&term_handle, &rows, username.as_deref()) {
-        Ok(Some(rs)) => rs,
-        Ok(None) => {
-            // User cancelled with `q` or Ctrl-C.
-            writeln!(out, "\nCancelled. No agents were wired.")?;
+    // Selection / confirmation loop: if the operator declines on the
+    // confirmation screen we re-enter the picker with their previous
+    // selections preserved so they don't lose work. Cancel from inside
+    // the picker still aborts the whole flow.
+    let mut current_rows = rows.clone();
+    let selected_rows = loop {
+        let picked = match interact(&term_handle, &current_rows, username.as_deref()) {
+            Ok(Some(rs)) => rs,
+            Ok(None) => {
+                // User cancelled with `q` or Ctrl-C.
+                writeln!(out, "\nCancelled. No agents were wired.")?;
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        if picked.is_empty() {
+            writeln!(out, "\nNo agents selected. Nothing to do.")?;
             return Ok(());
         }
-        Err(e) => return Err(e.into()),
-    };
 
-    if selected_rows.is_empty() {
-        writeln!(out, "\nNo agents selected. Nothing to do.")?;
-        return Ok(());
-    }
+        render_confirmation(out, &picked)?;
+        if read_confirm_yn(&term_handle)? {
+            break picked;
+        }
+        // Operator declined: preserve their selections (carry the
+        // `selected` flag forward) and re-enter the picker.
+        let picked_indices: std::collections::HashSet<usize> =
+            picked.iter().map(|r| r.spec_index).collect();
+        for row in current_rows.iter_mut() {
+            row.selected = picked_indices.contains(&row.spec_index);
+        }
+    };
 
     // For each selected agent, invoke the post-root-gate install path
     // directly. The root gate has already fired in `run_with_env_to_writer`
@@ -338,6 +357,63 @@ fn next_selectable(rows: &[Row], start: usize, delta: isize) -> Option<usize> {
     None
 }
 
+/// Render the confirmation screen between picker selection and the
+/// install loop. Lists each selected agent with the right verb:
+/// "Install" for `InstalledNotWired` (fresh wiring) and "Re-install"
+/// for `InstalledWired` (refresh existing files). The trailing prompt
+/// `Confirm? [Y/n]` is appended without a trailing newline so the
+/// caller's read mirrors the wizard's `[Y/n]` prompt convention.
+pub(crate) fn render_confirmation(out: &mut dyn Write, picked: &[Row]) -> io::Result<()> {
+    writeln!(out)?;
+    writeln!(out, "{}", term::header("Tasks to perform:"))?;
+    writeln!(out)?;
+    for (idx, row) in picked.iter().enumerate() {
+        let spec = &registry()[row.spec_index];
+        let verb = match row.state {
+            InstallState::InstalledWired => "Re-install AIMX MCP for",
+            // InstalledNotWired (and any future selectable state) gets
+            // the plain Install verb — fresh wiring.
+            _ => "Install AIMX MCP for",
+        };
+        let suffix = match row.state {
+            InstallState::InstalledWired => format!(" {}", term::dim("(refresh files)")),
+            _ => String::new(),
+        };
+        writeln!(
+            out,
+            "  {}. {} {}{suffix}",
+            idx + 1,
+            verb,
+            term::highlight(spec.display_name)
+        )?;
+    }
+    writeln!(out)?;
+    write!(out, "Confirm? [Y/n] ")?;
+    out.flush()?;
+    Ok(())
+}
+
+/// Read a single line from the controlling terminal and apply the same
+/// `[Y/n]` default-yes parsing as the wizard. Lives next to
+/// [`render_confirmation`] so the picker → confirm → install flow uses
+/// one consistent rule.
+fn read_confirm_yn(term_handle: &Term) -> io::Result<bool> {
+    let line = term_handle.read_line()?;
+    Ok(parse_confirm_yn(&line))
+}
+
+/// Pure parser for `[Y/n]` answers. Mirrors `setup::parse_yn`: blank
+/// Enter or any non-`n`/`N` first character → `true`; `n`/`N` → `false`.
+/// Kept private to the TUI so the confirm screen has its own pinned
+/// behavior independent of the wizard's parser.
+pub(crate) fn parse_confirm_yn(input: &str) -> bool {
+    !input
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N')
+}
+
 fn render(
     term_handle: &Term,
     rows: &[Row],
@@ -372,15 +448,23 @@ fn render(
                 }
             }
         };
+        // Two-shade dim per branding §5.4: agent name carries one
+        // dim level (when non-selectable) while the status suffix is
+        // one shade deeper still, so the operator can immediately tell
+        // the suffix from the name even on rows where both are dim.
         let name = match row.state {
             InstallState::NotInstalled => term::dim(spec.display_name).to_string(),
             InstallState::InstalledWired => {
-                format!("{}  {}", spec.display_name, term::dim("(already wired)"))
+                format!(
+                    "{}  {}",
+                    spec.display_name,
+                    term::very_dim("(AIMX MCP wired)")
+                )
             }
             InstallState::InstalledNotWired => spec.display_name.to_string(),
         };
         let suffix = match row.state {
-            InstallState::NotInstalled => format!(" {}", term::dim("(not detected)")),
+            InstallState::NotInstalled => format!(" {}", term::very_dim("(not detected)")),
             _ => String::new(),
         };
         term_handle.write_line(&format!("{caret} {mark} {name}{suffix}"))?;
@@ -470,18 +554,20 @@ mod tests {
 
     #[test]
     fn build_rows_already_wired_is_unselected_but_selectable() {
-        // Create `~/.claude/plugins/aimx` with a real aimx-content file
-        // so detection reports InstalledWired. Row
-        // is selectable (operator can choose to re-wire / overwrite) but
-        // defaults to unselected to avoid unnecessary re-installs.
+        // Create `~/.claude/plugins/aimx/.claude-plugin/plugin.json`
+        // (the canonical Claude-Code plugin manifest aimx writes) so
+        // detection reports InstalledWired. Row is selectable (operator
+        // can choose to re-wire / overwrite) but defaults to unselected
+        // to avoid unnecessary re-installs.
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        let plugin_dir = tmp
+            .path()
+            .join(".claude")
+            .join("plugins")
+            .join("aimx")
+            .join(".claude-plugin");
         std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"mcpServers":{"aimx":{}}}"#,
-        )
-        .unwrap();
+        std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"aimx"}"#).unwrap();
         let env = FakeEnv::new(tmp.path().to_path_buf());
         let rows = build_rows(&env);
         let claude_row = rows
@@ -727,6 +813,166 @@ mod tests {
         let term_handle = Term::stdout();
         let rows: Vec<Row> = Vec::new();
         let _ = render(&term_handle, &rows, 0, None);
+    }
+
+    /// Walk just `fn render(...)`'s top-level body — `fn render(` to the
+    /// matching column-0 `\n}\n` — so source-grep tests can assert on the
+    /// production render function without picking up the rest of the file
+    /// (including these tests, whose bodies otherwise self-trip on the
+    /// "(already wired)" / "term::very_dim" tokens).
+    fn render_fn_body() -> &'static str {
+        let source = include_str!("agent_tui.rs");
+        let start = source.find("fn render(").expect("render fn must exist");
+        let end = source[start..]
+            .find("\n}\n")
+            .map(|off| start + off + "\n}\n".len())
+            .expect("render body must close with `}` at column 1");
+        // SAFETY: `include_str!` returns a `&'static str`; the slice is
+        // pinned for the program's lifetime.
+        &source[start..end]
+    }
+
+    #[test]
+    fn render_emits_aimx_mcp_wired_label() {
+        // The "wired" status suffix changed from `(already wired)` to
+        // `(AIMX MCP wired)` for consistency with the "wire" verb used
+        // elsewhere. Source-grep the render fn body so this test runs
+        // without needing a TTY.
+        let body = render_fn_body();
+        assert!(
+            body.contains("(AIMX MCP wired)"),
+            "render must emit the new wired label: {body}"
+        );
+        // Build the forbidden literal at runtime so this test's source
+        // doesn't trip its own check.
+        let forbidden = ["(already", " ", "wired)"].concat();
+        assert!(
+            !body.contains(&forbidden),
+            "render must not carry the old wired label: {body}"
+        );
+    }
+
+    #[test]
+    fn render_uses_very_dim_for_status_suffix() {
+        // The status suffix (`(AIMX MCP wired)`, `(not detected)`) must
+        // wrap through `term::very_dim` so it sits one shade deeper than
+        // the agent display name beside it. Source-grep the render fn
+        // body for the helper invocation.
+        let body = render_fn_body();
+        assert!(
+            body.contains("term::very_dim(\"(AIMX MCP wired)\")"),
+            "render must wrap the wired suffix in term::very_dim: {body}"
+        );
+        assert!(
+            body.contains("term::very_dim(\"(not detected)\")"),
+            "render must wrap the not-detected suffix in term::very_dim: {body}"
+        );
+    }
+
+    #[test]
+    fn confirmation_screen_lists_install_and_reinstall() {
+        // Build a known TUI selection: one InstalledNotWired (fresh
+        // install) and one InstalledWired (re-install). Render the
+        // confirmation screen and assert each task carries the right
+        // verb and the affected agent's display name.
+        let claude_index = registry()
+            .iter()
+            .position(|s| s.name == "claude-code")
+            .unwrap();
+        let codex_index = registry().iter().position(|s| s.name == "codex").unwrap();
+        let picked = vec![
+            Row {
+                spec_index: codex_index,
+                state: InstallState::InstalledNotWired,
+                selected: true,
+            },
+            Row {
+                spec_index: claude_index,
+                state: InstallState::InstalledWired,
+                selected: true,
+            },
+        ];
+        let mut buf: Vec<u8> = Vec::new();
+        render_confirmation(&mut buf, &picked).unwrap();
+        let out = String::from_utf8(buf).unwrap();
+        assert!(
+            out.contains("Tasks to perform:"),
+            "expected confirmation header, got: {out}"
+        );
+        assert!(
+            out.contains("Install AIMX MCP for"),
+            "fresh-install verb missing, got: {out}"
+        );
+        assert!(
+            out.contains("Re-install AIMX MCP for"),
+            "re-install verb missing, got: {out}"
+        );
+        assert!(
+            out.contains("Codex CLI"),
+            "expected Codex CLI display name, got: {out}"
+        );
+        assert!(
+            out.contains("Claude Code"),
+            "expected Claude Code display name, got: {out}"
+        );
+        assert!(
+            out.contains("Confirm? [Y/n]"),
+            "expected confirmation prompt, got: {out}"
+        );
+    }
+
+    #[test]
+    fn confirmation_screen_returns_to_selection_on_no() {
+        // The pure parser drives the loop control. Feeding `n` /
+        // `no` / `N` produces `false`, which `run_tui` interprets as
+        // "go back to picker". Anything else (blank, `y`, `yes`,
+        // garbage) confirms.
+        assert!(!parse_confirm_yn("n"));
+        assert!(!parse_confirm_yn("no"));
+        assert!(!parse_confirm_yn("N"));
+        assert!(!parse_confirm_yn("  no  "));
+        // Default-yes semantics.
+        assert!(parse_confirm_yn(""));
+        assert!(parse_confirm_yn("\n"));
+        assert!(parse_confirm_yn("y"));
+        assert!(parse_confirm_yn("yes"));
+        assert!(parse_confirm_yn("Y"));
+    }
+
+    #[test]
+    fn run_tui_loop_returns_to_picker_on_confirm_no() {
+        // Source-grep: the confirmation step lives inside a `loop` so a
+        // `false` answer continues to the next iteration (re-entering
+        // the picker), while `true` `break`s out with the picked rows.
+        // The previous selections are carried forward via a recompute
+        // of `row.selected` against the picked-spec indices, not by
+        // overwriting them with the freshly-built defaults.
+        let source = include_str!("agent_tui.rs");
+        let run_start = source.find("pub fn run_tui(").expect("run_tui must exist");
+        let run_end = source[run_start..]
+            .find("\nfn ")
+            .map(|off| run_start + off)
+            .unwrap_or(source.len());
+        let body = &source[run_start..run_end];
+        assert!(
+            body.contains("render_confirmation(out, &picked)"),
+            "run_tui must render confirmation between selection and install: {body}"
+        );
+        assert!(
+            body.contains("read_confirm_yn(&term_handle)"),
+            "run_tui must read [Y/n] via the confirmation helper: {body}"
+        );
+        assert!(
+            body.contains("break picked"),
+            "run_tui must break out of the picker loop on Yes: {body}"
+        );
+        // The "no" branch must not zero out the operator's prior
+        // selections — we recompute `selected` against the picked set,
+        // we don't rebuild rows from scratch.
+        assert!(
+            body.contains("picked_indices"),
+            "run_tui must carry prior selections forward on No: {body}"
+        );
     }
 
     #[test]

@@ -84,6 +84,26 @@ pub fn dim(s: &str) -> ColoredString {
     s.dimmed()
 }
 
+/// One shade dimmer than [`dim`]. Used by the `aimx agents setup` TUI to
+/// distinguish the "status suffix" (e.g. `(AIMX MCP wired)`, `(not detected)`)
+/// from the agent display name beside it. On a TTY emits a low-luma grey
+/// truecolor escape (with the named-`bright black` fallback the `colored`
+/// crate picks on non-truecolor terminals); on a non-TTY pipe emits plain
+/// text. Mirrors [`dim`]'s semantic-color rule: callers never need to think
+/// about whether the surface is colored — the helper handles it.
+pub fn very_dim(s: &str) -> ColoredString {
+    if colorize_active() {
+        // Truecolor grey (`#585858`, the 256-color `240` equivalent) on
+        // truecolor-capable terminals. On non-truecolor terminals the
+        // `colored` crate degrades this to its nearest named color
+        // (`bright black`, ANSI 90), which is still visibly dimmer than
+        // `dim`'s plain `\x1b[2m` ANSI dim.
+        s.truecolor(88, 88, 88)
+    } else {
+        s.normal()
+    }
+}
+
 /// Returns true when the output stream should carry ANSI escapes (TTY + not
 /// disabled by `NO_COLOR`). Matches the `colored` crate's internal decision.
 fn colorize_active() -> bool {
@@ -244,6 +264,7 @@ mod tests {
             header("DNS").to_string(),
             highlight("aimx").to_string(),
             dim("hint").to_string(),
+            very_dim("hint").to_string(),
             accent("→ next").to_string(),
             success_mark().to_string(),
             fail_mark().to_string(),
@@ -257,6 +278,73 @@ mod tests {
                 "expected no ANSI escape in {s:?} when color is disabled"
             );
         }
+    }
+
+    #[test]
+    fn very_dim_is_dimmer_than_dim_when_color_forced_on() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Force COLORTERM=truecolor so the `colored` crate emits the
+        // truecolor escape rather than its named-color fallback.
+        // SAFETY: single-threaded inside COLOR_OVERRIDE_LOCK.
+        let saved_colorterm = std::env::var("COLORTERM").ok();
+        unsafe { std::env::set_var("COLORTERM", "truecolor") };
+        control::set_override(true);
+        let dim_s = dim("hint").to_string();
+        let very_s = very_dim("hint").to_string();
+        control::unset_override();
+        match saved_colorterm {
+            Some(v) => unsafe { std::env::set_var("COLORTERM", v) },
+            None => unsafe { std::env::remove_var("COLORTERM") },
+        }
+        // Both must carry ANSI escapes.
+        assert!(dim_s.contains('\x1b'), "expected ANSI escape on dim()");
+        assert!(
+            very_s.contains('\x1b'),
+            "expected ANSI escape on very_dim()"
+        );
+        // On a truecolor terminal `very_dim` emits the explicit grey
+        // RGB sequence so it sits visibly deeper than `dim`'s
+        // `\x1b[2m`. The truecolor escape for #585858 is
+        // `\x1b[38;2;88;88;88m`.
+        assert!(
+            very_s.contains("38;2;88;88;88"),
+            "expected truecolor grey escape in very_dim under COLORTERM=truecolor, got {very_s:?}"
+        );
+        // very_dim must not just collapse to plain text on TTY.
+        assert_ne!(
+            very_s, "hint",
+            "very_dim must add styling on TTY, got {very_s:?}"
+        );
+    }
+
+    #[test]
+    fn very_dim_degrades_to_named_color_without_truecolor() {
+        // On terminals that don't advertise truecolor, `colored` falls
+        // back to the nearest named ANSI color. The grey fallback is
+        // `bright black` (ANSI 90); the helper must still produce *some*
+        // colored output rather than going plain.
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_colorterm = std::env::var("COLORTERM").ok();
+        // SAFETY: single-threaded inside COLOR_OVERRIDE_LOCK.
+        unsafe { std::env::remove_var("COLORTERM") };
+        control::set_override(true);
+        let very_s = very_dim("hint").to_string();
+        control::unset_override();
+        if let Some(v) = saved_colorterm {
+            unsafe { std::env::set_var("COLORTERM", v) };
+        }
+        assert!(
+            very_s.contains('\x1b'),
+            "expected an ANSI escape even without COLORTERM=truecolor, got {very_s:?}"
+        );
+        assert!(
+            very_s.contains("hint"),
+            "raw text must survive the degrade, got {very_s:?}"
+        );
     }
 
     #[test]

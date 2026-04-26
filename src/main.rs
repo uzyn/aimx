@@ -1,4 +1,5 @@
 mod agent_cleanup;
+mod agent_remove;
 mod agent_setup;
 mod agent_tui;
 mod cli;
@@ -47,7 +48,7 @@ mod user_resolver;
 mod version;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{AgentsCommand, Cli, Command};
 
 fn main() {
     // Handle `aimx --version` / `aimx -V` manually so the output is
@@ -87,8 +88,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
             rt.block_on(mcp::run(cli.data_dir.as_deref()))
         }
-        // agent-setup uses data_dir as an install-path override for emitted
-        // MCP configs, not a config-loading override.
+        // agent-setup (legacy hyphenated alias) — kept hidden in --help
+        // so existing scripts and `install.sh` invocations keep
+        // working. Forwards to the same `agent_setup::run` as
+        // `aimx agents setup`. `data_dir` threads through to the
+        // installer so activation hints for `--data-dir`-customised
+        // installs reference the right path.
         Command::AgentSetup {
             agent,
             list,
@@ -109,6 +114,50 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             dangerously_allow_root,
             data_dir: cli.data_dir.as_deref(),
         }),
+        // `aimx agents <command>`: the new plural-noun-with-verb shape.
+        // Setup / Remove / List dispatch to their dedicated modules;
+        // `agent` (singular) is wired as a clap alias on the Agents
+        // subcommand itself.
+        Command::Agents(cmd) => match cmd {
+            AgentsCommand::Setup {
+                agent,
+                list,
+                force,
+                print,
+                no_template,
+                redetect,
+                no_interactive,
+                dangerously_allow_root,
+            } => agent_setup::run(agent_setup::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template,
+                redetect,
+                no_interactive,
+                dangerously_allow_root,
+                data_dir: cli.data_dir.as_deref(),
+            }),
+            AgentsCommand::Remove {
+                agent,
+                dangerously_allow_root,
+            } => agent_remove::run(agent_remove::RunOpts {
+                agent,
+                dangerously_allow_root,
+            }),
+            AgentsCommand::List => agent_setup::run(agent_setup::RunOpts {
+                agent: None,
+                list: true,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
+                data_dir: cli.data_dir.as_deref(),
+            }),
+        },
         // agent-cleanup is the per-user inverse of agent-setup. Drops
         // the `invoke-<agent>-<username>` template over UDS and, with
         // `--full`, removes the plugin files too. Never loads config.
@@ -189,6 +238,7 @@ fn dispatch_with_config(
         | Command::Mcp
         | Command::Send(_)
         | Command::Logs { .. }
+        | Command::Agents(_)
         | Command::AgentSetup { .. }
         | Command::AgentCleanup { .. }
         | Command::Upgrade(_) => unreachable!("handled by dispatch"),

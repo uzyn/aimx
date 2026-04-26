@@ -6,7 +6,7 @@ AIMX ships as a single statically-compiled binary. Install it in one line on any
 curl -fsSL https://aimx.email/install.sh | sh
 ```
 
-This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, runs the interactive setup wizard (`sudo aimx setup`), then drops back to your user to wire the MCP server into your LLM agent (`aimx agent-setup`). One command, end-to-end. No Rust toolchain, no `cargo build`, no source checkout.
+This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, runs the interactive setup wizard (`sudo aimx setup`), then drops back to your user to wire the MCP server into your LLM agent (`aimx agents setup`). One command, end-to-end. No Rust toolchain, no `cargo build`, no source checkout.
 
 ## Supported platforms
 
@@ -37,7 +37,7 @@ The installer:
 6. Extracts it into a temp directory that is cleaned up on every exit path (success, error, or interrupt).
 7. Installs the binary with `install -m 0755` into `/usr/local/bin/aimx` (override with `--to` or `AIMX_PREFIX`).
 8. On a fresh box, backs up any pre-existing `/etc/aimx/config.toml` to `config.toml.bak-YYYYMMDD-HHMMSS` (DKIM keys and TLS certs are left in place so deliverability survives re-runs), then `exec`s `sudo aimx setup </dev/tty`. The binary takes over from there.
-9. `aimx setup` runs the six-step wizard end-to-end: preflight on port 25, domain & DNS, TLS certificate, trust policy, install + service unit, and MCP wiring (the wizard re-execs `aimx agent-setup` as `$SUDO_USER`). The wizard owns the welcome banner, the checklist's `☐ → ☑/☒` ticking, and the closing message with `@<your-domain>` substituted.
+9. `aimx setup` runs the six-step wizard end-to-end: preflight on port 25, domain & DNS, TLS certificate, trust policy, install + service unit, and MCP wiring (the wizard re-execs `aimx agents setup` as `$SUDO_USER`). The wizard owns the welcome banner, the checklist's `☐ → ☑/☒` ticking, and the closing message with `@<your-domain>` substituted.
 10. If an older `aimx` is already installed, the upgrade path kicks in instead: stops the service, swaps the binary atomically, and restarts — no wizard re-run. If the same version is already installed, exits without touching anything (pass `--force` to reinstall).
 
 If no TTY is available (CI, fully-scripted contexts), the setup step will error unless you also supply `AIMX_NONINTERACTIVE=1` with the required defaults — see [Setup](setup.md) for the non-interactive contract. Pre-existing `/etc/aimx/config.toml` is backed up to a timestamped `.bak-*` sibling before setup runs; DKIM keys and TLS certs are preserved.
@@ -79,10 +79,10 @@ curl -fsSL https://aimx.email/install.sh | sh -s -- --target x86_64-unknown-linu
 
 ```bash
 curl -fsSL https://aimx.email/install.sh | AIMX_PREFIX=/opt/aimx/bin sh
-sudo /opt/aimx/bin/aimx setup agent.example.com
+sudo /opt/aimx/bin/aimx setup
 ```
 
-The drop-through to `aimx agent-setup` also uses `/proc/self/exe`, so a non-default prefix works end-to-end without extra configuration.
+The drop-through to `aimx agents setup` also uses `/proc/self/exe`, so a non-default prefix works end-to-end without extra configuration.
 
 ## Verification (skeptical operator path)
 

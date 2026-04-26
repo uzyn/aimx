@@ -1546,13 +1546,36 @@ dangerously_support_untrusted = true
 }
 
 #[test]
-fn setup_help_shows_domain_arg() {
+fn setup_help_hides_domain_arg() {
+    // The `<domain>` positional is hidden in --help: the wizard prompts
+    // for the domain interactively and the bare `aimx setup` is the
+    // documented entry point. The arg is retained as a backward-compat
+    // input for scripts that already supply it (and the parse path is
+    // exercised below by `setup_with_explicit_domain_still_parses`).
     Command::cargo_bin("aimx")
         .unwrap()
         .args(["setup", "--help"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("DOMAIN"));
+        .stdout(predicate::str::contains("DOMAIN").not());
+}
+
+#[test]
+fn setup_with_explicit_domain_still_parses() {
+    // Backward-compat: `aimx setup <domain>` must still parse even
+    // though the positional is hidden from --help. We check that clap
+    // doesn't reject the args with a usage error before the root
+    // check fires (which is the next, documented failure).
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("Skipping: running as root");
+        return;
+    }
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["setup", "agent.example.com"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires root"));
 }
 
 #[test]
@@ -5525,4 +5548,65 @@ fn aimx_version_renders_full_metadata() {
     assert!(date[..4].chars().all(|c| c.is_ascii_digit()));
     assert!(date[5..7].chars().all(|c| c.is_ascii_digit()));
     assert!(date[8..10].chars().all(|c| c.is_ascii_digit()));
+}
+
+// ===== aimx agents <command> CLI surface =================================
+
+/// `aimx agents list` is a thin alias of `aimx agents setup --list`. Both
+/// must succeed and emit at least one of the registered agent names.
+#[test]
+fn agents_list_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agents", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+#[test]
+fn agents_setup_list_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agents", "setup", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+/// `aimx agents remove <unknown>` must surface an explicit "Unknown agent"
+/// error rather than a clap usage hint or a silent no-op.
+#[test]
+fn agents_remove_unknown_agent_errors_clearly() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agents", "remove", "nonesuch"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Unknown agent"))
+        .stderr(predicate::str::contains("nonesuch"));
+}
+
+/// `aimx agent setup --list` (singular alias) must keep working —
+/// the `Agents` subcommand carries an `agent` clap alias.
+#[test]
+fn agent_setup_singular_alias_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agent", "setup", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code"));
+}
+
+/// `aimx agent-setup --list` (legacy hyphenated flat verb) must keep
+/// working — install.sh and existing scripts call it this way.
+#[test]
+fn legacy_agent_setup_hyphenated_alias_works() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agent-setup", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("claude-code"));
 }

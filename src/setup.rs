@@ -2212,7 +2212,9 @@ pub fn run_setup(
 
     // Root check (precondition; not a numbered step)
     if !sys.check_root() {
-        return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
+        return Err("`aimx setup` requires root. To set up the AIMX server, run with: `sudo aimx setup`.\n\
+                    \n\
+                    If you already have aimx running and you're trying to wire it into an AI agent, you want `aimx agents setup` (no root needed).".into());
     }
 
     let mut checklist = Checklist::new();

@@ -939,6 +939,13 @@ fn dest_contains_aimx_entry(spec: &AgentSpec, dest: &Path) -> bool {
         // for file presence alone is enough — if aimx wrote it, the
         // filename carries the wiring signal.
         "goose" => dest.join("aimx.yaml").is_file(),
+        // Claude Code's plugin layout puts everything under
+        // `.claude-plugin/` and `skills/` subdirectories — the top-level
+        // of `~/.claude/plugins/aimx/` has zero files in a real install.
+        // The canonical marker is the plugin manifest at
+        // `.claude-plugin/plugin.json`; aimx's installer always writes
+        // it, so filename presence is a strong wiring signal.
+        "claude-code" => dest.join(".claude-plugin").join("plugin.json").is_file(),
         // Directory-shaped destinations: walk the directory's top-level
         // entries and return true if any regular file contains the
         // substring "aimx" anywhere in its bytes. aimx's own SKILL.md /
@@ -2188,8 +2195,10 @@ mod tests {
     #[test]
     fn detect_install_state_installed_wired_when_dest_exists() {
         // Destination must exist AND contain aimx's MCP entry.
-        // An empty plugin directory reports NotWired; a directory holding
-        // a file that references "aimx" reports Wired.
+        // An empty plugin directory reports NotWired; the canonical
+        // Claude-Code wiring marker is `.claude-plugin/plugin.json`
+        // (plugin layout puts everything under that subdirectory and
+        // `skills/` — top level has zero files in a real install).
         let tmp = TempDir::new().unwrap();
         let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
@@ -2198,14 +2207,48 @@ mod tests {
         let state_empty = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_empty, InstallState::InstalledNotWired);
 
-        // Drop aimx-content file → Wired.
+        // Drop the canonical plugin manifest → Wired.
+        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
         std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"mcpServers":{"aimx":{}}}"#,
+            plugin_manifest_dir.join("plugin.json"),
+            r#"{"name":"aimx"}"#,
         )
         .unwrap();
         let state_wired = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_wired, InstallState::InstalledWired);
+    }
+
+    /// Regression for the bug where `dest_contains_aimx_entry` only scanned
+    /// top-level files. Claude Code's plugin layout has nothing at the top
+    /// level — everything lives under `.claude-plugin/` and `skills/`. A
+    /// fully-wired install always classified as `InstalledNotWired` before
+    /// the special-case fix.
+    #[test]
+    fn detect_install_state_installed_wired_for_claude_code_plugin_layout() {
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
+        let skills_dir = plugin_dir.join("skills").join("aimx");
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        // Real installs lay down `.claude-plugin/plugin.json` and
+        // `skills/aimx/SKILL.md`; nothing at the top level of
+        // `~/.claude/plugins/aimx/`.
+        std::fs::write(
+            plugin_manifest_dir.join("plugin.json"),
+            r#"{"name":"aimx"}"#,
+        )
+        .unwrap();
+        std::fs::write(skills_dir.join("SKILL.md"), "# aimx skill\n").unwrap();
+
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(
+            state,
+            InstallState::InstalledWired,
+            "claude-code plugin layout (nothing at top level) must be detected as wired"
+        );
     }
 
     #[test]

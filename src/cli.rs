@@ -105,7 +105,11 @@ pub enum Command {
 
     /// Run interactive setup wizard
     Setup {
-        /// Domain to configure (e.g. agent.example.com)
+        /// Domain to configure (e.g. agent.example.com). Hidden from
+        /// --help: the wizard prompts for the domain interactively, but
+        /// the positional is retained as a backward-compat input for
+        /// scripts that already supply it.
+        #[arg(hide = true)]
         domain: Option<String>,
 
         /// Override the verify service host (e.g. https://verify.example.com)
@@ -156,7 +160,13 @@ pub enum Command {
         verify_host: Option<String>,
     },
 
-    /// Install aimx plugin/skill for an AI agent into the current user's config
+    /// Manage AI agent MCP wiring (setup / remove / list)
+    #[command(subcommand, alias = "agent")]
+    Agents(AgentsCommand),
+
+    /// Legacy alias for `aimx agents setup`. Hidden from --help; retained
+    /// so existing scripts and `install.sh` invocations keep working.
+    #[command(name = "agent-setup", hide = true)]
     AgentSetup {
         /// Agent short name (e.g. claude-code). Omit to launch the interactive checkbox TUI, or pass --list for a plain registry dump.
         agent: Option<String>,
@@ -185,12 +195,13 @@ pub enum Command {
         #[arg(long)]
         no_interactive: bool,
 
-        /// FOOTGUN: bypass the root-refusal check and wire aimx into /root's home. Intended for single-user root-login VPS setups that have no separate operator account. Prefer `sudo -u <user> aimx agent-setup` on any machine with a regular user.
+        /// FOOTGUN: bypass the root-refusal check and wire aimx into /root's home. Intended for single-user root-login VPS setups that have no separate operator account. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user.
         #[arg(long)]
         dangerously_allow_root: bool,
     },
 
-    /// Inverse of agent-setup: remove the invoke-<agent>-<username> template, optionally the plugin files too
+    /// Inverse of agent-setup: remove the invoke-<agent>-<username> template, optionally the plugin files too. Hidden legacy alias.
+    #[command(hide = true)]
     AgentCleanup {
         /// Agent short name (e.g. claude-code)
         agent: String,
@@ -376,6 +387,57 @@ pub enum MailboxCommand {
         #[arg(long)]
         force: bool,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum AgentsCommand {
+    /// Wire aimx into one or more AI agents (interactive TUI by default).
+    Setup {
+        /// Agent short name (e.g. claude-code). Omit to launch the interactive checkbox TUI, or pass --list for a plain registry dump.
+        agent: Option<String>,
+
+        /// List supported agents with destinations and activation hints (no TUI)
+        #[arg(long)]
+        list: bool,
+
+        /// Overwrite existing destination files without prompting
+        #[arg(long)]
+        force: bool,
+
+        /// Print plugin contents to stdout instead of writing to disk
+        #[arg(long)]
+        print: bool,
+
+        /// Install plugin files only; skip probing $PATH and registering the template
+        #[arg(long, conflicts_with = "redetect")]
+        no_template: bool,
+
+        /// Re-probe $PATH and update an existing invoke-<agent>-<username> template
+        #[arg(long)]
+        redetect: bool,
+
+        /// Skip the interactive TUI when invoked with no agent argument; print the same plain registry dump as --list.
+        #[arg(long)]
+        no_interactive: bool,
+
+        /// FOOTGUN: bypass the root-refusal check and wire aimx into /root's home. Intended for single-user root-login VPS setups that have no separate operator account. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user.
+        #[arg(long)]
+        dangerously_allow_root: bool,
+    },
+
+    /// Unwire aimx from an AI agent: remove plugin files under $HOME and
+    /// drop the matching `invoke-<agent>-<username>` template over UDS.
+    Remove {
+        /// Agent short name (e.g. claude-code)
+        agent: String,
+
+        /// FOOTGUN: bypass the root-refusal check and remove aimx from /root's home.
+        #[arg(long)]
+        dangerously_allow_root: bool,
+    },
+
+    /// Show wiring state for every supported agent (alias of `aimx agents setup --list`).
+    List,
 }
 
 #[derive(Subcommand, Clone)]
