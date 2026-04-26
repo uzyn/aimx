@@ -1021,8 +1021,7 @@ where
     Ok(())
 }
 
-/// Write an `AIMX/1 HOOK-CREATE` request frame. Template-only: the body
-/// is a JSON-encoded [`HookTemplateCreateBody`]; the codec does not
+/// Write an `AIMX/1 HOOK-CREATE` request frame. The codec does not
 /// parse the body, it simply ships the bytes the caller supplies.
 #[allow(dead_code)]
 pub async fn write_hook_create_request<W>(

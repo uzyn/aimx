@@ -357,14 +357,6 @@ pub enum AgentsCommand {
         #[arg(long)]
         print: bool,
 
-        /// Install plugin files only; skip probing $PATH and registering the template
-        #[arg(long, conflicts_with = "redetect")]
-        no_template: bool,
-
-        /// Re-probe $PATH and update an existing invoke-<agent>-<username> template
-        #[arg(long)]
-        redetect: bool,
-
         /// Skip the interactive TUI when invoked with no agent argument; print the same plain registry dump as --list.
         #[arg(long)]
         no_interactive: bool,

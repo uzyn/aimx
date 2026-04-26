@@ -10,7 +10,6 @@ mod dkim;
 mod doctor;
 mod frontmatter;
 mod hook;
-mod hook_client;
 mod hook_handler;
 mod hooks;
 mod ingest;
@@ -96,8 +95,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 list,
                 force,
                 print,
-                no_template,
-                redetect,
                 no_interactive,
                 dangerously_allow_root,
             } => agents_setup::run(agents_setup::RunOpts {
@@ -105,8 +102,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 list,
                 force,
                 print,
-                no_template,
-                redetect,
                 no_interactive,
                 dangerously_allow_root,
                 data_dir: cli.data_dir.as_deref(),
@@ -123,8 +118,6 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 list: true,
                 force: false,
                 print: false,
-                no_template: false,
-                redetect: false,
                 no_interactive: true,
                 dangerously_allow_root: false,
                 data_dir: cli.data_dir.as_deref(),

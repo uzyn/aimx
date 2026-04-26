@@ -1,8 +1,7 @@
 //! Daemon-side handlers for the `HOOK-CREATE` and `HOOK-DELETE` verbs of
 //! the `AIMX/1` UDS protocol.
 //!
-//! With the legacy template / origin / `dangerously_*` schema removed,
-//! the UDS hook verbs are stubs that return `ERR PROTOCOL` until the
+//! The UDS hook verbs are stubs that return `ERR PROTOCOL` until the
 //! UDS hardening pass rewires them under the new auth predicate.
 //! Operators continue to manage hooks via `sudo aimx hooks create
 //! --cmd` / `sudo aimx hooks delete`, both of which write

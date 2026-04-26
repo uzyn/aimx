@@ -2956,7 +2956,7 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 6 -->"),
+        after.starts_with("<!-- aimx-readme-version: 7 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );

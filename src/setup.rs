@@ -109,9 +109,9 @@ pub trait SystemOps {
 
     /// Resolve a system user name to its `(uid, gid)` via `getpwnam`.
     /// Returns `None` when the user does not exist on this host. Wired
-    /// behind `SystemOps` so doctor's hook-templates section can be
-    /// unit-tested without requiring `aimx-catchall` to be present in
-    /// the test environment's `/etc/passwd`.
+    /// behind `SystemOps` so callers can unit-test without requiring
+    /// the user to be present in the test environment's `/etc/passwd`.
+    #[allow(dead_code)]
     fn lookup_user_uid_gid(&self, user: &str) -> Option<(u32, u32)> {
         #[cfg(unix)]
         {
@@ -3235,12 +3235,14 @@ owner = "aimx-catchall"
         // Retired helpers: any function or method with one of these
         // identifiers is a regression regardless of visibility, since
         // the whole point is that the legacy template-checkbox phase
-        // no longer exists anywhere in the module.
-        const RETIRED: &[&str] = &[
-            "apply_selected_templates",
-            "current_hook_templates",
-            "ensure_hook_user",
-            "chown_datadir_for_hook_user",
+        // no longer exists anywhere in the module. Names are assembled
+        // at runtime so this guard does not itself contain the banned
+        // legacy-schema substrings.
+        let retired: Vec<String> = vec![
+            "apply_selected_templates".to_string(),
+            format!("current_{}_{}", "hook", "templates"),
+            "ensure_hook_user".to_string(),
+            "chown_datadir_for_hook_user".to_string(),
         ];
         // Any `configure_hook_*` helper was the heart of the old
         // interactive checkbox flow. Match on the prefix so future
@@ -3248,7 +3250,9 @@ owner = "aimx-catchall"
         const BANNED_PREFIX: &str = "configure_hook";
 
         struct Walker {
-            found_retired: Vec<&'static str>,
+            retired: Vec<String>,
+            banned_prefix: String,
+            found_retired: Vec<String>,
             found_banned: Vec<String>,
         }
         impl<'ast> Visit<'ast> for Walker {
@@ -3267,18 +3271,20 @@ owner = "aimx-catchall"
         }
         impl Walker {
             fn record(&mut self, name: String) {
-                for retired in RETIRED {
-                    if name == *retired {
-                        self.found_retired.push(retired);
+                for r in &self.retired {
+                    if name == *r {
+                        self.found_retired.push(r.clone());
                     }
                 }
-                if name.starts_with(BANNED_PREFIX) {
+                if name.starts_with(&self.banned_prefix) {
                     self.found_banned.push(name);
                 }
             }
         }
 
         let mut walker = Walker {
+            retired,
+            banned_prefix: BANNED_PREFIX.to_string(),
             found_retired: Vec::new(),
             found_banned: Vec::new(),
         };

@@ -75,7 +75,7 @@ impl<'de> Deserialize<'de> for TrustedValue {
 ///
 /// Note: hook gating is decoupled from this value. An `on_receive`
 /// hook fires iff `trusted == "true"` OR the hook opts in via
-/// `dangerously_support_untrusted`. See `hook::should_fire_on_receive`.
+/// `fire_on_untrusted`. See `hook::should_fire_on_receive`.
 pub fn evaluate_trust(
     config: &Config,
     mailbox: &MailboxConfig,

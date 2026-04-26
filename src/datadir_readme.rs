@@ -5,7 +5,7 @@
 use std::path::Path;
 
 pub const TEMPLATE: &str = include_str!("datadir_readme.md.tpl");
-pub const VERSION: u32 = 6;
+pub const VERSION: u32 = 7;
 
 fn version_line() -> String {
     format!("<!-- aimx-readme-version: {VERSION} -->")

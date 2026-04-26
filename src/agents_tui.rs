@@ -193,8 +193,6 @@ pub fn run_tui(
             list: false,
             force: opts.force,
             print: false,
-            no_template: opts.no_template,
-            redetect: opts.redetect,
             no_interactive: true,
             // Already inside the post-gate path; the inner function
             // doesn't inspect this flag again.
@@ -633,8 +631,6 @@ mod tests {
             list: false,
             force: false,
             print: false,
-            no_template: false,
-            redetect: false,
             no_interactive: false,
             dangerously_allow_root: false,
             data_dir: None,

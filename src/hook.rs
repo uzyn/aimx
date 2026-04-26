@@ -397,11 +397,11 @@ fn run_and_log(
         }
     };
 
-    // --- Resolve run_as / timeout / stdin mode -----------------------------
+    // --- Resolve owner / timeout / stdin mode ------------------------------
     // With the legacy schema gone, hooks always run as the mailbox's
     // owner. The auth predicate will gate this in a later pass; for
     // now this is the simple single-line rule.
-    let run_as: String = mailbox_config.owner.clone();
+    let owner: String = mailbox_config.owner.clone();
 
     let timeout = Duration::from_secs(HOOK_DEFAULT_TIMEOUT_SECS);
 
@@ -409,15 +409,15 @@ fn run_and_log(
 
     tracing::info!(
         target: "aimx::hook",
-        "firing hook_name={hook_name} event={event} mailbox={mailbox} run_as={run_as}",
+        "firing hook_name={hook_name} event={event} mailbox={mailbox} owner={owner}",
         hook_name = hook_name,
         event = hook.event.as_str(),
         mailbox = mailbox,
-        run_as = run_as,
+        owner = owner,
     );
 
     // --- Spawn -------------------------------------------------------------
-    let outcome_result = spawn_sandboxed(&argv, stdin_payload, &run_as, timeout, env);
+    let outcome_result = spawn_sandboxed(&argv, stdin_payload, &owner, timeout, env);
 
     let (exit_code, stderr_tail, timed_out, sandbox, exec_err, duration_ms) = match outcome_result {
         Ok(SandboxOutcome {
@@ -469,7 +469,7 @@ fn run_and_log(
 
     tracing::info!(
         target: "aimx::hook",
-        "hook_name={hook_name} event={event} mailbox={mailbox} run_as={run_as} sandbox={sandbox_tag} {id_tag} exit_code={exit_code} duration_ms={duration_ms} timed_out={timed_out} stderr_tail={stderr_tail_str}",
+        "hook_name={hook_name} event={event} mailbox={mailbox} owner={owner} sandbox={sandbox_tag} {id_tag} exit_code={exit_code} duration_ms={duration_ms} timed_out={timed_out} stderr_tail={stderr_tail_str}",
         hook_name = hook_name,
         event = hook.event.as_str(),
         mailbox = mailbox,
