@@ -1,15 +1,51 @@
+use crate::auth::{Action, AuthError, authorize};
 use crate::cli::MailboxCommand;
 use crate::config::{Config, MailboxConfig};
+use crate::platform::{current_euid, is_root};
 use crate::term;
 use std::io::{self, Write};
 use std::path::Path;
 
 pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
     match cmd {
-        MailboxCommand::Create { name, owner } => create(&config, &name, owner.as_deref()),
-        MailboxCommand::List => list(&config),
+        MailboxCommand::Create { name, owner } => {
+            // Mailbox CRUD is root-only, decided by the central
+            // predicate so the gate stays consistent with UDS handlers.
+            // Tests bypass via `AIMX_TEST_SKIP_ROOT_CHECK` so the
+            // post-gate logic stays exercised under `cargo test` on a
+            // non-root CI runner.
+            if !skip_root_check && let Err(e) = authorize(current_euid(), Action::MailboxCrud, None)
+            {
+                return Err(format_auth_error(&e, "create").into());
+            }
+            create(&config, &name, owner.as_deref())
+        }
+        MailboxCommand::List { all } => list(&config, all),
         MailboxCommand::Show { name } => show(&config, &name),
-        MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
+        MailboxCommand::Delete { name, yes, force } => {
+            if !skip_root_check && let Err(e) = authorize(current_euid(), Action::MailboxCrud, None)
+            {
+                return Err(format_auth_error(&e, "delete").into());
+            }
+            delete(&config, &name, yes, force)
+        }
+    }
+}
+
+/// Render an [`AuthError`] for the CLI. We keep the canonical "not
+/// authorized" prefix so tooling can grep for it, and append the verb
+/// the operator was attempting so the error text makes sense without
+/// re-reading the command.
+fn format_auth_error(err: &AuthError, verb: &str) -> String {
+    match err {
+        AuthError::NotRoot => {
+            format!("not authorized: aimx mailboxes {verb} requires root (run with sudo)")
+        }
+        AuthError::NotOwner { mailbox } => {
+            format!("not authorized: caller does not own mailbox '{mailbox}'")
+        }
+        AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
     }
 }
 
@@ -332,8 +368,30 @@ fn resolve_create_owner(
     crate::setup::prompt_mailbox_owner(&address, sys)
 }
 
-fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
-    let mailboxes = list_mailboxes(config);
+fn list(config: &Config, all: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let euid = current_euid();
+    let caller_is_root = is_root();
+
+    if all && !caller_is_root {
+        return Err("not authorized: --all requires root (run with sudo)".into());
+    }
+
+    // Root sees everything by default; `--all` is a no-op for root.
+    // Non-root sees only mailboxes whose `owner_uid()` matches euid.
+    // Mailboxes whose owner field doesn't resolve via getpwnam are
+    // hidden from non-root callers entirely (they cannot be owned by
+    // anyone visible to the caller, so revealing their existence would
+    // leak operator-side configuration).
+    let show_all = caller_is_root || all;
+    let all_mailboxes = list_mailboxes(config);
+    let mailboxes: Vec<(String, usize, usize)> = if show_all {
+        all_mailboxes
+    } else {
+        all_mailboxes
+            .into_iter()
+            .filter(|(name, _, _)| caller_owns(config, name, euid))
+            .collect()
+    };
 
     if mailboxes.is_empty() {
         println!("No mailboxes configured.");
@@ -366,6 +424,17 @@ fn list(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+/// Returns `true` when the named mailbox is configured and its
+/// `owner_uid()` resolves to `caller_euid`. Filesystem-only mailboxes
+/// (orphans without a config row) and mailboxes whose owner cannot be
+/// resolved both return `false` — non-root callers should not see them.
+pub(crate) fn caller_owns(config: &Config, name: &str, caller_euid: u32) -> bool {
+    let Some(mb) = config.mailboxes.get(name) else {
+        return false;
+    };
+    matches!(mb.owner_uid(), Ok(uid) if uid == caller_euid)
 }
 
 /// Build the formatted lines emitted by `aimx mailboxes show <name>`.
@@ -678,5 +747,93 @@ fn print_restart_hint() {
     let init = crate::serve::service::detect_init_system();
     for line in restart_hint_lines(&init) {
         println!("{line}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthError;
+
+    #[test]
+    fn format_auth_error_not_root_mentions_sudo_and_verb() {
+        let msg = format_auth_error(&AuthError::NotRoot, "create");
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("create"), "{msg}");
+        assert!(msg.contains("sudo"), "{msg}");
+    }
+
+    #[test]
+    fn format_auth_error_not_owner_carries_mailbox_name() {
+        let msg = format_auth_error(
+            &AuthError::NotOwner {
+                mailbox: "alice".into(),
+            },
+            "delete",
+        );
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("alice"), "{msg}");
+    }
+
+    #[test]
+    fn format_auth_error_no_such_mailbox_does_not_leak_caller() {
+        let msg = format_auth_error(&AuthError::NoSuchMailbox, "create");
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("no such mailbox"), "{msg}");
+    }
+
+    fn config_with_owners(owners: &[(&str, &str)]) -> Config {
+        let mut mailboxes = std::collections::HashMap::new();
+        for (name, owner) in owners {
+            mailboxes.insert(
+                (*name).into(),
+                MailboxConfig {
+                    address: format!("{name}@agent.example.com"),
+                    owner: (*owner).into(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                    allow_root_catchall: false,
+                },
+            );
+        }
+        Config {
+            domain: "agent.example.com".into(),
+            data_dir: std::path::PathBuf::from("/tmp/test"),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            upgrade: None,
+        }
+    }
+
+    #[test]
+    fn caller_owns_returns_false_for_unknown_mailbox() {
+        let cfg = config_with_owners(&[]);
+        assert!(!caller_owns(&cfg, "missing", 1000));
+    }
+
+    #[test]
+    fn caller_owns_returns_false_for_orphan_owner() {
+        let cfg = config_with_owners(&[("alice", "aimx-nonexistent-orphan-user")]);
+        // owner_uid() errors → caller_owns must be false (we never
+        // surface mailboxes with unresolvable owners to non-root).
+        assert!(!caller_owns(&cfg, "alice", 1000));
+    }
+
+    #[test]
+    fn caller_owns_returns_true_for_root_when_owner_is_root() {
+        let cfg = config_with_owners(&[("admin", "root")]);
+        assert!(caller_owns(&cfg, "admin", 0));
+    }
+
+    #[test]
+    fn caller_owns_returns_false_for_uid_mismatch() {
+        let cfg = config_with_owners(&[("admin", "root")]);
+        // Caller is non-root; root-owned mailbox doesn't match.
+        assert!(!caller_owns(&cfg, "admin", 1000));
     }
 }

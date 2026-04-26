@@ -1,15 +1,32 @@
 //! `aimx hooks list | create | delete` CLI.
 //!
-//! With template hooks gone, every hook in `config.toml` is a raw shell
-//! command stored under `[[mailboxes.<name>.hooks]]`. Hook CRUD is
-//! root-only and writes `config.toml` directly (no UDS), then SIGHUPs
-//! the running daemon so the change is picked up without a restart.
+//! With template hooks gone, every hook in `config.toml` is a raw argv
+//! stored under `[[mailboxes.<name>.hooks]]`. CRUD goes through the
+//! daemon UDS first (`HOOK-CREATE` / `HOOK-DELETE`) so the running
+//! daemon hot-swaps its in-memory `Config` without a restart. The
+//! daemon enforces caller-uid = mailbox-owner-uid (or root) per the
+//! single auth predicate in `src/auth.rs`. When the daemon is down:
+//! root falls back to a direct `config.toml` edit + restart hint;
+//! non-root hard-errors because it cannot write the root-owned config.
+//!
+//! `list` reads the locally-loaded `Config` and filters to caller-owned
+//! mailboxes for non-root callers. Reads do not need the daemon —
+//! `config.toml` is `0640 root:root`, but the local
+//! `dispatch_with_config` path uses `Config::load_resolved`, which
+//! requires read access. Non-root operators on a default install
+//! cannot read `/etc/aimx/config.toml`; the load failure is surfaced
+//! by the dispatcher before the CLI is reached, with a "permission
+//! denied" message that is more actionable than this layer would
+//! produce.
 
 use std::io::{self, Write};
 
+use crate::auth::{Action, AuthError, authorize};
 use crate::cli::{HookCommand, HookCreateArgs};
 use crate::config::{Config, validate_hooks};
 use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
+use crate::mcp::{HookCrudFallback, submit_hook_create_via_daemon, submit_hook_delete_via_daemon};
+use crate::platform::{current_euid, is_root};
 use crate::term;
 
 pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +44,16 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
 
+    // Non-root callers see only hooks on mailboxes they own. The
+    // daemon does not have a HOOK-LIST verb today; reads come straight
+    // from the locally-loaded Config snapshot the dispatcher already
+    // produced, with the same euid filter as `aimx mailboxes list`.
+    let caller_is_root = is_root();
+    let euid = current_euid();
     let mut rows = gather_rows(config, filter_mailbox);
+    if !caller_is_root {
+        rows.retain(|row| crate::mailbox::caller_owns(config, &row.mailbox, euid));
+    }
     rows.sort_by(|a, b| {
         a.mailbox
             .cmp(&b.mailbox)
@@ -104,14 +130,6 @@ fn truncate_with_ellipsis(s: &str, max: usize) -> String {
 }
 
 fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
-    if !skip_root_check && !crate::platform::is_root() {
-        return Err(
-            "hook creation requires root: run again with `sudo aimx hooks create --cmd ...`."
-                .into(),
-        );
-    }
-
     if let Some(name) = &args.name
         && !is_valid_hook_name(name)
     {
@@ -120,9 +138,24 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         )
         .into());
     }
-    if !config.mailboxes.contains_key(&args.mailbox) {
-        return Err(format!("Mailbox '{}' does not exist", args.mailbox).into());
+    let mb_cfg = config
+        .mailboxes
+        .get(&args.mailbox)
+        .ok_or_else(|| format!("Mailbox '{}' does not exist", args.mailbox))?;
+
+    // Pre-flight authz so non-owners get a precise error before any
+    // socket I/O. The daemon enforces the same predicate; we run it
+    // here too so non-root + daemon-down + non-owner errors out
+    // consistently rather than producing a misleading "daemon not
+    // running" message.
+    let euid = current_euid();
+    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    if !skip_root_check
+        && let Err(e) = authorize(euid, Action::HookCrud(args.mailbox.clone()), Some(mb_cfg))
+    {
+        return Err(format_hook_auth_error(&e, "create").into());
     }
+
     let event = parse_event(&args.event)?;
     if matches!(event, HookEvent::AfterSend) && args.fire_on_untrusted {
         return Err("--fire-on-untrusted is only valid on --event on_receive".into());
@@ -136,37 +169,69 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         name: args.name.clone(),
         event,
         r#type: "cmd".to_string(),
-        cmd,
+        cmd: cmd.clone(),
         fire_on_untrusted: args.fire_on_untrusted,
     };
     let effective = effective_hook_name(&hook);
 
-    apply_create_direct(config, &args.mailbox, hook)?;
-    println!(
-        "{} {}",
-        term::success("Hook created:"),
-        term::highlight(&effective)
-    );
-
-    match crate::serve::sighup_running_daemon() {
-        crate::serve::SighupOutcome::Sent(pid) => {
+    // Try the UDS path first. The daemon authorizes via SO_PEERCRED +
+    // auth::authorize so the same gate runs whether the caller used CLI
+    // or MCP, and the running Config hot-swaps without a restart.
+    let body = build_hook_create_body(&cmd, args.fire_on_untrusted)?;
+    match submit_hook_create_via_daemon(&args.mailbox, &args.event, args.name.as_deref(), body) {
+        Ok(()) => {
             println!(
-                "{} SIGHUP sent to aimx serve (pid {pid}); hook is live.",
-                term::info("Reload:")
+                "{} {} (live via daemon)",
+                term::success("Hook created:"),
+                term::highlight(&effective)
             );
+            Ok(())
         }
-        crate::serve::SighupOutcome::DaemonNotRunning => {
-            print_restart_hint();
-        }
-        crate::serve::SighupOutcome::SignalFailed(pid, err) => {
-            eprintln!(
-                "{} failed to SIGHUP aimx serve (pid {pid}): {err}",
-                term::warn("Warning:")
+        Err(HookCrudFallback::SocketMissing) => {
+            // Daemon down. Only root can rewrite the root-owned
+            // config.toml; non-root callers hard-error so we don't
+            // pretend the change went through.
+            if !skip_root_check && !is_root() {
+                return Err("daemon not running, non-root hook CRUD requires daemon".into());
+            }
+            apply_create_direct(config, &args.mailbox, hook)?;
+            println!(
+                "{} {}",
+                term::success("Hook created:"),
+                term::highlight(&effective)
             );
             print_restart_hint();
+            Ok(())
         }
+        Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
-    Ok(())
+}
+
+/// Render an [`AuthError`] for hook CRUD CLI paths.
+fn format_hook_auth_error(err: &AuthError, verb: &str) -> String {
+    match err {
+        AuthError::NotRoot => {
+            format!("not authorized: aimx hooks {verb} requires root (run with sudo)")
+        }
+        AuthError::NotOwner { mailbox } => {
+            format!("not authorized: caller does not own mailbox '{mailbox}'")
+        }
+        AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
+    }
+}
+
+/// Build the JSON body the daemon's `HookCreateBody` deserializer
+/// expects: `{"cmd": [...], "fire_on_untrusted": <bool>, "type": "cmd"}`.
+fn build_hook_create_body(
+    cmd: &[String],
+    fire_on_untrusted: bool,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let body = serde_json::json!({
+        "cmd": cmd,
+        "fire_on_untrusted": fire_on_untrusted,
+        "type": "cmd",
+    });
+    Ok(serde_json::to_vec(&body)?)
 }
 
 fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -195,26 +260,43 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
     }
 
+    let euid = current_euid();
     let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
-    if !skip_root_check && !crate::platform::is_root() {
-        return Err("hook deletion requires root: run again with `sudo aimx hooks delete`".into());
-    }
-    apply_delete_direct(config, name)?;
-    println!(
-        "{} {}",
-        term::success("Hook deleted:"),
-        term::highlight(name)
-    );
-    match crate::serve::sighup_running_daemon() {
-        crate::serve::SighupOutcome::Sent(pid) => {
-            println!(
-                "{} SIGHUP sent to aimx serve (pid {pid}); change is live.",
-                term::info("Reload:")
-            );
+
+    // Pre-flight authz: same predicate the daemon enforces, run here so
+    // a non-owner hits a precise error before the daemon-or-fallback
+    // dispatch.
+    if !skip_root_check {
+        let mb_cfg = config.mailboxes.get(&mailbox);
+        if let Err(e) = authorize(euid, Action::HookCrud(mailbox.clone()), mb_cfg) {
+            return Err(format_hook_auth_error(&e, "delete").into());
         }
-        _ => print_restart_hint(),
     }
-    Ok(())
+
+    match submit_hook_delete_via_daemon(name) {
+        Ok(()) => {
+            println!(
+                "{} {} (live via daemon)",
+                term::success("Hook deleted:"),
+                term::highlight(name)
+            );
+            Ok(())
+        }
+        Err(HookCrudFallback::SocketMissing) => {
+            if !skip_root_check && !is_root() {
+                return Err("daemon not running, non-root hook CRUD requires daemon".into());
+            }
+            apply_delete_direct(config, name)?;
+            println!(
+                "{} {}",
+                term::success("Hook deleted:"),
+                term::highlight(name)
+            );
+            print_restart_hint();
+            Ok(())
+        }
+        Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
+    }
 }
 
 fn parse_event(s: &str) -> Result<HookEvent, Box<dyn std::error::Error>> {
@@ -305,4 +387,54 @@ fn print_restart_hint() {
          (`sudo systemctl start aimx`).",
         term::info("Note:")
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::AuthError;
+
+    #[test]
+    fn build_hook_create_body_emits_canonical_json() {
+        let body =
+            build_hook_create_body(&["/bin/echo".to_string(), "hi".to_string()], true).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["cmd"][0], "/bin/echo");
+        assert_eq!(parsed["cmd"][1], "hi");
+        assert_eq!(parsed["fire_on_untrusted"], true);
+        assert_eq!(parsed["type"], "cmd");
+    }
+
+    #[test]
+    fn build_hook_create_body_default_fire_on_untrusted_is_false() {
+        let body = build_hook_create_body(&["/bin/true".to_string()], false).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["fire_on_untrusted"], false);
+    }
+
+    #[test]
+    fn format_hook_auth_error_not_owner_names_mailbox() {
+        let msg = format_hook_auth_error(
+            &AuthError::NotOwner {
+                mailbox: "alice".into(),
+            },
+            "create",
+        );
+        assert!(msg.contains("alice"), "{msg}");
+        assert!(msg.contains("not authorized"), "{msg}");
+    }
+
+    #[test]
+    fn format_hook_auth_error_not_root_mentions_verb() {
+        let msg = format_hook_auth_error(&AuthError::NotRoot, "delete");
+        assert!(msg.contains("delete"), "{msg}");
+        assert!(msg.contains("sudo"), "{msg}");
+    }
+
+    #[test]
+    fn format_hook_auth_error_no_such_mailbox_is_opaque() {
+        let msg = format_hook_auth_error(&AuthError::NoSuchMailbox, "create");
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("no such mailbox"), "{msg}");
+    }
 }

@@ -727,25 +727,64 @@ fn mcp_list_tools() {
 
     let resp = client.list_tools();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    // Hook tools were removed; 9 mail/mailbox tools remain.
-    assert_eq!(tools.len(), 9);
+    // Mailbox CRUD tools are gone (moved to root-only CLI). Hook
+    // tools are back under the new auth predicate. Surface: 7 mail
+    // tools + 3 hook tools = 10.
+    assert_eq!(tools.len(), 10);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"mailbox_create"));
     assert!(names.contains(&"mailbox_list"));
-    assert!(names.contains(&"mailbox_delete"));
     assert!(names.contains(&"email_list"));
     assert!(names.contains(&"email_read"));
     assert!(names.contains(&"email_mark_read"));
     assert!(names.contains(&"email_mark_unread"));
     assert!(names.contains(&"email_send"));
     assert!(names.contains(&"email_reply"));
+    assert!(names.contains(&"hook_create"));
+    assert!(names.contains(&"hook_list"));
+    assert!(names.contains(&"hook_delete"));
+    // mailbox_create / mailbox_delete moved to root-only CLI; the
+    // MCP surface no longer exposes them.
+    assert!(!names.contains(&"mailbox_create"));
+    assert!(!names.contains(&"mailbox_delete"));
+    // hook_list_templates was deleted alongside hook templates.
+    assert!(!names.contains(&"hook_list_templates"));
 
     client.shutdown();
 }
 
 #[test]
-fn mcp_mailbox_create_list_delete() {
+fn mcp_mailbox_list_returns_caller_owned() {
+    // After the CLI/MCP rework `mailbox_create` / `mailbox_delete` are
+    // gone from the MCP surface (moved to root-only CLI). What remains
+    // is `mailbox_list`, which returns mailboxes the caller owns. The
+    // shared fixture sets every mailbox to the test runner's own
+    // username so the listing is non-empty under non-root `cargo test`.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("alice"),
+        "expected alice in list, got: {text}"
+    );
+    assert!(
+        text.contains("catchall"),
+        "expected catchall in list, got: {text}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_mailbox_create_tool_no_longer_exposed() {
+    // `mailbox_create` was removed from the MCP surface (mailbox CRUD
+    // moved to root-only CLI). Calling the tool by name returns a
+    // tool-not-found error from the rmcp framework.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -753,39 +792,29 @@ fn mcp_mailbox_create_list_delete() {
     client.initialize();
 
     let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "support"}));
-    let text = get_tool_text(&resp);
+    // The framework's response shape is "tool not found" / unknown tool;
+    // the assertion is robust to small text drift.
     assert!(
-        text.contains("created"),
-        "Expected creation message, got: {text}"
+        is_tool_error(&resp) || resp.get("error").is_some(),
+        "expected mailbox_create to be rejected, got: {resp}"
     );
-    assert!(inbox(tmp.path(), "support").is_dir());
-
-    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("catchall"));
-    assert!(text.contains("support"));
-    assert!(text.contains("alice"));
-
-    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("deleted"));
-    assert!(!inbox(tmp.path(), "support").exists());
 
     client.shutdown();
 }
 
 #[test]
-fn mcp_mailbox_delete_catchall_error() {
+fn mcp_mailbox_delete_tool_no_longer_exposed() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "catchall"}));
-    assert!(is_tool_error(&resp));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("Cannot delete"), "Got: {text}");
+    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
+    assert!(
+        is_tool_error(&resp) || resp.get("error").is_some(),
+        "expected mailbox_delete to be rejected, got: {resp}"
+    );
 
     client.shutdown();
 }
@@ -3288,8 +3317,12 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
 
+    // Mailbox CRUD is root-only via the central auth predicate; tests
+    // bypass via `AIMX_TEST_SKIP_ROOT_CHECK` so the post-gate fallback
+    // path stays exercised under non-root `cargo test`.
     let assert = aimx_cmd(tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailbox")
@@ -3556,7 +3589,10 @@ fn mailbox_delete_force_refuses_catchall() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
+    // Mailbox CRUD is root-only; bypass via the test env var so the
+    // catchall-refusal logic itself runs under non-root `cargo test`.
     let assert = aimx_cmd(tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailboxes")
@@ -4387,9 +4423,9 @@ fn hooks_delete_unknown_name_errors() {
 // ---------------------------------------------------------------------
 
 /// Spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm the
-/// CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely)
-/// and SIGHUP'd the running daemon. The success path prints a
-/// `Reload:` banner and no `Hint:` restart banner.
+/// CLI routed through the daemon's UDS HOOK-CREATE verb so `config.toml`
+/// hot-swaps without a restart. The success path prints the
+/// `(live via daemon)` marker and no `Hint:` restart banner.
 #[test]
 fn hooks_raw_cmd_sighup_hot_swaps_config() {
     let tmp = TempDir::new().unwrap();
@@ -4422,22 +4458,23 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
         create_out.contains("Hook created"),
         "create output: {create_out}"
     );
-    // Raw-cmd hooks write config.toml directly and
-    // SIGHUP the daemon. Positive signal: stdout must carry the
-    // `Reload:` banner (which only prints on SighupOutcome::Sent).
-    // Negative signal: no `Hint:` restart banner (that would indicate
-    // the SIGHUP path fell through to DaemonNotRunning).
+    // The CLI now routes through the daemon's UDS HOOK-CREATE verb —
+    // the daemon atomically rewrites config.toml and hot-swaps the
+    // in-memory Config so SIGHUP is not required. Positive signal:
+    // stdout carries the `(live via daemon)` marker. Negative
+    // signal: no `Hint:` restart banner (the daemon-down fallback
+    // path would have produced one).
     assert!(
-        create_out.contains("Reload:"),
-        "daemon-success should print Reload: banner: {create_out}"
+        create_out.contains("live via daemon"),
+        "daemon-success should print the live-via-daemon marker: {create_out}"
     );
     assert!(
         !create_out.contains("Hint:"),
         "daemon-success should not print restart hint: {create_out}"
     );
 
-    // On-disk config.toml should contain the new hook argv (CLI wrote
-    // it directly — raw-cmd never traverses UDS).
+    // The daemon writes config.toml atomically when handling
+    // HOOK-CREATE. The new hook argv must appear there.
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
         content.contains("via-daemon"),
@@ -4627,12 +4664,12 @@ fn mcp_hook_list_templates_returns_registered_template() {
 }
 
 /// `hook_create` without a running daemon returns a precise
-/// socket-missing error rather than panicking.
+/// socket-missing error rather than panicking. Exercised against the
+/// new MCP signature (`mailbox`, `event`, `cmd: Vec<String>`).
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
 fn mcp_hook_create_without_daemon_reports_missing_socket() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
+    setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4642,8 +4679,7 @@ fn mcp_hook_create_without_daemon_reports_missing_socket() {
         serde_json::json!({
             "mailbox": "alice",
             "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {"prompt": "hi"}
+            "cmd": ["/bin/echo", "hi"]
         }),
     );
     assert!(
@@ -4654,6 +4690,74 @@ fn mcp_hook_create_without_daemon_reports_missing_socket() {
     assert!(
         text.contains("daemon not running"),
         "expected socket-missing message: {text}"
+    );
+
+    client.shutdown();
+}
+
+/// `hook_create` against a mailbox the caller does not own returns
+/// the canonical "not authorized" error from the auth predicate. The
+/// daemon is not even started: the MCP-side pre-flight check rejects
+/// before any wire I/O.
+#[test]
+fn mcp_hook_create_unowned_mailbox_returns_not_authorized() {
+    // Skip this assertion when running the test runner as root (CI
+    // tier 1 runs in containers as root). The auth predicate
+    // unconditionally allows root, so the unowned-mailbox negative
+    // path can only fire as a non-root caller.
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root {
+        eprintln!("skipping unowned-mailbox negative-auth test under root caller");
+        return;
+    }
+
+    // Plant a mailbox owned by `nobody` (uid !=
+    // current_euid() on every supported Linux deployment) so the
+    // current test user is *not* the owner.
+    let tmp = TempDir::new().unwrap();
+    let owner = current_username();
+    let config = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{tmp_dir}\"\n\n\
+         [mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.foreign]\naddress = \"foreign@agent.example.com\"\nowner = \"nobody\"\n",
+        tmp_dir = tmp.path().display()
+    );
+    for sub in [
+        "inbox/catchall",
+        "sent/catchall",
+        "inbox/alice",
+        "sent/alice",
+        "inbox/foreign",
+        "sent/foreign",
+    ] {
+        let dir = tmp.path().join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
+    install_cached_dkim_keys(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "foreign",
+            "event": "on_receive",
+            "cmd": ["/bin/echo", "hi"]
+        }),
+    );
+    assert!(is_tool_error(&resp), "{resp}");
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("not authorized"),
+        "expected not-authorized error, got: {text}"
     );
 
     client.shutdown();
@@ -4759,23 +4863,6 @@ fn mcp_hook_create_missing_param_returns_error() {
 
     client.shutdown();
     stop_serve(daemon);
-}
-
-/// `hook_list` emits an empty array when no hooks are configured.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_list_empty_returns_empty_array() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    let resp = client.call_tool("hook_list", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    assert_eq!(text, "[]", "{text}");
-
-    client.shutdown();
 }
 
 /// Origin-masking is enforced end-to-end. Operator-origin hooks
@@ -4905,21 +4992,39 @@ fn mcp_hook_delete_respects_origin_protection() {
     stop_serve(daemon);
 }
 
-/// `hook_delete` without a running daemon returns a precise
-/// socket-missing error.
+/// `hook_delete` against a hook that does not exist returns the
+/// canonical "not found" error without ever reaching the daemon. The
+/// test deliberately uses the standard fixture (no daemon spawned) to
+/// pin behavior under the new MCP shape.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_delete_without_daemon_reports_missing_socket() {
+fn mcp_hook_delete_unknown_hook_returns_not_found() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
+    setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "anything"}));
-    assert!(is_tool_error(&resp));
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "no_such_hook"}));
+    assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    assert!(text.contains("daemon not running"), "{text}");
+    assert!(text.contains("not found"), "{text}");
+
+    client.shutdown();
+}
+
+/// `hook_list` with no hooks configured returns `[]`. Exercises the
+/// new MCP `hook_list` tool's empty-output shape end-to-end.
+#[test]
+fn mcp_hook_list_empty_returns_empty_array() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert_eq!(text, "[]", "{text}");
 
     client.shutdown();
 }

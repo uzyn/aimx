@@ -29,6 +29,20 @@ pub fn is_root() -> bool {
     }
 }
 
+/// Returns the current process's effective UID. On non-Unix targets
+/// this returns 0 — non-Unix is not a supported deployment but kept
+/// compiling for `cargo check` runs on developer machines.
+pub fn current_euid() -> u32 {
+    #[cfg(unix)]
+    {
+        unsafe { libc::geteuid() }
+    }
+    #[cfg(not(unix))]
+    {
+        0
+    }
+}
+
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};

@@ -310,8 +310,15 @@ pub enum MailboxCommand {
         owner: Option<String>,
     },
 
-    /// List all mailboxes
-    List,
+    /// List mailboxes. Non-root callers see only mailboxes they own;
+    /// root sees all. Pass `--all` to override and force the full list
+    /// (root-only).
+    List {
+        /// List every configured mailbox regardless of ownership.
+        /// Root-only — non-root callers refused.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Show trust, hooks, and message counts for a single mailbox
     Show {
