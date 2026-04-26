@@ -1447,7 +1447,7 @@ pub fn finalize_setup(
     install_config_dir()?;
 
     let config_path = crate::config::config_path();
-    let _config = if config_path.exists() {
+    let config = if config_path.exists() {
         let mut cfg = Config::load_ignore_warnings(&config_path)?;
         if cfg.domain != domain {
             let old_domain = cfg.domain.clone();
@@ -1508,8 +1508,12 @@ pub fn finalize_setup(
         cfg
     };
 
-    let catchall_dir = data_dir.join("catchall");
-    std::fs::create_dir_all(&catchall_dir)?;
+    // Ensure every mailbox in the loaded config has its inbox/sent
+    // directories on disk with the expected `<owner>:<owner> 0700`
+    // perms. Catchall (`aimx-catchall:aimx-catchall`) is included.
+    // Idempotent: re-running setup on a clean install is a no-op once
+    // the directories already match.
+    ensure_mailbox_dirs(data_dir, &config)?;
 
     let dkim_root = crate::config::dkim_dir();
     let dkim_private = dkim_root.join("private.key");
@@ -1521,6 +1525,79 @@ pub fn finalize_setup(
         println!("DKIM keypair already exists.");
     }
 
+    Ok(())
+}
+
+/// For every mailbox in `config`, ensure `inbox/<name>/` and
+/// `sent/<name>/` exist under `data_dir` with `<owner>:<owner> 0700`.
+///
+/// Idempotent: re-running on an already-configured datadir is a no-op
+/// once the directories match. When running as root, bails if a
+/// configured `owner` does not resolve on the host so operators see the
+/// misconfiguration before the daemon starts ingesting mail.
+///
+/// Non-root invocations (CI smoke tests, `cargo test` on a workstation)
+/// still create the dirs and chmod them to `0700`, but skip the chown
+/// step because chown to a different uid would EPERM. The strict
+/// owner-existence check is also relaxed for non-root callers — tests
+/// run with mailbox owners that don't exist on the host, and a real
+/// install always re-runs setup as root where the strict check fires.
+fn ensure_mailbox_dirs(data_dir: &Path, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let running_as_root = is_root();
+
+    for (name, mb) in &config.mailboxes {
+        if running_as_root {
+            // Strict owner-existence check: both the user and its
+            // primary group must resolve. `owner_uid` / `owner_gid` go
+            // through validate_run_as + getpwnam, so a missing user or
+            // group surfaces as the same OrphanUser error the daemon
+            // would emit on load.
+            if let Err(e) = mb.owner_uid() {
+                return Err(format!(
+                    "error: mailbox owner '{owner}' for mailbox '{name}' does not \
+                     exist on this system (resolver: {e}); create it with \
+                     `useradd --system --no-create-home --shell /usr/sbin/nologin \
+                     {owner}` or edit `{path}` and re-run setup",
+                    owner = mb.owner,
+                    path = crate::config::config_path().display(),
+                )
+                .into());
+            }
+            if let Err(e) = mb.owner_gid() {
+                return Err(format!(
+                    "error: primary group for mailbox owner '{owner}' (mailbox \
+                     '{name}') does not exist on this system (resolver: {e}); \
+                     ensure both the user and its primary group are present and \
+                     re-run setup",
+                    owner = mb.owner,
+                )
+                .into());
+            }
+        }
+
+        let inbox = data_dir.join("inbox").join(name);
+        let sent = data_dir.join("sent").join(name);
+
+        for dir in [&inbox, &sent] {
+            std::fs::create_dir_all(dir)?;
+
+            if running_as_root {
+                // Chown + chmod via the shared helper so the perm story
+                // is identical to mailbox_handler's create path.
+                if let Err(e) = crate::ownership::chown_as_owner(dir, mb, 0o700) {
+                    return Err(
+                        format!("failed to chown {} to {}: {e}", dir.display(), mb.owner).into(),
+                    );
+                }
+            } else {
+                // Non-root path: chmod only, so at least the dir mode
+                // reaches 0700. Real installs always run setup as root.
+                std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -4116,7 +4193,10 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         assert!(crate::config::config_path().exists());
-        assert!(tmp.path().join("catchall").exists());
+        // Mailbox layout matches what `aimx serve` ingests into:
+        // `<data_dir>/inbox/<name>/` and `<data_dir>/sent/<name>/`.
+        assert!(tmp.path().join("inbox").join("catchall").exists());
+        assert!(tmp.path().join("sent").join("catchall").exists());
         assert!(tmp.path().join("dkim/private.key").exists());
         assert!(tmp.path().join("dkim/public.key").exists());
 
@@ -4142,6 +4222,38 @@ owner = "aimx-catchall"
         let config = Config::load_resolved_ignore_warnings().unwrap();
         assert_eq!(config.domain, "test.example.com");
         assert!(config.mailboxes.contains_key("catchall"));
+    }
+
+    /// Each configured mailbox must end up with its inbox/sent dirs at
+    /// mode `0o700`. Idempotent re-runs preserve the mode.
+    #[cfg(unix)]
+    #[test]
+    fn finalize_locks_mailbox_dirs_to_mode_0700() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
+
+        for sub in ["inbox", "sent"] {
+            let dir = tmp.path().join(sub).join("catchall");
+            assert!(dir.is_dir(), "{} must be a directory", dir.display());
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o700, "{} must be 0o700, got {mode:o}", dir.display());
+        }
+
+        // Re-run to confirm idempotency.
+        finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
+        for sub in ["inbox", "sent"] {
+            let dir = tmp.path().join(sub).join("catchall");
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} must remain 0o700 across re-run, got {mode:o}",
+                dir.display()
+            );
+        }
     }
 
     #[test]

@@ -254,6 +254,22 @@ pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: 
     let email_trusted = parse_trusted(&ctx.metadata.trusted);
     let mailbox_name = &ctx.metadata.mailbox;
 
+    // Defense in depth: catchall hooks are rejected at config load
+    // (`reject_post_parse_legacy`), so reaching here with a non-empty
+    // hook list on a catchall mailbox indicates a configuration bypass
+    // or an in-memory mutation that snuck around the validator. Refuse
+    // to fire and log loudly.
+    if mailbox_config.is_catchall(config) && !mailbox_config.hooks.is_empty() {
+        tracing::warn!(
+            target: "aimx::hook",
+            "catchall mailbox '{mailbox}' has {n} configured hook(s) but \
+             catchall hooks are forbidden; refusing to fire",
+            mailbox = mailbox_name,
+            n = mailbox_config.hooks.len(),
+        );
+        return;
+    }
+
     let hooks: Vec<&Hook> = mailbox_config.on_receive_hooks().collect();
     if hooks.is_empty() {
         tracing::info!(
@@ -309,6 +325,20 @@ pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: 
 /// The daemon awaits subprocess completion for predictable timing, but exit
 /// codes are discarded (hooks cannot affect delivery).
 pub fn execute_after_send(config: &Config, mailbox_config: &MailboxConfig, ctx: &AfterSendContext) {
+    // Defense in depth: catchall mailboxes never accept outbound mail
+    // (catchall is inbound-only), so an `after_send` hook on a catchall
+    // mailbox should be unreachable. Refuse to fire if it ever isn't.
+    if mailbox_config.is_catchall(config) && !mailbox_config.hooks.is_empty() {
+        tracing::warn!(
+            target: "aimx::hook",
+            "catchall mailbox '{mailbox}' has {n} configured hook(s) but \
+             catchall hooks are forbidden; refusing to fire",
+            mailbox = ctx.mailbox,
+            n = mailbox_config.hooks.len(),
+        );
+        return;
+    }
+
     let hooks: Vec<&Hook> = mailbox_config.after_send_hooks().collect();
     if hooks.is_empty() {
         tracing::info!(
@@ -635,7 +665,7 @@ mod tests {
             spf: "none".to_string(),
             dmarc: "none".to_string(),
             trusted: "none".to_string(),
-            mailbox: "catchall".to_string(),
+            mailbox: "alice".to_string(),
             read: false,
             read_at: None,
             labels: vec![],
@@ -661,9 +691,13 @@ mod tests {
             .unwrap_or_else(|| "nobody".to_string())
     }
 
-    fn catchall_mailbox(hooks: Vec<Hook>) -> MailboxConfig {
+    /// Build a regular (non-catchall) mailbox owned by the current user
+    /// for tests that exercise the fire path. The `is_catchall` check
+    /// matches `*@<domain>`, so an explicit local part keeps the
+    /// defense-in-depth catchall guard out of the way.
+    fn regular_mailbox(hooks: Vec<Hook>) -> MailboxConfig {
         MailboxConfig {
-            address: "*@test.com".to_string(),
+            address: "alice@test.com".to_string(),
             owner: current_user_name(),
             hooks,
             trust: Some("none".to_string()),
@@ -763,7 +797,7 @@ mod tests {
     }
 
     fn execute_single(hook: Hook, trusted: TrustedValue) -> (MailboxConfig, PathBuf) {
-        let mailbox = catchall_mailbox(vec![hook]);
+        let mailbox = regular_mailbox(vec![hook]);
         let mut meta = sample_metadata();
         meta.trusted = trusted.as_str().to_string();
 
@@ -829,7 +863,7 @@ mod tests {
              \"$AIMX_MAILBOX\" \"$AIMX_FILEPATH\" > {}",
             out.display()
         );
-        let mailbox = catchall_mailbox(vec![hook]);
+        let mailbox = regular_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -842,7 +876,7 @@ mod tests {
         assert!(content.contains("HOOK=hook_explicit"), "got: {content}");
         assert!(content.contains("FROM=alice@gmail.com"), "got: {content}");
         assert!(content.contains("SUBJECT=Hello World"), "got: {content}");
-        assert!(content.contains("MAILBOX=catchall"), "got: {content}");
+        assert!(content.contains("MAILBOX=alice"), "got: {content}");
     }
 
     #[test]
@@ -860,7 +894,7 @@ mod tests {
             fire_on_untrusted: true,
         };
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
-        let mailbox = catchall_mailbox(vec![hook]);
+        let mailbox = regular_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -897,7 +931,7 @@ mod tests {
             "printf 'leak=[%s]\\n' \"$AIMX_LEAK_SENTINEL_HOOK\" > {}",
             out.display()
         );
-        let mailbox = catchall_mailbox(vec![hook]);
+        let mailbox = regular_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -1088,5 +1122,144 @@ cmd = "echo hi"
     #[test]
     fn placeholder_path_import() {
         let _p: &Path = Path::new("/tmp");
+    }
+
+    // ----- Catchall guard regression -----------------------------------
+
+    /// Catchall hooks are blocked at config load time, but the fire path
+    /// also has a defense-in-depth early return. If the rejection at load
+    /// is ever bypassed (or in-memory mutation slips a hook onto a
+    /// catchall mailbox), the fire path must refuse to spawn the
+    /// subprocess.
+    #[test]
+    #[tracing_test::traced_test]
+    fn execute_on_receive_refuses_to_fire_for_catchall_mailbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("fired");
+        let mut hook = basic_hook("h_catchall");
+        hook.fire_on_untrusted = true;
+        hook.cmd = format!("touch {}", marker.display());
+
+        // Construct a catchall mailbox with a hook attached, bypassing
+        // the load-time validator. This is the configuration the
+        // defense-in-depth guard exists to catch.
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            owner: current_user_name(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
+        };
+
+        let mut meta = sample_metadata();
+        meta.trusted = "true".to_string();
+        meta.mailbox = "catchall".to_string();
+        let filepath = tmp.path().join("test.md");
+        std::fs::write(&filepath, b"test\n").ok();
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&sample_config(), &mailbox, &ctx);
+
+        assert!(
+            !marker.exists(),
+            "catchall hook must not fire even when load-time rejection is bypassed"
+        );
+        assert!(
+            logs_contain("catchall hooks are forbidden"),
+            "expected refuse-to-fire warning in logs"
+        );
+    }
+
+    #[test]
+    fn execute_after_send_refuses_to_fire_for_catchall_mailbox() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join("fired_after");
+        let hook = Hook {
+            name: Some("h_catchall_send".to_string()),
+            event: HookEvent::AfterSend,
+            r#type: "cmd".to_string(),
+            cmd: format!("touch {}", marker.display()),
+            fire_on_untrusted: false,
+        };
+        let mailbox = MailboxConfig {
+            address: "*@test.com".to_string(),
+            owner: current_user_name(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
+        };
+        let ctx = AfterSendContext {
+            mailbox: "catchall",
+            from: "noreply@test.com",
+            to: "bob@example.com",
+            subject: "x",
+            filepath: "",
+            message_id: "<m@test.com>",
+            send_status: SendStatus::Delivered,
+        };
+        execute_after_send(&sample_config(), &mailbox, &ctx);
+        assert!(
+            !marker.exists(),
+            "catchall after_send hook must not fire even when bypassed"
+        );
+    }
+
+    // ----- Owner-derived run_as regression -----------------------------
+
+    /// Fire a real `/bin/echo hello` hook on a non-catchall mailbox
+    /// owned by the current user; assert exit-success, that stdout
+    /// reached the marker file, and that the structured log line
+    /// records `owner=<current user>` (the value the fire path resolved
+    /// from `mailbox.owner`).
+    ///
+    /// The structured log line shape includes an `owner=<u>` field;
+    /// this test pins the invariant that the fire path reads the value
+    /// off `mailbox.owner` and threads it into the log record.
+    #[test]
+    #[tracing_test::traced_test]
+    fn fire_path_runs_as_mailbox_owner_and_logs_owner_field() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let out = tmp.path().join("echoed.out");
+        let mut hook = basic_hook("echo_hello");
+        hook.fire_on_untrusted = true;
+        // Use /bin/echo directly via shell wrapper. The acceptance
+        // criterion calls for `cmd = ["/bin/echo", "hello"]`; the Hook
+        // schema stores `cmd` as a string that resolve_argv wraps in
+        // /bin/sh -c, so the same observable behavior runs through
+        // /bin/echo with output captured to a tempfile.
+        hook.cmd = format!("/bin/echo hello > {}", out.display());
+
+        let owner = current_user_name();
+        let mailbox = regular_mailbox(vec![hook]);
+
+        let mut meta = sample_metadata();
+        meta.trusted = "true".to_string();
+        meta.mailbox = "alice".to_string();
+        let filepath = tmp.path().join("test.md");
+        std::fs::write(&filepath, b"test\n").ok();
+        let ctx = OnReceiveContext {
+            filepath: &filepath,
+            metadata: &meta,
+        };
+        execute_on_receive(&sample_config(), &mailbox, &ctx);
+
+        let written = std::fs::read_to_string(&out).unwrap_or_default();
+        assert!(
+            written.contains("hello"),
+            "echo hook should have written 'hello' to {}; got {written:?}",
+            out.display()
+        );
+        assert!(
+            logs_contain(&format!("owner={owner}")),
+            "structured log must include owner={owner}; logs did not match"
+        );
+        assert!(
+            logs_contain("exit_code=0"),
+            "structured log must record exit_code=0 for the successful hook"
+        );
     }
 }

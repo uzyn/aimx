@@ -47,6 +47,45 @@ jobs:
           fi
           echo "Author metadata check passed"
 
+  mailbox-isolation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Provision test users
+        run: |
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin aimx-test-alice || \
+            id aimx-test-alice
+          sudo useradd --system --no-create-home --shell /usr/sbin/nologin aimx-test-bob || \
+            id aimx-test-bob
+
+      - name: Build the isolation test binary
+        run: cargo test --no-run --test mailbox_isolation
+
+      - name: Run mailbox isolation test (under sudo)
+        run: |
+          # Pre-built binary path is stable thanks to `--no-run`; locate
+          # the most-recently-built `mailbox_isolation-*` artifact and
+          # run it as root with the sudo gate set so the test body
+          # actually exercises the kernel-level isolation. Skipping
+          # `cargo test` here avoids re-running rustc under sudo with a
+          # cargo home pointing at root's $HOME.
+          BIN=$(ls -t target/debug/deps/mailbox_isolation-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored
+
+      - name: Tear down test users
+        if: always()
+        run: |
+          sudo userdel aimx-test-alice || true
+          sudo userdel aimx-test-bob || true
+
   docs-build:
     runs-on: ubuntu-latest
     steps:
