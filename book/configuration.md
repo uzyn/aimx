@@ -109,6 +109,8 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is a **raw-c
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
 | `cmd` | array of strings | Argv exec'd directly. Required and non-empty; `cmd[0]` must be an absolute path. There is no shell wrapping — spell out `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
+| `stdin` | string | `"email"` (default) pipes the raw `.md` (frontmatter + body) to the hook's stdin; `"none"` closes stdin immediately so the hook only sees env vars. |
+| `timeout_secs` | int | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. |
 
 Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.

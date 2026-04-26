@@ -118,6 +118,14 @@ pub struct HookCreateParams {
                        12-char hex name is derived from (event, cmd, \
                        fire_on_untrusted).")]
     pub name: Option<String>,
+    #[schemars(description = "Stdin delivery mode. \"email\" (default) pipes the \
+                       raw .md (frontmatter + body) into the child's stdin. \
+                       \"none\" closes stdin immediately so the hook only \
+                       sees env vars.")]
+    pub stdin: Option<String>,
+    #[schemars(description = "Hard subprocess timeout in seconds. Default 60, \
+                       max 600. SIGTERM at the limit, SIGKILL 5s later.")]
+    pub timeout_secs: Option<u32>,
     #[schemars(description = "Opt into firing on inbound emails the trust gate \
                        marks as not trusted. Only valid on event = \
                        \"on_receive\".")]
@@ -494,11 +502,26 @@ impl AimxMcpServer {
         }
         let fire_on_untrusted = params.fire_on_untrusted.unwrap_or(false);
 
-        let body = serde_json::json!({
+        // Validate stdin at the MCP layer so callers get a precise error
+        // before any wire I/O. The daemon would re-validate on the wire,
+        // but the local check produces a more actionable message.
+        if let Some(s) = params.stdin.as_deref()
+            && let Err(e) = crate::hook::HookStdin::parse(s)
+        {
+            return Err(e);
+        }
+
+        let mut body = serde_json::json!({
             "cmd": params.cmd,
             "fire_on_untrusted": fire_on_untrusted,
             "type": "cmd",
         });
+        if let Some(stdin) = params.stdin.as_deref() {
+            body["stdin"] = serde_json::Value::String(stdin.to_string());
+        }
+        if let Some(t) = params.timeout_secs {
+            body["timeout_secs"] = serde_json::Value::Number(t.into());
+        }
         let body_bytes =
             serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize hook body: {e}"))?;
 
@@ -551,6 +574,8 @@ impl AimxMcpServer {
                     "event": hook.event.as_str(),
                     "cmd": hook.cmd,
                     "fire_on_untrusted": hook.fire_on_untrusted,
+                    "stdin": hook.stdin.as_str(),
+                    "timeout_secs": hook.timeout_secs,
                 }));
             }
         }
@@ -589,7 +614,9 @@ impl AimxMcpServer {
         // against the right principal. Hidden mailboxes (owned by other
         // users) surface as "hook not found" — we deliberately do not
         // distinguish "exists but you don't own it" from "doesn't exist"
-        // to avoid leaking ownership.
+        // to avoid leaking ownership of foreign mailboxes. The UDS wire
+        // already returns canonical opaque text on auth failures; this
+        // collapse keeps the MCP surface from leaking more than the wire.
         let config = self.load_config()?;
         let mailbox_name = config
             .mailboxes
@@ -602,7 +629,16 @@ impl AimxMcpServer {
             })
             .ok_or_else(|| format!("Hook '{}' not found", params.name))?;
 
-        self.authorize_mailbox(crate::auth::Action::HookCrud(mailbox_name.clone()), &config)?;
+        // If authorization fails (caller is not the mailbox's owner and
+        // is not root), surface as `not found` rather than leaking the
+        // foreign mailbox's name through a "caller does not own
+        // mailbox 'X'" error.
+        if self
+            .authorize_mailbox(crate::auth::Action::HookCrud(mailbox_name.clone()), &config)
+            .is_err()
+        {
+            return Err(format!("Hook '{}' not found", params.name));
+        }
 
         match submit_hook_delete_via_daemon(&params.name) {
             Ok(()) => Ok(format!("Hook '{}' deleted.", params.name)),

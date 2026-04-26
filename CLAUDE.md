@@ -43,6 +43,26 @@ cargo fmt -- --check
 
 CI runs both crates independently (`.github/workflows/ci.yml`).
 
+### Test environment escape hatches
+
+A handful of CLI gating points refuse to run as non-root in production. The
+test suite injects an opt-in to keep the post-gate code paths exercised under
+a non-root `cargo test` runner. Set this only from the test harness:
+
+- **`AIMX_TEST_SKIP_ROOT_CHECK=1`** — bypasses the `is_root()` / `euid != 0`
+  refusal in `aimx mailboxes` and `aimx hooks` CLI paths so the rest of the
+  command (config writes, fallback hints, error formatting) stays
+  reachable without `sudo`. Read by `src/mailbox.rs` and `src/hooks.rs`.
+  Production callers must never set this — it neutralizes the root gate
+  by design.
+
+Other test-only env vars are documented next to their read sites:
+`AIMX_SANDBOX_FORCE_FALLBACK` (force the non-systemd-run hook executor),
+`AIMX_CONFIG_DIR` / `AIMX_DATA_DIR` (redirect config + storage paths),
+`AIMX_TEST_MAIL_DROP` (use the file-drop transport instead of MX delivery),
+`AIMX_INTEGRATION_SUDO=1` (opt the integration suite into the root-only
+MAILBOX-CRUD branch when the test runner has sudo).
+
 ## Architecture
 
 ### Two independent Rust crates

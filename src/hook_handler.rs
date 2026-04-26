@@ -20,7 +20,9 @@
 use serde::Deserialize;
 
 use crate::config::{Config, validate_hooks, validate_single_hook};
-use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
+use crate::hook::{
+    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, HookStdin, effective_hook_name, is_valid_hook_name,
+};
 use crate::mailbox_handler::{CONFIG_WRITE_LOCK, MailboxContext, write_config_atomic};
 use crate::send_protocol::{AckResponse, ErrCode, HookCreateRequest, HookDeleteRequest};
 use crate::state_handler::StateContext;
@@ -40,6 +42,15 @@ struct HookCreateBody {
     fire_on_untrusted: bool,
     #[serde(default = "default_hook_type")]
     r#type: String,
+    /// Optional stdin mode override. Defaults to `email`. The legacy
+    /// `email_json` value is rejected by `Config::load`'s pre-parse hook
+    /// for `[[hooks]]` blocks; the wire-level rejection runs here too.
+    #[serde(default)]
+    stdin: Option<String>,
+    /// Optional subprocess timeout override. Defaults to 60s. Range
+    /// [1, 600] is enforced by `validate_single_hook`.
+    #[serde(default)]
+    timeout_secs: Option<u32>,
 }
 
 fn default_hook_type() -> String {
@@ -133,12 +144,27 @@ pub async fn handle_hook_create(
         }
     };
 
+    let stdin_mode = match body.stdin.as_deref() {
+        None => HookStdin::Email,
+        Some(s) => match HookStdin::parse(s) {
+            Ok(v) => v,
+            Err(reason) => {
+                return AckResponse::Err {
+                    code: ErrCode::Validation,
+                    reason,
+                };
+            }
+        },
+    };
+
     let hook = Hook {
         name: req.name.clone(),
         event,
         r#type: body.r#type,
         cmd: body.cmd,
         fire_on_untrusted: body.fire_on_untrusted,
+        stdin: stdin_mode,
+        timeout_secs: body.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS),
     };
 
     if let Err(reason) = validate_single_hook(&hook) {
@@ -330,6 +356,11 @@ fn reject_legacy_body_fields(body: &[u8]) -> Result<(), String> {
             "hook sets `dangerously_support_untrusted`; the field was renamed to `fire_on_untrusted`"
                 .to_string(),
         );
+    }
+    if let Some(stdin) = obj.get("stdin").and_then(|v| v.as_str())
+        && stdin == "email_json"
+    {
+        return Err("email_json stdin mode was removed; use stdin = \"email\"".to_string());
     }
     Ok(())
 }
@@ -879,6 +910,153 @@ mod tests {
         };
         match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
+            other => panic!("expected VALIDATION, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_accepts_stdin_none() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "stdin": "none",
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: Some("stdinhook".into()),
+            body,
+        };
+        let resp = handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await;
+        assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
+        let cfg = mb_ctx.config_handle.load();
+        assert_eq!(
+            cfg.mailboxes["alice"].hooks[0].stdin,
+            crate::hook::HookStdin::None
+        );
+    }
+
+    #[tokio::test]
+    async fn create_accepts_explicit_timeout_secs() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "timeout_secs": 5,
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: Some("timeouthook".into()),
+            body,
+        };
+        let resp = handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await;
+        assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
+        let cfg = mb_ctx.config_handle.load();
+        assert_eq!(cfg.mailboxes["alice"].hooks[0].timeout_secs, 5);
+    }
+
+    #[tokio::test]
+    async fn create_rejects_invalid_stdin_value() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "stdin": "bogus",
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert!(reason.contains("stdin"), "{reason}");
+            }
+            other => panic!("expected VALIDATION, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_legacy_email_json_stdin() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "stdin": "email_json",
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Protocol);
+                assert!(reason.contains("email_json"), "{reason}");
+            }
+            other => panic!("expected PROTOCOL, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_timeout_secs_zero() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "timeout_secs": 0,
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert!(reason.contains("timeout_secs"), "{reason}");
+            }
+            other => panic!("expected VALIDATION, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_timeout_secs_over_max() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/true"],
+            "timeout_secs": 700,
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert!(reason.contains("600"), "{reason}");
+            }
             other => panic!("expected VALIDATION, got {other:?}"),
         }
     }

@@ -435,6 +435,17 @@ pub struct HookCreateArgs {
     #[arg(long)]
     pub name: Option<String>,
 
+    /// Stdin delivery mode. `email` (default) pipes the raw `.md`
+    /// (frontmatter + body) into the hook's stdin. `none` closes
+    /// stdin immediately so the hook only sees env vars.
+    #[arg(long, value_parser = ["email", "none"])]
+    pub stdin: Option<String>,
+
+    /// Hard subprocess timeout in seconds. Default 60, max 600.
+    /// SIGTERM at the limit, SIGKILL 5s later.
+    #[arg(long)]
+    pub timeout_secs: Option<u32>,
+
     /// Opt into firing this hook on non-trusted inbound email. Only
     /// valid on `on_receive` hooks.
     #[arg(long)]

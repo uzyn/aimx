@@ -24,7 +24,9 @@ use std::io::{self, Write};
 use crate::auth::{Action, AuthError, authorize};
 use crate::cli::{HookCommand, HookCreateArgs};
 use crate::config::{Config, validate_hooks};
-use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
+use crate::hook::{
+    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, HookStdin, effective_hook_name, is_valid_hook_name,
+};
 use crate::mcp::{HookCrudFallback, submit_hook_create_via_daemon, submit_hook_delete_via_daemon};
 use crate::platform::{current_euid, is_root};
 use crate::term;
@@ -67,18 +69,22 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
     }
 
     println!(
-        "{} {} {} {}",
+        "{} {} {} {} {} {}",
         term::header("NAME                        "),
         term::header("MAILBOX             "),
         term::header("EVENT       "),
+        term::header("STDIN  "),
+        term::header("TIMEOUT"),
         term::header("CMD"),
     );
     for row in rows {
         println!(
-            "{:<28.28} {:<20.20} {:<11} {}",
+            "{:<28.28} {:<20.20} {:<11} {:<6} {:>7} {}",
             term::highlight(&row.name).to_string(),
             row.mailbox,
             row.event,
+            row.stdin.as_str(),
+            row.timeout_secs,
             truncate_with_ellipsis(&row.cmd, 60),
         );
     }
@@ -90,6 +96,8 @@ struct HookRow {
     mailbox: String,
     event: &'static str,
     cmd: String,
+    stdin: HookStdin,
+    timeout_secs: u32,
 }
 
 /// Render a hook argv into a single-line JSON-array string for display
@@ -114,6 +122,8 @@ fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<HookRow> {
                 mailbox: mailbox_name.clone(),
                 event: hook.event.as_str(),
                 cmd: format_argv_for_display(&hook.cmd),
+                stdin: hook.stdin,
+                timeout_secs: hook.timeout_secs,
             });
         }
     }
@@ -149,6 +159,10 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     // consistently rather than producing a misleading "daemon not
     // running" message.
     let euid = current_euid();
+    // `AIMX_TEST_SKIP_ROOT_CHECK=1` is the test-harness opt-in documented
+    // in `CLAUDE.md`'s "Test environment escape hatches" section. It
+    // bypasses the auth predicate so the post-gate code path stays
+    // exercised under non-root `cargo test`. Never set in production.
     let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
     if !skip_root_check
         && let Err(e) = authorize(euid, Action::HookCrud(args.mailbox.clone()), Some(mb_cfg))
@@ -165,19 +179,27 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     }
     let cmd = parse_cmd_argv(&args.cmd)?;
 
+    let stdin_mode = match args.stdin.as_deref() {
+        None => HookStdin::Email,
+        Some(s) => HookStdin::parse(s)?,
+    };
+    let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
+
     let hook = Hook {
         name: args.name.clone(),
         event,
         r#type: "cmd".to_string(),
         cmd: cmd.clone(),
         fire_on_untrusted: args.fire_on_untrusted,
+        stdin: stdin_mode,
+        timeout_secs,
     };
     let effective = effective_hook_name(&hook);
 
     // Try the UDS path first. The daemon authorizes via SO_PEERCRED +
     // auth::authorize so the same gate runs whether the caller used CLI
     // or MCP, and the running Config hot-swaps without a restart.
-    let body = build_hook_create_body(&cmd, args.fire_on_untrusted)?;
+    let body = build_hook_create_body(&cmd, args.fire_on_untrusted, stdin_mode, timeout_secs)?;
     match submit_hook_create_via_daemon(&args.mailbox, &args.event, args.name.as_deref(), body) {
         Ok(()) => {
             println!(
@@ -222,15 +244,26 @@ fn format_hook_auth_error(err: &AuthError, verb: &str) -> String {
 
 /// Build the JSON body the daemon's `HookCreateBody` deserializer
 /// expects: `{"cmd": [...], "fire_on_untrusted": <bool>, "type": "cmd"}`.
+/// `stdin` and `timeout_secs` are emitted only when they differ from the
+/// schema defaults so existing callers (and round-tripped configs) round
+/// through unchanged.
 fn build_hook_create_body(
     cmd: &[String],
     fire_on_untrusted: bool,
+    stdin: HookStdin,
+    timeout_secs: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "cmd": cmd,
         "fire_on_untrusted": fire_on_untrusted,
         "type": "cmd",
     });
+    if !matches!(stdin, HookStdin::Email) {
+        body["stdin"] = serde_json::Value::String(stdin.as_str().to_string());
+    }
+    if timeout_secs != DEFAULT_HOOK_TIMEOUT_SECS {
+        body["timeout_secs"] = serde_json::Value::Number(timeout_secs.into());
+    }
     Ok(serde_json::to_vec(&body)?)
 }
 
@@ -245,6 +278,8 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         println!("  {}   {}", term::header("name:   "), term::highlight(name));
         println!("  {}   {}", term::header("mailbox:"), mailbox);
         println!("  {}   {}", term::header("event:  "), hook.event);
+        println!("  {}   {}", term::header("stdin:  "), hook.stdin.as_str());
+        println!("  {}   {}", term::header("timeout:"), hook.timeout_secs);
         println!(
             "  {}   {}",
             term::header("cmd:    "),
@@ -396,20 +431,44 @@ mod tests {
 
     #[test]
     fn build_hook_create_body_emits_canonical_json() {
-        let body =
-            build_hook_create_body(&["/bin/echo".to_string(), "hi".to_string()], true).unwrap();
+        let body = build_hook_create_body(
+            &["/bin/echo".to_string(), "hi".to_string()],
+            true,
+            HookStdin::Email,
+            DEFAULT_HOOK_TIMEOUT_SECS,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["cmd"][0], "/bin/echo");
         assert_eq!(parsed["cmd"][1], "hi");
         assert_eq!(parsed["fire_on_untrusted"], true);
         assert_eq!(parsed["type"], "cmd");
+        // Defaults are not serialized so the wire stays stable across
+        // operators that don't touch stdin/timeout_secs.
+        assert!(parsed.get("stdin").is_none(), "{parsed}");
+        assert!(parsed.get("timeout_secs").is_none(), "{parsed}");
     }
 
     #[test]
     fn build_hook_create_body_default_fire_on_untrusted_is_false() {
-        let body = build_hook_create_body(&["/bin/true".to_string()], false).unwrap();
+        let body = build_hook_create_body(
+            &["/bin/true".to_string()],
+            false,
+            HookStdin::Email,
+            DEFAULT_HOOK_TIMEOUT_SECS,
+        )
+        .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["fire_on_untrusted"], false);
+    }
+
+    #[test]
+    fn build_hook_create_body_emits_stdin_and_timeout_when_non_default() {
+        let body =
+            build_hook_create_body(&["/bin/true".to_string()], false, HookStdin::None, 5).unwrap();
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["stdin"], "none");
+        assert_eq!(parsed["timeout_secs"], 5);
     }
 
     #[test]

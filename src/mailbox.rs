@@ -7,14 +7,16 @@ use std::io::{self, Write};
 use std::path::Path;
 
 pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+    // `AIMX_TEST_SKIP_ROOT_CHECK=1` is a test-harness opt-in (see the
+    // "Test environment escape hatches" section in `CLAUDE.md`). It
+    // bypasses the root gate so the post-gate code path stays reachable
+    // under a non-root `cargo test` runner; production callers must
+    // never set it.
     let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
     match cmd {
         MailboxCommand::Create { name, owner } => {
             // Mailbox CRUD is root-only, decided by the central
             // predicate so the gate stays consistent with UDS handlers.
-            // Tests bypass via `AIMX_TEST_SKIP_ROOT_CHECK` so the
-            // post-gate logic stays exercised under `cargo test` on a
-            // non-root CI runner.
             if !skip_root_check && let Err(e) = authorize(current_euid(), Action::MailboxCrud, None)
             {
                 return Err(format_auth_error(&e, "create").into());
