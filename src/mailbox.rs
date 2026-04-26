@@ -36,6 +36,16 @@ pub(crate) fn validate_mailbox_name(name: &str) -> Result<(), String> {
     if name.starts_with('.') || name.ends_with('.') {
         return Err("Mailbox name cannot start or end with '.'".into());
     }
+    // Reserved names: `catchall` is the runtime-special wildcard mailbox
+    // identifier and `aimx-catchall` is the reserved system user that
+    // owns it on a default install. Either as a user-defined mailbox
+    // name would shadow the wildcard slot or collide with the system
+    // user — reject regardless of caller (CLI or UDS).
+    if name == "catchall" || name == "aimx-catchall" {
+        return Err(format!(
+            "Mailbox name '{name}' is reserved for the wildcard catchall slot"
+        ));
+    }
     for c in name.chars() {
         let ok = c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-';
         if !ok {
