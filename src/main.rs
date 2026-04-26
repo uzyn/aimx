@@ -12,8 +12,6 @@ mod frontmatter;
 mod hook;
 mod hook_client;
 mod hook_handler;
-mod hook_substitute;
-mod hook_templates_defaults;
 mod hooks;
 mod ingest;
 mod logging;

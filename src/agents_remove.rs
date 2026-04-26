@@ -180,19 +180,19 @@ impl<'a> AgentEnv for MaskRootEnv<'a> {
     }
     fn submit_template_create(
         &self,
-        request: &crate::send_protocol::TemplateCreateRequest,
+        request: &crate::agents_setup::TemplateCreateRequest,
     ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
         self.inner.submit_template_create(request)
     }
     fn submit_template_update(
         &self,
-        request: &crate::send_protocol::TemplateUpdateRequest,
+        request: &crate::agents_setup::TemplateUpdateRequest,
     ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
         self.inner.submit_template_update(request)
     }
     fn submit_template_delete(
         &self,
-        request: &crate::send_protocol::TemplateDeleteRequest,
+        request: &crate::agents_setup::TemplateDeleteRequest,
     ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
         self.inner.submit_template_delete(request)
     }
@@ -201,10 +201,10 @@ impl<'a> AgentEnv for MaskRootEnv<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook_client::TemplateCrudFallback;
-    use crate::send_protocol::{
+    use crate::agents_setup::{
         TemplateCreateRequest, TemplateDeleteRequest, TemplateUpdateRequest,
     };
+    use crate::hook_client::TemplateCrudFallback;
     use std::cell::RefCell;
     use tempfile::TempDir;
 

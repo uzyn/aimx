@@ -21,7 +21,9 @@ use crate::config::MailboxConfig;
 pub enum Action {
     /// Create or delete a mailbox. Root-only.
     MailboxCrud,
-    /// Read mail in a named mailbox.
+    /// Read mail in a named mailbox. Reachable from MCP and CLI gating
+    /// only — there is no UDS verb for reads, since `aimx mcp` and
+    /// the CLI inspect the filesystem directly.
     MailboxRead(String),
     /// Send mail as a named mailbox (the resolved sender of the
     /// outbound message).
@@ -125,13 +127,13 @@ mod tests {
     }
 
     fn current_user() -> (u32, String) {
-        // SAFETY: getuid() is always safe on Unix. We only read; we do
-        // not pass any pointers into libc.
-        let uid = unsafe { libc::getuid() };
-        let name = std::env::var("USER")
-            .or_else(|_| std::env::var("LOGNAME"))
-            .unwrap_or_else(|_| "nobody".to_string());
-        (uid, name)
+        let uid = nix::unistd::Uid::current();
+        let name = nix::unistd::User::from_uid(uid)
+            .ok()
+            .flatten()
+            .map(|u| u.name)
+            .unwrap_or_else(|| "nobody".to_string());
+        (uid.as_raw(), name)
     }
 
     #[test]
@@ -170,12 +172,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires non-root host; surfaces via cargo test --ignored"]
     fn non_root_owner_match_passes() {
         let (uid, name) = current_user();
-        if uid == 0 {
-            // Skip: we cannot test the non-root branch as root.
-            return;
-        }
+        assert_ne!(uid, 0, "test must run as a non-root user");
         let mb = mailbox_owned_by(&name);
         assert!(authorize(uid, Action::MailboxRead("hi".into()), Some(&mb)).is_ok());
         assert!(authorize(uid, Action::MailboxSendAs("hi".into()), Some(&mb)).is_ok());
@@ -184,11 +184,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires non-root host; surfaces via cargo test --ignored"]
     fn non_root_owner_mismatch_returns_not_owner() {
         let (uid, _) = current_user();
-        if uid == 0 {
-            return;
-        }
+        assert_ne!(uid, 0, "test must run as a non-root user");
         // `root` always resolves to uid 0 on every Linux box, so this
         // is a stable mismatch target regardless of what the test user
         // actually is.
@@ -243,11 +242,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "requires non-root host; surfaces via cargo test --ignored"]
     fn orphan_owner_collapses_to_no_such_mailbox_for_non_root() {
         let (uid, _) = current_user();
-        if uid == 0 {
-            return;
-        }
+        assert_ne!(uid, 0, "test must run as a non-root user");
         // A regex-valid but unresolvable owner: `getpwnam` returns
         // None, so `owner_uid()` errs. The predicate must not leak the
         // distinction; surface as NoSuchMailbox.

@@ -10,9 +10,9 @@
 //! `sudo aimx hooks prune --orphans` to clean up the template side
 //! after the daemon restarts.
 
+use crate::agents_setup::TemplateDeleteRequest;
 use crate::agents_setup::{AgentEnv, AgentSpec, derive_template_name, find_agent, resolve_dest};
 use crate::hook_client::TemplateCrudFallback;
-use crate::send_protocol::TemplateDeleteRequest;
 use crate::term;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -252,7 +252,7 @@ mod tests {
         }
         fn submit_template_create(
             &self,
-            _request: &crate::send_protocol::TemplateCreateRequest,
+            _request: &crate::agents_setup::TemplateCreateRequest,
         ) -> Result<(), TemplateCrudFallback> {
             Err(TemplateCrudFallback::Local(
                 "not used in cleanup tests".into(),
@@ -260,7 +260,7 @@ mod tests {
         }
         fn submit_template_update(
             &self,
-            _request: &crate::send_protocol::TemplateUpdateRequest,
+            _request: &crate::agents_setup::TemplateUpdateRequest,
         ) -> Result<(), TemplateCrudFallback> {
             Err(TemplateCrudFallback::Local(
                 "not used in cleanup tests".into(),

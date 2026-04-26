@@ -410,38 +410,9 @@ pub enum HookCommand {
         #[arg(short = 'y', long)]
         yes: bool,
     },
-
-    /// List enabled hook templates (`[[hook_template]]` entries in config.toml)
-    #[command(alias = "template-list")]
-    Templates,
-
-    /// Remove orphan templates / hooks (root-only).
-    ///
-    /// After `userdel alice`, alice's templates and hooks become orphans.
-    /// This command atomically rewrites `config.toml`, removing every
-    /// template whose `run_as` does not resolve and every hook whose
-    /// effective `run_as` (or referenced template) is orphan. Refuses
-    /// when `aimx doctor` surfaces non-orphan failures — fix those first.
-    Prune {
-        /// Only remove templates/hooks whose `run_as` user no longer
-        /// resolves. This is currently the only scope supported (hence
-        /// required); added as an explicit flag so future pruning scopes
-        /// (e.g. `--broken-cmd`) slot in cleanly.
-        #[arg(long)]
-        orphans: bool,
-
-        /// Print the proposed diff without writing `config.toml`.
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 #[derive(clap::Args, Clone)]
-#[command(group(
-    clap::ArgGroup::new("hook_body")
-        .required(true)
-        .args(["cmd", "template"]),
-))]
 pub struct HookCreateArgs {
     /// Owning mailbox (local part). Must already exist in config
     #[arg(long)]
@@ -452,39 +423,18 @@ pub struct HookCreateArgs {
     pub event: String,
 
     /// Shell command executed via `sh -c` when the hook fires.
-    /// Raw-cmd hooks require root (writes to /etc/aimx/config.toml
-    /// directly and sends SIGHUP to aimx serve; they never traverse
-    /// the UDS socket). Mutually exclusive with `--template`.
-    #[arg(long, conflicts_with = "template")]
-    pub cmd: Option<String>,
-
-    /// Reference a pre-installed `[[hook_template]]` by name. Mutually
-    /// exclusive with `--cmd`. Hook creation goes through the daemon
-    /// UDS (template-only verb) and the resulting hook inherits the
-    /// template's argv shape with parameters supplied via `--param`.
-    #[arg(long, conflicts_with = "cmd")]
-    pub template: Option<String>,
-
-    /// Bind a template parameter `KEY=VAL`. Repeatable. Only valid
-    /// with `--template`. Every parameter the template declares must
-    /// be bound exactly once.
-    #[arg(
-        long = "param",
-        value_name = "KEY=VAL",
-        requires = "template",
-        action = clap::ArgAction::Append
-    )]
-    pub params: Vec<String>,
+    /// Hook creation requires root: it writes to `/etc/aimx/config.toml`
+    /// directly and sends SIGHUP to `aimx serve`.
+    #[arg(long)]
+    pub cmd: String,
 
     /// Optional hook name. When omitted, a stable 12-char hex name is
-    /// derived from the event + (cmd | template + params) shape.
+    /// derived from `(event, cmd, fire_on_untrusted)`.
     #[arg(long)]
     pub name: Option<String>,
 
-    /// Opt into firing this hook on non-trusted inbound email. Deliberately
-    /// verbose so operators think twice. Only valid on `on_receive`.
-    /// Never settable on `--template` hooks (template hooks only fire
-    /// on trusted mail).
-    #[arg(long, conflicts_with = "template")]
-    pub dangerously_support_untrusted: bool,
+    /// Opt into firing this hook on non-trusted inbound email. Only
+    /// valid on `on_receive` hooks.
+    #[arg(long)]
+    pub fire_on_untrusted: bool,
 }

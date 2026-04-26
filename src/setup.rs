@@ -1499,7 +1499,6 @@ pub fn finalize_setup(
             dkim_selector: dkim_selector.to_string(),
             trust: default_trust,
             trusted_senders: default_trusted_senders,
-            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,

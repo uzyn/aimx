@@ -52,14 +52,15 @@ pub const SIGKILL_GRACE: Duration = Duration::from_secs(5);
 /// per-template override in future work.
 pub const DEFAULT_MEMORY_MAX: &str = "256M";
 
-/// Stdin delivery policy per PRD §6.7. The daemon writes the chosen
-/// payload to the child's stdin before starting the timeout clock, then
-/// closes stdin — no hook blocks mid-run on a stdin `read()`.
+/// Stdin delivery policy. The daemon writes the chosen payload to the
+/// child's stdin before starting the timeout clock, then closes stdin —
+/// no hook blocks mid-run on a stdin `read()`.
+#[allow(dead_code)]
 pub enum SandboxStdin {
     /// Raw `.md` bytes (TOML frontmatter + body) written to stdin.
     Email(Vec<u8>),
     /// JSON object `{ "frontmatter": {...}, "body": "..." }` written to
-    /// stdin. Currently a best-effort shape — see PRD §9 out-of-scope.
+    /// stdin. Retained for the sprint-rework but not constructed today.
     EmailJson(Vec<u8>),
     /// Close stdin immediately (no payload).
     None,
