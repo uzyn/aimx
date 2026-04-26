@@ -522,11 +522,18 @@ pub trait AgentEnv {
     fn caller_username(&self) -> Option<String> {
         caller_username_from_euid()
     }
-    /// Probe the caller's `$PATH` for `binary_name`. Default wraps the
-    /// free-standing `probe_path` helper so production callers pick up
-    /// the real `$PATH` without forcing tests to mutate process env.
+    /// Probe the caller's `$PATH` for `binary_name`, falling back to a
+    /// POSIX login shell (`sh -lc 'command -v "$1"' sh <name>`) when the
+    /// fast `$PATH` walk misses. The fallback covers the runuser /
+    /// sudo `secure_path` scenario where per-user PATH additions
+    /// (`~/.local/bin`, `~/.npm-global/bin`, nvm shims) aren't in the
+    /// inherited environment but the operator's profile chain still
+    /// knows about them. Default impl wraps the free-standing
+    /// `probe_path` + `probe_login_shell` helpers so production callers
+    /// pick up the real environment without forcing tests to mutate
+    /// process env.
     fn probe_binary(&self, binary_name: &str) -> Option<PathBuf> {
-        probe_path(binary_name)
+        probe_path(binary_name).or_else(|| probe_login_shell(binary_name))
     }
     /// Submit a `TEMPLATE-CREATE` frame to the daemon. Default delegates
     /// to the UDS client; tests can override to avoid spinning up a
@@ -763,6 +770,53 @@ pub(crate) fn probe_path_in(binary_name: &str, path_var: &OsString) -> Option<Pa
     }
 
     None
+}
+
+/// Fallback for [`probe_path`]: spawn a POSIX login shell, source the
+/// user's profile chain, and ask `command -v` where the binary lives.
+/// Used by [`AgentEnv::probe_binary`] when the inherited `$PATH` (often
+/// sudo's `secure_path`) is missing per-user `~/.local/bin` /
+/// `~/.npm-global/bin` / nvm shim entries that the operator's
+/// interactive shell sees fine.
+///
+/// Argument-safe: the binary name is passed as `$1` to the script
+/// rather than interpolated — no shell-injection surface.
+///
+/// Returns `Some(canonicalised_path)` only when the resolved path is
+/// absolute, points at a regular file, and is executable.
+pub(crate) fn probe_login_shell(binary_name: &str) -> Option<PathBuf> {
+    if binary_name.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v \"$1\"")
+        .arg("sh")
+        .arg(binary_name)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = stdout.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    // `command -v` can return non-path tokens for builtins / functions /
+    // aliases. Filter to absolute paths that point at executable files.
+    if !path.is_absolute() {
+        return None;
+    }
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if nix::unistd::access(&path, nix::unistd::AccessFlags::X_OK).is_err() {
+        return None;
+    }
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
 }
 
 /// Options controlling a single `agent-setup` invocation.
@@ -1320,7 +1374,7 @@ fn register_template(
             let bin = spec.canonical_binary;
             return TemplateOutcome::Failed {
                 reason: format!(
-                    "Could not find '{bin}' in $PATH. Install it, then re-run 'aimx agent-setup {}'.",
+                    "Could not find '{bin}' in $PATH or your login shell. Install it, then re-run 'aimx agent-setup {}'.",
                     spec.name
                 ),
                 exit_code: Some(3),
@@ -2446,7 +2500,7 @@ mod tests {
             "missing failure line: {msg}"
         );
         assert!(
-            msg.contains("Could not find 'claude' in $PATH"),
+            msg.contains("Could not find 'claude' in $PATH or your login shell"),
             "missing binary-missing copy: {msg}"
         );
         // The failure line must NOT also land on stdout — `run` prints it
@@ -4643,5 +4697,174 @@ mod tests {
                 "canonical_binary mismatch for agent '{agent}'"
             );
         }
+    }
+
+    // ----- login-shell probe fallback ------------------------------------
+
+    #[test]
+    fn probe_login_shell_finds_known_binary() {
+        // `ls` exists at /bin/ls (or /usr/bin/ls) on every supported
+        // target. The login shell's profile chain always contains one
+        // of /bin or /usr/bin, so `command -v ls` resolves cleanly.
+        let got = probe_login_shell("ls").expect("ls must resolve via login shell");
+        assert!(got.is_absolute(), "resolved path must be absolute: {got:?}");
+        let meta = std::fs::metadata(&got).unwrap_or_else(|e| {
+            panic!("resolved path {got:?} must stat cleanly: {e}");
+        });
+        assert!(
+            meta.is_file(),
+            "resolved path must be a regular file: {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_returns_none_for_missing() {
+        let got = probe_login_shell("definitely-not-a-real-binary-aimx-test-xyz");
+        assert!(
+            got.is_none(),
+            "missing binary must return None, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_returns_none_for_empty_name() {
+        assert!(probe_login_shell("").is_none());
+    }
+
+    #[test]
+    fn probe_login_shell_rejects_non_absolute_resolution() {
+        // `command -v` for a shell builtin like `cd` prints the bare
+        // word "cd" — not an absolute path. `probe_login_shell` must
+        // filter that out so we never hand a non-path token back to
+        // the template registration code.
+        let got = probe_login_shell("cd");
+        assert!(
+            got.is_none(),
+            "builtin 'cd' must not resolve to an absolute path, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_immune_to_argv_injection() {
+        // Pre-create a sentinel file. If `probe_login_shell` were to
+        // shell-interpolate the binary name into the script body, the
+        // `; rm ...` payload would delete the sentinel. Because the
+        // name is passed as `$1` (positional argument), the payload
+        // gets seen by `command -v` as a single literal token and is
+        // simply not found.
+        let tmp = TempDir::new().unwrap();
+        let sentinel = tmp.path().join("sentinel-do-not-delete");
+        std::fs::write(&sentinel, b"keep me").unwrap();
+        let sentinel_str = sentinel.to_str().unwrap();
+
+        let payload = format!("foo; rm -f {sentinel_str}");
+        let got = probe_login_shell(&payload);
+        assert!(
+            got.is_none(),
+            "argv-injection payload must not resolve, got {got:?}"
+        );
+        assert!(
+            sentinel.exists(),
+            "sentinel was deleted — argv injection was not contained!"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_binary_default_falls_back_when_path_misses() {
+        // Pin the two-tier probe: when the inherited `$PATH` does NOT
+        // contain a binary, the default `AgentEnv::probe_binary` impl
+        // falls through to `probe_login_shell`, which sources the
+        // user's profile chain. We simulate the runuser / secure_path
+        // scenario by:
+        //   1. Setting HOME to a tmp dir with a `.profile` that prepends
+        //      a private tmp/bin to PATH.
+        //   2. Setting the parent PATH to a dir that does NOT contain
+        //      the sentinel binary (so `probe_path` is guaranteed to
+        //      miss).
+        //   3. Calling `probe_binary` and asserting the sentinel
+        //      resolves via the login-shell fallback.
+        struct DefaultEnv;
+        impl AgentEnv for DefaultEnv {
+            fn home_dir(&self) -> Option<PathBuf> {
+                None
+            }
+            fn xdg_config_home(&self) -> Option<PathBuf> {
+                None
+            }
+            fn is_root(&self) -> bool {
+                false
+            }
+            fn is_stdin_tty(&self) -> bool {
+                false
+            }
+            fn read_line(&self) -> io::Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let user_bin = home.join("bin");
+        std::fs::create_dir_all(&user_bin).unwrap();
+
+        // Sentinel binary lives only in the user's home bin — never on
+        // the inherited PATH. Using a randomised name so a stray real
+        // binary on the runner can't accidentally satisfy the probe.
+        let sentinel_name = "aimx-test-sentinel-binary-xyz";
+        write_executable(&user_bin, sentinel_name);
+
+        // The `.profile` is what the login shell sources. Prepending
+        // user_bin here is the production analogue of the operator's
+        // `~/.local/bin` PATH addition.
+        let profile = home.join(".profile");
+        std::fs::write(
+            &profile,
+            format!("export PATH=\"{}:$PATH\"\n", user_bin.display()),
+        )
+        .unwrap();
+
+        // Snapshot env, swap to a `secure_path`-shaped PATH (just the
+        // system bin dirs — same shape sudo's `secure_path` has). This
+        // guarantees `probe_path` misses on the sentinel, but `sh` is
+        // still spawnable because /bin and /usr/bin are present.
+        let prev_path = std::env::var_os("PATH");
+        let prev_home = std::env::var_os("HOME");
+        let secure_like =
+            OsString::from("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        // SAFETY: serialized via #[serial_test::serial] — no concurrent
+        // test observes the swap.
+        unsafe {
+            std::env::set_var("PATH", &secure_like);
+            std::env::set_var("HOME", &home);
+        }
+
+        let env = DefaultEnv;
+        let got = env.probe_binary(sentinel_name);
+
+        // Restore env before assertions so a failure doesn't leak state
+        // into the next test.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let resolved = got.expect(
+            "default probe_binary must fall back to login shell when PATH misses but ~/.profile knows the binary",
+        );
+        assert!(
+            resolved.is_absolute(),
+            "fallback must return an absolute path: {resolved:?}"
+        );
+        assert!(
+            resolved.ends_with(sentinel_name),
+            "fallback must resolve to the sentinel binary, got {resolved:?}"
+        );
     }
 }
