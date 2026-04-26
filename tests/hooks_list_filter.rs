@@ -116,11 +116,24 @@ fn write_test_config() -> PathBuf {
     tmp_root
 }
 
+/// Copy the test binary out of `target/debug/` (whose ancestors aren't
+/// world-traversable on the GitHub Actions runner: `/home/runner/...`)
+/// into a `0755` location under the test's own tempdir. Without this,
+/// `runuser -u alice -- <binary>` fails with `Permission denied`
+/// before the binary even gets to exec.
+fn install_aimx_in(dest_dir: &Path) -> PathBuf {
+    let src = aimx_binary_path();
+    let dst = dest_dir.join("aimx");
+    std::fs::copy(&src, &dst).expect("failed to copy aimx binary into tempdir");
+    std::fs::set_permissions(&dst, PermissionsExt::from_mode(0o755))
+        .expect("failed to chmod copied aimx binary");
+    dst
+}
+
 /// Run `aimx hooks list` as `user` (None = current process, i.e. root)
-/// against the supplied `AIMX_CONFIG_DIR`. Returns combined stdout +
-/// stderr (since the CLI sometimes uses both).
-fn run_hooks_list_as(user: Option<&str>, config_dir: &Path) -> String {
-    let binary = aimx_binary_path();
+/// using `binary` against the supplied `AIMX_CONFIG_DIR`. Returns
+/// combined stdout + stderr (since the CLI sometimes uses both).
+fn run_hooks_list_as(user: Option<&str>, binary: &Path, config_dir: &Path) -> String {
     let output = match user {
         Some(u) => Command::new("runuser")
             .arg("-u")
@@ -180,9 +193,10 @@ fn hooks_list_filters_to_caller_owned_mailboxes_for_non_root_callers() {
         .status();
 
     let config_dir = write_test_config();
+    let aimx_bin = install_aimx_in(&config_dir);
 
     // Alice sees only her hook.
-    let alice_out = run_hooks_list_as(Some(ALICE), &config_dir);
+    let alice_out = run_hooks_list_as(Some(ALICE), &aimx_bin, &config_dir);
     assert!(
         alice_out.contains("alice-hook-marker"),
         "alice should see her own hook in `aimx hooks list` output: {alice_out}"
@@ -193,7 +207,7 @@ fn hooks_list_filters_to_caller_owned_mailboxes_for_non_root_callers() {
     );
 
     // Bob sees only his hook.
-    let bob_out = run_hooks_list_as(Some(BOB), &config_dir);
+    let bob_out = run_hooks_list_as(Some(BOB), &aimx_bin, &config_dir);
     assert!(
         bob_out.contains("bob-hook-marker"),
         "bob should see his own hook in `aimx hooks list` output: {bob_out}"
@@ -204,7 +218,7 @@ fn hooks_list_filters_to_caller_owned_mailboxes_for_non_root_callers() {
     );
 
     // Root sees both — confirms the filter is uid-gated, not always-on.
-    let root_out = run_hooks_list_as(None, &config_dir);
+    let root_out = run_hooks_list_as(None, &aimx_bin, &config_dir);
     assert!(
         root_out.contains("alice-hook-marker"),
         "root should see alice's hook: {root_out}"
