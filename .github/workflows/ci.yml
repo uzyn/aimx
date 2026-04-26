@@ -72,6 +72,7 @@ jobs:
         run: |
           cargo test --no-run --test mailbox_isolation
           cargo test --no-run --test uds_authz
+          cargo test --no-run --test hooks_list_filter
 
       - name: Run mailbox isolation test (under sudo)
         run: |
@@ -95,6 +96,17 @@ jobs:
           BIN=$(ls -t target/debug/deps/uds_authz-* | grep -v '\.d$' | head -n 1)
           test -x "$BIN"
           sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored --test-threads=1
+
+      - name: Run hooks-list filter test (under sudo)
+        run: |
+          # Pins the wire-level behaviour of `aimx hooks list` filtering
+          # output by caller euid. Spawns the CLI as alice / bob / root
+          # against a temp config that carries one hook per user; asserts
+          # each non-root caller sees only their own hook and root sees
+          # both. Reuses the alice/bob test users provisioned above.
+          BIN=$(ls -t target/debug/deps/hooks_list_filter-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored
 
       - name: Tear down test users
         if: always()
