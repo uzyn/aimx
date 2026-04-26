@@ -3352,4 +3352,259 @@ mod tests {
         let rendered = String::from_utf8(out).unwrap();
         assert!(rendered.contains("aimx agents setup <agent>"));
     }
+
+    /// Walk every embedded `agents/` markdown / yaml / header file looking
+    /// for `cmd: [...]` (skill-recipe form) and `cmd = [...]` (TOML form)
+    /// inside fenced code blocks, plus `--cmd '[...]'` (aimx hooks create
+    /// CLI form), and assert each example's first array element is an
+    /// absolute path. The daemon's `Config::load` and `Hook::resolve_argv`
+    /// both reject non-absolute `cmd[0]`, so any recipe shipped with a
+    /// bare command name is broken on every host.
+    ///
+    /// The walker only inspects fenced code blocks so prose mentions
+    /// (e.g. the per-agent recipe table that uses bare names as
+    /// descriptive labels) are intentionally excluded.
+    #[test]
+    fn embedded_skill_recipes_use_absolute_cmd_paths() {
+        // Recursively collect every text file under agents/.
+        fn collect<'a>(dir: &'a Dir<'a>, out: &mut Vec<(&'a str, &'a str)>) {
+            for entry in dir.entries() {
+                match entry {
+                    DirEntry::Dir(d) => collect(d, out),
+                    DirEntry::File(f) => {
+                        let path = f.path().to_str().unwrap_or("");
+                        let is_text = path.ends_with(".md")
+                            || path.ends_with(".md.tpl")
+                            || path.ends_with(".md.header")
+                            || path.ends_with(".yaml")
+                            || path.ends_with(".yaml.header")
+                            || path.ends_with(".toml");
+                        if is_text && let Ok(s) = std::str::from_utf8(f.contents()) {
+                            out.push((path, s));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut files: Vec<(&str, &str)> = Vec::new();
+        collect(&AGENTS_DIR, &mut files);
+        assert!(
+            !files.is_empty(),
+            "expected to find embedded skill files under agents/"
+        );
+
+        // Linux's MAX_ARG_STRLEN is 128 KiB. argv elements above this size
+        // would be rejected by the kernel at execve time. Keep the bar
+        // generous (8 KiB) — bigger than any current inline prompt but
+        // small enough to flag a future regression that pastes a megabyte
+        // of text into argv.
+        const MAX_ARGV_ELEMENT_BYTES: usize = 8 * 1024;
+
+        // Match `cmd:` or `cmd =` followed by `[`. The body may span
+        // multiple lines (the worked example in hooks.md splits the argv
+        // across lines). We grab everything up to the matching `]`.
+        let mut violations: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        for (path, contents) in &files {
+            let mut in_fence = false;
+            let mut fence_buf = String::new();
+            for line in contents.lines() {
+                let trimmed = line.trim_start();
+                if trimmed.starts_with("```") {
+                    if in_fence {
+                        check_cmd_examples(
+                            path,
+                            &fence_buf,
+                            &mut violations,
+                            &mut checked,
+                            MAX_ARGV_ELEMENT_BYTES,
+                        );
+                        fence_buf.clear();
+                    }
+                    in_fence = !in_fence;
+                    continue;
+                }
+                if in_fence {
+                    fence_buf.push_str(line);
+                    fence_buf.push('\n');
+                }
+            }
+            if in_fence && !fence_buf.is_empty() {
+                check_cmd_examples(
+                    path,
+                    &fence_buf,
+                    &mut violations,
+                    &mut checked,
+                    MAX_ARGV_ELEMENT_BYTES,
+                );
+            }
+        }
+
+        assert!(
+            checked > 0,
+            "expected at least one cmd=[...] example in embedded agents/ docs; found none. \
+             Either the walker is broken or every recipe was removed."
+        );
+        assert!(
+            violations.is_empty(),
+            "embedded recipe(s) violate cmd[0]-must-be-absolute or argv-size invariants:\n  - {}",
+            violations.join("\n  - ")
+        );
+    }
+
+    /// Inside a fenced code block, find each `cmd:` / `cmd =` / `--cmd`
+    /// example and verify its first array element starts with `/` and
+    /// every element fits within `max_bytes`.
+    fn check_cmd_examples(
+        path: &str,
+        fence: &str,
+        violations: &mut Vec<String>,
+        checked: &mut usize,
+        max_bytes: usize,
+    ) {
+        // Find all `cmd` openers — both `cmd:`, `cmd =`, and `--cmd '`.
+        // We then locate the next `[` and scan to the matching `]`,
+        // honoring quoted strings so a literal `]` inside a string does
+        // not terminate the array.
+        let needles = ["cmd:", "cmd =", "cmd=", "--cmd"];
+        let mut idx = 0usize;
+        let bytes = fence.as_bytes();
+        while idx < bytes.len() {
+            // Find the next opener.
+            let mut next_open: Option<(usize, usize)> = None;
+            for needle in &needles {
+                if let Some(pos) = fence[idx..].find(needle) {
+                    let abs = idx + pos;
+                    if next_open.map(|(p, _)| abs < p).unwrap_or(true) {
+                        next_open = Some((abs, needle.len()));
+                    }
+                }
+            }
+            let Some((open_pos, needle_len)) = next_open else {
+                break;
+            };
+            let after = open_pos + needle_len;
+            // Locate the `[` after the opener, allowing quotes/whitespace
+            // (`--cmd '[...]'` form).
+            let bracket_rel = fence[after..].find('[');
+            let Some(bracket_rel) = bracket_rel else {
+                idx = after;
+                continue;
+            };
+            let bracket_pos = after + bracket_rel;
+            // Sanity: the gap between opener and `[` must be short and
+            // contain only whitespace, `=`, `:`, `'`, or `"`. Otherwise
+            // we matched something unrelated (e.g. prose containing
+            // "cmd:" later followed by an unrelated array).
+            let gap = &fence[after..bracket_pos];
+            if gap.len() > 8
+                || gap
+                    .chars()
+                    .any(|c| !(c.is_whitespace() || c == '=' || c == ':' || c == '\'' || c == '"'))
+            {
+                idx = bracket_pos + 1;
+                continue;
+            }
+
+            // Scan to the matching `]`, honoring single/double quoted
+            // strings.
+            let scan = &bytes[bracket_pos + 1..];
+            let mut depth = 1i32;
+            let mut in_str: Option<u8> = None;
+            let mut prev_escape = false;
+            let mut end_rel: Option<usize> = None;
+            for (i, &b) in scan.iter().enumerate() {
+                if let Some(q) = in_str {
+                    if !prev_escape && b == q {
+                        in_str = None;
+                    }
+                    prev_escape = b == b'\\' && !prev_escape;
+                    continue;
+                }
+                prev_escape = false;
+                match b {
+                    b'"' | b'\'' => in_str = Some(b),
+                    b'[' => depth += 1,
+                    b']' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end_rel = Some(i);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let Some(end_rel) = end_rel else {
+                idx = bracket_pos + 1;
+                continue;
+            };
+            let body = &fence[bracket_pos + 1..bracket_pos + 1 + end_rel];
+
+            // Pull out the literal string elements.
+            let elements = parse_argv_elements(body);
+            if elements.is_empty() {
+                idx = bracket_pos + 1 + end_rel + 1;
+                continue;
+            }
+            *checked += 1;
+
+            let first = &elements[0];
+            if !first.starts_with('/') {
+                violations.push(format!(
+                    "{path}: cmd[0] = {first:?} is not an absolute path; \
+                     daemon Config::load rejects bare command names"
+                ));
+            }
+            for (i, el) in elements.iter().enumerate() {
+                if el.len() > max_bytes {
+                    violations.push(format!(
+                        "{path}: cmd[{i}] is {} bytes; exceeds the test cap of {} bytes \
+                         (Linux MAX_ARG_STRLEN is 128 KiB)",
+                        el.len(),
+                        max_bytes
+                    ));
+                }
+            }
+
+            idx = bracket_pos + 1 + end_rel + 1;
+        }
+    }
+
+    /// Pull literal string elements out of an argv body, honoring
+    /// single- and double-quoted strings. Anything between quotes is one
+    /// element; nested arrays / unquoted tokens are ignored (the recipes
+    /// only use string elements).
+    fn parse_argv_elements(body: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let bytes = body.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b == b'"' || b == b'\'' {
+                let q = b;
+                i += 1;
+                let mut s = String::new();
+                while i < bytes.len() {
+                    let c = bytes[i];
+                    if c == b'\\' && i + 1 < bytes.len() {
+                        s.push(bytes[i + 1] as char);
+                        i += 2;
+                        continue;
+                    }
+                    if c == q {
+                        i += 1;
+                        break;
+                    }
+                    s.push(c as char);
+                    i += 1;
+                }
+                out.push(s);
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
 }

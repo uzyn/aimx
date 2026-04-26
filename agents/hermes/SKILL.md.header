@@ -21,13 +21,19 @@ prompt that tells the agent to fetch the email itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"],
+  cmd: ["/usr/local/bin/hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"],
   stdin: "none"
 )
 ```
 
 Notes:
 
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/hermes`, which is typical
+  for npm/curl installs. Adjust to match `which hermes` on your host
+  if the binary lives elsewhere (e.g. `/usr/bin/hermes`). The inline
+  prompt argv element is ~120 chars; well under `MAX_ARG_STRLEN`
+  (128 KiB on Linux).
 - `--yolo` bypasses dangerous-command approval, which is required for
   unattended runs. Without it the headless invocation blocks on
   approvals and never calls MCP.

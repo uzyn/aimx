@@ -298,10 +298,10 @@ that will run.
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["claude", "-p", "You are the support agent.", "--dangerously-skip-permissions"],
+  cmd: ["/usr/local/bin/claude", "-p", "You are the support agent.", "--dangerously-skip-permissions"],
   stdin: "email"
 )
-→ "Hook 'support-replier' created on mailbox 'support'. argv=['claude', '-p', 'You are the support agent.', '--dangerously-skip-permissions']"
+→ "Hook 'support-replier' created on mailbox 'support'. argv=['/usr/local/bin/claude', '-p', 'You are the support agent.', '--dangerously-skip-permissions']"
 ```
 
 **Errors:**
@@ -329,7 +329,7 @@ List hooks on mailboxes you own (or one when `mailbox` is set).
 ```
 hook_list()
 → [{"name":"support-replier","mailbox":"support","event":"on_receive",
-    "cmd":["claude","-p","...","--dangerously-skip-permissions"],
+    "cmd":["/usr/local/bin/claude","-p","...","--dangerously-skip-permissions"],
     "stdin":"email","timeout_secs":60,"fire_on_untrusted":false}]
 ```
 

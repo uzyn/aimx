@@ -71,7 +71,7 @@ List hooks on mailboxes you own.
   "name": "support-replier",
   "mailbox": "support",
   "event": "on_receive",
-  "cmd": ["claude", "-p", "You are the support agent...", "--dangerously-skip-permissions"],
+  "cmd": ["/usr/local/bin/claude", "-p", "You are the support agent...", "--dangerously-skip-permissions"],
   "stdin": "email",
   "timeout_secs": 60,
   "fire_on_untrusted": false
@@ -159,7 +159,7 @@ hook_create(
   mailbox: "accounts",
   event: "on_receive",
   cmd: [
-    "claude", "-p",
+    "/usr/local/bin/claude", "-p",
     "You are the accounts agent. Read the email on stdin. If it is from the bank, mark it read via email_mark_read and reply via email_reply with the current balance from the local ledger. Otherwise mark it read and do nothing.",
     "--dangerously-skip-permissions"
   ],

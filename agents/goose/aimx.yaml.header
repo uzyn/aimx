@@ -31,10 +31,15 @@ prompt: |
   hook_create(
     mailbox: "support",
     event: "on_receive",
-    cmd: ["goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"],
+    cmd: ["/usr/local/bin/goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"],
     stdin: "email"
   )
   ```
+
+  `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/goose`, which is typical for
+  npm/curl installs. Adjust to match `which goose` on your host if
+  the binary lives elsewhere (e.g. `/usr/bin/goose`).
 
   The referenced recipe pre-binds the `aimx` MCP extension and
   parameterizes `$AIMX_FILEPATH`. A minimal `/etc/aimx/goose-aimx-hook.yaml`:
@@ -60,7 +65,7 @@ prompt: |
   hook_create(
     mailbox: "support",
     event: "on_receive",
-    cmd: ["goose", "run", "--instructions", "-", "--quiet"],
+    cmd: ["/usr/local/bin/goose", "run", "--instructions", "-", "--quiet"],
     stdin: "email"
   )
   ```

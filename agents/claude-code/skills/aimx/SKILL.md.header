@@ -15,7 +15,7 @@ exact recipe:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["claude", "-p", "<instruction-string>", "--dangerously-skip-permissions"],
+  cmd: ["/usr/local/bin/claude", "-p", "<instruction-string>", "--dangerously-skip-permissions"],
   stdin: "email"
 )
 ```
@@ -24,6 +24,10 @@ Replace `<instruction-string>` with the prompt you want the headless
 session to follow (for example: `"You are the support agent. Read the
 email on stdin and reply via the aimx MCP server."`). Notes:
 
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/claude`, which is typical
+  for npm/curl installs. Adjust to match `which claude` on your host
+  if the binary lives elsewhere (e.g. `/usr/bin/claude`).
 - `--dangerously-skip-permissions` (alias `--permission-mode
   bypassPermissions`) is required for autonomous tool calls — without
   it the headless session will block on the permission prompt and

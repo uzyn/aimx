@@ -15,13 +15,17 @@ prompt itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["codex", "exec", "--skip-git-repo-check", "--full-auto", "-"],
+  cmd: ["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"],
   stdin: "email"
 )
 ```
 
 Notes:
 
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/codex`, which is typical for
+  npm/curl installs. Adjust to match `which codex` on your host if
+  the binary lives elsewhere (e.g. `/usr/bin/codex`).
 - The trailing `-` makes Codex read stdin as the prompt — so the email
   itself becomes Codex's task. You do not embed an instruction in
   argv; if you need a prefix or framing, the operator can wrap the

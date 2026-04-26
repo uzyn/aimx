@@ -14,7 +14,7 @@ hook that re-launches `gemini` with the email piped on stdin:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["gemini", "-p", "<instruction-string>", "--yolo"],
+  cmd: ["/usr/local/bin/gemini", "-p", "<instruction-string>", "--yolo"],
   stdin: "email"
 )
 ```
@@ -23,6 +23,10 @@ Replace `<instruction-string>` with the prompt you want the headless
 run to follow (for example: `"You are the support agent. The email
 arrives on stdin. Reply via the aimx MCP server."`). Notes:
 
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/gemini`, which is typical
+  for npm/curl installs. Adjust to match `which gemini` on your host
+  if the binary lives elsewhere (e.g. `/usr/bin/gemini`).
 - `--yolo` auto-approves tool calls, which is required for
   unattended operation. Without it the headless run blocks on
   approval prompts and never calls MCP.

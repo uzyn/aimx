@@ -15,13 +15,19 @@ that tells the agent to fetch the email itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g., email_reply)."],
+  cmd: ["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g., email_reply)."],
   stdin: "none"
 )
 ```
 
 Notes:
 
+- `cmd[0]` must be an absolute path; the daemon refuses bare command
+  names. The example uses `/usr/local/bin/opencode`, which is typical
+  for npm/curl installs. Adjust to match `which opencode` on your
+  host if the binary lives elsewhere (e.g. `/usr/bin/opencode`). The
+  inline-prompt argv element is ~200 chars; well under
+  `MAX_ARG_STRLEN` (128 KiB on Linux).
 - `opencode run` does not read stdin in headless mode, so we use
   `stdin: "none"` and embed the entire instruction as the final argv
   element. The daemon sets the `AIMX_FILEPATH` environment variable
