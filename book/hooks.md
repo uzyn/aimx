@@ -73,37 +73,39 @@ The CLI sends the request over the same UDS verb MCP uses, so the hook ends up w
 
 ## Raw-cmd hooks (power user)
 
-Raw-cmd hooks let the operator drop an arbitrary shell string directly into `config.toml`. The command is wrapped in `/bin/sh -c` and executed inside the same privilege-dropped sandbox as template hooks. Hook `run_as` defaults to the mailbox's `owner`; the operator can elevate to `run_as = "root"` by hand-editing `config.toml` — this is intentionally not reachable from the CLI or MCP. The reserved `aimx-catchall` value is allowed on hooks attached to the catchall mailbox.
+Raw-cmd hooks let the operator drop an argv array directly into `config.toml`. The argv is exec'd as the mailbox's `owner` inside the privilege-dropped sandbox — there is no shell wrapping. If you need shell expansion (env-var substitution, redirection), spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
 
 ```toml
 [[mailboxes.support.hooks]]
 name = "support_notify"
 event = "on_receive"
-cmd = 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log'
+cmd = ["/bin/sh", "-c", 'echo "New email from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/email.log']
 ```
 
 ### Create a raw-cmd hook
 
+`--cmd` takes the argv as a JSON array string. The first element must be an absolute path:
+
 ```bash
-# on_receive with an explicit name
+# on_receive with an explicit name (shell wrapper for env-var expansion)
 sudo aimx hooks create \
   --mailbox support \
   --event on_receive \
-  --cmd 'curl -fsS -X POST https://hooks.example.com/notify -d "$AIMX_SUBJECT"' \
+  --cmd '["/bin/sh", "-c", "curl -fsS -X POST https://hooks.example.com/notify -d \"$AIMX_SUBJECT\""]' \
   --name support_notify
 
 # after_send: log successful deliveries
 sudo aimx hooks create \
   --mailbox alice \
   --event after_send \
-  --cmd 'printf "%s -> %s: %s\n" "$AIMX_FROM" "$AIMX_TO" "$AIMX_SEND_STATUS" >> /var/log/aimx-outbound.log'
+  --cmd '["/bin/sh", "-c", "printf \"%s -> %s: %s\\n\" \"$AIMX_FROM\" \"$AIMX_TO\" \"$AIMX_SEND_STATUS\" >> /var/log/aimx-outbound.log"]'
 
-# on_receive: fire on untrusted mail too (verbose flag is intentional)
+# on_receive: direct argv exec, no shell required
 sudo aimx hooks create \
   --mailbox catchall \
   --event on_receive \
-  --cmd 'logger -t aimx "inbound from $AIMX_FROM"' \
-  --dangerously-support-untrusted
+  --cmd '["/usr/bin/logger", "-t", "aimx", "inbound mail"]' \
+  --fire-on-untrusted
 ```
 
 Raw-cmd hook creation requires `sudo` because it writes `/etc/aimx/config.toml` directly (bypassing the UDS) and then sends SIGHUP to `aimx serve` to hot-reload. If the daemon isn't running, the CLI writes the config and prints a restart hint.
@@ -112,15 +114,11 @@ Raw-cmd hook creation requires `sudo` because it writes `/etc/aimx/config.toml` 
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
-| `name` | string | no | Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)`. Names must be globally unique across mailboxes, including derived ones. |
+| `name` | string | no | Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes, including derived ones. |
 | `event` | string | yes | `"on_receive"` or `"after_send"`. |
 | `type` | string | no | Trigger kind (default `"cmd"`). Only `cmd` is supported today. |
-| `cmd` | string | conditional | Shell command. Required for raw-cmd hooks, forbidden for template hooks. |
-| `template` | string | conditional | Template name from `[[hook_template]]`. Forbidden for raw-cmd hooks. |
-| `params` | table | no | Bound parameter values for template hooks. Keys must match the template's declared `params`. |
-| `dangerously_support_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. Rejected on MCP-origin hooks. |
-| `run_as` | string | no | Any existing Linux username, plus the reserved `"aimx-catchall"` and `"root"`. Must equal the mailbox's `owner` (catchall exception: `"aimx-catchall"`) or `"root"`. `"root"` is settable only via hand-edit of `config.toml` — not via CLI or MCP. |
-| `origin` | string | no | `"operator"` (default) or `"mcp"`. Stamped automatically; lets `hook_delete` distinguish submission channels. |
+| `cmd` | array of strings | yes | Argv exec'd directly. Must be non-empty; `cmd[0]` must be an absolute path. No shell wrapping — wrap in `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
+| `fire_on_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. |
 
 Multiple hooks can be defined per mailbox; each is evaluated independently. Unknown fields on a hook table are rejected at config load.
 
@@ -130,9 +128,9 @@ When an email is ingested or sent:
 
 1. The email is parsed/saved as a `.md` file (ingest) or the outbound MX result is known (send).
 2. aimx walks the mailbox's `hooks` array, picking entries whose `event` matches.
-3. For `on_receive`, the trust gate is applied: the hook fires iff `trusted == "true"` on the email, OR the hook sets `dangerously_support_untrusted = true`.
-4. For template hooks, the daemon looks up the matching `[[hook_template]]`, substitutes declared `params` + built-in placeholders into the argv, and launches the command via `spawn_sandboxed`. For raw-cmd hooks, `/bin/sh -c <cmd>` is spawned the same way.
-5. On systemd the subprocess runs under `systemd-run` with `--uid=<run_as>`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, and `RuntimeMaxSec=<timeout_secs>`. On OpenRC the daemon `fork+exec`s with `setresgid/setresuid` to `<run_as>` plus a manual timeout.
+3. For `on_receive`, the trust gate is applied: the hook fires iff `trusted == "true"` on the email, OR the hook sets `fire_on_untrusted = true`.
+4. The argv `cmd` is exec'd directly via `spawn_sandboxed` — there is no shell interpretation. Spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly when shell expansion is required.
+5. On systemd the subprocess runs under `systemd-run` with `--uid=<owner>`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, and a 60s `RuntimeMaxSec`. On OpenRC the daemon `fork+exec`s with `setresgid/setresuid` to `<owner>` plus a manual timeout.
 6. stdout and stderr are captured and truncated at 64 KiB each; the daemon awaits the subprocess for predictable timing.
 7. Hook failures (non-zero exit, timeout) are logged at `warn` but **never block delivery**.
 
@@ -156,7 +154,7 @@ Email is always stored (inbound) or attempted (outbound) regardless of whether h
 | `AIMX_DATE` | both | Email date (inbound) or send timestamp (outbound) |
 | `AIMX_SEND_STATUS` | after_send | `"delivered"`, `"failed"`, or `"deferred"` |
 
-Always expand env vars inside double quotes (`"$AIMX_SUBJECT"`). Values from sender-controlled headers can contain `$()`, backticks, quotes, or newlines — under `sh -c` these pass through as literal bytes.
+Always expand env vars inside double quotes (`"$AIMX_SUBJECT"`). Values from sender-controlled headers can contain `$()`, backticks, quotes, or newlines — when you wrap your hook in `["/bin/sh", "-c", "..."]`, these pass through as literal bytes.
 
 ### Stdin (template hooks only)
 
@@ -343,8 +341,8 @@ aimx hooks create \
 ```toml
 [[mailboxes.catchall.hooks]]
 event = "on_receive"
-cmd = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
-dangerously_support_untrusted = true
+cmd = ["/bin/sh", "-c", 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"']
+fire_on_untrusted = true
 ```
 
 ### After-send audit log (raw-cmd)
@@ -353,7 +351,7 @@ dangerously_support_untrusted = true
 [[mailboxes.alice.hooks]]
 name = "after_send_audit"
 event = "after_send"
-cmd = 'echo "$AIMX_SEND_STATUS $AIMX_TO $AIMX_SUBJECT" >> /var/log/aimx/alice-sent.log'
+cmd = ["/bin/sh", "-c", 'echo "$AIMX_SEND_STATUS $AIMX_TO $AIMX_SUBJECT" >> /var/log/aimx/alice-sent.log']
 ```
 
 ### Webhook (template hook)

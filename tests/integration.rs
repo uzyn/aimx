@@ -2882,7 +2882,7 @@ owner = "{owner}"
 [[mailboxes.alice.hooks]]
 name = "aftersendhk1"
 event = "after_send"
-cmd = 'printf "status=%s to=%s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" > {sentinel}'
+cmd = ["/bin/sh", "-c", 'printf "status=%s to=%s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" > {sentinel}']
 "#,
         data_dir = tmp.path().display(),
         sentinel = sentinel.display(),
@@ -4070,12 +4070,12 @@ trusted_senders = ["*@company.com", "boss@example.com"]
 [[mailboxes.support.hooks]]
 name = "inbound_urgent"
 event = "on_receive"
-cmd = "echo inbound"
+cmd = ["/bin/echo", "inbound"]
 
 [[mailboxes.support.hooks]]
 name = "outbound_notify"
 event = "after_send"
-cmd = "echo outbound"
+cmd = ["/bin/echo", "outbound"]
 "#,
         tmp.path().display()
     );
@@ -4233,7 +4233,7 @@ fn hooks_create_anonymous_prints_derived_name() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo anon",
+            r#"["/bin/echo", "anon"]"#,
         ])
         .assert()
         .success();
@@ -4311,7 +4311,7 @@ fn hooks_create_rejects_unknown_event_at_parse_time() {
             "--event",
             "nope",
             "--cmd",
-            "echo hi",
+            r#"["/bin/echo", "hi"]"#,
         ])
         .assert()
         .failure();
@@ -4338,7 +4338,7 @@ fn hooks_delete_prompts_and_removes_via_direct_edit() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo hi",
+            r#"["/bin/echo", "hi"]"#,
             "--name",
             "delete_me",
         ])
@@ -4409,7 +4409,7 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo via-daemon",
+            r#"["/bin/echo", "via-daemon"]"#,
         ])
         .assert()
         .success();
@@ -4432,11 +4432,11 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
         "daemon-success should not print restart hint: {create_out}"
     );
 
-    // On-disk config.toml should contain the new hook (CLI wrote it
-    // directly — raw-cmd never traverses UDS).
+    // On-disk config.toml should contain the new hook argv (CLI wrote
+    // it directly — raw-cmd never traverses UDS).
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        content.contains("echo via-daemon"),
+        content.contains("via-daemon"),
         "config.toml should contain new hook: {content}"
     );
 
@@ -4470,7 +4470,7 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo daemon-anon",
+            r#"["/bin/echo", "daemon-anon"]"#,
         ])
         .assert()
         .success();
@@ -4485,15 +4485,19 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
     );
 
     // Compute the expected derived name (mirrors `derive_hook_name` in
-    // src/hook.rs) and assert it was printed by the CLI.
+    // src/hook.rs) and assert it was printed by the CLI. Argv elements
+    // are joined by 0x1F so `["/bin/echo", "daemon-anon"]` hashes
+    // distinctly from a string fused on whitespace.
     let expected = {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(b"on_receive");
         hasher.update([0x1F]);
-        hasher.update(b"echo daemon-anon");
+        hasher.update(b"/bin/echo");
         hasher.update([0x1F]);
-        hasher.update([0u8]); // dangerously_support_untrusted = false
+        hasher.update(b"daemon-anon");
+        hasher.update([0x1F]);
+        hasher.update([0u8]); // fire_on_untrusted = false
         let digest = hasher.finalize();
         let mut s = String::with_capacity(12);
         for b in digest.iter().take(6) {

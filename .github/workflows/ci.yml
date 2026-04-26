@@ -47,7 +47,7 @@ jobs:
           fi
           echo "Author metadata check passed"
 
-  mailbox-isolation:
+  mailbox-dir-perms-isolation:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

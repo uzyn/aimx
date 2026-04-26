@@ -4256,6 +4256,80 @@ owner = "aimx-catchall"
         }
     }
 
+    /// Non-root callers (CI smoke tests, `cargo test` on a developer
+    /// workstation) do not have CAP_CHOWN, so `ensure_mailbox_dirs`
+    /// takes the permissive branch: it still creates the directories
+    /// and chmods them to `0o700`, but skips the owner-existence check
+    /// and the chown. Construct a config whose mailbox owner does NOT
+    /// resolve on this host and verify the helper does not error.
+    #[cfg(unix)]
+    #[test]
+    fn ensure_mailbox_dirs_non_root_skips_chown_and_owner_existence() {
+        use crate::config::MailboxConfig;
+        use std::collections::HashMap;
+        use std::os::unix::fs::PermissionsExt;
+
+        // The strict-existence check this test pins is gated on
+        // `is_root()`. Skip when the harness is somehow root (e.g. a CI
+        // box that runs `cargo test` under sudo) so we don't trip the
+        // production-only check.
+        if crate::platform::is_root() {
+            eprintln!(
+                "ensure_mailbox_dirs_non_root_skips_chown_and_owner_existence: \
+                       harness is root; skipping non-root branch test"
+            );
+            return;
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let mut mailboxes: HashMap<String, MailboxConfig> = HashMap::new();
+        mailboxes.insert(
+            "ghost".to_string(),
+            MailboxConfig {
+                address: "ghost@test.example.com".to_string(),
+                // Synthetic owner that almost certainly does not exist
+                // on the host. The non-root branch must not try to
+                // resolve it.
+                owner: "aimx-nonexistent-test-user".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        let config = Config {
+            domain: "test.example.com".to_string(),
+            data_dir: tmp.path().to_path_buf(),
+            dkim_selector: "aimx".to_string(),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            upgrade: None,
+        };
+
+        // The non-root branch must succeed even though `owner` does not
+        // resolve.
+        ensure_mailbox_dirs(tmp.path(), &config)
+            .expect("non-root ensure_mailbox_dirs must succeed for unresolvable owner");
+
+        for sub in ["inbox", "sent"] {
+            let dir = tmp.path().join(sub).join("ghost");
+            assert!(dir.is_dir(), "{} must be created", dir.display());
+            let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode,
+                0o700,
+                "{} must be chmod'd to 0o700 even on non-root path, got {mode:o}",
+                dir.display()
+            );
+        }
+
+        // Idempotent re-run still succeeds.
+        ensure_mailbox_dirs(tmp.path(), &config).expect("idempotent re-run");
+    }
+
     #[test]
     fn finalize_preserves_existing_mailboxes() {
         let tmp = TempDir::new().unwrap();

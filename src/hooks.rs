@@ -66,6 +66,14 @@ struct HookRow {
     cmd: String,
 }
 
+/// Render a hook argv into a single-line JSON-array string for display
+/// in `aimx hooks list` / `aimx mailboxes show`. Falls back to a
+/// space-joined argv if `serde_json` somehow refuses (it won't for
+/// `Vec<String>` but the fallback keeps the CLI infallible).
+fn format_argv_for_display(argv: &[String]) -> String {
+    serde_json::to_string(argv).unwrap_or_else(|_| argv.join(" "))
+}
+
 fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<HookRow> {
     let mut rows = Vec::new();
     for (mailbox_name, mb) in &config.mailboxes {
@@ -79,7 +87,7 @@ fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<HookRow> {
                 name: effective_hook_name(hook),
                 mailbox: mailbox_name.clone(),
                 event: hook.event.as_str(),
-                cmd: hook.cmd.clone(),
+                cmd: format_argv_for_display(&hook.cmd),
             });
         }
     }
@@ -122,12 +130,13 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     if args.cmd.trim().is_empty() {
         return Err("--cmd must not be empty".into());
     }
+    let cmd = parse_cmd_argv(&args.cmd)?;
 
     let hook = Hook {
         name: args.name.clone(),
         event,
         r#type: "cmd".to_string(),
-        cmd: args.cmd.clone(),
+        cmd,
         fire_on_untrusted: args.fire_on_untrusted,
     };
     let effective = effective_hook_name(&hook);
@@ -174,7 +183,7 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         println!(
             "  {}   {}",
             term::header("cmd:    "),
-            truncate_with_ellipsis(&hook.cmd, 60)
+            truncate_with_ellipsis(&format_argv_for_display(&hook.cmd), 60)
         );
         print!("Continue? [y/N] ");
         io::stdout().flush()?;
@@ -216,6 +225,32 @@ fn parse_event(s: &str) -> Result<HookEvent, Box<dyn std::error::Error>> {
             Err(format!("Invalid event '{other}': expected 'on_receive' or 'after_send'").into())
         }
     }
+}
+
+/// Parse `--cmd` into an argv. Accepts a JSON array of strings
+/// (e.g. `["/bin/echo", "hello"]`). Validates that the array is
+/// non-empty and that every element is a string; absolute-path checks
+/// on `cmd[0]` are deferred to `validate_hooks` so the CLI and the
+/// daemon use the same validator.
+fn parse_cmd_argv(raw: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let trimmed = raw.trim_start();
+    if !trimmed.starts_with('[') {
+        return Err(format!(
+            "--cmd must be a JSON array of strings, e.g. \
+             --cmd '[\"/bin/echo\", \"hello\"]'; got: {raw}"
+        )
+        .into());
+    }
+    let argv: Vec<String> = serde_json::from_str(raw).map_err(|e| {
+        format!(
+            "--cmd must be a JSON array of strings, e.g. \
+             --cmd '[\"/bin/echo\", \"hello\"]'; parse error: {e}"
+        )
+    })?;
+    if argv.is_empty() {
+        return Err("--cmd must be a non-empty JSON array of strings".into());
+    }
+    Ok(argv)
 }
 
 fn find_hook_by_effective_name<'a>(config: &'a Config, name: &str) -> Option<(String, &'a Hook)> {

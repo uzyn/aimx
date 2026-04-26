@@ -91,7 +91,7 @@ trusted_senders = ["*@yourcompany.com"]
 [[mailboxes.inbox.hooks]]
 name = "claudeinbox1"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 claude -p "You received a new email. Read it and file a summary ticket.
 
 Email path: $AIMX_FILEPATH
@@ -101,7 +101,7 @@ From: $AIMX_FROM
 Use the Read tool to open \"$AIMX_FILEPATH\", then call the appropriate MCP tool." \
   --permission-mode=bypassPermissions \
   >> /var/log/aimx/claude.log 2>&1
-'''
+''']
 ```
 
 - `"$AIMX_FILEPATH"` is always safe. The shell quotes the value, so paths with spaces or unusual characters are handled correctly.
@@ -126,7 +126,7 @@ trust = "verified"
 [[mailboxes.triage.hooks]]
 name = "codextriage1"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 codex exec "Triage this email and update the issue tracker.
 
 Email file: $AIMX_FILEPATH
@@ -134,7 +134,7 @@ From: $AIMX_FROM
 Subject: $AIMX_SUBJECT" \
   --full-auto \
   >> /var/log/aimx/codex.log 2>&1
-'''
+''']
 ```
 
 - `--full-auto` is the recommended default for hooks: Codex auto-approves tool use but stays inside its sandbox.
@@ -155,13 +155,13 @@ trust = "verified"
 [[mailboxes.research.hooks]]
 name = "ocresearch01"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 opencode run "A new research email arrived. Read \"$AIMX_FILEPATH\" and append a digest entry to docs/digest.md.
 
 From: $AIMX_FROM
 Subject: $AIMX_SUBJECT" \
   >> /var/log/aimx/opencode.log 2>&1
-'''
+''']
 ```
 
 ## Gemini CLI
@@ -180,11 +180,11 @@ trust = "verified"
 [[mailboxes.notes.hooks]]
 name = "geminines01"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 gemini -p "A new note arrived by email. Read \"$AIMX_FILEPATH\" and file it into my notes." \
   --yolo \
   >> /var/log/aimx/gemini.log 2>&1
-'''
+''']
 ```
 
 ## Goose
@@ -202,13 +202,13 @@ trust = "verified"
 [[mailboxes.ops.hooks]]
 name = "gooseops001"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 goose run -t "Ops email arrived. Read \"$AIMX_FILEPATH\", check if action is required, and page on-call if so.
 
 Subject: $AIMX_SUBJECT
 From: $AIMX_FROM" \
   >> /var/log/aimx/goose.log 2>&1
-'''
+''']
 ```
 
 ## OpenClaw
@@ -228,13 +228,13 @@ trusted_senders = ["*@yourcompany.com"]
 [[mailboxes.inbox.hooks]]
 name = "openclaw0001"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 openclaw agent \
     --message "An email arrived at $(basename \"$AIMX_FILEPATH\"). Read it at \"$AIMX_FILEPATH\", summarize the sender's request, and respond via the aimx MCP tools if a reply is appropriate." \
     --deliver \
     --json \
     >> /var/log/aimx/openclaw.log 2>&1
-'''
+''']
 ```
 
 ## Hermes
@@ -256,8 +256,8 @@ trust = "verified"
 [[mailboxes.hermes.hooks]]
 # name is optional — a stable 12-char hex id is derived from event+cmd if omitted
 event = "on_receive"
-cmd = 'ntfy pub hermes-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
-dangerously_support_untrusted = true
+cmd = ["/bin/sh", "-c", 'ntfy pub hermes-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"']
+fire_on_untrusted = true
 ```
 
 When Hermes grows a headless `--message` / `exec`-style CLI, add it here mirroring the Claude Code or Codex recipe.
@@ -280,12 +280,12 @@ trusted_senders = ["*@yourcompany.com"]
 [[mailboxes.bugs.hooks]]
 name = "aiderbugs01"
 event = "on_receive"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 cd /srv/repos/myapp && \
 aider --yes-always \
       --message "Bug report arrived by email. Read \"$AIMX_FILEPATH\", reproduce the issue if possible, apply a fix, and commit." \
       >> /var/log/aimx/aider.log 2>&1
-'''
+''']
 ```
 
 ## `after_send` recipes
@@ -298,7 +298,7 @@ Send-side hooks run after aimx resolves the MX delivery attempt. They cannot aff
 [[mailboxes.alice.hooks]]
 name = "auditlog0001"
 event = "after_send"
-cmd = 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$AIMX_HOOK_NAME" >> /var/log/aimx/alice-sent.log'
+cmd = ["/bin/sh", "-c", 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$AIMX_HOOK_NAME" >> /var/log/aimx/alice-sent.log']
 ```
 
 ### Page on failed sends
@@ -307,11 +307,11 @@ cmd = 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$A
 [[mailboxes.alerts.hooks]]
 name = "failedpage01"
 event = "after_send"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 if [ "$AIMX_SEND_STATUS" != "delivered" ]; then
   ntfy pub on-call "aimx send to $AIMX_TO $AIMX_SEND_STATUS: $AIMX_SUBJECT"
 fi
-'''
+''']
 ```
 
 ### Notify only on matching recipients (shell guard)
@@ -322,14 +322,14 @@ Filter fields on hooks have been removed — do recipient/subject matching in th
 [[mailboxes.marketing.hooks]]
 name = "marknotify01"
 event = "after_send"
-cmd = '''
+cmd = ["/bin/sh", "-c", '''
 case "$AIMX_TO" in
   *@customer-co.com)
     curl -fsS -X POST https://hooks.internal/marketing-sent \
          -d "to=$AIMX_TO&status=$AIMX_SEND_STATUS"
     ;;
 esac
-'''
+''']
 ```
 
 ## Operational tips

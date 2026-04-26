@@ -613,9 +613,23 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                      must match [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
                 ));
             }
-            if hook.cmd.trim().is_empty() {
+            if hook.cmd.is_empty() {
                 return Err(format!(
-                    "hook '{label}' on mailbox '{mailbox_name}' has empty `cmd`"
+                    "hook '{label}' on mailbox '{mailbox_name}' has empty `cmd`: \
+                     `cmd` must be a non-empty argv array, e.g. `cmd = [\"/bin/echo\", \"hi\"]`"
+                ));
+            }
+            if hook.cmd[0].trim().is_empty() {
+                return Err(format!(
+                    "hook '{label}' on mailbox '{mailbox_name}' has blank `cmd[0]`"
+                ));
+            }
+            if !std::path::Path::new(&hook.cmd[0]).is_absolute() {
+                return Err(format!(
+                    "hook '{label}' on mailbox '{mailbox_name}' has non-absolute `cmd[0]` \
+                     '{prog}': hooks fire from /var/lib/aimx/... so PATH lookup is brittle; \
+                     use an absolute path (e.g. `/bin/echo` instead of `echo`)",
+                    prog = hook.cmd[0]
                 ));
             }
             if hook.r#type != "cmd" {
@@ -677,8 +691,21 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
              [a-zA-Z0-9_][a-zA-Z0-9_.-]{{0,127}}"
         ));
     }
-    if hook.cmd.trim().is_empty() {
-        return Err("hook has empty `cmd`".into());
+    if hook.cmd.is_empty() {
+        return Err(
+            "hook has empty `cmd`: must be a non-empty argv array, e.g. `[\"/bin/echo\", \"hi\"]`"
+                .into(),
+        );
+    }
+    if hook.cmd[0].trim().is_empty() {
+        return Err("hook has blank `cmd[0]`".into());
+    }
+    if !std::path::Path::new(&hook.cmd[0]).is_absolute() {
+        return Err(format!(
+            "hook has non-absolute `cmd[0]` '{prog}': hooks fire from /var/lib/aimx/... so PATH \
+             lookup is brittle; use an absolute path",
+            prog = hook.cmd[0]
+        ));
     }
     if hook.r#type != "cmd" {
         return Err(format!(
@@ -1244,7 +1271,7 @@ owner = "aimx-catchall"
 
 [[mailboxes.catchall.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
@@ -1269,7 +1296,7 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "after_send"
-cmd = "true"
+cmd = ["/bin/true"]
 fire_on_untrusted = true
 "#,
         );
@@ -1296,13 +1323,13 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 "#,
         );
         let cfg = Config::load_ignore_warnings(&path).unwrap();
         assert_eq!(cfg.mailboxes["support"].hooks.len(), 1);
         let hook = &cfg.mailboxes["support"].hooks[0];
-        assert_eq!(hook.cmd, "true");
+        assert_eq!(hook.cmd, vec!["/bin/true"]);
         assert!(!hook.fire_on_untrusted);
     }
 
@@ -1321,12 +1348,64 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 fire_on_untrusted = true
 "#,
         );
         let cfg = Config::load_ignore_warnings(&path).unwrap();
         let hook = &cfg.mailboxes["support"].hooks[0];
         assert!(hook.fire_on_untrusted);
+    }
+
+    #[test]
+    fn load_rejects_empty_cmd_array() {
+        let _g = ConfigDirOverride::set(Path::new("/tmp"));
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = []
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("empty `cmd`"),
+            "error should call out empty cmd array: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_non_absolute_cmd_program() {
+        let _g = ConfigDirOverride::set(Path::new("/tmp"));
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = ["echo", "hi"]
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("non-absolute `cmd[0]`"),
+            "error should call out non-absolute cmd[0]: {err}"
+        );
     }
 }

@@ -1,15 +1,17 @@
-//! Hook manager: event dispatch, trust gating, and synchronous shell
+//! Hook manager: event dispatch, trust gating, and synchronous argv
 //! execution for `on_receive` and `after_send` events.
 //!
 //! One `Hook` entry in `config.toml` carries an `event`
-//! (`on_receive` | `after_send`), a `cmd`, an opt-in `fire_on_untrusted`
-//! flag that lets `on_receive` hooks fire on non-trusted email, and an
-//! optional `name`. Hooks fire on every event of their configured type;
-//! the only gate is the `on_receive` trust check.
+//! (`on_receive` | `after_send`), a `cmd` argv array, an opt-in
+//! `fire_on_untrusted` flag that lets `on_receive` hooks fire on
+//! non-trusted email, and an optional `name`. Hooks fire on every event
+//! of their configured type; the only gate is the `on_receive` trust
+//! check.
 //!
 //! `name` is optional. When omitted, the effective name is derived
-//! deterministically from `sha256(event || cmd || fire_on_untrusted)` —
-//! stable across restarts without writing anything back to `config.toml`.
+//! deterministically from
+//! `sha256(event || joined_argv || fire_on_untrusted)` — stable across
+//! restarts without writing anything back to `config.toml`.
 //!
 //! The trust gate:
 //! `on_receive` hooks fire iff `email.trusted == "true"` OR
@@ -65,14 +67,18 @@ impl std::fmt::Display for HookEvent {
 /// One configured hook. `deny_unknown_fields` makes stale filter fields or
 /// typos fail loudly at config load.
 ///
-/// Hooks are raw-cmd only: `cmd` is a non-empty shell string created by
-/// the operator via CLI / hand-edit. Hook creation requires root and
-/// SIGHUPs the running daemon; there is no UDS verb for it.
+/// Hooks are raw-cmd only: `cmd` is a non-empty argv array created by the
+/// operator via CLI / hand-edit. The first element is the absolute path
+/// to the program to exec; the remaining elements are passed verbatim as
+/// arguments. There is no shell interpretation — operators who need shell
+/// expansion can spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
+/// Hook creation requires root and SIGHUPs the running daemon; there is
+/// no UDS verb for raw-cmd hooks.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
     /// Optional hook name. When `None`, the effective name is derived
-    /// from `sha256(event || cmd || fire_on_untrusted)`. Kept as
+    /// from `sha256(event || joined_argv || fire_on_untrusted)`. Kept as
     /// `Option<String>` so the raw round-trip distinguishes "omitted"
     /// from "present".
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -86,8 +92,10 @@ pub struct Hook {
     #[serde(default = "default_hook_type")]
     pub r#type: String,
 
-    /// Shell command for raw-cmd hooks. Required and non-empty.
-    pub cmd: String,
+    /// Argv array exec'd directly. Required, non-empty, and `cmd[0]` must
+    /// be an absolute path (hooks fire from `/var/lib/aimx/...` so PATH
+    /// lookup is brittle).
+    pub cmd: Vec<String>,
 
     /// `on_receive` only: when `true`, the hook fires even if the email's
     /// `trusted` value is not `"true"`.
@@ -98,19 +106,21 @@ pub struct Hook {
 impl Hook {
     /// Resolve the final argv that the sandboxed executor will `exec`.
     ///
-    /// Wraps the operator-provided shell string in
-    /// `["/bin/sh", "-c", <cmd>]` so the spawn site has a uniform argv
-    /// shape; shell interpretation is intentional for operator-authored
-    /// hooks.
+    /// Returns `cmd` verbatim — no shell wrapping, no substitution.
+    /// Validates non-emptiness and the absolute-path constraint on
+    /// `cmd[0]` so a malformed in-memory hook still fails closed at fire
+    /// time even if it bypassed `Config::load` validation.
     pub fn resolve_argv(&self) -> Result<Vec<String>, ResolveArgvError> {
-        if self.cmd.trim().is_empty() {
+        if self.cmd.is_empty() {
             return Err(ResolveArgvError::EmptyCmd);
         }
-        Ok(vec![
-            "/bin/sh".to_string(),
-            "-c".to_string(),
-            self.cmd.clone(),
-        ])
+        if self.cmd[0].trim().is_empty() {
+            return Err(ResolveArgvError::EmptyCmd);
+        }
+        if !std::path::Path::new(&self.cmd[0]).is_absolute() {
+            return Err(ResolveArgvError::NonAbsoluteProgram(self.cmd[0].clone()));
+        }
+        Ok(self.cmd.clone())
     }
 }
 
@@ -118,12 +128,16 @@ impl Hook {
 #[derive(Debug)]
 pub enum ResolveArgvError {
     EmptyCmd,
+    NonAbsoluteProgram(String),
 }
 
 impl std::fmt::Display for ResolveArgvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ResolveArgvError::EmptyCmd => write!(f, "raw-cmd hook has empty cmd"),
+            ResolveArgvError::NonAbsoluteProgram(p) => {
+                write!(f, "raw-cmd hook has non-absolute cmd[0]: '{p}'")
+            }
         }
     }
 }
@@ -157,20 +171,27 @@ pub fn is_valid_hook_name(s: &str) -> bool {
 /// Derive a stable 12-hex-char name from `(event, cmd, fire_on_untrusted)`.
 ///
 /// Uses sha256 over the three inputs joined by the 0x1F unit-separator
-/// byte, which can never appear in the TOML payload. The first 12 hex
-/// chars (48 bits) are returned — wide enough that collisions across a
-/// realistic config set are vanishingly improbable, and the output
-/// satisfies `is_valid_hook_name`.
+/// byte, which can never appear in the TOML payload. Argv elements
+/// inside `cmd` are themselves separated by 0x1F so that
+/// `["/bin/echo", "a b"]` and `["/bin/echo a", "b"]` hash distinctly.
+/// The first 12 hex chars (48 bits) are returned — wide enough that
+/// collisions across a realistic config set are vanishingly improbable,
+/// and the output satisfies `is_valid_hook_name`.
 ///
 /// The mailbox name is deliberately excluded from the hash. Two mailboxes
 /// with the same `(event, cmd, fire_on_untrusted)` will produce the same
 /// derived name and collide under the load-time hook-name uniqueness
 /// check, forcing the operator to set an explicit `name` to disambiguate.
-pub fn derive_hook_name(event: HookEvent, cmd: &str, fire_on_untrusted: bool) -> String {
+pub fn derive_hook_name(event: HookEvent, cmd: &[String], fire_on_untrusted: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(event.as_str().as_bytes());
     hasher.update([0x1F]);
-    hasher.update(cmd.as_bytes());
+    for (i, arg) in cmd.iter().enumerate() {
+        if i > 0 {
+            hasher.update([0x1F]);
+        }
+        hasher.update(arg.as_bytes());
+    }
     hasher.update([0x1F]);
     hasher.update([fire_on_untrusted as u8]);
     let digest = hasher.finalize();
@@ -677,7 +698,7 @@ mod tests {
             name: Some(name.to_string()),
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
-            cmd: "true".to_string(),
+            cmd: vec!["/bin/true".to_string()],
             fire_on_untrusted: false,
         }
     }
@@ -722,10 +743,15 @@ mod tests {
         assert!(!is_valid_hook_name("über"));
     }
 
+    fn argv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| s.to_string()).collect()
+    }
+
     #[test]
     fn derive_hook_name_deterministic() {
-        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
-        let b = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
+        let cmd = argv(&["/bin/echo", "hi"]);
+        let a = derive_hook_name(HookEvent::OnReceive, &cmd, false);
+        let b = derive_hook_name(HookEvent::OnReceive, &cmd, false);
         assert_eq!(a, b);
         assert_eq!(a.len(), DERIVED_HOOK_NAME_LEN);
         assert!(is_valid_hook_name(&a));
@@ -733,22 +759,33 @@ mod tests {
 
     #[test]
     fn derive_hook_name_differs_by_event() {
-        let r = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
-        let s = derive_hook_name(HookEvent::AfterSend, "echo hi", false);
+        let cmd = argv(&["/bin/echo", "hi"]);
+        let r = derive_hook_name(HookEvent::OnReceive, &cmd, false);
+        let s = derive_hook_name(HookEvent::AfterSend, &cmd, false);
         assert_ne!(r, s);
     }
 
     #[test]
     fn derive_hook_name_differs_by_cmd() {
-        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
-        let b = derive_hook_name(HookEvent::OnReceive, "echo hj", false);
+        let a = derive_hook_name(HookEvent::OnReceive, &argv(&["/bin/echo", "hi"]), false);
+        let b = derive_hook_name(HookEvent::OnReceive, &argv(&["/bin/echo", "hj"]), false);
+        assert_ne!(a, b);
+    }
+
+    /// Argv split must affect the hash so `["/bin/echo", "a b"]` and
+    /// `["/bin/echo a", "b"]` derive distinct names.
+    #[test]
+    fn derive_hook_name_differs_by_argv_split() {
+        let a = derive_hook_name(HookEvent::OnReceive, &argv(&["/bin/echo", "a b"]), false);
+        let b = derive_hook_name(HookEvent::OnReceive, &argv(&["/bin/echo a", "b"]), false);
         assert_ne!(a, b);
     }
 
     #[test]
     fn derive_hook_name_differs_by_fire_on_untrusted_flag() {
-        let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
-        let b = derive_hook_name(HookEvent::OnReceive, "echo hi", true);
+        let cmd = argv(&["/bin/echo", "hi"]);
+        let a = derive_hook_name(HookEvent::OnReceive, &cmd, false);
+        let b = derive_hook_name(HookEvent::OnReceive, &cmd, true);
         assert_ne!(a, b);
     }
 
@@ -760,7 +797,7 @@ mod tests {
         let derived = effective_hook_name(&hook);
         assert_eq!(
             derived,
-            derive_hook_name(HookEvent::OnReceive, "true", false)
+            derive_hook_name(HookEvent::OnReceive, &argv(&["/bin/true"]), false)
         );
     }
 
@@ -814,12 +851,20 @@ mod tests {
         (mailbox, path)
     }
 
+    /// Build an argv that runs `script` under /bin/sh -c. Tests exercise
+    /// observable side effects (touching marker files, capturing env
+    /// vars) that are easiest to express in shell; the new schema makes
+    /// the shell wrapping explicit.
+    fn shell_argv(script: String) -> Vec<String> {
+        vec!["/bin/sh".to_string(), "-c".to_string(), script]
+    }
+
     #[test]
     fn execute_on_receive_fires_when_trusted_true() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
         let mut hook = basic_hook("h1");
-        hook.cmd = format!("touch {}", marker.display());
+        hook.cmd = shell_argv(format!("touch {}", marker.display()));
         let (_m, _p) = execute_single(hook, TrustedValue::True);
         assert!(marker.exists(), "hook should fire when trusted=true");
     }
@@ -829,7 +874,7 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
         let mut hook = basic_hook("h1");
-        hook.cmd = format!("touch {}", marker.display());
+        hook.cmd = shell_argv(format!("touch {}", marker.display()));
         let (_m, _p) = execute_single(hook, TrustedValue::None);
         assert!(
             !marker.exists(),
@@ -843,7 +888,7 @@ mod tests {
         let marker = tmp.path().join("fired");
         let mut hook = basic_hook("h1");
         hook.fire_on_untrusted = true;
-        hook.cmd = format!("touch {}", marker.display());
+        hook.cmd = shell_argv(format!("touch {}", marker.display()));
         let (_m, _p) = execute_single(hook, TrustedValue::None);
         assert!(
             marker.exists(),
@@ -857,12 +902,12 @@ mod tests {
         let out = tmp.path().join("env.out");
         let mut hook = basic_hook("hook_explicit");
         hook.fire_on_untrusted = true;
-        hook.cmd = format!(
+        hook.cmd = shell_argv(format!(
             "printf 'HOOK=%s FROM=%s TO=%s SUBJECT=%s MAILBOX=%s FILEPATH=%s\\n' \
              \"$AIMX_HOOK_NAME\" \"$AIMX_FROM\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \
              \"$AIMX_MAILBOX\" \"$AIMX_FILEPATH\" > {}",
             out.display()
-        );
+        ));
         let mailbox = regular_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -887,10 +932,10 @@ mod tests {
             name: None,
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
-            cmd: format!(
+            cmd: shell_argv(format!(
                 "printf 'HOOK=%s\\n' \"$AIMX_HOOK_NAME\" > {}",
                 out.display()
-            ),
+            )),
             fire_on_untrusted: true,
         };
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
@@ -927,10 +972,10 @@ mod tests {
 
         let mut hook = basic_hook("h1");
         hook.fire_on_untrusted = true;
-        hook.cmd = format!(
+        hook.cmd = shell_argv(format!(
             "printf 'leak=[%s]\\n' \"$AIMX_LEAK_SENTINEL_HOOK\" > {}",
             out.display()
-        );
+        ));
         let mailbox = regular_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
@@ -966,12 +1011,12 @@ mod tests {
             name: Some("after_explicit".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
-            cmd: format!(
+            cmd: shell_argv(format!(
                 "printf 'STATUS=%s HOOK=%s TO=%s FROM=%s FILEPATH=%s\\n' \
                  \"$AIMX_SEND_STATUS\" \"$AIMX_HOOK_NAME\" \"$AIMX_TO\" \"$AIMX_FROM\" \
                  \"$AIMX_FILEPATH\" > {}",
                 out.display()
-            ),
+            )),
             fire_on_untrusted: false,
         };
         let mailbox = alice_mailbox(vec![hook]);
@@ -1010,7 +1055,7 @@ mod tests {
             name: Some("failhook".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
-            cmd: "false".to_string(),
+            cmd: vec!["/bin/false".to_string()],
             fire_on_untrusted: false,
         };
         let mailbox = alice_mailbox(vec![hook]);
@@ -1032,7 +1077,7 @@ mod tests {
             name: Some("raw".to_string()),
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
-            cmd: "echo hi".to_string(),
+            cmd: argv(&["/bin/echo", "hi"]),
             fire_on_untrusted: false,
         };
         let s = toml::to_string(&hook).unwrap();
@@ -1043,32 +1088,52 @@ mod tests {
     }
 
     #[test]
-    fn legacy_hook_toml_with_only_required_fields_loads() {
+    fn hook_toml_with_only_required_fields_loads() {
         let src = r#"
 event = "on_receive"
-cmd = "echo hi"
+cmd = ["/bin/echo", "hi"]
 "#;
         let hook: Hook = toml::from_str(src).unwrap();
         assert_eq!(hook.event, HookEvent::OnReceive);
-        assert_eq!(hook.cmd, "echo hi");
+        assert_eq!(hook.cmd, vec!["/bin/echo", "hi"]);
         assert!(!hook.fire_on_untrusted);
     }
 
     #[test]
-    fn resolve_argv_raw_cmd_wraps_in_sh_dash_c() {
+    fn resolve_argv_returns_cmd_verbatim() {
         let mut hook = basic_hook("raw");
-        hook.cmd = "echo hi".into();
-        let argv = hook.resolve_argv().unwrap();
-        assert_eq!(argv, vec!["/bin/sh", "-c", "echo hi"]);
+        hook.cmd = argv(&["/bin/echo", "hi"]);
+        let resolved = hook.resolve_argv().unwrap();
+        assert_eq!(resolved, vec!["/bin/echo", "hi"]);
     }
 
     #[test]
-    fn resolve_argv_raw_cmd_with_empty_cmd_fails() {
+    fn resolve_argv_empty_cmd_fails() {
         let mut hook = basic_hook("empty");
-        hook.cmd = "   ".into();
+        hook.cmd = vec![];
         assert!(matches!(
             hook.resolve_argv(),
             Err(ResolveArgvError::EmptyCmd)
+        ));
+    }
+
+    #[test]
+    fn resolve_argv_blank_program_fails() {
+        let mut hook = basic_hook("blank");
+        hook.cmd = vec!["   ".to_string()];
+        assert!(matches!(
+            hook.resolve_argv(),
+            Err(ResolveArgvError::EmptyCmd)
+        ));
+    }
+
+    #[test]
+    fn resolve_argv_non_absolute_program_fails() {
+        let mut hook = basic_hook("relative");
+        hook.cmd = vec!["echo".to_string(), "hi".to_string()];
+        assert!(matches!(
+            hook.resolve_argv(),
+            Err(ResolveArgvError::NonAbsoluteProgram(_))
         ));
     }
 
@@ -1138,7 +1203,7 @@ cmd = "echo hi"
         let marker = tmp.path().join("fired");
         let mut hook = basic_hook("h_catchall");
         hook.fire_on_untrusted = true;
-        hook.cmd = format!("touch {}", marker.display());
+        hook.cmd = vec!["/bin/touch".to_string(), marker.display().to_string()];
 
         // Construct a catchall mailbox with a hook attached, bypassing
         // the load-time validator. This is the configuration the
@@ -1181,7 +1246,7 @@ cmd = "echo hi"
             name: Some("h_catchall_send".to_string()),
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
-            cmd: format!("touch {}", marker.display()),
+            cmd: vec!["/bin/touch".to_string(), marker.display().to_string()],
             fire_on_untrusted: false,
         };
         let mailbox = MailboxConfig {
@@ -1210,11 +1275,11 @@ cmd = "echo hi"
 
     // ----- Owner-derived run_as regression -----------------------------
 
-    /// Fire a real `/bin/echo hello` hook on a non-catchall mailbox
-    /// owned by the current user; assert exit-success, that stdout
-    /// reached the marker file, and that the structured log line
-    /// records `owner=<current user>` (the value the fire path resolved
-    /// from `mailbox.owner`).
+    /// Fire a real `cmd = ["/bin/echo", "hello"]` hook on a non-catchall
+    /// mailbox owned by the current user; assert exit-success, that the
+    /// echoed stdout actually reached the captured pipe, and that the
+    /// structured log line records `owner=<current user>` (the value
+    /// the fire path resolved from `mailbox.owner`).
     ///
     /// The structured log line shape includes an `owner=<u>` field;
     /// this test pins the invariant that the fire path reads the value
@@ -1226,12 +1291,11 @@ cmd = "echo hi"
         let out = tmp.path().join("echoed.out");
         let mut hook = basic_hook("echo_hello");
         hook.fire_on_untrusted = true;
-        // Use /bin/echo directly via shell wrapper. The acceptance
-        // criterion calls for `cmd = ["/bin/echo", "hello"]`; the Hook
-        // schema stores `cmd` as a string that resolve_argv wraps in
-        // /bin/sh -c, so the same observable behavior runs through
-        // /bin/echo with output captured to a tempfile.
-        hook.cmd = format!("/bin/echo hello > {}", out.display());
+        // Wrap in /bin/sh -c so we can redirect /bin/echo's stdout into
+        // the marker file the test reads back. With argv-form hooks the
+        // shell invocation is now explicit — there is no implicit
+        // /bin/sh -c wrapper.
+        hook.cmd = shell_argv(format!("/bin/echo hello > {}", out.display()));
 
         let owner = current_user_name();
         let mailbox = regular_mailbox(vec![hook]);

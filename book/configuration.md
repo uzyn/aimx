@@ -101,19 +101,15 @@ Trust only gates hook execution (`on_receive`). All email is stored regardless o
 
 ### Hook settings
 
-Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is either **template-bound** (`template = "..."`, `params = {...}`) or **raw-cmd** (`cmd = "..."`). Both flavours run sandboxed as the mailbox's `owner` by default (catchall hooks default to the reserved `aimx-catchall` user).
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is a **raw-cmd** stanza: `cmd` is an argv array exec'd directly as the mailbox's `owner`. The first element must be an absolute path; there is no shell wrapping. If you need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + cmd + dangerously_support_untrusted)` (raw-cmd) or `sha256(event + template + sorted_params)` (template-bound). Names must be globally unique across mailboxes — including derived ones. |
+| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
-| `cmd` | string | Raw shell command. Required for raw-cmd hooks; forbidden for template-bound hooks. |
-| `template` | string | Name of a `[[hook_template]]` to bind to. Mutually exclusive with `cmd`. |
-| `params` | table | Bound parameter values for template-bound hooks. Keys must match the template's declared `params`; unknown keys rejected. |
-| `dangerously_support_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on hooks with `origin = "mcp"`. |
-| `run_as` | string | Any existing Linux username; must equal the mailbox's `owner` (catchall exception: `"aimx-catchall"`) or `"root"`. Defaults to the mailbox's `owner` when omitted. `"root"` is only settable via hand-edit of `config.toml` — not via CLI or MCP. |
-| `origin` | string | `"operator"` (default) or `"mcp"`. Stamped by the daemon based on submission channel. |
+| `cmd` | array of strings | Argv exec'd directly. Required and non-empty; `cmd[0]` must be an absolute path. There is no shell wrapping — spell out `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
+| `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. |
 
 Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
 
@@ -258,8 +254,8 @@ address = "*@agent.yourdomain.com"
 [[mailboxes.catchall.hooks]]
 # name is optional — a stable 12-char hex id is derived from event+cmd if omitted
 event = "on_receive"
-cmd = 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"'
-dangerously_support_untrusted = true
+cmd = ["/bin/sh", "-c", 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"']
+fire_on_untrusted = true
 
 # ----------------------------
 # Named mailbox with a per-mailbox trust override
@@ -276,13 +272,13 @@ trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 [[mailboxes.support.hooks]]
 name = "support_log"
 event = "on_receive"
-cmd = 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log'
+cmd = ["/bin/sh", "-c", 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log']
 
 # Trigger agent on every trusted incoming email
 [[mailboxes.support.hooks]]
 name = "support_agent"
 event = "on_receive"
-cmd = 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"'
+cmd = ["/bin/sh", "-c", 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"']
 
 # ----------------------------
 # Another mailbox

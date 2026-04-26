@@ -437,7 +437,8 @@ fn push_event_group(lines: &mut Vec<String>, event: &str, hooks: &[&crate::hook:
     }
     lines.push(format!("  {}", term::header(event)));
     for h in hooks {
-        let cmd = truncate_show_cmd(&h.cmd, 60);
+        let cmd_display = serde_json::to_string(&h.cmd).unwrap_or_else(|_| h.cmd.join(" "));
+        let cmd = truncate_show_cmd(&cmd_display, 60);
         let name = crate::hook::effective_hook_name(h);
         let suffix = if h.fire_on_untrusted {
             "   [fire_on_untrusted=true]"
