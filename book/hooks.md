@@ -7,7 +7,7 @@ Hooks trigger commands on specific email events. Two events are supported today:
 
 aimx supports two hook flavours:
 
-1. **Template hooks (recommended).** Per-agent templates are registered by each user who runs `aimx agent-setup <agent>` (no sudo); an agent-neutral `webhook` template ships pre-bundled. Agents then pick a template and fill declared parameters via MCP. Each template's `run_as` equals the registering user's Linux username, so hook children drop into that user's uid before exec.
+1. **Template hooks (recommended).** Per-agent templates are registered by each user who runs `aimx agents setup <agent>` (no sudo); an agent-neutral `webhook` template ships pre-bundled. Agents then pick a template and fill declared parameters via MCP. Each template's `run_as` equals the registering user's Linux username, so hook children drop into that user's uid before exec.
 2. **Raw-cmd hooks (power user).** The operator hand-writes a shell command in `config.toml` or via `sudo aimx hooks create --cmd`. Raw-cmd hooks carry an explicit `run_as` username (any existing Linux user, or the reserved `aimx-catchall` / `root`).
 
 Combined with the mailbox-level `trust` policy, hooks gate shell-side automation on DKIM-verified inbound mail and on outbound delivery outcomes.
@@ -29,7 +29,7 @@ Templates are the agent-native way to wire up hooks. They enable the "chat with 
 Per-agent templates are registered on demand by the user who wants them:
 
 ```bash
-aimx agent-setup claude-code      # runs as the user, no sudo
+aimx agents setup claude-code     # runs as the user, no sudo
 ```
 
 This probes `$PATH` for the agent binary, submits `TEMPLATE-CREATE` over the UDS, and lands a template named `invoke-<agent>-<username>` (for example `invoke-claude-alice`). The daemon hot-swaps its in-memory config so the template is live immediately — no SIGHUP, no restart. See [Agent integration](agent-integration.md) for the full flow.
@@ -277,7 +277,7 @@ Prints a table (`NAME`, `MAILBOX`, `EVENT`, `ORIGIN`, `CMD`). The `CMD` column i
 aimx hooks templates
 ```
 
-Prints a table of enabled templates (`NAME`, `DESCRIPTION`, `PARAMS`, `EVENTS`, `RUN_AS`). Empty output means no per-agent templates are registered for your user yet — run `aimx agent-setup <agent>` (no sudo) for the agent you want.
+Prints a table of enabled templates (`NAME`, `DESCRIPTION`, `PARAMS`, `EVENTS`, `RUN_AS`). Empty output means no per-agent templates are registered for your user yet — run `aimx agents setup <agent>` (no sudo) for the agent you want.
 
 ### Delete a hook
 
@@ -315,7 +315,7 @@ Operators can build `journalctl -u aimx | grep hook_name=<name>` workflows aroun
 ### Trigger Claude Code on verified mail (template hook)
 
 ```toml
-# config.toml — alice's `aimx agent-setup claude-code` writes this block over UDS
+# config.toml — alice's `aimx agents setup claude-code` writes this block over UDS
 [[hook_template]]
 name = "invoke-claude-alice"
 description = "Pipe email into Claude Code with a prompt"

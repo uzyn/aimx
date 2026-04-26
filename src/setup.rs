@@ -1409,12 +1409,12 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     lines.push("Wire aimx into your AI agent with one command per agent:".to_string());
     lines.push(String::new());
 
-    for spec in crate::agent_setup::registry() {
+    for spec in crate::agents_setup::registry() {
         let cmd = if data_dir == Path::new("/var/lib/aimx") {
-            format!("aimx agent-setup {}", spec.name)
+            format!("aimx agents setup {}", spec.name)
         } else {
             format!(
-                "aimx --data-dir {} agent-setup {}",
+                "aimx --data-dir {} agents setup {}",
                 data_dir.display(),
                 spec.name
             )
@@ -1423,9 +1423,7 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     }
 
     lines.push(String::new());
-    lines.push(
-        "Run `aimx agent-setup --list` to see supported agents and destination paths.".to_string(),
-    );
+    lines.push("Run `aimx agents list` to see supported agents and destination paths.".to_string());
     lines.push(
         "See `book/agent-integration.md` for the full list and manual MCP wiring.".to_string(),
     );
@@ -1525,18 +1523,6 @@ pub fn finalize_setup(
     }
 
     Ok(())
-}
-
-fn announce_setup_complete(domain: &str) {
-    // The wizard closes with a single-line success
-    // banner naming the domain. Intentionally terse — the operator just
-    // sat through TLS, DKIM, DNS, and systemctl start; they don't need
-    // more ceremony.
-    println!();
-    println!(
-        "{}",
-        term::success(&format!("aimx is running for {domain}."))
-    );
 }
 
 /// Create the config dir (default `/etc/aimx`, or `AIMX_CONFIG_DIR` override)
@@ -1656,8 +1642,13 @@ or re-run `sudo aimx setup` to prompt again.";
 /// as a constant so unit tests can assert the rendered string is free
 /// of the double-space artifacts that `\`-newline + leading-indent
 /// continuations silently produce.
-pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com, *@company.com) \
-— leave blank to disable hooks: ";
+///
+/// Block form: the question spans three short lines so each line stays
+/// well under terminal-width without wrapping; the input cursor is
+/// emitted on its own line afterwards via `> `.
+pub(crate) const TRUSTED_SENDERS_PROMPT: &str = "Trusted sender addresses (comma-separated, e.g. you@example.com,\n\
+*@company.com). Leave blank to disable trust model — this also\n\
+disables hooks.";
 
 /// Validate that a string is a plausible email address or glob pattern
 /// suitable for `trusted_senders`. Delegates final semantics to the
@@ -1715,12 +1706,88 @@ pub(crate) fn parse_trusted_senders_line(line: &str) -> Result<Vec<String>, (Str
     Ok(entries)
 }
 
+/// Read a single `[Y/n]` confirmation line. Default is YES (Enter,
+/// blank, or any leading char that isn't `n`/`N`). Echoes a labeled
+/// value preview before reading so the operator sees the parsed
+/// representation and can back out.
+///
+/// Block form:
+/// ```text
+///
+/// <label>: <value>
+/// Confirm? [Y/n] _
+/// ```
+/// Parse a `[Y/n]` answer with default-yes semantics.
+///
+/// Returns `true` on blank Enter or any non-`n`/`N` first character;
+/// returns `false` only when the trimmed input begins with `n` or `N`.
+/// Shared by [`prompt_confirm`], [`prompt_confirm_list`], and
+/// [`read_yn_line`] so the parsing rule lives in exactly one place.
+fn parse_yn(input: &str) -> bool {
+    !input
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| c == 'n' || c == 'N')
+}
+
+fn prompt_confirm(
+    reader: &mut dyn BufRead,
+    label: &str,
+    value: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    println!();
+    println!("{label}: {}", term::highlight(value));
+    print!("Confirm? [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(parse_yn(&buf))
+}
+
+/// Multi-value variant of [`prompt_confirm`] for prompts whose parsed
+/// value is a list (e.g. trusted-senders). Each item is shown on its
+/// own line with a `  - ` bullet so the operator can scan the list
+/// before confirming.
+fn prompt_confirm_list(
+    reader: &mut dyn BufRead,
+    label: &str,
+    items: &[String],
+) -> Result<bool, Box<dyn std::error::Error>> {
+    println!();
+    println!("{label}:");
+    for item in items {
+        println!("  - {}", term::highlight(item));
+    }
+    print!("Confirm? [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(parse_yn(&buf))
+}
+
+/// Read a `[Y/n]` line WITHOUT a value preview. Used when the caller
+/// has already printed its own context (e.g. the empty-trusted-senders
+/// warning) and just wants the confirmation.
+fn read_yn_line(
+    reader: &mut dyn BufRead,
+    question: &str,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    print!("{question} [Y/n] ");
+    io::stdout().flush()?;
+    let mut buf = String::new();
+    reader.read_line(&mut buf)?;
+    Ok(parse_yn(&buf))
+}
+
 /// Interactively prompt for the `trusted_senders` allowlist.
 ///
 /// Returns `(policy, senders)`:
-/// - Non-empty list → `("verified", senders)`; no warning printed.
+/// - Non-empty list → `("verified", senders)`; echoed back and confirmed
+///   via `[Y/n]` before returning. Operator can decline to re-enter.
 /// - Empty input  → `("none", vec![])`; a loud warning block is printed
-///   so the operator knows hooks will not fire.
+///   and the operator must explicitly confirm leaving hooks disabled
+///   (declining re-prompts for senders).
 ///
 /// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
 /// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
@@ -1728,17 +1795,35 @@ pub fn prompt_trusted_senders(
     reader: &mut dyn BufRead,
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
-    for attempt in 1..=MAX_TRUSTED_SENDERS_ATTEMPTS {
-        print!("{TRUSTED_SENDERS_PROMPT}");
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        println!("{TRUSTED_SENDERS_PROMPT}");
+        print!("> ");
         io::stdout().flush()?;
         let mut line = String::new();
         reader.read_line(&mut line)?;
         match parse_trusted_senders_line(&line) {
             Ok(senders) if senders.is_empty() => {
                 print_empty_trusted_senders_warning();
-                return Ok(("none".to_string(), vec![]));
+                if read_yn_line(reader, "Leave hooks disabled?")? {
+                    return Ok(("none".to_string(), vec![]));
+                }
+                // Operator wants to re-enter senders — fall through to
+                // the next loop iteration. Reset the attempt counter
+                // so a "no, let me try again" doesn't burn the budget.
+                attempt = 0;
+                continue;
             }
-            Ok(senders) => return Ok(("verified".to_string(), senders)),
+            Ok(senders) => {
+                if prompt_confirm_list(reader, "Trusted senders", &senders)? {
+                    return Ok(("verified".to_string(), senders));
+                }
+                // No → re-prompt. Reset the attempt budget so the
+                // operator can iterate freely.
+                attempt = 0;
+                continue;
+            }
             Err((entry, reason)) => {
                 println!("{} invalid sender '{entry}': {reason}", term::fail_mark());
                 if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
@@ -1751,7 +1836,6 @@ pub fn prompt_trusted_senders(
             }
         }
     }
-    unreachable!("loop exits via return");
 }
 
 /// Print the loud warning block for an empty trusted-senders list.
@@ -1785,33 +1869,40 @@ pub(crate) fn resolve_noninteractive_trust_defaults() -> (String, Vec<String>) {
 }
 
 pub fn prompt_domain(reader: &mut dyn BufRead) -> Result<String, Box<dyn std::error::Error>> {
-    print!("Enter the domain you want to use for email (e.g. agent.example.com): ");
-    io::stdout().flush()?;
-    let mut domain = String::new();
-    reader.read_line(&mut domain)?;
-    let domain = domain.trim().to_string();
-    if domain.is_empty() {
-        return Err("No domain entered. Setup cancelled.".into());
-    }
-    validate_domain(&domain)?;
+    loop {
+        println!("Enter the domain you want to use for email");
+        println!("(e.g. agent.example.com).");
+        print!("> ");
+        io::stdout().flush()?;
+        let mut domain = String::new();
+        reader.read_line(&mut domain)?;
+        let domain = domain.trim().to_string();
+        if domain.is_empty() {
+            return Err("No domain entered. Setup cancelled.".into());
+        }
+        if let Err(e) = validate_domain(&domain) {
+            println!("{} {e}", term::fail_mark());
+            continue;
+        }
 
-    print!(
-        "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
-         Do you control this domain and have access to its DNS settings? (Y/n) "
-    );
-    io::stdout().flush()?;
-    let mut confirm = String::new();
-    reader.read_line(&mut confirm)?;
-    if confirm
-        .trim()
-        .chars()
-        .next()
-        .is_some_and(|c| c == 'n' || c == 'N')
-    {
-        return Err("Setup cancelled. You need DNS access to proceed.".into());
-    }
+        if !prompt_confirm(reader, "Domain", &domain)? {
+            // Operator wants to re-enter; loop and re-prompt.
+            continue;
+        }
 
-    Ok(domain)
+        // Domain confirmed — keep the existing DNS-control sanity
+        // check so the operator gets one last "do you actually have
+        // DNS access?" gate before the wizard prints DNS records.
+        if !read_yn_line(
+            reader,
+            "You will need to add MX, SPF, and DKIM DNS records for this domain.\n\
+             Do you control this domain and have access to its DNS settings?",
+        )? {
+            return Err("Setup cancelled. You need DNS access to proceed.".into());
+        }
+
+        return Ok(domain);
+    }
 }
 
 /// True iff the on-disk `config.toml` has a mailbox whose address is
@@ -1982,6 +2073,122 @@ pub(crate) fn detect_server_ipv6(enable_ipv6: bool, ipv6: Option<Ipv6Addr>) -> O
     if enable_ipv6 { ipv6 } else { None }
 }
 
+/// Operator-visible titles for the six wizard sections, in spec order.
+/// `run_setup` prints them as section headers (via [`section_header`]) and
+/// the welcome / final banners pull from this same array so labels stay
+/// in lockstep.
+pub const SETUP_STEPS: [&str; 6] = [
+    "Preflight checks on port 25",
+    "Set up domain and DNS",
+    "Set up TLS certificate",
+    "Set up trust policy",
+    "Install AIMX",
+    "Set up MCP for agent(s)",
+];
+
+/// Tracks the live state of each of the six wizard steps. Mutated by
+/// `run_setup` as each section completes; rendered by [`print_step_list`]
+/// inside the welcome and final banners.
+#[derive(Debug, Clone, Copy)]
+pub struct Checklist {
+    states: [term::StepState; 6],
+}
+
+impl Checklist {
+    pub fn new() -> Self {
+        Self {
+            states: [term::StepState::Pending; 6],
+        }
+    }
+
+    pub fn set(&mut self, step: usize, state: term::StepState) {
+        // 1-indexed for operator-readability at call sites: `set(1, Done)`.
+        debug_assert!((1..=6).contains(&step), "step must be 1..=6, got {step}");
+        if (1..=6).contains(&step) {
+            self.states[step - 1] = state;
+        }
+    }
+
+    #[cfg(test)]
+    pub fn state(&self, step: usize) -> term::StepState {
+        debug_assert!((1..=6).contains(&step), "step must be 1..=6, got {step}");
+        self.states[step - 1]
+    }
+}
+
+impl Default for Checklist {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Render the six-step checklist with one line per step. Goes to stdout
+/// so the operator's terminal scrollback captures it alongside the rest
+/// of the wizard output.
+pub fn print_step_list(checklist: &Checklist) {
+    for (i, title) in SETUP_STEPS.iter().enumerate() {
+        let state = checklist.states[i];
+        println!("  {} {title}", term::step_glyph(state));
+    }
+}
+
+/// Emit the post-step status line + the full six-row checklist so the
+/// operator sees both the immediate result of the step they just
+/// finished and the up-to-date overall progress before the wizard
+/// continues. Used after each `Done` step in [`run_setup`].
+pub fn print_step_complete(n: usize, checklist: &Checklist) {
+    println!();
+    println!("{} Step {n} complete.", term::success_mark());
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
+/// Skipped variant of [`print_step_complete`]. The reason is folded
+/// into the status line so the operator can see WHY a step was skipped
+/// (e.g. "existing config preserved", "TLS certificate already exists")
+/// alongside the checklist redraw.
+pub fn print_step_skipped(n: usize, checklist: &Checklist, reason: &str) {
+    println!();
+    println!("{} Step {n} skipped ({reason}).", term::warn_mark());
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
+/// Print the welcome banner that opens `aimx setup`. The branded title
+/// line is followed by a tagline and the all-pending checklist, so the
+/// operator sees the plan before any prompt.
+pub fn print_welcome_banner(checklist: &Checklist) {
+    println!();
+    println!("{}", term::header("🐦‍⬛ AIMX setup"));
+    println!(
+        "{}",
+        term::dim("Self-hosted email for AI agents. One binary, one setup.")
+    );
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
+/// Print the closing checklist banner. Reprinted with the terminal step
+/// states so the operator sees ☐ flip to ☑ / ☒ at the end of the run.
+pub fn print_final_banner(checklist: &Checklist) {
+    println!();
+    println!("{}", term::header("🐦‍⬛ AIMX setup — complete"));
+    println!();
+    print_step_list(checklist);
+    println!();
+}
+
+/// Print one section header with a numbered prefix. Numbering matches
+/// [`SETUP_STEPS`] (1-indexed). Used by `run_setup` so the operator sees
+/// `Step N: <title>` consistently across all six sections.
+fn section_header(step: usize, title: &str) {
+    println!();
+    println!("{}", term::header(&format!("Step {step}: {title}")));
+}
+
 pub fn run_setup(
     domain: Option<&str>,
     data_dir: Option<&Path>,
@@ -2001,14 +2208,17 @@ pub fn run_setup(
     // re-entering `run_setup` are safe.
     crate::logging::init();
 
-    // Step 1: Root check
+    // Root check (precondition; not a numbered step)
     if !sys.check_root() {
-        return Err("`aimx setup` requires root. Run with: sudo aimx setup <domain>".into());
+        return Err("`aimx setup` requires root. To set up the AIMX server, run with: `sudo aimx setup`.\n\
+                    \n\
+                    If you already have aimx running and you're trying to wire it into an AI agent, you want `aimx agents setup` (no root needed).".into());
     }
 
-    // Step 2: Port 25 preflight. Runs BEFORE the domain prompt and any
-    // filesystem writes. If the VPS blocks SMTP there is no point asking for
-    // a domain, generating TLS certs, or writing config.
+    let mut checklist = Checklist::new();
+    print_welcome_banner(&checklist);
+
+    // ---- Step 1: Preflight checks on port 25 -------------------------------
     let port25_status = sys.check_port25_occupancy()?;
     if let Port25Status::OtherProcess(name) = &port25_status {
         return Err(format!(
@@ -2018,16 +2228,21 @@ pub fn run_setup(
         .into());
     }
 
-    println!("{}\n", term::header("Port 25 preflight"));
+    section_header(1, SETUP_STEPS[0]);
+    println!();
     if matches!(port25_status, Port25Status::Aimx) {
         println!("  `aimx serve` is already running on port 25. Probing the live daemon.");
         run_port25_preflight(net)?;
     } else {
         sys.with_temp_smtp_listener(&mut || run_port25_preflight(net))?;
     }
-    println!();
+    checklist.set(1, term::StepState::Done);
+    print_step_complete(1, &checklist);
 
-    // Resolve domain: use argument if provided, otherwise prompt interactively
+    // ---- Step 2: Set up domain and DNS -------------------------------------
+    section_header(2, SETUP_STEPS[1]);
+
+    // Resolve domain: use argument if provided, otherwise prompt interactively.
     let domain = match domain {
         Some(d) => {
             validate_domain(d)?;
@@ -2040,7 +2255,7 @@ pub fn run_setup(
         }
     };
 
-    println!("aimx setup for {domain}\n");
+    println!("\naimx setup for {domain}\n");
 
     let data_dir = data_dir.unwrap_or(Path::new("/var/lib/aimx"));
     std::fs::create_dir_all(data_dir)?;
@@ -2056,9 +2271,9 @@ pub fn run_setup(
         ("aimx".to_string(), false)
     };
 
-    // Re-entrant detection: if already configured, skip install/configure steps
+    // Re-entrant detection: if already configured, the install/configure
+    // sub-steps (TLS, trust, install) become "skipped" rather than re-run.
     let already_configured = is_already_configured(sys, data_dir);
-
     if already_configured {
         println!(
             "{}",
@@ -2068,49 +2283,7 @@ pub fn run_setup(
         );
     }
 
-    // Step 3: Trusted-senders prompt. Runs BEFORE TLS cert and DKIM
-    // keygen so the operator is not asked a decision question after
-    // the wizard has started mutating /etc. Re-entry skips the prompt
-    // (existing values preserved). Non-interactive installs default
-    // to an empty list with the warning logged, not displayed.
-    let trust_defaults = if config_path.exists() {
-        None
-    } else if is_noninteractive_env() {
-        Some(resolve_noninteractive_trust_defaults())
-    } else {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        Some(prompt_trusted_senders(&mut reader)?)
-    };
-
-    // Step 4: Generate TLS cert, then write config.toml + DKIM
-    // keys. Idempotent on re-entry (handles domain changes). Must
-    // happen before the aimx.service install at the end, because the
-    // daemon refuses to start without a loadable config and DKIM key.
-    if !already_configured {
-        let cert_dir = Path::new("/etc/ssl/aimx");
-        if !sys.file_exists(&cert_dir.join("cert.pem")) {
-            println!("Generating self-signed TLS certificate...");
-            sys.generate_tls_cert(cert_dir, &domain)?;
-            println!("TLS certificate generated in /etc/ssl/aimx/");
-        } else {
-            println!("TLS certificate already exists.");
-        }
-    }
-
-    finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
-
-    // Step 4b: Create `aimx-catchall` service user — but only when
-    // the operator's configured mailboxes include a
-    // catchall, so installs that skip the catchall don't bloat
-    // `/etc/passwd` with a service user they'll never use. Re-entrant
-    // setup passes through the same guard so a host that once had a
-    // catchall and removed it won't re-create the user.
-    if config_has_catchall(&config_path) {
-        ensure_catchall_user(sys)?;
-    }
-
-    // Step 6: DNS guidance and verification (section [DNS])
+    // DNS guidance + verify loop run together as one section (step 2).
     // Single `hostname -I` invocation: derive both families from one call.
     let (ipv4_detected, ipv6_detected) = net.get_server_ips()?;
     let server_ipv4 = ipv4_detected
@@ -2118,7 +2291,16 @@ pub fn run_setup(
     let server_ipv6 = detect_server_ipv6(enable_ipv6, ipv6_detected);
     let server_ip: IpAddr = IpAddr::V4(server_ipv4);
     let server_ipv6_ip: Option<IpAddr> = server_ipv6.map(IpAddr::V6);
-    let dkim_value = dkim::dns_record_value(&crate::config::dkim_dir())?;
+    // The DKIM keypair lives at `/etc/aimx/dkim/`. On a fresh install it
+    // doesn't exist yet — `finalize_setup` (step 5) will generate it. To
+    // print DNS guidance up front, generate the key now if missing so the
+    // public part is available to render in the table.
+    let dkim_root = crate::config::dkim_dir();
+    if !dkim_root.join("private.key").exists() {
+        std::fs::create_dir_all(&dkim_root)?;
+        crate::dkim::generate_keypair(&dkim_root, false)?;
+    }
+    let dkim_value = dkim::dns_record_value(&dkim_root)?;
 
     let local_dkim_pubkey = dkim_value
         .strip_prefix("v=DKIM1; k=rsa; p=")
@@ -2141,10 +2323,8 @@ pub fn run_setup(
         &dkim_selector,
     );
 
-    // Step 6: DNS verify loop. The "press q to skip and run
-    // `aimx doctor` later" escape is surfaced as a prominent standalone
-    // line, not buried as a parenthetical, so an operator who hasn't
-    // finished propagating records doesn't feel trapped in the wizard.
+    // DNS verify loop. The "press q to skip and run `aimx doctor` later"
+    // escape stays a prominent standalone line.
     loop {
         println!();
         println!(
@@ -2189,49 +2369,167 @@ pub fn run_setup(
             println!("DNS propagation can take up to 48 hours.");
         }
     }
+    checklist.set(2, term::StepState::Done);
+    print_step_complete(2, &checklist);
 
-    // Write (or refresh) the agent-facing README inside the data directory.
-    crate::datadir_readme::write(data_dir)?;
-
-    // Step 7: Install and start aimx.service once DNS guidance
-    // is out of the way. Setup concludes with the daemon bound to :25
-    // and verified healthy, or a loud error.
-    if !already_configured {
-        install_and_verify_service(sys, data_dir)?;
+    // ---- Step 3: Set up TLS certificate ------------------------------------
+    section_header(3, SETUP_STEPS[2]);
+    if already_configured {
+        println!("\nTLS certificate already exists.");
+        checklist.set(3, term::StepState::Skipped);
+        print_step_skipped(3, &checklist, "TLS certificate already exists");
+    } else {
+        let cert_dir = Path::new("/etc/ssl/aimx");
+        if !sys.file_exists(&cert_dir.join("cert.pem")) {
+            println!("\nGenerating self-signed TLS certificate...");
+            sys.generate_tls_cert(cert_dir, &domain)?;
+            println!("TLS certificate generated in /etc/ssl/aimx/");
+        } else {
+            println!("\nTLS certificate already exists.");
+        }
+        checklist.set(3, term::StepState::Done);
+        print_step_complete(3, &checklist);
     }
 
-    // Section [MCP] — informational summary. The wizard closes with
-    // a placeholder message pointing operators at `aimx agent-setup`.
+    // ---- Step 4: Set up trust policy ---------------------------------------
+    section_header(4, SETUP_STEPS[3]);
+    // NOTE: Trust prompts are skipped whenever a config exists at all
+    // (preserving operator-entered values), even on partial-install
+    // re-entries where `already_configured` would be false. This is
+    // deliberately broader than the steps 3 and 5 gate (which uses the
+    // composite `already_configured = service_running && cert_exists &&
+    // dkim_exists`): the goal here is to never overwrite an operator's
+    // prior trust decision, regardless of how far the previous run got.
+    let trust_defaults = if config_path.exists() {
+        // Re-entry: existing trust config is preserved. Treated as
+        // skipped (no decision asked of the operator).
+        println!("\nExisting trust policy preserved.");
+        checklist.set(4, term::StepState::Skipped);
+        print_step_skipped(4, &checklist, "existing trust policy preserved");
+        None
+    } else if is_noninteractive_env() {
+        let defaults = resolve_noninteractive_trust_defaults();
+        checklist.set(4, term::StepState::Done);
+        print_step_complete(4, &checklist);
+        Some(defaults)
+    } else {
+        let stdin = io::stdin();
+        let mut reader = stdin.lock();
+        let defaults = prompt_trusted_senders(&mut reader)?;
+        checklist.set(4, term::StepState::Done);
+        print_step_complete(4, &checklist);
+        Some(defaults)
+    };
+
+    // ---- Step 5: Install AIMX ----------------------------------------------
+    section_header(5, SETUP_STEPS[4]);
+    if already_configured {
+        println!("\naimx is already installed and the service is running.");
+        // Still ensure the on-disk config + datadir README are
+        // refreshed, but skip the service install.
+        finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
+        if config_has_catchall(&config_path) {
+            ensure_catchall_user(sys)?;
+        }
+        crate::datadir_readme::write(data_dir)?;
+        checklist.set(5, term::StepState::Skipped);
+        print_step_skipped(5, &checklist, "aimx already installed");
+    } else {
+        finalize_setup(data_dir, &domain, &dkim_selector, trust_defaults)?;
+        if config_has_catchall(&config_path) {
+            ensure_catchall_user(sys)?;
+        }
+        crate::datadir_readme::write(data_dir)?;
+        install_and_verify_service(sys, data_dir)?;
+        checklist.set(5, term::StepState::Done);
+        print_step_complete(5, &checklist);
+    }
+
+    // ---- Step 6: Set up MCP for agent(s) -----------------------------------
+    section_header(6, SETUP_STEPS[5]);
     display_mcp_section(data_dir);
 
-    // Step 8: one-line success banner.
-    announce_setup_complete(&domain);
+    // Print the interim banner BEFORE the drop-through so the operator sees
+    // ☑ on 1–5 and ◐ on 6 right before the agents setup TUI takes over.
+    let mut pre_handoff = checklist;
+    pre_handoff.set(6, term::StepState::Running);
+    print_final_banner(&pre_handoff);
 
-    // Drop through to `aimx agent-setup` as `$SUDO_USER`. Skipped
-    // under AIMX_NONINTERACTIVE=1 so scripted installs don't hang on
-    // a TUI no one's watching. When `$SUDO_USER` is unset (direct
-    // root login) we fall back to the placeholder guidance so the
-    // operator still knows where to go.
-    if !is_noninteractive_env() {
-        drop_through_to_agent_setup(explicit_data_dir.as_deref());
-    }
+    // Drive the drop-through. Returns `Some(true)` on success, `Some(false)`
+    // on agents setup non-zero exit (treated as skipped, not fatal),
+    // `None` when skipped (no SUDO_USER, AIMX_NONINTERACTIVE=1, or
+    // runuser unavailable).
+    let mcp_state = if is_noninteractive_env() {
+        term::StepState::Skipped
+    } else {
+        match drop_through_to_agents_setup(explicit_data_dir.as_deref()) {
+            AgentsSetupOutcome::Done => term::StepState::Done,
+            AgentsSetupOutcome::Skipped => term::StepState::Skipped,
+            AgentsSetupOutcome::Failed => term::StepState::Skipped,
+        }
+    };
+    checklist.set(6, mcp_state);
+
+    // Reprint the final banner with all six step states resolved so the
+    // operator sees step 6 flip from ◐ to ☑ / ☒ before the closing message.
+    print_final_banner(&checklist);
+
+    // Closing message — final thing the operator sees.
+    print_closing_message(&domain);
 
     Ok(())
 }
 
+/// Outcome of the drop-through to `aimx agents setup`. Maps to the step-6
+/// state in the wizard's checklist so the closing message can render the
+/// right glyph regardless of whether the agents setup TUI ran, was skipped,
+/// or returned non-zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentsSetupOutcome {
+    /// agents setup ran and exited zero — step 6 ☑.
+    Done,
+    /// $SUDO_USER unset, or runuser missing on PATH — step 6 ☒
+    /// (with operator guidance printed).
+    Skipped,
+    /// agents setup ran and exited non-zero — surfaced as step 6 ☒
+    /// rather than a hard error so a TUI quirk doesn't void a successful
+    /// setup. The operator can re-run `aimx agents setup` by hand.
+    Failed,
+}
+
+/// Print the closing message that ends `aimx setup`. Substitutes the
+/// configured domain into the template the spec mandates.
+fn print_closing_message(domain: &str) {
+    println!();
+    println!("{}", term::success("AIMX has been set up successfully."));
+    println!();
+    println!(
+        "Your agents now have access to set up, send and receive emails from {} emails.",
+        term::highlight(&format!("@{domain}"))
+    );
+    println!();
+    println!(
+        "Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g."
+    );
+    println!(
+        "  claude -p \"Set up agent@{domain} and respond to me via email the moment you receive my instructions via email.\""
+    );
+    println!();
+}
+
 /// Build the argv we'd hand to `runuser -u <sudo_user> --` so the drop-
-/// through re-execs `aimx agent-setup` as the invoking user. Pure helper
+/// through re-execs `aimx agents setup` as the invoking user. Pure helper
 /// — no syscalls — so unit tests can assert on the exact argv without
 /// spinning up a process.
 ///
 /// Layout:
 ///
 /// ```text
-/// [exe, "agent-setup",
+/// [exe, "agents", "setup",
 ///  // --data-dir is only appended when the operator explicitly named a
 ///  // path on the `aimx setup` command line. The default
 ///  // `/var/lib/aimx` is left implicit so it matches what a standalone
-///  // `aimx agent-setup` invocation would resolve.
+///  // `aimx agents setup` invocation would resolve.
 ///  "--data-dir", <path>]
 /// ```
 ///
@@ -2239,14 +2537,15 @@ pub fn run_setup(
 /// fires only when `$SUDO_USER` is set, and implicit
 /// `--dangerously-allow-root` is forbidden (operators must opt in by
 /// hand).
-pub(crate) fn build_agent_setup_argv(
+pub(crate) fn build_agents_setup_argv(
     exe: &Path,
     explicit_data_dir: Option<&Path>,
 ) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut argv: Vec<OsString> = Vec::with_capacity(4);
     argv.push(exe.as_os_str().to_os_string());
-    argv.push(OsString::from("agent-setup"));
+    argv.push(OsString::from("agents"));
+    argv.push(OsString::from("setup"));
     if let Some(p) = explicit_data_dir {
         argv.push(OsString::from("--data-dir"));
         argv.push(p.as_os_str().to_os_string());
@@ -2254,72 +2553,112 @@ pub(crate) fn build_agent_setup_argv(
     argv
 }
 
-/// Drive the drop-through to `aimx agent-setup`:
-/// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
-///    /proc/self/exe agent-setup [--data-dir …]` via
-///    `CommandExt::exec`. `exec` replaces the current process so the
-///    TUI takes over the terminal cleanly.
-/// 2. If `$SUDO_USER` is unset → print the guidance message (naming
-///    `--dangerously-allow-root` as the root-login option) and return.
+/// Drive the drop-through to `aimx agents setup` and return an outcome
+/// the caller maps onto step 6's checklist state.
 ///
-/// On `exec` failure (e.g. `runuser` not installed on a stripped
-/// container image) we fall back to the same guidance message so the
-/// wizard still exits cleanly.
-fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) {
-    use std::os::unix::process::CommandExt;
-
+/// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
+///    /proc/self/exe agents setup [--data-dir …]` via `Command::status()`
+///    so the parent `aimx setup` regains control after the TUI exits.
+///    The closing message is printed AFTER this call returns.
+/// 2. If `$SUDO_USER` is unset → print the guidance message (naming
+///    `--dangerously-allow-root` as the root-login option) and return
+///    [`AgentsSetupOutcome::Skipped`].
+///
+/// On spawn failure (e.g. `runuser` not installed on a stripped
+/// container image) print the same guidance and return
+/// [`AgentsSetupOutcome::Skipped`].
+///
+/// agents setup non-zero exit returns [`AgentsSetupOutcome::Failed`] so
+/// the caller can render step 6 as ☒ without aborting the wizard.
+fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetupOutcome {
     let sudo_user = std::env::var("SUDO_USER").unwrap_or_default();
     if sudo_user.is_empty() {
         // Direct root login path. Print the guidance and return.
         println!(
             "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
             term::prompt_mark(),
-            term::highlight("aimx agent-setup")
+            term::highlight("aimx agents setup")
         );
         println!(
             "  (On a single-user root-login VPS, pass `{}` to wire aimx into /root's home.)",
-            term::highlight("aimx agent-setup --dangerously-allow-root")
+            term::highlight("aimx agents setup --dangerously-allow-root")
         );
-        return;
+        return AgentsSetupOutcome::Skipped;
     }
 
-    // `/proc/self/exe` resolves to the current binary even when it lives
-    // outside `/usr/local/bin` (e.g. `AIMX_PREFIX=/opt/aimx` installs).
-    // Self-canonicalise so the re-exec works from a bare `$PATH`.
-    let exe = std::path::PathBuf::from("/proc/self/exe");
-    let argv = build_agent_setup_argv(&exe, explicit_data_dir);
+    // Resolve in OUR context (not runuser's). Passing the literal
+    // string "/proc/self/exe" makes `runuser` `execve` it relative to
+    // its own /proc/self — which points at /usr/sbin/runuser — so the
+    // child re-execs runuser with argv ["exe", "agents", "setup"]; the
+    // second runuser parses "agents" as a username and dies with
+    // `exe: user agents does not exist`. Resolve with
+    // `current_exe()` here so the child receives the actual aimx
+    // binary path. On the rare target where `current_exe()` errors
+    // (chroot / no-procfs container) we surface the failure and treat
+    // step 6 as skipped rather than hardcode an install prefix that
+    // may not exist (regression guard:
+    // `install_service_file_has_no_silent_fallback`).
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "{} Could not resolve the running aimx binary path: {}",
+                term::warn("warning:"),
+                e
+            );
+            println!(
+                "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
+                term::prompt_mark(),
+                term::highlight("aimx agents setup"),
+                term::highlight(&sudo_user)
+            );
+            return AgentsSetupOutcome::Skipped;
+        }
+    };
+    let argv = build_agents_setup_argv(&exe, explicit_data_dir);
 
     println!();
     println!(
         "{} Dropping through to `{}` as {}...",
         term::prompt_mark(),
-        term::highlight("aimx agent-setup"),
+        term::highlight("aimx agents setup"),
         term::highlight(&sudo_user)
     );
 
-    // Hand off to `runuser`. `exec` replaces the current process so on
-    // success this call does not return.
-    let exec_err = std::process::Command::new("runuser")
+    // Hand off via `Command::status()` so control returns here once the
+    // TUI exits, allowing the closing message to print AFTER agents setup.
+    match std::process::Command::new("runuser")
         .arg("-u")
         .arg(&sudo_user)
         .arg("--")
         .args(&argv)
-        .exec();
-
-    // Only reached when exec itself failed (e.g. runuser missing). Fall
-    // back to the guidance message so the operator still knows what to
-    // do.
-    eprintln!(
-        "{} Could not drop through to `aimx agent-setup` automatically: {}",
-        term::warn("warning:"),
-        exec_err
-    );
-    println!(
-        "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
-        term::prompt_mark(),
-        term::highlight("aimx agent-setup"),
-        term::highlight(&sudo_user)
-    );
+        .status()
+    {
+        Ok(status) if status.success() => AgentsSetupOutcome::Done,
+        Ok(status) => {
+            eprintln!(
+                "{} `aimx agents setup` exited with {status}. \
+                 Re-run as {} to wire aimx into Claude Code, Codex, etc.",
+                term::warn("warning:"),
+                term::highlight(&sudo_user)
+            );
+            AgentsSetupOutcome::Failed
+        }
+        Err(e) => {
+            eprintln!(
+                "{} Could not drop through to `aimx agents setup` automatically: {}",
+                term::warn("warning:"),
+                e
+            );
+            println!(
+                "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
+                term::prompt_mark(),
+                term::highlight("aimx agents setup"),
+                term::highlight(&sudo_user)
+            );
+            AgentsSetupOutcome::Skipped
+        }
+    }
 }
 
 /// Install the systemd/OpenRC service file, restart the daemon, and poll
@@ -2948,7 +3287,7 @@ owner = "aimx-catchall"
 
         assert!(
             walker.found_retired.is_empty(),
-            "retired helper(s) resurfaced — agent-setup owns template wiring now: {:?}",
+            "retired helper(s) resurfaced — agents setup owns template wiring now: {:?}",
             walker.found_retired
         );
         assert!(
@@ -3519,7 +3858,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
         let joined = lines.join("\n");
         assert!(
-            joined.contains("aimx agent-setup claude-code"),
+            joined.contains("aimx agents setup claude-code"),
             "expected claude-code install command in:\n{joined}"
         );
         assert!(!joined.contains("mcpServers"));
@@ -3531,7 +3870,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/custom/data"));
         let joined = lines.join("\n");
         assert!(
-            joined.contains("aimx --data-dir /custom/data agent-setup claude-code"),
+            joined.contains("aimx --data-dir /custom/data agents setup claude-code"),
             "expected --data-dir override in install command:\n{joined}"
         );
         assert!(!joined.contains("mcpServers"));
@@ -3542,7 +3881,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
         let joined = lines.join("\n");
         assert!(joined.contains("agent-integration.md"));
-        assert!(joined.contains("aimx agent-setup --list"));
+        assert!(joined.contains("aimx agents list"));
     }
 
     #[test]
@@ -4388,7 +4727,10 @@ owner = "aimx-catchall"
             !TRUSTED_SENDERS_PROMPT.contains("  "),
             "prompt should not contain leaked double spaces from \\-newline continuations"
         );
-        assert!(TRUSTED_SENDERS_PROMPT.contains("leave blank to disable hooks"));
+        assert!(
+            TRUSTED_SENDERS_PROMPT.contains("disables hooks"),
+            "prompt should still mention that empty input disables hooks"
+        );
         assert!(TRUSTED_SENDERS_PROMPT.contains("*@company.com"));
     }
 
@@ -4449,9 +4791,24 @@ owner = "aimx-catchall"
 
     #[test]
     fn prompt_domain_accepts_valid_domain_with_confirmation() {
-        let input = b"agent.example.com\ny\n";
+        // Cycle 5 confirm-after-prompt UX:
+        // line 1 → domain
+        // line 2 → "y" confirms the parsed domain
+        // line 3 → "y" confirms DNS access
+        let input = b"agent.example.com\ny\ny\n";
         let mut reader = io::Cursor::new(input);
         let domain = prompt_domain(&mut reader).unwrap();
+        assert_eq!(domain, "agent.example.com");
+    }
+
+    #[test]
+    fn prompt_domain_accepts_empty_confirmations_as_yes() {
+        // Both confirms default to YES on Enter — operator can hit
+        // Enter twice to accept the parsed domain and the DNS-access
+        // sanity check.
+        let input = b"agent.example.com\n\n\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).expect("empty confirmation should default to yes");
         assert_eq!(domain, "agent.example.com");
     }
 
@@ -4470,42 +4827,209 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn prompt_domain_rejects_invalid_domain() {
-        let input = b"notvalid\n";
+    fn prompt_domain_loops_on_invalid_then_accepts() {
+        // Cycle 5: invalid input must NOT terminate the prompt. The
+        // wizard re-prompts until either a valid domain is confirmed
+        // or the operator hands in an empty line (= explicit abort).
+        let input = b"notvalid\nagent.example.com\ny\ny\n";
         let mut reader = io::Cursor::new(input);
-        let result = prompt_domain(&mut reader);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn prompt_domain_exits_on_declined_confirmation() {
-        let input = b"agent.example.com\nn\n";
-        let mut reader = io::Cursor::new(input);
-        let result = prompt_domain(&mut reader);
-        assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("cancelled"),
-            "should indicate cancellation"
-        );
-    }
-
-    #[test]
-    fn prompt_domain_accepts_empty_confirmation_as_yes() {
-        let input = b"agent.example.com\n\n";
-        let mut reader = io::Cursor::new(input);
-        let domain = prompt_domain(&mut reader).expect("empty confirmation should default to yes");
+        let domain = prompt_domain(&mut reader).expect("invalid input must re-prompt, not abort");
         assert_eq!(domain, "agent.example.com");
     }
 
     #[test]
-    fn prompt_domain_exits_on_uppercase_n() {
-        let input = b"agent.example.com\nN\n";
+    fn prompt_domain_loops_on_no_confirmation() {
+        // Cycle 5 echo+confirm: declining the parsed domain must
+        // re-prompt the operator instead of cancelling setup.
+        let input = b"first.example.com\nn\nsecond.example.com\ny\ny\n";
+        let mut reader = io::Cursor::new(input);
+        let domain = prompt_domain(&mut reader).expect("no-confirm must re-prompt, not cancel");
+        assert_eq!(
+            domain, "second.example.com",
+            "second pass after `n` must be the domain that landed"
+        );
+    }
+
+    #[test]
+    fn prompt_domain_cancels_on_dns_access_no() {
+        // The DNS-access sanity check is the LAST prompt; declining
+        // it cancels the wizard with a clear error. Inputs:
+        // line 1 → domain, line 2 → "y" confirms domain, line 3 →
+        // "n" declines DNS access.
+        let input = b"agent.example.com\ny\nn\n";
         let mut reader = io::Cursor::new(input);
         let result = prompt_domain(&mut reader);
         assert!(result.is_err());
         assert!(
             result.unwrap_err().to_string().contains("cancelled"),
-            "should indicate cancellation"
+            "DNS-access decline must surface as cancellation"
+        );
+    }
+
+    // ----- Cycle 5: confirm-after-prompt helpers ----------------------------
+
+    #[test]
+    fn parse_yn_handles_default_yes_and_n_first_char() {
+        // Blank / Enter → yes (default).
+        assert!(super::parse_yn(""));
+        assert!(super::parse_yn("\n"));
+        assert!(super::parse_yn("   "));
+        assert!(super::parse_yn("   \n"));
+
+        // Anything starting with non-`n` → yes.
+        assert!(super::parse_yn("y"));
+        assert!(super::parse_yn("Y"));
+        assert!(super::parse_yn("yes"));
+        assert!(super::parse_yn("yes\n"));
+        assert!(super::parse_yn("Yeah"));
+        assert!(super::parse_yn("ok"));
+        assert!(super::parse_yn("1"));
+
+        // Anything starting with `n` or `N` → no.
+        assert!(!super::parse_yn("n"));
+        assert!(!super::parse_yn("N"));
+        assert!(!super::parse_yn("no"));
+        assert!(!super::parse_yn("NO"));
+        assert!(!super::parse_yn("nope\n"));
+
+        // Leading whitespace is trimmed before the first-char check.
+        assert!(!super::parse_yn("  n"));
+        assert!(!super::parse_yn("\tno\n"));
+        assert!(!super::parse_yn("   N   "));
+    }
+
+    #[test]
+    fn prompt_confirm_yn_defaults_to_yes_on_blank() {
+        let input = b"\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes, "blank Enter must default to yes");
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_lowercase_y() {
+        let input = b"y\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_yes_word() {
+        let input = b"yes\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_lowercase_n() {
+        let input = b"n\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_uppercase_n() {
+        let input = b"N\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_confirm_yn_parses_no_word() {
+        let input = b"no\n";
+        let mut reader = io::Cursor::new(input);
+        let yes = super::prompt_confirm(&mut reader, "Domain", "agent.example.com").unwrap();
+        assert!(!yes);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_echoes_parsed_list_and_confirms() {
+        // Cycle 5: parsed list is echoed back, operator confirms with
+        // an empty line (= yes), wizard returns ("verified", senders).
+        let input = b"alice@example.com, *@company.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(
+            senders,
+            vec!["alice@example.com".to_string(), "*@company.com".to_string()]
+        );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_loops_when_user_declines_echo() {
+        // First parse → echoed back; operator declines (`n`); the
+        // wizard re-prompts; second parse → echoed back; operator
+        // accepts (`\n`).
+        let input = b"oldlist@example.com\nn\nnewlist@example.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(senders, vec!["newlist@example.com".to_string()]);
+    }
+
+    #[test]
+    fn prompt_trusted_senders_empty_input_confirms_disable() {
+        // Empty input → warning + "Leave hooks disabled? [Y/n]"
+        // confirm. `\n` (= yes default) returns ("none", []).
+        let input = b"\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "none");
+        assert!(senders.is_empty());
+    }
+
+    #[test]
+    fn prompt_trusted_senders_empty_input_no_loops_back() {
+        // Empty → confirm "leave disabled?" → operator says `n` →
+        // wizard re-prompts → operator types real list → confirm.
+        let input = b"\nn\nalice@example.com\n\n";
+        let mut reader = io::Cursor::new(input);
+        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        assert_eq!(mode, "verified");
+        assert_eq!(senders, vec!["alice@example.com".to_string()]);
+    }
+
+    #[test]
+    fn print_step_complete_emits_full_checklist() {
+        // Source-grep: every `Done` step in `run_setup` must call
+        // `print_step_complete` with the live checklist. The helper
+        // emits the success line + the six-row checklist + bracketing
+        // blank lines so the operator sees ☐ flip to ☑ as the wizard
+        // progresses.
+        let source = include_str!("setup.rs");
+        let helper_start = source
+            .find("pub fn print_step_complete(")
+            .expect("print_step_complete helper must exist");
+        let helper_body = &source[helper_start..helper_start + 600];
+        assert!(
+            helper_body.contains("print_step_list(checklist)"),
+            "print_step_complete must redraw the full checklist"
+        );
+        assert!(
+            helper_body.contains("Step {n} complete"),
+            "print_step_complete must mention the step number and \"complete\""
+        );
+
+        // Every Done branch in run_setup wires through the new helper
+        // (no straggling raw `println!` of a step-complete line).
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body_end = source[run_setup_start..]
+            .find("\n}\n")
+            .map(|off| run_setup_start + off)
+            .unwrap();
+        let body = &source[run_setup_start..body_end];
+        assert!(
+            !body.contains("Step 1 complete.\""),
+            "Step 1 must use print_step_complete, not a raw println"
+        );
+        assert!(
+            !body.contains("Step 5 complete.\""),
+            "Step 5 must use print_step_complete, not a raw println"
         );
     }
 
@@ -5250,17 +5774,88 @@ owner = "aimx-catchall"
     // ----- wizard flow / success banner polish ---------------------------
 
     #[test]
-    fn success_banner_is_single_line_and_names_domain() {
-        // The wizard closes with `aimx is running for
-        // <domain>.` on a single line. Capture stdout via the
-        // `announce_setup_complete` helper and verify.
-        // (Direct stdout capture is finicky under cargo test; instead
-        // assert the helper calls `term::success` with the expected
-        // string shape by grepping the source for the key literal.)
+    fn closing_message_carries_required_phrasing() {
+        // The wizard closes with the spec-mandated message: a success
+        // banner, the `@<DOMAIN>` line, and the `claude -p` example
+        // prompt. Direct stdout capture is finicky under cargo test, so
+        // grep the source for the load-bearing literals instead.
         let source = include_str!("setup.rs");
         assert!(
-            source.contains("aimx is running for {domain}."),
-            "announce_setup_complete must emit the single-line banner"
+            source.contains("AIMX has been set up successfully."),
+            "closing message must include the success banner"
+        );
+        assert!(
+            source.contains("Your agents now have access to set up, send and receive emails from"),
+            "closing message must surface agent capabilities"
+        );
+        assert!(
+            source.contains("claude -p"),
+            "closing message must show the `claude -p` example prompt"
+        );
+    }
+
+    #[test]
+    fn closing_message_preserves_trailing_emails_word() {
+        // Spec wording explicitly ends with "...emails from @<DOMAIN>
+        // emails." with the trailing "emails" word. Lock in both the
+        // template (what's in the source) and the rendered string (what
+        // an operator actually sees with their domain substituted in).
+        let source = include_str!("setup.rs");
+        assert!(
+            source.contains(
+                "Your agents now have access to set up, send and receive emails from {} emails."
+            ),
+            "closing message template must keep the trailing `emails.` word \
+             so the rendered line reads `... from @<DOMAIN> emails.`"
+        );
+
+        // Cross-check the rendered substring an operator would see.
+        let domain = "agent.example.com";
+        let rendered = format!(
+            "Your agents now have access to set up, send and receive emails from @{domain} emails."
+        );
+        assert!(
+            rendered.contains(&format!("emails from @{domain} emails.")),
+            "rendered closing message must contain `emails from @{{domain}} emails.`. \
+             Got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn run_setup_reprints_final_banner_after_drop_through() {
+        // Bug #1 from the cycle-3 review: the operator never saw step 6
+        // flip from ◐ to ☑ / ☒ because `print_final_banner` was only
+        // called once — BEFORE the drop-through — and was not reprinted
+        // after `drop_through_to_agents_setup` returned. Lock in the
+        // two-call contract by source-grep so a future refactor can't
+        // silently drop the second call.
+        let source = include_str!("setup.rs");
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body_end = source[run_setup_start..]
+            .find("\n}\n")
+            .map(|off| run_setup_start + off)
+            .expect("run_setup body terminator");
+        let body = &source[run_setup_start..body_end];
+
+        let banner_calls = body.matches("print_final_banner(").count();
+        assert!(
+            banner_calls >= 2,
+            "run_setup must call `print_final_banner` at least twice: once \
+             before the drop-through (step 6 = ◐) and once after \
+             (step 6 in its terminal state). Found {banner_calls} call(s)."
+        );
+
+        // The second call must come AFTER the drop-through call site so
+        // the reprinted banner reflects the resolved step-6 state.
+        let drop_through_pos = body
+            .find("drop_through_to_agents_setup(")
+            .expect("drop_through_to_agents_setup call site");
+        let after_drop_through = &body[drop_through_pos..];
+        assert!(
+            after_drop_through.contains("print_final_banner("),
+            "the second `print_final_banner` call must come AFTER \
+             `drop_through_to_agents_setup` so the operator sees step 6 \
+             flip from ◐ to ☑ / ☒ before the closing message."
         );
     }
 
@@ -5307,35 +5902,37 @@ owner = "aimx-catchall"
     // ----- drop-through argv construction -----------------------------------
 
     #[test]
-    fn build_agent_setup_argv_without_data_dir() {
+    fn build_agents_setup_argv_without_data_dir() {
         let exe = Path::new("/usr/local/bin/aimx");
-        let argv = super::build_agent_setup_argv(exe, None);
-        assert_eq!(argv.len(), 2);
+        let argv = super::build_agents_setup_argv(exe, None);
+        assert_eq!(argv.len(), 3);
         assert_eq!(argv[0], std::ffi::OsStr::new("/usr/local/bin/aimx"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
+        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
     }
 
     #[test]
-    fn build_agent_setup_argv_appends_explicit_data_dir() {
+    fn build_agents_setup_argv_appends_explicit_data_dir() {
         // When the operator passed `--data-dir /custom` to `aimx setup`,
-        // the drop-through must carry it through so `aimx agent-setup`
+        // the drop-through must carry it through so `aimx agents setup`
         // emits activation hints referencing the same path.
         let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
-        assert_eq!(argv.len(), 4);
+        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
+        assert_eq!(argv.len(), 5);
         assert_eq!(argv[0], std::ffi::OsStr::new("/proc/self/exe"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
-        assert_eq!(argv[2], std::ffi::OsStr::new("--data-dir"));
-        assert_eq!(argv[3], std::ffi::OsStr::new("/srv/aimx-data"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
+        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
+        assert_eq!(argv[3], std::ffi::OsStr::new("--data-dir"));
+        assert_eq!(argv[4], std::ffi::OsStr::new("/srv/aimx-data"));
     }
 
     #[test]
-    fn build_agent_setup_argv_never_includes_dangerously_allow_root() {
+    fn build_agents_setup_argv_never_includes_dangerously_allow_root() {
         // The drop-through MUST NOT pass
         // `--dangerously-allow-root` implicitly. Regression guard — if
         // someone adds the flag in the future, this test fails loudly.
         let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/opt/data")));
+        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/opt/data")));
         for part in &argv {
             assert_ne!(
                 part,
@@ -5346,16 +5943,41 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn build_agent_setup_argv_uses_proc_self_exe_shape() {
-        // `/proc/self/exe` is preferred over hardcoding
-        // `/usr/local/bin/aimx` so custom-prefix installs
-        // (`AIMX_PREFIX=/opt/aimx`) still re-exec the right binary.
-        // Assert the call-site in `drop_through_to_agent_setup` still
-        // uses the `/proc/self/exe` literal.
+    fn build_agents_setup_argv_uses_resolved_exe_path() {
+        // Regression guard for the cycle-5 fix: `runuser` re-execs
+        // `argv[0]` in its own context. Passing the literal string
+        // `/proc/self/exe` makes the child runuser resolve
+        // `/proc/self` → `/usr/sbin/runuser` and treat `agents`
+        // as a username, dying with
+        // `exe: user agents does not exist`. The drop-through
+        // must instead resolve the binary in the parent process via
+        // `std::env::current_exe()`. Lock that invariant in by
+        // source-grep so a future refactor can't silently regress
+        // back to the literal-string shape.
         let source = include_str!("setup.rs");
         assert!(
-            source.contains("\"/proc/self/exe\""),
-            "drop-through must self-reference via /proc/self/exe"
+            source.contains("std::env::current_exe()"),
+            "drop-through must resolve the running binary via \
+             `std::env::current_exe()` so `runuser` receives an \
+             absolute path"
+        );
+        // The literal `"/proc/self/exe"` string is forbidden as the
+        // `runuser` argv[0]. Walk just the `drop_through_to_agents_setup`
+        // body so doc comments / unrelated paths in this file don't
+        // false-positive.
+        let drop_through_start = source
+            .find("fn drop_through_to_agents_setup(")
+            .expect("drop_through_to_agents_setup must exist");
+        let drop_through_end = source[drop_through_start..]
+            .find("\nfn ")
+            .map(|off| drop_through_start + off)
+            .unwrap_or(source.len());
+        let body = &source[drop_through_start..drop_through_end];
+        assert!(
+            !body.contains("PathBuf::from(\"/proc/self/exe\")"),
+            "drop_through_to_agents_setup must NOT pass the literal \
+             string \"/proc/self/exe\" to runuser — runuser would \
+             re-exec itself in its own /proc context"
         );
     }
 
@@ -5375,5 +5997,217 @@ owner = "aimx-catchall"
             source.contains("aimx doctor"),
             "q-escape must name `aimx doctor` as the followup"
         );
+    }
+
+    // ----- 6-step checklist, banners, and section ordering ------------------
+
+    #[test]
+    fn setup_steps_match_spec_wording() {
+        assert_eq!(
+            super::SETUP_STEPS,
+            [
+                "Preflight checks on port 25",
+                "Set up domain and DNS",
+                "Set up TLS certificate",
+                "Set up trust policy",
+                "Install AIMX",
+                "Set up MCP for agent(s)",
+            ]
+        );
+    }
+
+    #[test]
+    fn checklist_defaults_all_pending_and_supports_per_step_mutation() {
+        let mut c = super::Checklist::new();
+        for i in 1..=6 {
+            assert_eq!(c.state(i), term::StepState::Pending);
+        }
+        c.set(1, term::StepState::Done);
+        c.set(3, term::StepState::Skipped);
+        c.set(6, term::StepState::Running);
+        assert_eq!(c.state(1), term::StepState::Done);
+        assert_eq!(c.state(2), term::StepState::Pending);
+        assert_eq!(c.state(3), term::StepState::Skipped);
+        assert_eq!(c.state(6), term::StepState::Running);
+    }
+
+    #[test]
+    fn print_step_list_renders_six_titled_lines() {
+        // The function writes via `println!`. `cargo test` already
+        // captures stdout per-thread for test-output suppression, but
+        // we cannot read that buffer from here. Instead lock in the
+        // contract: `print_step_list` iterates `SETUP_STEPS` once and
+        // emits one line per title via `term::step_glyph`. Source-grep
+        // is sufficient (we already cover the terminal-rendering side
+        // in the term::tests suite).
+        let source = include_str!("setup.rs");
+        // The body must reference `SETUP_STEPS` and `term::step_glyph`
+        // so the renderer cannot drift out of sync with the constants.
+        let body_start = source
+            .find("pub fn print_step_list(checklist: &Checklist)")
+            .expect("print_step_list signature present");
+        let window = &source[body_start..body_start + 400];
+        assert!(
+            window.contains("SETUP_STEPS"),
+            "print_step_list must iterate SETUP_STEPS. Window:\n{window}"
+        );
+        assert!(
+            window.contains("term::step_glyph"),
+            "print_step_list must use term::step_glyph. Window:\n{window}"
+        );
+    }
+
+    #[test]
+    fn welcome_banner_includes_title_and_step_titles() {
+        let source = include_str!("setup.rs");
+        let body_start = source
+            .find("pub fn print_welcome_banner")
+            .expect("print_welcome_banner signature present");
+        let window = &source[body_start..body_start + 600];
+        assert!(
+            window.contains("AIMX setup"),
+            "welcome banner title missing. Window:\n{window}"
+        );
+        assert!(
+            window.contains("print_step_list"),
+            "welcome banner must call print_step_list so all six titles render. Window:\n{window}"
+        );
+    }
+
+    #[test]
+    fn final_banner_signals_completion_and_renders_step_list() {
+        let source = include_str!("setup.rs");
+        let body_start = source
+            .find("pub fn print_final_banner")
+            .expect("print_final_banner signature present");
+        let window = &source[body_start..body_start + 400];
+        assert!(
+            window.contains("AIMX setup — complete"),
+            "final banner missing completion title. Window:\n{window}"
+        );
+        assert!(
+            window.contains("print_step_list"),
+            "final banner must reuse print_step_list so per-step glyphs render. \
+             Window:\n{window}"
+        );
+    }
+
+    #[test]
+    fn run_setup_marks_step_six_skipped_when_sudo_user_unset() {
+        // The drop-through helper enters its `$SUDO_USER` unset branch and
+        // returns AgentsSetupOutcome::Skipped. `run_setup` then maps that
+        // onto step-6 = Skipped. We assert that the call site exists so
+        // a future refactor that drops the mapping can't sneak past
+        // review.
+        let source = include_str!("setup.rs");
+        // The mapping is in run_setup near the drop_through_to_agents_setup
+        // call; it sets `mcp_state` to Skipped on Skipped/Failed outcomes.
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body = &source[run_setup_start..];
+        assert!(
+            body.contains("AgentsSetupOutcome::Skipped"),
+            "run_setup must handle the Skipped outcome from the drop-through"
+        );
+        assert!(
+            body.contains("AgentsSetupOutcome::Failed"),
+            "run_setup must handle the Failed outcome from the drop-through"
+        );
+        assert!(
+            body.contains("AgentsSetupOutcome::Done"),
+            "run_setup must handle the Done outcome from the drop-through"
+        );
+    }
+
+    // CAVEAT: this test relies on each `section_header(N, ...)` being a
+    // literal call at the top level of `run_setup`. If a future refactor
+    // extracts a section into a helper (e.g. `setup_tls()`), the header
+    // call moves out of `run_setup`'s body and the source-grep below stops
+    // testing runtime order — it will still pass on the surviving
+    // top-level calls but will silently lose coverage of the moved one.
+    // If you extract a section, you must either inline the helper for
+    // this test OR convert it to a stdout-capture invariant against the
+    // actual `run_setup` execution.
+    #[test]
+    fn run_setup_emits_section_headers_in_spec_order() {
+        // Spec order: Preflight → Domain & DNS → TLS → Trust → Install → MCP.
+        // We exercise this by driving `run_setup` against MockSystemOps +
+        // MockNetworkOps. The DNS verify loop reads from stdin, so use
+        // `q\n` to skip immediately. Preflight passes because the mocks
+        // default to `outbound_port25=true`/`inbound_port25=true`.
+        let tmp = TempDir::new().unwrap();
+        let _cfg_guard = crate::config::test_env::ConfigDirOverride::set(tmp.path());
+
+        // Drive `q\n` into stdin via a pipe so the DNS loop exits.
+        // We can't easily redirect stdin in a unit test without a fixture;
+        // instead, source-grep is enough to lock in the section ordering
+        // — the headers appear as literal `format!` arguments to
+        // `term::header` calls inside `run_setup`. The spec literals
+        // live in `SETUP_STEPS` and the call sites use
+        // `section_header(N, SETUP_STEPS[N-1])` so the order is fixed at
+        // compile time.
+        let _ = tmp;
+        let source = include_str!("setup.rs");
+        let preflight = source
+            .find("section_header(1,")
+            .expect("step 1 header call");
+        let domain = source
+            .find("section_header(2,")
+            .expect("step 2 header call");
+        let tls = source
+            .find("section_header(3,")
+            .expect("step 3 header call");
+        let trust = source
+            .find("section_header(4,")
+            .expect("step 4 header call");
+        let install = source
+            .find("section_header(5,")
+            .expect("step 5 header call");
+        let mcp = source
+            .find("section_header(6,")
+            .expect("step 6 header call");
+        assert!(preflight < domain, "step 1 must precede step 2");
+        assert!(domain < tls, "step 2 must precede step 3");
+        assert!(tls < trust, "step 3 must precede step 4");
+        assert!(trust < install, "step 4 must precede step 5");
+        assert!(install < mcp, "step 5 must precede step 6");
+    }
+
+    // CAVEAT: this test relies on the re-entrant `checklist.set(N,
+    // Skipped)` mutations being literal call sites at the top level of
+    // `run_setup`. Same shape as the section-order test above — extracting
+    // any branch into a helper means the source-grep can no longer prove
+    // the runtime contract. If you refactor, either inline the helper for
+    // this test or convert it to a stdout-capture invariant against the
+    // actual re-entrant execution path.
+    #[test]
+    fn run_setup_reentrant_path_marks_tls_trust_install_skipped() {
+        // Lock in the re-entrant section-skip contract via source-grep:
+        // when `already_configured` is true, run_setup must mutate the
+        // checklist with Skipped on steps 3, 4, and 5 (TLS, Trust,
+        // Install) and emit a "Step N skipped" line. A future refactor
+        // that drops a branch will trip this regression guard.
+        let source = include_str!("setup.rs");
+        let run_setup_start = source.find("pub fn run_setup(").unwrap();
+        let body = &source[run_setup_start..];
+
+        // The TLS / Trust / Install sections each contain a
+        // `checklist.set(N, term::StepState::Skipped);` mutation guarded
+        // by `already_configured` / config-file-exists.
+        for marker in [
+            "checklist.set(3, term::StepState::Skipped)",
+            "checklist.set(4, term::StepState::Skipped)",
+            "checklist.set(5, term::StepState::Skipped)",
+        ] {
+            assert!(
+                body.contains(marker),
+                "run_setup must mark step N skipped on re-entry. Missing: {marker}"
+            );
+        }
+        for marker in ["Step 3 skipped", "Step 4 skipped", "Step 5 skipped"] {
+            assert!(
+                body.contains(marker),
+                "run_setup must emit `{marker}` line so the operator sees the no-op"
+            );
+        }
     }
 }

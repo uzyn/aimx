@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) skill source tree for Hermes Agent. This directory
 wires aimx into [Hermes Agent](https://hermes-agent.nousresearch.com/) by
 Nous Research. Contents are bundled into the `aimx` binary at compile time
-(via `include_dir!`) and installed by `aimx agent-setup hermes`.
+(via `include_dir!`) and installed by `aimx agents setup hermes`.
 
 ## What gets installed
 
@@ -24,7 +24,7 @@ the running agent with the in-app `/reload-mcp` slash command.
 ## Install
 
 ```bash
-aimx agent-setup hermes
+aimx agents setup hermes
 ```
 
 Default skill destination: `~/.hermes/skills/aimx/SKILL.md`.
@@ -53,7 +53,7 @@ If aimx was set up with a non-default data directory, re-run the
 installer with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup hermes
+aimx --data-dir /custom/path agents setup hermes
 ```
 
 The printed YAML snippet's `args` array will become

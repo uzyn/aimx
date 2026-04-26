@@ -169,7 +169,7 @@ async fn submit_hook_delete_request(
 }
 
 /// Outcome of a template-CRUD submission that didn't succeed. Keeps
-/// socket-missing distinct from daemon-reported errors so `agent-setup`
+/// socket-missing distinct from daemon-reported errors so `agents setup`
 /// can map each case to its own exit code and user-facing message per
 /// §6.6 (daemon-down → exit 2, ECONFLICT → "use --redetect", etc.).
 #[derive(Debug)]
@@ -186,7 +186,7 @@ pub(crate) enum TemplateCrudFallback {
 
 /// Submit an `AIMX/1 TEMPLATE-CREATE` request over UDS. Mirrors
 /// [`submit_hook_template_create_via_daemon`] but for the template-scope
-/// template-scope verbs. Used by `aimx agent-setup` to register the
+/// template-scope verbs. Used by `aimx agents setup` to register the
 /// `invoke-<agent>-<username>` template after the plugin files are
 /// installed.
 pub(crate) fn submit_template_create_via_daemon(
@@ -199,7 +199,7 @@ pub(crate) fn submit_template_create_via_daemon(
 }
 
 /// Submit an `AIMX/1 TEMPLATE-UPDATE` request over UDS. Used by
-/// `aimx agent-setup --redetect` to refresh the registered template's
+/// `aimx agents setup --redetect` to refresh the registered template's
 /// `cmd[0]` after the agent binary has moved.
 pub(crate) fn submit_template_update_via_daemon(
     request: &TemplateUpdateRequest,
@@ -211,7 +211,7 @@ pub(crate) fn submit_template_update_via_daemon(
 }
 
 /// Submit an `AIMX/1 TEMPLATE-DELETE` request over UDS. Used by
-/// `aimx agent-cleanup <agent>` to drop the caller's
+/// `aimx agents remove <agent>` to drop the caller's
 /// `invoke-<agent>-<username>` template when the operator uninstalls
 /// the agent. The daemon enforces caller-uid = template.run_as so
 /// each user can only delete their own templates.

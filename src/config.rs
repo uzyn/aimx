@@ -135,7 +135,7 @@ pub struct Config {
 
     /// Installed hook templates. Each entry is a pre-vetted command shape
     /// an agent can reference via MCP `hook_create`. Populated by
-    /// `aimx agent-setup <agent>`. Validated at load time.
+    /// `aimx agents setup <agent>`. Validated at load time.
     ///
     /// Serialized as `[[hook_template]]` blocks (singular) to match the
     /// PRD wording and the usual TOML convention for array-of-tables.
@@ -261,7 +261,7 @@ const HOOK_TEMPLATE_BUILTIN_PLACEHOLDERS: &[&str] =
 /// don't have to re-resolve. An orphan `run_as` (regex-valid but absent
 /// from `getpwnam`) never produces this type — the caller sees
 /// [`ConfigError::OrphanUser`] so it can decide whether to warn (config
-/// load) or hard-fail (`aimx agent-setup`).
+/// load) or hard-fail (`aimx agents setup`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunAsKind {
     /// `root` or `aimx-catchall`. The inner `&'static str` echoes the
@@ -277,7 +277,7 @@ pub enum RunAsKind {
 /// `InvalidUsername` is a hard-failure (regex-invalid names can never
 /// resolve). `OrphanUser` is a soft-signal — callers decide whether to
 /// warn (config load, per PRD §6.1 orphan tolerance) or reject
-/// (`aimx agent-setup` registration, where the user must exist now).
+/// (`aimx agents setup` registration, where the user must exist now).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
     InvalidUsername(String),

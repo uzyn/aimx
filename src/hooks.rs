@@ -101,7 +101,7 @@ fn list_templates(
         writeln!(
             out,
             "No hook templates enabled. Run `{}` to install one per agent.",
-            term::highlight("aimx agent-setup <agent>")
+            term::highlight("aimx agents setup")
         )?;
         return Ok(());
     }
@@ -1114,7 +1114,7 @@ mod tests {
         cfg.hook_templates.clear();
         let out = capture_list_templates(&cfg);
         assert!(out.contains("No hook templates enabled"), "{out}");
-        assert!(out.contains("aimx agent-setup"), "{out}");
+        assert!(out.contains("aimx agents setup"), "{out}");
     }
 
     #[test]
@@ -1136,7 +1136,7 @@ mod tests {
         // Every `invoke-*` block has been stripped from
         // `hook-templates/defaults.toml`; only `webhook` remains
         // pre-bundled. Per-agent templates are registered on demand
-        // by `aimx agent-setup`.
+        // by `aimx agents setup`.
         let mut cfg = base_config();
         cfg.hook_templates = crate::hook_templates_defaults::default_templates();
         let out = capture_list_templates(&cfg);

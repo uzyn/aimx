@@ -1,4 +1,4 @@
-//! Per-agent plugin installer for `aimx agent-setup`.
+//! Per-agent plugin installer for `aimx agents setup`.
 //!
 //! Ships plugin/skill packages for supported agents (currently Claude Code)
 //! bundled into the binary via `include_dir!`, and installs them into the
@@ -46,7 +46,7 @@ pub struct AgentSpec {
     /// demand. Agents that take a single blob (Goose, Gemini, OpenCode)
     /// receive only the main primer.
     pub progressive_disclosure: bool,
-    /// Canonical binary name probed on `$PATH` during `aimx agent-setup`
+    /// Canonical binary name probed on `$PATH` during `aimx agents setup`
     /// to locate the agent's executable (e.g. `claude-code` → `claude`).
     /// `cmd[0]` of the registered template is the resolved path.
     pub canonical_binary: &'static str,
@@ -327,7 +327,7 @@ fn goose_hint(_data_dir: Option<&Path>) -> String {
     // Goose runs recipes by filename stem; `aimx.yaml` → `goose run --recipe aimx`.
     //
     // The team-sharing blurb is intentionally static (no `std::env::var`
-    // lookup) so `aimx agent-setup --list` is deterministic across
+    // lookup) so `aimx agents setup --list` is deterministic across
     // developer shells. Reading GOOSE_RECIPE_GITHUB_REPO at hint-render
     // time made snapshot-style tests of `--list` flake when the env var
     // happened to be set locally; instead, reference the variable by name
@@ -448,7 +448,7 @@ pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
 /// `[a-z0-9-]+` because the template-name validator used by
 /// `Config::load` rejects anything else. Usernames that fall outside the
 /// charset can still own mailboxes (operators can hand-author templates
-/// in `config.toml`), but they cannot use `agent-setup`'s template
+/// in `config.toml`), but they cannot use `agents setup`'s template
 /// registration because the derived name would fail validation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemplateNameError {
@@ -482,7 +482,7 @@ impl std::error::Error for TemplateNameError {}
 /// PRD §6.6. Both parts must match `[a-z0-9-]+`. Rejects empty
 /// components, uppercase letters, underscores, and non-ASCII characters.
 ///
-/// `agent-setup` uses this helper both when registering a new template
+/// `agents setup` uses this helper both when registering a new template
 /// (`TEMPLATE-CREATE`) and when re-detecting the binary path
 /// (`TEMPLATE-UPDATE` on `--redetect`). Keeping one derivation
 /// guarantees idempotence: re-running the command always targets the
@@ -518,15 +518,22 @@ pub trait AgentEnv {
     fn is_stdin_tty(&self) -> bool;
     fn read_line(&self) -> io::Result<String>;
     /// The current user's Linux username (from `getpwuid(geteuid())`).
-    /// Since `agent-setup` refuses root, this is always a real user.
+    /// Since `agents setup` refuses root, this is always a real user.
     fn caller_username(&self) -> Option<String> {
         caller_username_from_euid()
     }
-    /// Probe the caller's `$PATH` for `binary_name`. Default wraps the
-    /// free-standing `probe_path` helper so production callers pick up
-    /// the real `$PATH` without forcing tests to mutate process env.
+    /// Probe the caller's `$PATH` for `binary_name`, falling back to a
+    /// POSIX login shell (`sh -lc 'command -v "$1"' sh <name>`) when the
+    /// fast `$PATH` walk misses. The fallback covers the runuser /
+    /// sudo `secure_path` scenario where per-user PATH additions
+    /// (`~/.local/bin`, `~/.npm-global/bin`, nvm shims) aren't in the
+    /// inherited environment but the operator's profile chain still
+    /// knows about them. Default impl wraps the free-standing
+    /// `probe_path` + `probe_login_shell` helpers so production callers
+    /// pick up the real environment without forcing tests to mutate
+    /// process env.
     fn probe_binary(&self, binary_name: &str) -> Option<PathBuf> {
-        probe_path(binary_name)
+        probe_path(binary_name).or_else(|| probe_login_shell(binary_name))
     }
     /// Submit a `TEMPLATE-CREATE` frame to the daemon. Default delegates
     /// to the UDS client; tests can override to avoid spinning up a
@@ -658,13 +665,13 @@ impl<'a> AgentEnv for OverrideHomeEnv<'a> {
 }
 
 /// Resolve the caller's Linux username via `getpwuid(geteuid())`. Returns
-/// `None` if the euid does not map to a passwd entry. `agent-setup`
+/// `None` if the euid does not map to a passwd entry. `agents setup`
 /// refuses root up front (PRD §6.6 + §8.2), so in production this always
 /// resolves to a real, non-root username. Used as the `run_as` / username
 /// component of the derived template name.
 ///
 /// Thin wrapper over [`crate::uds_authz::lookup_username`] so the two
-/// callers (UDS authz cache and agent-setup) share one `getpwuid` helper.
+/// callers (UDS authz cache and agents setup) share one `getpwuid` helper.
 pub fn caller_username_from_euid() -> Option<String> {
     // SAFETY: `geteuid` is a bare syscall with no preconditions.
     let uid = unsafe { libc::geteuid() };
@@ -765,7 +772,54 @@ pub(crate) fn probe_path_in(binary_name: &str, path_var: &OsString) -> Option<Pa
     None
 }
 
-/// Options controlling a single `agent-setup` invocation.
+/// Fallback for [`probe_path`]: spawn a POSIX login shell, source the
+/// user's profile chain, and ask `command -v` where the binary lives.
+/// Used by [`AgentEnv::probe_binary`] when the inherited `$PATH` (often
+/// sudo's `secure_path`) is missing per-user `~/.local/bin` /
+/// `~/.npm-global/bin` / nvm shim entries that the operator's
+/// interactive shell sees fine.
+///
+/// Argument-safe: the binary name is passed as `$1` to the script
+/// rather than interpolated — no shell-injection surface.
+///
+/// Returns `Some(canonicalised_path)` only when the resolved path is
+/// absolute, points at a regular file, and is executable.
+pub(crate) fn probe_login_shell(binary_name: &str) -> Option<PathBuf> {
+    if binary_name.is_empty() {
+        return None;
+    }
+    let output = std::process::Command::new("sh")
+        .arg("-lc")
+        .arg("command -v \"$1\"")
+        .arg("sh")
+        .arg(binary_name)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let raw = stdout.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    // `command -v` can return non-path tokens for builtins / functions /
+    // aliases. Filter to absolute paths that point at executable files.
+    if !path.is_absolute() {
+        return None;
+    }
+    let meta = std::fs::metadata(&path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    if nix::unistd::access(&path, nix::unistd::AccessFlags::X_OK).is_err() {
+        return None;
+    }
+    Some(std::fs::canonicalize(&path).unwrap_or(path))
+}
+
+/// Options controlling a single `agents setup` invocation.
 pub struct InstallOptions<'a> {
     pub force: bool,
     pub print: bool,
@@ -784,7 +838,7 @@ pub struct InstallOptions<'a> {
 /// `$HOME` and `$XDG_CONFIG_HOME`.
 pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, String> {
     let home = env.home_dir().ok_or_else(|| {
-        "HOME is not set; agent-setup writes to the user's home directory".to_string()
+        "HOME is not set; agents setup writes to the user's home directory".to_string()
     })?;
     Ok(resolve_template_in_home(
         template,
@@ -810,7 +864,7 @@ pub fn resolve_template_in_home(template: &str, home: &Path, xdg: Option<PathBuf
 /// Per-agent install state used to render the checkbox TUI.
 ///
 /// - `InstalledWired`: the plugin destination path we'd write to already
-///   exists on disk — an earlier `aimx agent-setup <name>` has landed
+///   exists on disk — an earlier `aimx agents setup <name>` has landed
 ///   plugin files there, so aimx is wired into this agent. Rendered
 ///   dim + default-unselected in the TUI (`[x] (already wired)`).
 /// - `InstalledNotWired`: the agent's own config directory exists but no
@@ -885,6 +939,13 @@ fn dest_contains_aimx_entry(spec: &AgentSpec, dest: &Path) -> bool {
         // for file presence alone is enough — if aimx wrote it, the
         // filename carries the wiring signal.
         "goose" => dest.join("aimx.yaml").is_file(),
+        // Claude Code's plugin layout puts everything under
+        // `.claude-plugin/` and `skills/` subdirectories — the top-level
+        // of `~/.claude/plugins/aimx/` has zero files in a real install.
+        // The canonical marker is the plugin manifest at
+        // `.claude-plugin/plugin.json`; aimx's installer always writes
+        // it, so filename presence is a strong wiring signal.
+        "claude-code" => dest.join(".claude-plugin").join("plugin.json").is_file(),
         // Directory-shaped destinations: walk the directory's top-level
         // entries and return true if any regular file contains the
         // substring "aimx" anywhere in its bytes. aimx's own SKILL.md /
@@ -918,7 +979,7 @@ fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
     haystack.windows(needle.len()).any(|w| w == needle)
 }
 
-/// Parameters for one `aimx agent-setup` invocation. Carries everything
+/// Parameters for one `aimx agents setup` invocation. Carries everything
 /// `run` / `run_with_env` / `run_with_env_to_writer` need so these
 /// entry-point signatures don't keep growing each time a new CLI flag
 /// lands. Short-lived, borrowed-`data_dir`; not `Clone` by design —
@@ -943,17 +1004,17 @@ pub struct RunOpts<'a> {
 }
 
 /// Root-refusal message. Names both escape hatches: re-run as a
-/// regular user (`sudo -u <user> aimx agent-setup`) **or** pass
+/// regular user (`sudo -u <user> aimx agents setup`) **or** pass
 /// `--dangerously-allow-root` for single-user root-login VPS setups that
 /// genuinely want aimx wired into root's home.
-pub const ROOT_REFUSAL_MESSAGE: &str = "agent-setup is a per-user operation and refuses to run as root by default.\n\
+pub const ROOT_REFUSAL_MESSAGE: &str = "agents setup is a per-user operation and refuses to run as root by default.\n\
      \n\
      Re-run as your regular user:\n\
-     \x20\x20sudo -u <user> aimx agent-setup\n\
+     \x20\x20sudo -u <user> aimx agents setup\n\
      \n\
      Or, on a single-user root-login VPS that has no separate operator account,\n\
      pass --dangerously-allow-root to wire aimx into /root's home:\n\
-     \x20\x20aimx agent-setup --dangerously-allow-root";
+     \x20\x20aimx agents setup --dangerously-allow-root";
 
 /// Entry point called from `main.rs`.
 pub fn run(opts: RunOpts<'_>) -> Result<(), Box<dyn std::error::Error>> {
@@ -1055,7 +1116,7 @@ fn run_with_env_to_writer_inner(
 
     let spec = match opts.agent.as_deref() {
         Some(name) => find_agent(name).ok_or_else(|| {
-            format!("unknown agent '{name}'; run `aimx agent-setup --list` to see supported agents")
+            format!("unknown agent '{name}'; run `aimx agents list` to see supported agents")
         })?,
         None => {
             // Bare invocation. Several cases fall back to the plain
@@ -1075,19 +1136,19 @@ fn run_with_env_to_writer_inner(
                 if opts.print {
                     writeln!(
                         out,
-                        "Pass an agent name (e.g. `aimx agent-setup --print claude-code`) \
+                        "Pass an agent name (e.g. `aimx agents setup --print claude-code`) \
                          to preview the files an install would lay down."
                     )?;
                 } else {
                     writeln!(
                         out,
-                        "Run `aimx agent-setup <agent>` to install one of the agents \
-                         above, or `aimx agent-setup --list` to print this list again."
+                        "Run `aimx agents setup <agent>` to install one of the agents \
+                         above, or `aimx agents list` to print this list again."
                     )?;
                 }
                 return Ok(());
             }
-            return crate::agent_tui::run_tui(&opts, env, out);
+            return crate::agents_tui::run_tui(&opts, env, out);
         }
     };
 
@@ -1113,7 +1174,7 @@ fn print_registry_to_writer(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Resu
             .unwrap_or_else(|_| PathBuf::from(spec.dest_template));
         writeln!(out, "  {}", term::highlight(spec.name))?;
         writeln!(out, "    destination: {}", dest.display())?;
-        writeln!(out, "    install:     aimx agent-setup {}", spec.name)?;
+        writeln!(out, "    install:     aimx agents setup {}", spec.name)?;
         let hint = (spec.activation_hint)(None);
         let mut hint_lines = hint.lines();
         if let Some(first) = hint_lines.next() {
@@ -1166,7 +1227,7 @@ fn install_to_writer(
         writeln!(out, "=== activation ===")?;
         writeln!(out, "{hint}")?;
 
-        // Render the template TOML `agent-setup` WOULD submit. Uses the
+        // Render the template TOML `agents setup` WOULD submit. Uses the
         // caller's real username so the derived name matches what the
         // daemon would store. If the username can't be resolved or does
         // not pass the `[a-z0-9-]+` charset (PRD §8.2), fall back to a
@@ -1225,7 +1286,7 @@ fn install_to_writer(
         TemplateOutcome::AlreadyExists { name } => {
             writeln!(
                 out,
-                "{} {} already exists. Use 'aimx agent-setup {} --redetect' to update it.",
+                "{} {} already exists. Use 'aimx agents setup {} --redetect' to update it.",
                 term::warn("Template"),
                 term::highlight(&name),
                 spec.name,
@@ -1320,7 +1381,7 @@ fn register_template(
             let bin = spec.canonical_binary;
             return TemplateOutcome::Failed {
                 reason: format!(
-                    "Could not find '{bin}' in $PATH. Install it, then re-run 'aimx agent-setup {}'.",
+                    "Could not find '{bin}' in $PATH or your login shell. Install it, then re-run 'aimx agents setup {}'.",
                     spec.name
                 ),
                 exit_code: Some(3),
@@ -1340,7 +1401,7 @@ fn register_template(
             Err(TemplateCrudFallback::SocketMissing) => TemplateOutcome::Failed {
                 reason: format!(
                     "aimx serve is not running; start it with 'sudo systemctl start aimx' \
-                     and re-run 'aimx agent-setup {} --redetect'.",
+                     and re-run 'aimx agents setup {} --redetect'.",
                     spec.name
                 ),
                 exit_code: Some(2),
@@ -1349,7 +1410,7 @@ fn register_template(
                 if code == "ENOENT" || code == "NOTFOUND" {
                     TemplateOutcome::Failed {
                         reason: format!(
-                            "Template '{name}' does not exist yet. Run 'aimx agent-setup {}' \
+                            "Template '{name}' does not exist yet. Run 'aimx agents setup {}' \
                              without --redetect first.",
                             spec.name
                         ),
@@ -1381,7 +1442,7 @@ fn register_template(
             Err(TemplateCrudFallback::SocketMissing) => TemplateOutcome::Failed {
                 reason: format!(
                     "aimx serve is not running; start it with 'sudo systemctl start aimx' \
-                     and re-run 'aimx agent-setup {}'.",
+                     and re-run 'aimx agents setup {}'.",
                     spec.name
                 ),
                 exit_code: Some(2),
@@ -1418,7 +1479,7 @@ fn build_template_payload_with_path(
     UdsTemplatePayload {
         name: name.to_string(),
         description: format!(
-            "aimx agent-setup: invoke {} headlessly for {}",
+            "aimx agents setup: invoke {} headlessly for {}",
             spec.name, username
         ),
         cmd,
@@ -1452,7 +1513,7 @@ fn caller_username_for_display(env: &dyn AgentEnv) -> String {
 }
 
 /// Wrapper error used to carry a specific exit code out of
-/// `agent_setup::run` without losing the user-facing message. `main.rs`
+/// `agents_setup::run` without losing the user-facing message. `main.rs`
 /// exits with the contained code so the CLI matches the documented
 /// convention (daemon-down → 2, binary-missing → 3).
 #[derive(Debug)]
@@ -1973,10 +2034,10 @@ mod tests {
             &self,
             _request: &TemplateDeleteRequest,
         ) -> Result<(), TemplateCrudFallback> {
-            // Not exercised in agent-setup tests; agent-cleanup covers
+            // Not exercised in agents setup tests; agents remove covers
             // the delete path in its own module tests.
             Err(TemplateCrudFallback::Local(
-                "submit_template_delete not used in agent-setup tests".into(),
+                "submit_template_delete not used in agents setup tests".into(),
             ))
         }
     }
@@ -2134,8 +2195,10 @@ mod tests {
     #[test]
     fn detect_install_state_installed_wired_when_dest_exists() {
         // Destination must exist AND contain aimx's MCP entry.
-        // An empty plugin directory reports NotWired; a directory holding
-        // a file that references "aimx" reports Wired.
+        // An empty plugin directory reports NotWired; the canonical
+        // Claude-Code wiring marker is `.claude-plugin/plugin.json`
+        // (plugin layout puts everything under that subdirectory and
+        // `skills/` — top level has zero files in a real install).
         let tmp = TempDir::new().unwrap();
         let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
         std::fs::create_dir_all(&plugin_dir).unwrap();
@@ -2144,14 +2207,48 @@ mod tests {
         let state_empty = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_empty, InstallState::InstalledNotWired);
 
-        // Drop aimx-content file → Wired.
+        // Drop the canonical plugin manifest → Wired.
+        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
         std::fs::write(
-            plugin_dir.join("plugin.json"),
-            r#"{"mcpServers":{"aimx":{}}}"#,
+            plugin_manifest_dir.join("plugin.json"),
+            r#"{"name":"aimx"}"#,
         )
         .unwrap();
         let state_wired = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_wired, InstallState::InstalledWired);
+    }
+
+    /// Regression for the bug where `dest_contains_aimx_entry` only scanned
+    /// top-level files. Claude Code's plugin layout has nothing at the top
+    /// level — everything lives under `.claude-plugin/` and `skills/`. A
+    /// fully-wired install always classified as `InstalledNotWired` before
+    /// the special-case fix.
+    #[test]
+    fn detect_install_state_installed_wired_for_claude_code_plugin_layout() {
+        let tmp = TempDir::new().unwrap();
+        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
+        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
+        let skills_dir = plugin_dir.join("skills").join("aimx");
+        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        // Real installs lay down `.claude-plugin/plugin.json` and
+        // `skills/aimx/SKILL.md`; nothing at the top level of
+        // `~/.claude/plugins/aimx/`.
+        std::fs::write(
+            plugin_manifest_dir.join("plugin.json"),
+            r#"{"name":"aimx"}"#,
+        )
+        .unwrap();
+        std::fs::write(skills_dir.join("SKILL.md"), "# aimx skill\n").unwrap();
+
+        let spec = find_agent("claude-code").unwrap();
+        let state = detect_install_state(spec, tmp.path(), None);
+        assert_eq!(
+            state,
+            InstallState::InstalledWired,
+            "claude-code plugin layout (nothing at top level) must be detected as wired"
+        );
     }
 
     #[test]
@@ -2446,7 +2543,7 @@ mod tests {
             "missing failure line: {msg}"
         );
         assert!(
-            msg.contains("Could not find 'claude' in $PATH"),
+            msg.contains("Could not find 'claude' in $PATH or your login shell"),
             "missing binary-missing copy: {msg}"
         );
         // The failure line must NOT also land on stdout — `run` prints it
@@ -2723,13 +2820,13 @@ mod tests {
     }
 
     // Make sure the legacy `sudo` ... `aimx setup` copy cannot reappear
-    // in `agent_setup.rs`. The grep rule is translated to a compile-
+    // in `agents_setup.rs`. The grep rule is translated to a compile-
     // time assertion. The forbidden literal is assembled from
     // runtime pieces so this test file itself does not contain the exact
     // byte sequence the rest of the module is forbidden from carrying.
     #[test]
-    fn agent_setup_source_has_no_legacy_setup_hint_copy() {
-        let src = include_str!("agent_setup.rs");
+    fn agents_setup_source_has_no_legacy_setup_hint_copy() {
+        let src = include_str!("agents_setup.rs");
         let forbidden = format!("{} aimx setup", "sudo");
         let hits: Vec<&str> = src
             .lines()
@@ -2742,7 +2839,7 @@ mod tests {
             .collect();
         assert!(
             hits.is_empty(),
-            "agent_setup.rs still carries the legacy hint copy on lines: {hits:?}"
+            "agents_setup.rs still carries the legacy hint copy on lines: {hits:?}"
         );
     }
 
@@ -2821,7 +2918,7 @@ mod tests {
         let err = run_with_env(Some("bogus".into()), false, false, false, None, &env).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown agent"));
-        assert!(msg.contains("--list"));
+        assert!(msg.contains("aimx agents list"));
     }
 
     #[test]
@@ -2887,7 +2984,7 @@ mod tests {
     #[test]
     fn list_mode_runs_without_agent_name() {
         // `--list` prints the registry without the trailing
-        // `Run \`aimx agent-setup <agent>\`` usage-hint footer. The footer is
+        // `Run \`aimx agents setup <agent>\`` usage-hint footer. The footer is
         // reserved for bare invocation; this lock-in prevents the two
         // output shapes from converging.
         let tmp = TempDir::new().unwrap();
@@ -2896,7 +2993,7 @@ mod tests {
         run_with_env_to_writer(None, true, false, false, None, &env, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
         assert!(
-            !rendered.contains("Run `aimx agent-setup <agent>`"),
+            !rendered.contains("Run `aimx agents setup <agent>`"),
             "--list output must not include the bare-invocation usage hint: {rendered}"
         );
     }
@@ -3466,7 +3563,7 @@ mod tests {
         // The hint must reference GOOSE_RECIPE_GITHUB_REPO by name so users
         // discover the team-sharing mechanism. The output is now
         // deterministic. It does not depend on whether the variable is
-        // set in the caller's shell (so `aimx agent-setup --list` is stable
+        // set in the caller's shell (so `aimx agents setup --list` is stable
         // across developer environments).
         let spec = find_agent("goose").unwrap();
 
@@ -4378,7 +4475,7 @@ mod tests {
 
     #[test]
     fn bare_invocation_prints_registry_and_hint() {
-        // `aimx agent-setup` with no agent and no --list must print the
+        // `aimx agents setup` with no agent and no --list must print the
         // registry plus a usage-hint footer and exit Ok(()). Works on both
         // TTY and non-TTY, no interactive prompt.
         let tmp = TempDir::new().unwrap();
@@ -4397,7 +4494,7 @@ mod tests {
                 );
             }
             assert!(
-                rendered.contains("aimx agent-setup <agent>"),
+                rendered.contains("aimx agents setup <agent>"),
                 "missing usage hint (tty={tty}): {rendered}"
             );
             assert!(
@@ -4434,7 +4531,7 @@ mod tests {
     #[test]
     fn bare_invocation_non_tty_still_prints_registry() {
         // Regression guard: earlier behavior errored on non-TTY bare
-        // invocation ("agent-setup requires an agent name ..."). The soft
+        // invocation ("agents setup requires an agent name ..."). The soft
         // revert prints the registry + usage hint and returns Ok(()) on
         // both TTY and non-TTY so piped/non-interactive callers get the
         // same friendly output.
@@ -4443,7 +4540,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         run_with_env_to_writer(None, false, false, false, None, &env, &mut out).unwrap();
         let rendered = String::from_utf8(out).unwrap();
-        assert!(rendered.contains("aimx agent-setup <agent>"));
+        assert!(rendered.contains("aimx agents setup <agent>"));
     }
 
     // ----- $PATH probe -----------------------------------------------------
@@ -4643,5 +4740,174 @@ mod tests {
                 "canonical_binary mismatch for agent '{agent}'"
             );
         }
+    }
+
+    // ----- login-shell probe fallback ------------------------------------
+
+    #[test]
+    fn probe_login_shell_finds_known_binary() {
+        // `ls` exists at /bin/ls (or /usr/bin/ls) on every supported
+        // target. The login shell's profile chain always contains one
+        // of /bin or /usr/bin, so `command -v ls` resolves cleanly.
+        let got = probe_login_shell("ls").expect("ls must resolve via login shell");
+        assert!(got.is_absolute(), "resolved path must be absolute: {got:?}");
+        let meta = std::fs::metadata(&got).unwrap_or_else(|e| {
+            panic!("resolved path {got:?} must stat cleanly: {e}");
+        });
+        assert!(
+            meta.is_file(),
+            "resolved path must be a regular file: {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_returns_none_for_missing() {
+        let got = probe_login_shell("definitely-not-a-real-binary-aimx-test-xyz");
+        assert!(
+            got.is_none(),
+            "missing binary must return None, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_returns_none_for_empty_name() {
+        assert!(probe_login_shell("").is_none());
+    }
+
+    #[test]
+    fn probe_login_shell_rejects_non_absolute_resolution() {
+        // `command -v` for a shell builtin like `cd` prints the bare
+        // word "cd" — not an absolute path. `probe_login_shell` must
+        // filter that out so we never hand a non-path token back to
+        // the template registration code.
+        let got = probe_login_shell("cd");
+        assert!(
+            got.is_none(),
+            "builtin 'cd' must not resolve to an absolute path, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn probe_login_shell_immune_to_argv_injection() {
+        // Pre-create a sentinel file. If `probe_login_shell` were to
+        // shell-interpolate the binary name into the script body, the
+        // `; rm ...` payload would delete the sentinel. Because the
+        // name is passed as `$1` (positional argument), the payload
+        // gets seen by `command -v` as a single literal token and is
+        // simply not found.
+        let tmp = TempDir::new().unwrap();
+        let sentinel = tmp.path().join("sentinel-do-not-delete");
+        std::fs::write(&sentinel, b"keep me").unwrap();
+        let sentinel_str = sentinel.to_str().unwrap();
+
+        let payload = format!("foo; rm -f {sentinel_str}");
+        let got = probe_login_shell(&payload);
+        assert!(
+            got.is_none(),
+            "argv-injection payload must not resolve, got {got:?}"
+        );
+        assert!(
+            sentinel.exists(),
+            "sentinel was deleted — argv injection was not contained!"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn probe_binary_default_falls_back_when_path_misses() {
+        // Pin the two-tier probe: when the inherited `$PATH` does NOT
+        // contain a binary, the default `AgentEnv::probe_binary` impl
+        // falls through to `probe_login_shell`, which sources the
+        // user's profile chain. We simulate the runuser / secure_path
+        // scenario by:
+        //   1. Setting HOME to a tmp dir with a `.profile` that prepends
+        //      a private tmp/bin to PATH.
+        //   2. Setting the parent PATH to a dir that does NOT contain
+        //      the sentinel binary (so `probe_path` is guaranteed to
+        //      miss).
+        //   3. Calling `probe_binary` and asserting the sentinel
+        //      resolves via the login-shell fallback.
+        struct DefaultEnv;
+        impl AgentEnv for DefaultEnv {
+            fn home_dir(&self) -> Option<PathBuf> {
+                None
+            }
+            fn xdg_config_home(&self) -> Option<PathBuf> {
+                None
+            }
+            fn is_root(&self) -> bool {
+                false
+            }
+            fn is_stdin_tty(&self) -> bool {
+                false
+            }
+            fn read_line(&self) -> io::Result<String> {
+                Ok(String::new())
+            }
+        }
+
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let user_bin = home.join("bin");
+        std::fs::create_dir_all(&user_bin).unwrap();
+
+        // Sentinel binary lives only in the user's home bin — never on
+        // the inherited PATH. Using a randomised name so a stray real
+        // binary on the runner can't accidentally satisfy the probe.
+        let sentinel_name = "aimx-test-sentinel-binary-xyz";
+        write_executable(&user_bin, sentinel_name);
+
+        // The `.profile` is what the login shell sources. Prepending
+        // user_bin here is the production analogue of the operator's
+        // `~/.local/bin` PATH addition.
+        let profile = home.join(".profile");
+        std::fs::write(
+            &profile,
+            format!("export PATH=\"{}:$PATH\"\n", user_bin.display()),
+        )
+        .unwrap();
+
+        // Snapshot env, swap to a `secure_path`-shaped PATH (just the
+        // system bin dirs — same shape sudo's `secure_path` has). This
+        // guarantees `probe_path` misses on the sentinel, but `sh` is
+        // still spawnable because /bin and /usr/bin are present.
+        let prev_path = std::env::var_os("PATH");
+        let prev_home = std::env::var_os("HOME");
+        let secure_like =
+            OsString::from("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        // SAFETY: serialized via #[serial_test::serial] — no concurrent
+        // test observes the swap.
+        unsafe {
+            std::env::set_var("PATH", &secure_like);
+            std::env::set_var("HOME", &home);
+        }
+
+        let env = DefaultEnv;
+        let got = env.probe_binary(sentinel_name);
+
+        // Restore env before assertions so a failure doesn't leak state
+        // into the next test.
+        unsafe {
+            match prev_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match prev_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+
+        let resolved = got.expect(
+            "default probe_binary must fall back to login shell when PATH misses but ~/.profile knows the binary",
+        );
+        assert!(
+            resolved.is_absolute(),
+            "fallback must return an absolute path: {resolved:?}"
+        );
+        assert!(
+            resolved.ends_with(sentinel_name),
+            "fallback must resolve to the sentinel binary, got {resolved:?}"
+        );
     }
 }

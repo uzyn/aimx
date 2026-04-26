@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) skill source tree for OpenCode. This directory
 wires aimx into OpenCode. Contents are bundled into the `aimx` binary at
 compile time (via `include_dir!`) and installed by
-`aimx agent-setup opencode`.
+`aimx agents setup opencode`.
 
 ## What gets installed
 
@@ -21,7 +21,7 @@ of `opencode.json` (see Activation below).
 ## Install
 
 ```bash
-aimx agent-setup opencode
+aimx agents setup opencode
 ```
 
 Default skill destination: `~/.config/opencode/skills/aimx/SKILL.md`. After the
@@ -47,7 +47,7 @@ If aimx was set up with a non-default data directory, re-run the installer
 with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup opencode
+aimx --data-dir /custom/path agents setup opencode
 ```
 
 The printed JSONC snippet will include `--data-dir /custom/path` in the

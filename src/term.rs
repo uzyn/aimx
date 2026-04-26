@@ -84,6 +84,26 @@ pub fn dim(s: &str) -> ColoredString {
     s.dimmed()
 }
 
+/// One shade dimmer than [`dim`]. Used by the `aimx agents setup` TUI to
+/// distinguish the "status suffix" (e.g. `(AIMX MCP wired)`, `(not detected)`)
+/// from the agent display name beside it. On a TTY emits a low-luma grey
+/// truecolor escape (with the named-`bright black` fallback the `colored`
+/// crate picks on non-truecolor terminals); on a non-TTY pipe emits plain
+/// text. Mirrors [`dim`]'s semantic-color rule: callers never need to think
+/// about whether the surface is colored — the helper handles it.
+pub fn very_dim(s: &str) -> ColoredString {
+    if colorize_active() {
+        // Truecolor grey (`#585858`, the 256-color `240` equivalent) on
+        // truecolor-capable terminals. On non-truecolor terminals the
+        // `colored` crate degrades this to its nearest named color
+        // (`bright black`, ANSI 90), which is still visibly dimmer than
+        // `dim`'s plain `\x1b[2m` ANSI dim.
+        s.truecolor(88, 88, 88)
+    } else {
+        s.normal()
+    }
+}
+
 /// Returns true when the output stream should carry ANSI escapes (TTY + not
 /// disabled by `NO_COLOR`). Matches the `colored` crate's internal decision.
 fn colorize_active() -> bool {
@@ -114,6 +134,49 @@ pub fn warn_mark() -> ColoredString {
         "⚠".yellow()
     } else {
         "[WARN]".normal()
+    }
+}
+
+/// State of one entry in the setup wizard's six-step checklist. The
+/// rendering for each state is owned by [`step_glyph`] so the binary
+/// emits a consistent banner across every section transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepState {
+    Pending,
+    Running,
+    Done,
+    Skipped,
+    /// Reserved for surfaces that surface a fatal step-level error
+    /// without aborting the wizard. The current `aimx setup` flow never
+    /// reaches this state because hard errors `return Err(...)` and exit
+    /// the process; future surfaces (e.g. `aimx upgrade`'s rollback
+    /// path) may use it to render `✗` next to the failed step.
+    #[allow(dead_code)]
+    Error,
+}
+
+/// Render the checklist glyph for `state`. Unicode (☐ / ◐ / ☑ / ☒ / ✗)
+/// on a TTY with color enabled, ASCII fallback (`[ ]` / `[~]` / `[x]` /
+/// `[-]` / `[!]`) when color is disabled (piped, redirected, `NO_COLOR=1`,
+/// or dumb terminal). Color: pending=dim, running=yellow, done=green,
+/// skipped=cyan, error=red.
+pub fn step_glyph(state: StepState) -> ColoredString {
+    if colorize_active() {
+        match state {
+            StepState::Pending => "☐".dimmed(),
+            StepState::Running => "◐".yellow(),
+            StepState::Done => "☑".green(),
+            StepState::Skipped => "☒".cyan(),
+            StepState::Error => "✗".red(),
+        }
+    } else {
+        match state {
+            StepState::Pending => "[ ]".normal(),
+            StepState::Running => "[~]".normal(),
+            StepState::Done => "[x]".normal(),
+            StepState::Skipped => "[-]".normal(),
+            StepState::Error => "[!]".normal(),
+        }
     }
 }
 
@@ -201,6 +264,7 @@ mod tests {
             header("DNS").to_string(),
             highlight("aimx").to_string(),
             dim("hint").to_string(),
+            very_dim("hint").to_string(),
             accent("→ next").to_string(),
             success_mark().to_string(),
             fail_mark().to_string(),
@@ -214,6 +278,73 @@ mod tests {
                 "expected no ANSI escape in {s:?} when color is disabled"
             );
         }
+    }
+
+    #[test]
+    fn very_dim_is_dimmer_than_dim_when_color_forced_on() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Force COLORTERM=truecolor so the `colored` crate emits the
+        // truecolor escape rather than its named-color fallback.
+        // SAFETY: single-threaded inside COLOR_OVERRIDE_LOCK.
+        let saved_colorterm = std::env::var("COLORTERM").ok();
+        unsafe { std::env::set_var("COLORTERM", "truecolor") };
+        control::set_override(true);
+        let dim_s = dim("hint").to_string();
+        let very_s = very_dim("hint").to_string();
+        control::unset_override();
+        match saved_colorterm {
+            Some(v) => unsafe { std::env::set_var("COLORTERM", v) },
+            None => unsafe { std::env::remove_var("COLORTERM") },
+        }
+        // Both must carry ANSI escapes.
+        assert!(dim_s.contains('\x1b'), "expected ANSI escape on dim()");
+        assert!(
+            very_s.contains('\x1b'),
+            "expected ANSI escape on very_dim()"
+        );
+        // On a truecolor terminal `very_dim` emits the explicit grey
+        // RGB sequence so it sits visibly deeper than `dim`'s
+        // `\x1b[2m`. The truecolor escape for #585858 is
+        // `\x1b[38;2;88;88;88m`.
+        assert!(
+            very_s.contains("38;2;88;88;88"),
+            "expected truecolor grey escape in very_dim under COLORTERM=truecolor, got {very_s:?}"
+        );
+        // very_dim must not just collapse to plain text on TTY.
+        assert_ne!(
+            very_s, "hint",
+            "very_dim must add styling on TTY, got {very_s:?}"
+        );
+    }
+
+    #[test]
+    fn very_dim_degrades_to_named_color_without_truecolor() {
+        // On terminals that don't advertise truecolor, `colored` falls
+        // back to the nearest named ANSI color. The grey fallback is
+        // `bright black` (ANSI 90); the helper must still produce *some*
+        // colored output rather than going plain.
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved_colorterm = std::env::var("COLORTERM").ok();
+        // SAFETY: single-threaded inside COLOR_OVERRIDE_LOCK.
+        unsafe { std::env::remove_var("COLORTERM") };
+        control::set_override(true);
+        let very_s = very_dim("hint").to_string();
+        control::unset_override();
+        if let Some(v) = saved_colorterm {
+            unsafe { std::env::set_var("COLORTERM", v) };
+        }
+        assert!(
+            very_s.contains('\x1b'),
+            "expected an ANSI escape even without COLORTERM=truecolor, got {very_s:?}"
+        );
+        assert!(
+            very_s.contains("hint"),
+            "raw text must survive the degrade, got {very_s:?}"
+        );
     }
 
     #[test]
@@ -344,5 +475,58 @@ mod tests {
         assert!(fail_badge().to_string().contains("FAIL"));
         assert!(warn_badge().to_string().contains("WARN"));
         assert!(missing_badge().to_string().contains("MISSING"));
+    }
+
+    #[test]
+    fn step_glyphs_use_unicode_on_tty() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        control::set_override(true);
+        let pending = step_glyph(StepState::Pending).to_string();
+        let running = step_glyph(StepState::Running).to_string();
+        let done = step_glyph(StepState::Done).to_string();
+        let skipped = step_glyph(StepState::Skipped).to_string();
+        let error = step_glyph(StepState::Error).to_string();
+        control::unset_override();
+        assert!(
+            pending.contains('☐'),
+            "expected ☐ in pending step glyph on TTY, got {pending:?}"
+        );
+        assert!(
+            running.contains('◐'),
+            "expected ◐ in running step glyph on TTY, got {running:?}"
+        );
+        assert!(
+            done.contains('☑'),
+            "expected ☑ in done step glyph on TTY, got {done:?}"
+        );
+        assert!(
+            skipped.contains('☒'),
+            "expected ☒ in skipped step glyph on TTY, got {skipped:?}"
+        );
+        assert!(
+            error.contains('✗'),
+            "expected ✗ in error step glyph on TTY, got {error:?}"
+        );
+    }
+
+    #[test]
+    fn step_glyphs_use_ascii_fallback_on_non_tty() {
+        let _guard = COLOR_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        control::set_override(false);
+        let pending = step_glyph(StepState::Pending).to_string();
+        let running = step_glyph(StepState::Running).to_string();
+        let done = step_glyph(StepState::Done).to_string();
+        let skipped = step_glyph(StepState::Skipped).to_string();
+        let error = step_glyph(StepState::Error).to_string();
+        control::unset_override();
+        assert_eq!(pending, "[ ]");
+        assert_eq!(running, "[~]");
+        assert_eq!(done, "[x]");
+        assert_eq!(skipped, "[-]");
+        assert_eq!(error, "[!]");
     }
 }

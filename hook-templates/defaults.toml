@@ -3,7 +3,7 @@
 # Embedded via `include_str!` in src/hook_templates_defaults.rs. Per
 # PRD §6.7 the only agent-neutral default that ships pre-bundled is
 # `webhook`; per-agent `invoke-<agent>-<username>` templates are
-# created on demand by `aimx agent-setup` so they bind to the
+# created on demand by `aimx agents setup` so they bind to the
 # caller's `$PATH` and uid rather than a hardcoded path.
 #
 # Every template here must validate via `validate_hook_templates` —

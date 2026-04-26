@@ -60,16 +60,16 @@ Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gem
 
 | Agent | MCP supported? | Hook CLI | Non-interactive / approval flag | Notes |
 |-------|----------------|----------|---------------------------------|-------|
-| Claude Code | Yes (`aimx agent-setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits. Pipe the email via `$(cat "$AIMX_FILEPATH")`. |
-| Codex CLI | Yes (`aimx agent-setup codex`) | `codex exec "<prompt>"` | `--dangerously-bypass-approvals-and-sandbox` (or `--full-auto`) | `exec` is the non-interactive subcommand. `--full-auto` enables auto-approval within sandbox. The bypass flag goes further. |
-| OpenCode | Yes (`aimx agent-setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
-| Gemini CLI | Yes (`aimx agent-setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
-| Goose | Yes (`aimx agent-setup goose`) | `goose run -t "<prompt>"` | `--no-session` (optional. Sessions default on) | `-t/--text` takes an inline prompt. `-i/--instructions` reads from a file. |
-| OpenClaw | Yes (`aimx agent-setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw. `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
-| Hermes | Yes (`aimx agent-setup hermes`) | *(no headless CLI)* | n/a | Hermes has no shell-side invocation for dispatching a one-shot prompt. Integrate via MCP instead. See [Hermes](#hermes) for the recommended pattern. |
+| Claude Code | Yes (`aimx agents setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits. Pipe the email via `$(cat "$AIMX_FILEPATH")`. |
+| Codex CLI | Yes (`aimx agents setup codex`) | `codex exec "<prompt>"` | `--dangerously-bypass-approvals-and-sandbox` (or `--full-auto`) | `exec` is the non-interactive subcommand. `--full-auto` enables auto-approval within sandbox. The bypass flag goes further. |
+| OpenCode | Yes (`aimx agents setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
+| Gemini CLI | Yes (`aimx agents setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
+| Goose | Yes (`aimx agents setup goose`) | `goose run -t "<prompt>"` | `--no-session` (optional. Sessions default on) | `-t/--text` takes an inline prompt. `-i/--instructions` reads from a file. |
+| OpenClaw | Yes (`aimx agents setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw. `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
+| Hermes | Yes (`aimx agents setup hermes`) | *(no headless CLI)* | n/a | Hermes has no shell-side invocation for dispatching a one-shot prompt. Integrate via MCP instead. See [Hermes](#hermes) for the recommended pattern. |
 | Aider | No (no MCP server) | `aider --message "<prompt>"` | `--yes-always` | Aider is a code-editing agent. Recipes below pattern it as "take email, apply patch, commit." |
 
-Every agent with an `aimx agent-setup <agent>` installer can ALSO be wired as a hook. MCP support and hook support are orthogonal. MCP gives the agent a way to read/send mail on demand. A hook is aimx pushing an email into the agent when it arrives.
+Every agent with an `aimx agents setup <agent>` installer can ALSO be wired as a hook. MCP support and hook support are orthogonal. MCP gives the agent a way to read/send mail on demand. A hook is aimx pushing an email into the agent when it arrives.
 
 > **Flag drift warning.** CLI flags for every agent below were verified against each project's current `--help` output and public docs at the time of writing. Agent CLIs evolve fast. Always run `<agent> --help` yourself before deploying a recipe to a production mailbox, and check the linked docs for current flag names.
 
@@ -214,7 +214,7 @@ From: $AIMX_FROM" \
 ## OpenClaw
 
 - Docs: <https://docs.openclaw.ai/>
-- MCP server: `aimx agent-setup openclaw` emits an `openclaw mcp set aimx '<json>'` command you paste once to register aimx's MCP tools with the OpenClaw gateway.
+- MCP server: `aimx agents setup openclaw` emits an `openclaw mcp set aimx '<json>'` command you paste once to register aimx's MCP tools with the OpenClaw gateway.
 - Non-interactive agent invocation: `openclaw agent --message "<prompt>" --deliver --json`.
 
 ### config.toml snippet
@@ -244,7 +244,7 @@ openclaw agent \
 
 ### Recommended pattern
 
-Register aimx as an MCP server inside Hermes (`aimx agent-setup hermes` plus the YAML snippet it prints. See [Agent Integration: Hermes](agent-integration.md#hermes)). Inside Hermes, use the aimx skill's `email_list` / `email_read` tools to inspect the inbox on demand.
+Register aimx as an MCP server inside Hermes (`aimx agents setup hermes` plus the YAML snippet it prints. See [Agent Integration: Hermes](agent-integration.md#hermes)). Inside Hermes, use the aimx skill's `email_list` / `email_read` tools to inspect the inbox on demand.
 
 For shell-side notifications on new mail (so Hermes operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
 

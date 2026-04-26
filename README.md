@@ -119,7 +119,7 @@ Commands:
   logs         Tail or follow the aimx service log
   serve        Start the embedded SMTP listener daemon
   portcheck    Check port 25 connectivity (outbound, inbound)
-  agent-setup  Install aimx plugin/skill for an AI agent into the current user's config
+  agents       Manage AI agent MCP wiring (setup / remove / list)
   dkim-keygen  Generate DKIM keypair for email signing
   help         Print this message or the help of the given subcommand(s)
 
@@ -135,15 +135,15 @@ Install aimx into your agent with one command:
 
 | Agent | Install command | Activation |
 |-------|-----------------|------------|
-| Claude Code | `aimx agent-setup claude-code` | Restart Claude Code (auto-discovered from `~/.claude/plugins/`). |
-| Codex CLI | `aimx agent-setup codex` | Restart Codex CLI (auto-discovered from `~/.codex/plugins/`). |
-| OpenCode | `aimx agent-setup opencode` | Paste the printed JSONC block into `opencode.json`, then restart. |
-| Gemini CLI | `aimx agent-setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
-| Goose | `aimx agent-setup goose` | Run `goose run --recipe aimx`. |
-| OpenClaw | `aimx agent-setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
-| Hermes | `aimx agent-setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
+| Claude Code | `aimx agents setup claude-code` | Restart Claude Code (auto-discovered from `~/.claude/plugins/`). |
+| Codex CLI | `aimx agents setup codex` | Restart Codex CLI (auto-discovered from `~/.codex/plugins/`). |
+| OpenCode | `aimx agents setup opencode` | Paste the printed JSONC block into `opencode.json`, then restart. |
+| Gemini CLI | `aimx agents setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
+| Goose | `aimx agents setup goose` | Run `goose run --recipe aimx`. |
+| OpenClaw | `aimx agents setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
+| Hermes | `aimx agents setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
 
-Run `aimx agent-setup` (no args) or `aimx agent-setup --list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
+Run `aimx agents setup` (no args, launches the interactive picker) or `aimx agents list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
 
 Available MCP tools:
 - `mailbox_list`: list all mailboxes with message counts

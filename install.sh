@@ -5,8 +5,13 @@
 #   curl -fsSL https://aimx.email/install.sh | sh
 #   curl -fsSL https://aimx.email/install.sh | sh -s -- --tag 1.2.3
 #
-# Modelled on `just.systems/install.sh` — `say` / `err` / `need` / `download`
-# helper idioms, no bashisms, HTTPS-only trust anchor.
+# Thin wrapper around the binary: download → install → exec `aimx setup`.
+# The binary owns the operator-facing wizard (welcome banner, six-step
+# checklist, agents setup handoff, closing message). Upgrades are
+# non-interactive: stop service → swap binary → start service.
+#
+# Modelled on `just.systems/install.sh` — `say` / `err` / `need` /
+# `download` helper idioms, no bashisms, HTTPS-only trust anchor.
 
 set -eu
 
@@ -19,6 +24,10 @@ GITHUB_API="https://api.github.com/repos/${GITHUB_REPO}/releases"
 GITHUB_DL="https://github.com/${GITHUB_REPO}/releases/download"
 DEFAULT_PREFIX="/usr/local/bin"
 UNSUPPORTED_DOC="https://aimx.email/book/installation.html#unsupported-platforms"
+
+# Config path used by backup_existing_config. Overridable for tests via
+# AIMX_INSTALL_CONFIG_PATH; production always points at /etc/aimx/config.toml.
+AIMX_CONFIG_TOML="${AIMX_INSTALL_CONFIG_PATH:-/etc/aimx/config.toml}"
 
 # ---------------------------------------------------------------------------
 # Helpers (say / err / need / download)
@@ -53,6 +62,60 @@ cleanup() {
         rm -rf "${_td}"
         _td=""
     fi
+}
+
+# ---------------------------------------------------------------------------
+# UI helpers (color when TTY + !NO_COLOR, plain otherwise).
+# Kept thin: the binary owns the section/step rendering. The shell only
+# emits the install-time progress lines (download / extract / install).
+# ---------------------------------------------------------------------------
+
+_ui_color_enabled() {
+    if [ -n "${NO_COLOR:-}" ]; then
+        return 1
+    fi
+    if [ ! -t 2 ]; then
+        return 1
+    fi
+    return 0
+}
+
+_ui_paint() {
+    # $1 = ansi code, $2 = text
+    if _ui_color_enabled; then
+        printf '\033[%sm%s\033[0m' "$1" "$2"
+    else
+        printf '%s' "$2"
+    fi
+}
+
+ui_info() {
+    _msg="$1"
+    printf '%s %s\n' "$(_ui_paint 34 '[info]')" "${_msg}" >&2
+}
+
+ui_warn() {
+    _msg="$1"
+    printf '%s %s\n' "$(_ui_paint 33 '[warn]')" "${_msg}" >&2
+}
+
+ui_error() {
+    _msg="$1"
+    printf '%s %s\n' "$(_ui_paint 31 '[error]')" "${_msg}" >&2
+}
+
+ui_success() {
+    _msg="$1"
+    printf '%s %s\n' "$(_ui_paint 32 '[ok]')" "${_msg}" >&2
+}
+
+# Thin two-line install banner. The full six-step checklist + per-step
+# ticking lives in the Rust binary's `aimx setup` wizard.
+print_install_banner() {
+    printf '\n' >&2
+    printf '%s\n' "$(_ui_paint '1;35' 'AIMX installer')" >&2
+    printf '%s\n' "$(_ui_paint 2 '  downloading and installing aimx...')" >&2
+    printf '\n' >&2
 }
 
 # download <url> <path>
@@ -136,6 +199,108 @@ Trust anchor is HTTPS on the GitHub Releases domain. No signature or
 checksum verification in this script; skeptical operators can verify
 manually via the 'curl + sha256sum -c' block in the release notes.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# Privilege / invoker helpers
+# ---------------------------------------------------------------------------
+
+# SUDO holds the prefix to use for privileged commands. It is either
+# empty (when running as root) or "sudo" (when a non-root invoker has
+# sudo on PATH). Populated by resolve_sudo_prefix, which must be called
+# once early in main(). Defined here so sourced test harnesses see it.
+SUDO=""
+
+# resolve_sudo_prefix — set $SUDO to the right privilege prefix:
+#   - already root (euid 0)      → SUDO=""  (run commands directly)
+#   - non-root with sudo on PATH → SUDO="sudo"
+#   - non-root without sudo      → SUDO=""  (call sites will fail with a
+#                                  useful error via ensure_sudo before
+#                                  ever running a privileged command)
+resolve_sudo_prefix() {
+    _euid="$(id -u 2>/dev/null || echo 0)"
+    if [ "${_euid}" -eq 0 ]; then
+        SUDO=""
+    elif command -v sudo >/dev/null 2>&1; then
+        SUDO="sudo"
+    else
+        SUDO=""
+    fi
+}
+
+ensure_sudo() {
+    _euid="$(id -u 2>/dev/null || echo 0)"
+    if [ "${_euid}" -eq 0 ]; then
+        return 0
+    fi
+    if command -v sudo >/dev/null 2>&1; then
+        if ! sudo -n true >/dev/null 2>&1; then
+            ui_info "Administrator privileges required; enter your password"
+            # Reattach /dev/tty so `curl | sh` still gets a password prompt.
+            # Wrap in a subshell + rc capture so a failing redirect or
+            # wrong password yields a user-visible error instead of a
+            # silent `set -e` abort.
+            _sudo_rc=0
+            # Same logic as the post-install handoff: only re-point stdin
+            # at /dev/tty when the script's stdin is NOT already a
+            # terminal. Redirecting an already-terminal stdin breaks
+            # sudo's use_pty bridge on modern distros.
+            if [ -t 0 ]; then
+                sudo -v || _sudo_rc=$?
+            elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+                (sudo -v </dev/tty) || _sudo_rc=$?
+            else
+                sudo -v || _sudo_rc=$?
+            fi
+            if [ "${_sudo_rc}" -ne 0 ]; then
+                ui_error "failed to obtain sudo credentials"
+                exit 1
+            fi
+        fi
+        return 0
+    fi
+    ui_error "sudo is required for system installs on Linux"
+    say "  Install sudo or re-run as root."
+    exit 1
+}
+
+# detect_invoker
+#   Prints the non-root user that should run `aimx agents setup`.
+#   Returns 0 with stdout set on success, non-zero when no non-root
+#   user can be identified. Kept as a helper for tests + possible future
+#   use; the wizard's drop-through reads $SUDO_USER directly so this is
+#   not on the live install path anymore.
+detect_invoker() {
+    if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
+        printf '%s' "${SUDO_USER}"
+        return 0
+    fi
+    _me="$(id -un 2>/dev/null || echo '')"
+    if [ -n "${_me}" ] && [ "${_me}" != "root" ]; then
+        printf '%s' "${_me}"
+        return 0
+    fi
+    return 1
+}
+
+# backup_existing_config
+#   If /etc/aimx/config.toml exists, rename it to
+#   config.toml.bak-YYYYMMDD-HHMMSS-<pid> (UTC). On failure, err out
+#   rather than silently continuing. Only config.toml is backed up —
+#   DKIM keys and TLS certs are left in place so deliverability survives
+#   re-runs. The $$ (pid) suffix prevents collision between concurrent
+#   invocations that land in the same second.
+backup_existing_config() {
+    _cfg="${AIMX_CONFIG_TOML}"
+    if [ -f "${_cfg}" ]; then
+        _ts="$(date -u +%Y%m%d-%H%M%S)"
+        _bak="${_cfg}.bak-${_ts}-$$"
+        if ${SUDO} mv -f "${_cfg}" "${_bak}"; then
+            ui_info "backed up existing config to ${_bak}"
+        else
+            err "failed to back up existing ${_cfg}"
+        fi
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -230,28 +395,21 @@ parse_installed_tag() {
     if [ ! -x "${_bin}" ]; then
         return 0
     fi
-    # Capture stdout only; a binary that aborts on --version prints nothing
-    # here and we treat that as "unknown version" (falls through to install).
     _out="$("${_bin}" --version 2>/dev/null || true)"
     if [ -z "${_out}" ]; then
         return 0
     fi
-    # Expect the literal "aimx" prefix. If not, treat as unknown.
     case "${_out}" in
         aimx\ *) : ;;
         *) return 0 ;;
     esac
-    # Second whitespace-separated token is the tag.
     printf '%s' "${_out}" | awk '{print $2}'
 }
 
 # Compare two SemVer-ish tags. Prints "older" / "equal" / "newer" describing
-# the relationship of $1 relative to $2 (i.e. is $1 older/equal/newer than
-# $2?). Strips the leading "v" and compares dot-separated numeric segments
-# pairwise; any pre-release suffix (-rc1, -fixture) is compared
-# lexicographically *only* as a tiebreaker (pre-release < release per
-# SemVer). Good enough for the install-script upgrade heuristic; the real
-# `aimx upgrade` uses a proper crate.
+# the relationship of $1 relative to $2. Strips the leading "v" and compares
+# dot-separated numeric segments pairwise; any pre-release suffix is compared
+# lexicographically *only* as a tiebreaker (pre-release < release per SemVer).
 compare_tags() {
     _a="$(tag_to_version "$1")"
     _b="$(tag_to_version "$2")"
@@ -261,7 +419,6 @@ compare_tags() {
     _a_pre="$(printf '%s' "${_a}" | sed -n 's/^[^-]*-\(.*\)$/\1/p')"
     _b_pre="$(printf '%s' "${_b}" | sed -n 's/^[^-]*-\(.*\)$/\1/p')"
 
-    # Pad to three segments.
     _a1="$(printf '%s' "${_a_core}" | cut -d. -f1)"
     _a2="$(printf '%s' "${_a_core}" | cut -d. -f2)"
     _a3="$(printf '%s' "${_a_core}" | cut -d. -f3)"
@@ -284,8 +441,6 @@ compare_tags() {
         fi
     done
 
-    # Cores equal. Apply pre-release tiebreaker: no-pre > has-pre; if both
-    # have pre, compare strings.
     if [ -z "${_a_pre}" ] && [ -z "${_b_pre}" ]; then
         printf 'equal'
         return 0
@@ -302,8 +457,6 @@ compare_tags() {
         printf 'equal'
         return 0
     fi
-    # Lexicographic tiebreaker: feed both pre-release strings through
-    # `LC_ALL=C sort` and take the first line — that is the "smaller" one.
     _first="$(printf '%s\n%s\n' "${_a_pre}" "${_b_pre}" | LC_ALL=C sort | head -n1)"
     if [ "${_first}" = "${_a_pre}" ]; then
         printf 'older'
@@ -320,7 +473,7 @@ stop_service() {
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet aimx 2>/dev/null; then
             verbose "systemctl stop aimx"
-            systemctl stop aimx || err "systemctl stop aimx failed"
+            ${SUDO} systemctl stop aimx || err "systemctl stop aimx failed"
             printf 'systemd'
             return 0
         fi
@@ -328,7 +481,7 @@ stop_service() {
     fi
     if command -v rc-service >/dev/null 2>&1; then
         verbose "rc-service aimx stop"
-        rc-service aimx stop 2>/dev/null || true
+        ${SUDO} rc-service aimx stop 2>/dev/null || true
         printf 'openrc'
         return 0
     fi
@@ -341,11 +494,11 @@ start_service() {
     case "${_init}" in
         systemd)
             verbose "systemctl start aimx"
-            systemctl start aimx
+            ${SUDO} systemctl start aimx
             ;;
         openrc)
             verbose "rc-service aimx start"
-            rc-service aimx start
+            ${SUDO} rc-service aimx start
             ;;
         unknown)
             say "warning: unrecognized init system; not starting aimx.service"
@@ -408,6 +561,14 @@ parse_args() {
     done
 }
 
+# ---------------------------------------------------------------------------
+# Post-install handoff (fresh install only)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
 main() {
     parse_args "$@"
 
@@ -421,6 +582,9 @@ main() {
     if [ -z "${PREFIX}" ]; then
         PREFIX="${DEFAULT_PREFIX}"
     fi
+
+    # Thin install banner. Full six-step wizard checklist is the binary's job.
+    print_install_banner
 
     # Platform detection.
     detect_os >/dev/null
@@ -446,6 +610,15 @@ main() {
     need sed
     need grep
 
+    # Fail fast on no-sudo: dry-run is honored first so unprivileged
+    # auditors can still see what would happen, then ensure_sudo runs
+    # before any network call so a non-root user without sudo gets a
+    # clear error before we hit the GitHub API.
+    if [ "${DRY_RUN}" != "1" ]; then
+        ensure_sudo
+        resolve_sudo_prefix
+    fi
+
     # Temp dir for downloads.
     _td="$(mktemp -d 2>/dev/null || mktemp -d -t aimx-install)"
     [ -d "${_td}" ] || err "mktemp failed"
@@ -454,14 +627,16 @@ main() {
     # Resolve tag.
     if [ -z "${TAG}" ]; then
         say "resolving latest release from ${GITHUB_API}/latest"
-        TAG="$(resolve_latest_tag)"
+        if [ "${DRY_RUN}" = "1" ]; then
+            # Skip network for dry-run.
+            TAG="0.0.0"
+            say "dry-run: would resolve latest tag from GitHub"
+        else
+            TAG="$(resolve_latest_tag)"
+        fi
     fi
-    # Tags are bare SemVer. A caller-supplied `v` prefix
-    # (from `--tag v0.0.0-fixture` or `AIMX_VERSION=v1.2.3`) would compose a
-    # non-existent `/download/v…/` URL; strip it leniently before we use the
-    # tag for URL / asset-name / .sha256 filename composition. Narrow match:
-    # only strip `v` when the next character is a digit — leaves non-SemVer
-    # inputs like `version-1` alone.
+    # Tags are bare SemVer. A caller-supplied `v` prefix would compose a
+    # non-existent `/download/v…/` URL; strip it leniently.
     case "${TAG}" in
         v[0-9]*)
             _stripped="${TAG#v}"
@@ -476,13 +651,12 @@ main() {
     _url="${GITHUB_DL}/${TAG}/${_asset}"
     _install_path="${PREFIX}/aimx"
 
-    # Print the three facts operators want to see before any download.
     say "target:  ${TARGET}"
     say "tarball: ${_url}"
     say "install path: ${_install_path}"
 
-    # Upgrade-vs-fresh decision. Only matters when a binary is
-    # already present at ${_install_path}.
+    # Upgrade-vs-fresh decision. Only matters when a binary is already
+    # present at ${_install_path}.
     _installed_tag=""
     _is_upgrade=0
     if [ -x "${_install_path}" ]; then
@@ -507,8 +681,6 @@ main() {
                     ;;
             esac
         else
-            # Binary present but --version unparseable. Treat as upgrade
-            # so the service-aware swap path runs.
             say "existing binary at ${_install_path} did not report a parseable version; proceeding as upgrade"
             _is_upgrade=1
         fi
@@ -518,27 +690,19 @@ main() {
         say "dry-run: would download ${_url}"
         say "dry-run: would extract tarball under ${_td}"
         if [ "${_is_upgrade}" -eq 1 ]; then
-            say "dry-run: would stop aimx.service, swap binary, restart"
+            say "dry-run: would stop aimx.service, swap binary, restart (upgrade)"
         else
-            say "dry-run: would install to ${_install_path}"
+            say "dry-run: would ensure_sudo, install to ${_install_path}"
+            say "dry-run: would exec 'sudo aimx setup' (binary owns wizard)"
         fi
         say "dry-run: no filesystem changes made"
         exit 0
     fi
 
-    # For the upgrade path and writes to system dirs, enforce root.
-    _euid="$(id -u 2>/dev/null || echo 0)"
-    if [ "${_is_upgrade}" -eq 1 ] && [ "${_euid}" -ne 0 ]; then
-        err "upgrade path needs root to stop aimx.service and write to ${PREFIX}; re-run with sudo"
-    fi
     if [ ! -d "${PREFIX}" ]; then
-        # Try to create it. If we can't, surface a clear error.
-        if ! mkdir -p "${PREFIX}" 2>/dev/null; then
-            err "install prefix ${PREFIX} does not exist and cannot be created (re-run with sudo, or use --to)"
+        if ! ${SUDO} mkdir -p "${PREFIX}" 2>/dev/null; then
+            err "install prefix ${PREFIX} does not exist and cannot be created"
         fi
-    fi
-    if [ ! -w "${PREFIX}" ]; then
-        err "install prefix ${PREFIX} is not writable (re-run with sudo, or use --to)"
     fi
 
     # Download + extract.
@@ -553,54 +717,75 @@ main() {
     fi
 
     if [ "${_is_upgrade}" -eq 1 ]; then
-        _init="$(stop_service)"
+        # Upgrade path: non-interactive by design. Previous setup is
+        # preserved; just swap the binary and restart the service.
+        _init="$(stop_service || echo unknown)"
+
         _prev="${_install_path}.prev"
 
-        # Preserve the existing binary at .prev.
         if [ -f "${_install_path}" ]; then
-            if ! mv -f "${_install_path}" "${_prev}"; then
+            if ! ${SUDO} mv -f "${_install_path}" "${_prev}"; then
                 say "✗ failed to preserve ${_install_path} as ${_prev}"
-                start_service "${_init}"
+                start_service "${_init}" || true
                 err "aborting upgrade; previous binary still in place"
             fi
         fi
 
-        # Install new binary.
-        if ! install -m 0755 "${_staged}" "${_install_path}"; then
-            # Rollback.
+        if ! ${SUDO} install -m 0755 "${_staged}" "${_install_path}"; then
             say "✗ install failed; rolling back"
             if [ -f "${_prev}" ]; then
-                mv -f "${_prev}" "${_install_path}" || true
+                ${SUDO} mv -f "${_prev}" "${_install_path}" || true
             fi
-            start_service "${_init}"
+            start_service "${_init}" || true
             err "upgrade failed at install step; service restored"
         fi
 
-        # Start service.
         if ! start_service "${_init}"; then
             say "✗ service start failed; rolling back"
             if [ -f "${_prev}" ]; then
-                mv -f "${_prev}" "${_install_path}" || true
+                ${SUDO} mv -f "${_prev}" "${_install_path}" || true
                 start_service "${_init}" || true
             fi
             err "upgrade failed at start step; service restored if possible"
         fi
 
         if [ -n "${_installed_tag}" ]; then
-            say "aimx ${_installed_tag} -> ${TAG}. Service restarted."
+            ui_success "aimx upgraded from ${_installed_tag} to ${TAG}"
         else
-            say "aimx installed at ${TAG}. Service restarted."
+            ui_success "aimx installed at ${TAG}"
         fi
         say "upgrade complete. Run 'aimx doctor' for health."
         exit 0
     fi
 
-    # Fresh install.
-    install -m 0755 "${_staged}" "${_install_path}" \
+    # Fresh install path.
+    ${SUDO} install -m 0755 "${_staged}" "${_install_path}" \
         || err "install failed writing ${_install_path}"
+    ui_success "aimx ${TAG} installed to ${_install_path}"
 
-    say "✓ aimx ${TAG} installed to ${_install_path}"
-    say "→ next: sudo aimx setup"
+    # Hand off to the binary. `aimx setup` owns the welcome banner, the
+    # six-step checklist, the agents setup drop-through, and the closing
+    # message. Use `exec` so the shell is replaced cleanly. Backup any
+    # pre-existing config first so the wizard's writes don't clobber it.
+    backup_existing_config
+    # When stdin is already the terminal (./install.sh from a real shell),
+    # leave it alone. Re-pointing it at /dev/tty creates a separate fd
+    # that breaks sudo's `use_pty` bridge on modern distros — the
+    # operator's keystrokes stop registering at the first prompt. Only
+    # re-attach /dev/tty when stdin is a pipe or redirect (curl|sh).
+    if [ -t 0 ]; then
+        exec ${SUDO} aimx setup
+    elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        exec ${SUDO} aimx setup </dev/tty
+    else
+        # No TTY at all (CI, fully-scripted): the wizard will respect
+        # AIMX_NONINTERACTIVE=1 if set, or error out itself.
+        exec ${SUDO} aimx setup
+    fi
 }
 
-main "$@"
+# Honor INSTALL_SH_TEST=1 so unit tests can source the script to probe
+# individual helpers without triggering the full install flow.
+if [ "${INSTALL_SH_TEST:-0}" != "1" ]; then
+    main "$@"
+fi

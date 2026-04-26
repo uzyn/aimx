@@ -1,6 +1,7 @@
-mod agent_cleanup;
-mod agent_setup;
-mod agent_tui;
+mod agents_cleanup;
+mod agents_remove;
+mod agents_setup;
+mod agents_tui;
 mod cli;
 mod config;
 mod datadir_readme;
@@ -47,7 +48,7 @@ mod user_resolver;
 mod version;
 
 use clap::Parser;
-use cli::{Cli, Command};
+use cli::{AgentsCommand, Cli, Command};
 
 fn main() {
     // Handle `aimx --version` / `aimx -V` manually so the output is
@@ -87,34 +88,49 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
             rt.block_on(mcp::run(cli.data_dir.as_deref()))
         }
-        // agent-setup uses data_dir as an install-path override for emitted
-        // MCP configs, not a config-loading override.
-        Command::AgentSetup {
-            agent,
-            list,
-            force,
-            print,
-            no_template,
-            redetect,
-            no_interactive,
-            dangerously_allow_root,
-        } => agent_setup::run(agent_setup::RunOpts {
-            agent,
-            list,
-            force,
-            print,
-            no_template,
-            redetect,
-            no_interactive,
-            dangerously_allow_root,
-            data_dir: cli.data_dir.as_deref(),
-        }),
-        // agent-cleanup is the per-user inverse of agent-setup. Drops
-        // the `invoke-<agent>-<username>` template over UDS and, with
-        // `--full`, removes the plugin files too. Never loads config.
-        Command::AgentCleanup { agent, full, yes } => {
-            agent_cleanup::run(agent_cleanup::RunOpts { agent, full, yes })
-        }
+        // `aimx agents <command>`: the canonical plural-noun-with-verb
+        // shape. Setup / Remove / List dispatch to their dedicated
+        // modules.
+        Command::Agents(cmd) => match cmd {
+            AgentsCommand::Setup {
+                agent,
+                list,
+                force,
+                print,
+                no_template,
+                redetect,
+                no_interactive,
+                dangerously_allow_root,
+            } => agents_setup::run(agents_setup::RunOpts {
+                agent,
+                list,
+                force,
+                print,
+                no_template,
+                redetect,
+                no_interactive,
+                dangerously_allow_root,
+                data_dir: cli.data_dir.as_deref(),
+            }),
+            AgentsCommand::Remove {
+                agent,
+                dangerously_allow_root,
+            } => agents_remove::run(agents_remove::RunOpts {
+                agent,
+                dangerously_allow_root,
+            }),
+            AgentsCommand::List => agents_setup::run(agents_setup::RunOpts {
+                agent: None,
+                list: true,
+                force: false,
+                print: false,
+                no_template: false,
+                redetect: false,
+                no_interactive: true,
+                dangerously_allow_root: false,
+                data_dir: cli.data_dir.as_deref(),
+            }),
+        },
         // `aimx send` is a pure UDS client. It never reads config.toml.
         // The daemon parses the `From:` header itself and resolves the
         // sender mailbox against its in-memory Config.
@@ -189,8 +205,7 @@ fn dispatch_with_config(
         | Command::Mcp
         | Command::Send(_)
         | Command::Logs { .. }
-        | Command::AgentSetup { .. }
-        | Command::AgentCleanup { .. }
+        | Command::Agents(_)
         | Command::Upgrade(_) => unreachable!("handled by dispatch"),
     }
 }

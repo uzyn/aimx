@@ -7,7 +7,7 @@
 //!
 //! Every `invoke-<agent>` block has been stripped from the
 //! bundled TOML — per-agent templates are now created on demand by
-//! `aimx agent-setup` so they bind to the caller's `$PATH` and uid
+//! `aimx agents setup` so they bind to the caller's `$PATH` and uid
 //! rather than a hardcoded path. Only the agent-neutral `webhook`
 //! template remains pre-bundled. The module still compile-time-
 //! validates the bundled file so a malformed edit is caught at
@@ -149,7 +149,7 @@ mod tests {
 
     /// Regression guard: no `invoke-*` blocks should
     /// ever re-enter the bundled defaults. Per-agent templates belong
-    /// to `aimx agent-setup`, which registers them on demand.
+    /// to `aimx agents setup`, which registers them on demand.
     #[test]
     fn defaults_toml_has_no_invoke_templates() {
         for name in default_template_names() {

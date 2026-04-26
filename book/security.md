@@ -218,7 +218,7 @@ What makes this safe is a short list of guarantees the code enforces (from `src/
 
 The rendered argv vector is handed to `execvp` directly. `/bin/sh -c` is never invoked for template hooks, so there is no string-to-argv parsing step for an attacker to subvert.
 
-Template hooks run as the template's `run_as` Linux user — typically the mailbox owner that registered the template via `aimx agent-setup` — never as root. On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`, with `--uid=<run_as>`.
+Template hooks run as the template's `run_as` Linux user — typically the mailbox owner that registered the template via `aimx agents setup` — never as root. On systemd hosts the sandbox adds `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, and a `MemoryMax=256M` cap via `systemd-run`, with `--uid=<run_as>`.
 
 The substitution logic has no I/O and no locks, so it is fuzzed in isolation (`tests/hook_substitute_fuzz.rs`).
 

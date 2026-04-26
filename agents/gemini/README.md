@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) skill source tree for Gemini CLI. This directory
 wires aimx into Gemini. Contents are bundled into the `aimx` binary at
 compile time (via `include_dir!`) and installed by
-`aimx agent-setup gemini`.
+`aimx agents setup gemini`.
 
 ## What gets installed
 
@@ -21,7 +21,7 @@ section of `settings.json` (see Activation below).
 ## Install
 
 ```bash
-aimx agent-setup gemini
+aimx agents setup gemini
 ```
 
 Default skill destination: `~/.gemini/skills/aimx/SKILL.md`. After the skill is
@@ -50,7 +50,7 @@ If aimx was set up with a non-default data directory, re-run the installer
 with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup gemini
+aimx --data-dir /custom/path agents setup gemini
 ```
 
 The printed JSON block's `args` will include `--data-dir /custom/path`.

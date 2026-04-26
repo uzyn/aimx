@@ -202,14 +202,16 @@ Start the MCP server in stdio mode. Launched on-demand by MCP clients, not a bac
 
 No flags. See [MCP Server](mcp.md).
 
-### `aimx agent-setup [agent]`
+### `aimx agents setup [agent]`
 
-Install the aimx plugin / skill for a supported agent into the current user's config directory, probe `$PATH` for the agent binary, and register an `invoke-<agent>-<username>` hook template over the daemon's UDS. Refuses to run as root. Run with no arguments (or `--list`) to print the supported-agent registry and exit without installing.
+Install the aimx plugin / skill for a supported agent into the current user's config directory, probe `$PATH` for the agent binary, and register an `invoke-<agent>-<username>` hook template over the daemon's UDS. Refuses to run as root. Run with no arguments to launch the interactive checkbox TUI; pass `--list` (or call `aimx agents list`) to print the supported-agent registry and exit without installing.
 
 | Flag | Description |
 |------|-------------|
-| `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit to print the registry. |
-| `--list` | Print the registry: agent name, destination path, activation hint. Equivalent to running with no positional argument. |
+| `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit for the interactive TUI. |
+| `--list` | Print the registry: agent name, destination path, activation hint. Same output as `aimx agents list`. |
+| `--no-interactive` | Skip the TUI when no agent is named; print the same plain registry dump. Intended for scripting. |
+| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print the plugin contents and the template that would be registered to stdout instead of writing to disk. |
 | `--no-template` | Install plugin files only; skip the `$PATH` probe and `TEMPLATE-CREATE` over UDS. |
@@ -217,15 +219,18 @@ Install the aimx plugin / skill for a supported agent into the current user's co
 
 See [Agent Integration](agent-integration.md) for per-agent activation steps.
 
-### `aimx agent-cleanup <agent>`
+### `aimx agents list`
 
-Inverse of `agent-setup`. Submits `TEMPLATE-DELETE` for `invoke-<agent>-<caller_username>` to the daemon. With `--full`, also removes the plugin files under `$HOME` that `agent-setup` laid down. Refuses to run as root. When the daemon is unreachable, plugin files (if `--full`) are still removed and the command exits `2` with a pointer to `sudo aimx hooks prune --orphans`.
+Print the supported-agent registry as a plain table (agent name, destination path, activation hint).
+
+### `aimx agents remove <agent>`
+
+Inverse of `aimx agents setup`. Removes the plugin files under `$HOME` and submits `TEMPLATE-DELETE` for `invoke-<agent>-<caller_username>` to the daemon. Refuses to run as root. When the daemon is unreachable, plugin files are still removed and the command exits `2` with a pointer to `sudo aimx hooks prune --orphans`.
 
 | Flag | Description |
 |------|-------------|
-| `<agent>` (positional) | Short name; must match the agent previously passed to `agent-setup`. |
-| `--full` | Also remove plugin files under `$HOME`. |
-| `-y`, `--yes` | Skip the interactive prompt when `--full` removes plugin files. |
+| `<agent>` (positional) | Short name; must match the agent previously passed to `aimx agents setup`. |
+| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check. |
 
 ## Utilities
 
