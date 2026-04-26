@@ -4,7 +4,8 @@ use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
 use crate::send_protocol::{
-    self, ErrCode, MailboxCrudRequest, MarkFolder, MarkRequest, SendRequest,
+    self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxCrudRequest, MarkFolder,
+    MarkRequest, SendRequest,
 };
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -20,24 +21,13 @@ pub struct AimxMcpServer {
     /// supersedes `config.data_dir` for all storage operations; when
     /// `None`, the value from `/etc/aimx/config.toml` is used.
     data_dir_override: Option<PathBuf>,
+    /// Effective uid of the process running `aimx mcp`. Captured at
+    /// `new()` and passed into `auth::authorize` for every tool call.
+    /// Agents inherit the operator's uid via the launching shell, so
+    /// this is the agent's authorization principal.
+    caller_uid: u32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
-}
-
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MailboxCreateParams {
-    #[schemars(description = "Name of the mailbox to create (local part of email address)")]
-    pub name: String,
-    #[schemars(description = "Linux user that owns this mailbox's storage under \
-                       /var/lib/aimx/{inbox,sent}/<name>/. Defaults to the \
-                       mailbox name. Must resolve via getpwnam.")]
-    pub owner: Option<String>,
-}
-
-#[derive(Serialize, Deserialize, schemars::JsonSchema)]
-pub struct MailboxDeleteParams {
-    #[schemars(description = "Name of the mailbox to delete")]
-    pub name: String,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -111,10 +101,69 @@ pub struct EmailReplyParams {
     pub body: String,
 }
 
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookCreateParams {
+    #[schemars(description = "Mailbox name to attach the hook to. Must be a \
+                              mailbox you own.")]
+    pub mailbox: String,
+    #[schemars(description = "Event that triggers the hook. One of: \"on_receive\", \
+                       \"after_send\".")]
+    pub event: String,
+    #[schemars(description = "Argv array exec'd when the hook fires. cmd[0] must \
+                       be an absolute path; there is no shell wrapping. \
+                       Spell out [\"/bin/sh\", \"-c\", \"...\"] explicitly when \
+                       shell expansion is needed.")]
+    pub cmd: Vec<String>,
+    #[schemars(description = "Optional explicit hook name. When omitted, a stable \
+                       12-char hex name is derived from (event, cmd, \
+                       fire_on_untrusted).")]
+    pub name: Option<String>,
+    #[schemars(description = "Stdin delivery mode. \"email\" (default) pipes the \
+                       raw .md (frontmatter + body) into the child's stdin. \
+                       \"none\" closes stdin immediately so the hook only \
+                       sees env vars.")]
+    pub stdin: Option<String>,
+    #[schemars(description = "Hard subprocess timeout in seconds. Default 60, \
+                       max 600. SIGTERM at the limit, SIGKILL 5s later.")]
+    pub timeout_secs: Option<u32>,
+    #[schemars(description = "Opt into firing on inbound emails the trust gate \
+                       marks as not trusted. Only valid on event = \
+                       \"on_receive\".")]
+    pub fire_on_untrusted: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookListParams {
+    #[schemars(description = "Optional mailbox filter. When set, only hooks on \
+                       this mailbox are listed. When omitted, lists hooks \
+                       for every mailbox you own.")]
+    pub mailbox: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+pub struct HookDeleteParams {
+    #[schemars(description = "Hook name (explicit or derived). Only hooks on \
+                       mailboxes you own can be deleted.")]
+    pub name: String,
+}
+
 impl AimxMcpServer {
     pub fn new(data_dir_override: Option<PathBuf>) -> Self {
+        Self::with_caller_uid(data_dir_override, crate::platform::current_euid())
+    }
+
+    /// Test-only constructor that lets the caller pin the authorization
+    /// principal. Production code calls `new()`, which derives the uid
+    /// from `geteuid()` at startup.
+    #[cfg(test)]
+    pub fn with_caller_uid_for_test(data_dir_override: Option<PathBuf>, caller_uid: u32) -> Self {
+        Self::with_caller_uid(data_dir_override, caller_uid)
+    }
+
+    fn with_caller_uid(data_dir_override: Option<PathBuf>, caller_uid: u32) -> Self {
         Self {
             data_dir_override,
+            caller_uid,
             tool_router: Self::tool_router(),
         }
     }
@@ -124,49 +173,69 @@ impl AimxMcpServer {
             .map(|(cfg, _warnings)| cfg)
             .map_err(|e| format!("Failed to load config: {e}"))
     }
+
+    /// Return the auth predicate's verdict for `action` against the
+    /// named mailbox. Mirrors the daemon-side helper so the auth gate
+    /// runs the same way through CLI, daemon UDS, and MCP. The MCP
+    /// surface returns errors as `String` per `rmcp` conventions.
+    fn authorize_mailbox(
+        &self,
+        action: crate::auth::Action,
+        config: &Config,
+    ) -> Result<(), String> {
+        let mailbox_name = match &action {
+            crate::auth::Action::MailboxRead(n)
+            | crate::auth::Action::MailboxSendAs(n)
+            | crate::auth::Action::MarkReadWrite(n)
+            | crate::auth::Action::HookCrud(n) => n.clone(),
+            crate::auth::Action::MailboxCrud | crate::auth::Action::SystemCommand => String::new(),
+        };
+        let mb = if mailbox_name.is_empty() {
+            None
+        } else {
+            config.mailboxes.get(&mailbox_name)
+        };
+        crate::auth::authorize(self.caller_uid, action, mb).map_err(|e| match e {
+            crate::auth::AuthError::NotRoot => "not authorized: requires root".to_string(),
+            crate::auth::AuthError::NotOwner { mailbox } => {
+                format!("not authorized: caller does not own mailbox '{mailbox}'")
+            }
+            crate::auth::AuthError::NoSuchMailbox => {
+                format!("not authorized: mailbox '{mailbox_name}' not found")
+            }
+        })
+    }
 }
 
 #[tool_router]
 impl AimxMcpServer {
-    #[tool(name = "mailbox_create", description = "Create a new mailbox")]
-    fn mailbox_create(
-        &self,
-        Parameters(params): Parameters<MailboxCreateParams>,
-    ) -> Result<String, String> {
-        // Prefer the daemon UDS path. The daemon atomically rewrites
-        // config.toml and hot-swaps its in-memory Config so a following
-        // inbound mail routes correctly with no restart. Fall back to
-        // direct on-disk edit only when the socket isn't reachable
-        // (daemon stopped, first-time setup, etc.).
-        let owner_val = params.owner.clone().unwrap_or_else(|| params.name.clone());
-        match submit_mailbox_crud_via_daemon(&params.name, true, Some(&owner_val)) {
-            Ok(()) => Ok(format!("Mailbox '{}' created successfully.", params.name)),
-            Err(MailboxCrudFallback::SocketMissing) => {
-                let config = self.load_config()?;
-                mailbox::create_mailbox(&config, &params.name, &owner_val)
-                    .map_err(|e| e.to_string())?;
-                Ok(format!(
-                    "Mailbox '{}' created successfully (daemon not running. Restart aimx to apply the change).",
-                    params.name
-                ))
-            }
-            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
-        }
-    }
-
     #[tool(
         name = "mailbox_list",
-        description = "List all mailboxes with message counts"
+        description = "List mailboxes the caller owns, with message counts. \
+                       Mailboxes the caller does not own are absent — root sees all."
     )]
     fn mailbox_list(&self) -> Result<String, String> {
         let config = self.load_config()?;
         let mailboxes = list_mailboxes_with_unread(&config);
 
-        if mailboxes.is_empty() {
+        // Filter to caller-owned mailboxes for non-root callers.
+        // Mailboxes the caller doesn't own are simply absent from the
+        // output rather than returned with a "denied" tag. Root sees
+        // the full set.
+        let filtered: Vec<_> = if self.caller_uid == 0 {
+            mailboxes
+        } else {
+            mailboxes
+                .into_iter()
+                .filter(|(name, _, _, _, _)| mailbox::caller_owns(&config, name, self.caller_uid))
+                .collect()
+        };
+
+        if filtered.is_empty() {
             return Ok("No mailboxes configured.".to_string());
         }
 
-        let result: Vec<String> = mailboxes
+        let result: Vec<String> = filtered
             .iter()
             .map(|(name, total, unread, sent_count, registered)| {
                 let suffix = if *registered { "" } else { " (unregistered)" };
@@ -174,42 +243,6 @@ impl AimxMcpServer {
             })
             .collect();
         Ok(result.join("\n"))
-    }
-
-    #[tool(
-        name = "mailbox_delete",
-        description = "Delete a mailbox and all its emails"
-    )]
-    fn mailbox_delete(
-        &self,
-        Parameters(params): Parameters<MailboxDeleteParams>,
-    ) -> Result<String, String> {
-        // Daemon-side delete refuses when the inbox/sent directories
-        // still contain files (returns ERR NONEMPTY). MCP deliberately
-        // does NOT gain a force variant. Destructive wipes stay on the
-        // CLI where operators see prompts and can't be triggered
-        // remotely by an agent. On NONEMPTY we rewrite the daemon's
-        // error into a structured hint that names the exact CLI command
-        // The fallback direct-on-disk path runs only when the
-        // daemon is unreachable.
-        match submit_mailbox_crud_via_daemon(&params.name, false, None) {
-            Ok(()) => Ok(format!(
-                "Mailbox '{0}' deleted. Empty `inbox/{0}/` and `sent/{0}/` \
-                 directories remain on disk. Run `rmdir` to tidy up if desired.",
-                params.name
-            )),
-            Err(MailboxCrudFallback::SocketMissing) => {
-                let config = self.load_config()?;
-                mailbox::delete_mailbox(&config, &params.name).map_err(|e| e.to_string())?;
-                Ok(format!(
-                    "Mailbox '{}' deleted (daemon not running. Restart aimx to apply the change).",
-                    params.name
-                ))
-            }
-            Err(MailboxCrudFallback::Daemon(msg)) => {
-                Err(rewrite_nonempty_error_for_mcp(&params.name, &msg))
-            }
-        }
     }
 
     #[tool(
@@ -225,6 +258,16 @@ impl AimxMcpServer {
         if !config.mailboxes.contains_key(&params.mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
+
+        // Point operations on mailboxes the caller doesn't own return
+        // the canonical "not authorized" error. This is distinct from
+        // `mailbox_list`, which silently filters — point ops surface
+        // an explicit failure so the agent doesn't loop on an empty
+        // list it cannot interpret.
+        self.authorize_mailbox(
+            crate::auth::Action::MailboxRead(params.mailbox.clone()),
+            &config,
+        )?;
 
         let folder = resolve_folder(params.folder.as_deref())?;
         let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
@@ -266,6 +309,10 @@ impl AimxMcpServer {
         if !config.mailboxes.contains_key(&params.mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
+        self.authorize_mailbox(
+            crate::auth::Action::MailboxRead(params.mailbox.clone()),
+            &config,
+        )?;
 
         let folder = resolve_folder(params.folder.as_deref())?;
         let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
@@ -289,9 +336,16 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
+        let config = self.load_config()?;
+        self.authorize_mailbox(
+            crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
+            &config,
+        )?;
         let folder = resolve_folder(params.folder.as_deref())?;
         // Route through the daemon; mailbox files are root-owned and
-        // the MCP process runs as the invoking user.
+        // the MCP process runs as the invoking user. The daemon
+        // re-checks via SO_PEERCRED, so MCP's pre-flight authz is
+        // defense in depth, not the security boundary.
         submit_mark_via_daemon(&params.mailbox, &params.id, folder, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
@@ -302,6 +356,11 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
+        let config = self.load_config()?;
+        self.authorize_mailbox(
+            crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
+            &config,
+        )?;
         let folder = resolve_folder(params.folder.as_deref())?;
         submit_mark_via_daemon(&params.mailbox, &params.id, folder, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
@@ -320,6 +379,10 @@ impl AimxMcpServer {
         if !config.mailboxes.contains_key(&params.from_mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.from_mailbox));
         }
+        self.authorize_mailbox(
+            crate::auth::Action::MailboxSendAs(params.from_mailbox.clone()),
+            &config,
+        )?;
 
         let from_address = &config.mailboxes[&params.from_mailbox].address;
         if from_address.starts_with('*') {
@@ -348,6 +411,12 @@ impl AimxMcpServer {
         if !config.mailboxes.contains_key(&params.mailbox) {
             return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
         }
+        // `email_reply` reads the parent and submits a new outbound
+        // message — both surfaces are scoped to caller-owned mailboxes.
+        self.authorize_mailbox(
+            crate::auth::Action::MailboxSendAs(params.mailbox.clone()),
+            &config,
+        )?;
 
         let mailbox_dir = config.inbox_dir(&params.mailbox);
         // `email_reply` reads the parent message to
@@ -402,6 +471,182 @@ impl AimxMcpServer {
         };
 
         submit_via_daemon(&args)
+    }
+
+    #[tool(
+        name = "hook_create",
+        description = "Create a hook on a mailbox you own. The hook runs \
+                       as your Linux uid (the mailbox owner) when the \
+                       configured event fires. Routes through the daemon \
+                       UDS so the running config hot-swaps without a \
+                       restart."
+    )]
+    fn hook_create(
+        &self,
+        Parameters(params): Parameters<HookCreateParams>,
+    ) -> Result<String, String> {
+        let config = self.load_config()?;
+        if !config.mailboxes.contains_key(&params.mailbox) {
+            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
+        }
+        // Authorize against the central predicate before any wire I/O so
+        // a non-owner sees the canonical "not authorized" error rather
+        // than the daemon's opaque rejection text.
+        self.authorize_mailbox(
+            crate::auth::Action::HookCrud(params.mailbox.clone()),
+            &config,
+        )?;
+
+        if params.cmd.is_empty() {
+            return Err("cmd must not be empty".to_string());
+        }
+        let fire_on_untrusted = params.fire_on_untrusted.unwrap_or(false);
+
+        // Validate stdin at the MCP layer so callers get a precise error
+        // before any wire I/O. The daemon would re-validate on the wire,
+        // but the local check produces a more actionable message.
+        if let Some(s) = params.stdin.as_deref()
+            && let Err(e) = crate::hook::HookStdin::parse(s)
+        {
+            return Err(e);
+        }
+
+        let mut body = serde_json::json!({
+            "cmd": params.cmd,
+            "fire_on_untrusted": fire_on_untrusted,
+            "type": "cmd",
+        });
+        if let Some(stdin) = params.stdin.as_deref() {
+            body["stdin"] = serde_json::Value::String(stdin.to_string());
+        }
+        if let Some(t) = params.timeout_secs {
+            body["timeout_secs"] = serde_json::Value::Number(t.into());
+        }
+        let body_bytes =
+            serde_json::to_vec(&body).map_err(|e| format!("Failed to serialize hook body: {e}"))?;
+
+        match submit_hook_create_via_daemon(
+            &params.mailbox,
+            &params.event,
+            params.name.as_deref(),
+            body_bytes,
+        ) {
+            Ok(()) => Ok(format!("Hook created on mailbox '{}'.", params.mailbox,)),
+            Err(HookCrudFallback::SocketMissing) => {
+                Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
+            }
+            Err(HookCrudFallback::Daemon(msg)) => Err(msg),
+        }
+    }
+
+    #[tool(
+        name = "hook_list",
+        description = "List hooks on mailboxes you own. Pass `mailbox` to \
+                       filter to a single mailbox you own; omit to list \
+                       every hook on every mailbox you own."
+    )]
+    fn hook_list(&self, Parameters(params): Parameters<HookListParams>) -> Result<String, String> {
+        let config = self.load_config()?;
+
+        if let Some(name) = &params.mailbox {
+            if !config.mailboxes.contains_key(name) {
+                return Err(format!("Mailbox '{name}' does not exist."));
+            }
+            self.authorize_mailbox(crate::auth::Action::HookCrud(name.clone()), &config)?;
+        }
+
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for (mailbox_name, mb) in &config.mailboxes {
+            // Filter by --mailbox, or by caller ownership for non-root.
+            if let Some(f) = &params.mailbox
+                && f != mailbox_name
+            {
+                continue;
+            }
+            if self.caller_uid != 0 && !mailbox::caller_owns(&config, mailbox_name, self.caller_uid)
+            {
+                continue;
+            }
+            for hook in &mb.hooks {
+                rows.push(serde_json::json!({
+                    "name": crate::hook::effective_hook_name(hook),
+                    "mailbox": mailbox_name,
+                    "event": hook.event.as_str(),
+                    "cmd": hook.cmd,
+                    "fire_on_untrusted": hook.fire_on_untrusted,
+                    "stdin": hook.stdin.as_str(),
+                    "timeout_secs": hook.timeout_secs,
+                }));
+            }
+        }
+        rows.sort_by(|a, b| {
+            a["mailbox"]
+                .as_str()
+                .unwrap_or("")
+                .cmp(b["mailbox"].as_str().unwrap_or(""))
+                .then_with(|| {
+                    a["event"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["event"].as_str().unwrap_or(""))
+                })
+                .then_with(|| {
+                    a["name"]
+                        .as_str()
+                        .unwrap_or("")
+                        .cmp(b["name"].as_str().unwrap_or(""))
+                })
+        });
+
+        serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize: {e}"))
+    }
+
+    #[tool(
+        name = "hook_delete",
+        description = "Delete a hook by name. Only hooks on mailboxes you \
+                       own can be deleted."
+    )]
+    fn hook_delete(
+        &self,
+        Parameters(params): Parameters<HookDeleteParams>,
+    ) -> Result<String, String> {
+        // Resolve the hook to its mailbox so the auth predicate runs
+        // against the right principal. Hidden mailboxes (owned by other
+        // users) surface as "hook not found" — we deliberately do not
+        // distinguish "exists but you don't own it" from "doesn't exist"
+        // to avoid leaking ownership of foreign mailboxes. The UDS wire
+        // already returns canonical opaque text on auth failures; this
+        // collapse keeps the MCP surface from leaking more than the wire.
+        let config = self.load_config()?;
+        let mailbox_name = config
+            .mailboxes
+            .iter()
+            .find_map(|(mb_name, mb)| {
+                mb.hooks
+                    .iter()
+                    .find(|h| crate::hook::effective_hook_name(h) == params.name)
+                    .map(|_| mb_name.clone())
+            })
+            .ok_or_else(|| format!("Hook '{}' not found", params.name))?;
+
+        // If authorization fails (caller is not the mailbox's owner and
+        // is not root), surface as `not found` rather than leaking the
+        // foreign mailbox's name through a "caller does not own
+        // mailbox 'X'" error.
+        if self
+            .authorize_mailbox(crate::auth::Action::HookCrud(mailbox_name.clone()), &config)
+            .is_err()
+        {
+            return Err(format!("Hook '{}' not found", params.name));
+        }
+
+        match submit_hook_delete_via_daemon(&params.name) {
+            Ok(()) => Ok(format!("Hook '{}' deleted.", params.name)),
+            Err(HookCrudFallback::SocketMissing) => {
+                Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
+            }
+            Err(HookCrudFallback::Daemon(msg)) => Err(msg),
+        }
     }
 }
 
@@ -609,6 +854,144 @@ async fn submit_mailbox_crud_request(
     let (mut reader, mut writer) = stream.into_split();
 
     send_protocol::write_mailbox_crud_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+/// Outcome of a `HOOK-CREATE` / `HOOK-DELETE` UDS submission. Mirrors
+/// [`MailboxCrudFallback`] so callers can decide whether to fall back to
+/// a direct on-disk edit (only when the caller is root) or surface the
+/// daemon's reason verbatim.
+pub(crate) enum HookCrudFallback {
+    /// Socket not present / not connectable. Callers fall back to
+    /// direct config.toml edit when running as root, error otherwise.
+    SocketMissing,
+    /// Daemon connected and answered but reported an error. Caller
+    /// should surface this verbatim — includes ERR EACCES (not owner)
+    /// and ERR ENOENT (no such hook / mailbox).
+    Daemon(String),
+}
+
+/// Submit an `AIMX/1 HOOK-CREATE` to the daemon. The caller supplies the
+/// JSON body (`{"cmd": [...], "fire_on_untrusted": <bool>, "type": "cmd"}`)
+/// matching the daemon-side `HookCreateBody` shape.
+pub(crate) fn submit_hook_create_via_daemon(
+    mailbox: &str,
+    event: &str,
+    name: Option<&str>,
+    body: Vec<u8>,
+) -> Result<(), HookCrudFallback> {
+    let request = HookCreateRequest {
+        mailbox: mailbox.to_string(),
+        event: event.to_string(),
+        name: name.map(|s| s.to_string()),
+        body,
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<MarkOutcome, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_hook_create_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    HookCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_hook_create_request(&socket, &request))
+        }
+    };
+
+    map_hook_io_result(io_result, &socket)
+}
+
+/// Submit an `AIMX/1 HOOK-DELETE` to the daemon by effective name.
+pub(crate) fn submit_hook_delete_via_daemon(name: &str) -> Result<(), HookCrudFallback> {
+    let request = HookDeleteRequest {
+        name: name.to_string(),
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<MarkOutcome, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_hook_delete_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    HookCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_hook_delete_request(&socket, &request))
+        }
+    };
+
+    map_hook_io_result(io_result, &socket)
+}
+
+fn map_hook_io_result(
+    io_result: Result<MarkOutcome, std::io::Error>,
+    socket: &std::path::Path,
+) -> Result<(), HookCrudFallback> {
+    match io_result {
+        Ok(MarkOutcome::Ok) => Ok(()),
+        Ok(MarkOutcome::Err { code, reason }) => Err(HookCrudFallback::Daemon(format!(
+            "[{}] {reason}",
+            code.as_str()
+        ))),
+        Ok(MarkOutcome::Malformed(reason)) => Err(HookCrudFallback::Daemon(format!(
+            "Malformed response from aimx daemon: {reason}"
+        ))),
+        Err(e) => {
+            if is_socket_missing(&e) {
+                Err(HookCrudFallback::SocketMissing)
+            } else {
+                Err(HookCrudFallback::Daemon(format!(
+                    "Failed to connect to aimx daemon at {}: {e}",
+                    socket.display()
+                )))
+            }
+        }
+    }
+}
+
+async fn submit_hook_create_request(
+    socket_path: &std::path::Path,
+    request: &HookCreateRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_hook_create_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
+}
+
+async fn submit_hook_delete_request(
+    socket_path: &std::path::Path,
+    request: &HookDeleteRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_hook_delete_request(&mut writer, request).await?;
     writer.shutdown().await.ok();
 
     let mut buf = Vec::with_capacity(128);
@@ -1017,42 +1400,114 @@ fn extract_email_address(addr: &str) -> &str {
     addr
 }
 
-/// Rewrite the daemon's `[NONEMPTY]` error into an MCP-friendly hint
-/// that names the exact CLI command. The MCP `mailbox_delete` tool
-/// deliberately does not gain a force variant. Destructive wipes stay
-/// on the CLI where the operator sees prompts and the request can't be
-/// triggered remotely. Non-NONEMPTY daemon errors pass through verbatim.
-pub(crate) fn rewrite_nonempty_error_for_mcp(name: &str, msg: &str) -> String {
-    if !msg.contains("[NONEMPTY]") {
-        return msg.to_string();
-    }
-    let (inbox_files, sent_files) = parse_nonempty_counts(msg);
-    format!(
-        "Cannot delete mailbox '{name}'. inbox: {inbox_files} files, sent: {sent_files} files. \
-         MCP `mailbox_delete` does not wipe mail. Run `sudo aimx mailboxes delete --force {name}` \
-         on the host to wipe and remove."
-    )
-}
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use crate::auth::Action;
+    use crate::config::MailboxConfig;
+    use std::collections::HashMap;
+    use tempfile::TempDir;
 
-/// Parse `(N in inbox, M in sent)` out of the daemon's NONEMPTY reason
-/// string. Returns `(0, 0)` when the format doesn't match; the caller
-/// still gets the hint with zeroed counts, which is better than 500ing.
-fn parse_nonempty_counts(msg: &str) -> (usize, usize) {
-    let mut inbox = 0usize;
-    let mut sent = 0usize;
-    if let Some(idx) = msg.find(" in inbox") {
-        inbox = msg[..idx]
-            .rsplit(|c: char| !c.is_ascii_digit())
-            .find(|s| !s.is_empty())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+    /// Build a minimal in-memory `Config` whose `data_dir` points at a
+    /// caller-supplied tempdir and whose mailboxes carry the named
+    /// `(name, owner)` entries. Owners that are valid usernames on the
+    /// host (`root` always is) flow through `owner_uid()`; orphan
+    /// owners surface via the auth predicate's `NoSuchMailbox` arm
+    /// (the predicate hides the orphan / ownership distinction).
+    fn build_config(tmp: &std::path::Path, owners: &[(&str, &str)]) -> Config {
+        let mut mailboxes = HashMap::new();
+        for (name, owner) in owners {
+            mailboxes.insert(
+                (*name).into(),
+                MailboxConfig {
+                    address: format!("{name}@agent.example.com"),
+                    owner: (*owner).into(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                    allow_root_catchall: false,
+                },
+            );
+        }
+        Config {
+            domain: "agent.example.com".into(),
+            data_dir: tmp.to_path_buf(),
+            dkim_selector: "aimx".into(),
+            trust: "none".into(),
+            trusted_senders: vec![],
+            mailboxes,
+            verify_host: None,
+            enable_ipv6: false,
+            upgrade: None,
+        }
     }
-    if let Some(idx) = msg.find(" in sent") {
-        sent = msg[..idx]
-            .rsplit(|c: char| !c.is_ascii_digit())
-            .find(|s| !s.is_empty())
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+
+    #[test]
+    fn root_caller_passes_authorize_mailbox_for_any_action() {
+        let tmp = TempDir::new().unwrap();
+        let config = build_config(tmp.path(), &[("alice", "root")]);
+        let server = AimxMcpServer::with_caller_uid_for_test(None, 0);
+
+        assert!(
+            server
+                .authorize_mailbox(Action::MailboxRead("alice".into()), &config)
+                .is_ok()
+        );
+        assert!(
+            server
+                .authorize_mailbox(Action::MailboxSendAs("alice".into()), &config)
+                .is_ok()
+        );
+        assert!(
+            server
+                .authorize_mailbox(Action::MarkReadWrite("alice".into()), &config)
+                .is_ok()
+        );
     }
-    (inbox, sent)
+
+    #[test]
+    fn non_root_caller_rejected_when_mailbox_owner_does_not_resolve() {
+        let tmp = TempDir::new().unwrap();
+        let config = build_config(tmp.path(), &[("alice", "aimx-nonexistent-orphan-user")]);
+        // Pick a uid that's almost certainly not 0 and not root —
+        // exact value is irrelevant since the orphan-owner branch
+        // collapses to NoSuchMailbox before the uid match runs.
+        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+
+        let err = server
+            .authorize_mailbox(Action::MailboxRead("alice".into()), &config)
+            .unwrap_err();
+        // The auth predicate hides "orphan owner" vs. "wrong owner";
+        // both surface as NoSuchMailbox to non-root callers.
+        assert!(
+            err.contains("not authorized"),
+            "expected canonical not-authorized prefix: {err}"
+        );
+    }
+
+    #[test]
+    fn non_root_caller_rejected_when_mailbox_owned_by_root() {
+        // Caller uid 1000 vs mailbox owner uid 0 → NotOwner.
+        let tmp = TempDir::new().unwrap();
+        let config = build_config(tmp.path(), &[("admin", "root")]);
+        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+
+        let err = server
+            .authorize_mailbox(Action::MailboxRead("admin".into()), &config)
+            .unwrap_err();
+        assert!(err.contains("not authorized"), "{err}");
+        assert!(err.contains("admin"), "{err}");
+    }
+
+    #[test]
+    fn missing_mailbox_returns_not_authorized_not_found_for_non_root() {
+        let tmp = TempDir::new().unwrap();
+        let config = build_config(tmp.path(), &[]);
+        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+
+        let err = server
+            .authorize_mailbox(Action::MailboxRead("missing".into()), &config)
+            .unwrap_err();
+        assert!(err.contains("not authorized"), "{err}");
+    }
 }

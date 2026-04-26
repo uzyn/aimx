@@ -310,8 +310,15 @@ pub enum MailboxCommand {
         owner: Option<String>,
     },
 
-    /// List all mailboxes
-    List,
+    /// List mailboxes. Non-root callers see only mailboxes they own;
+    /// root sees all. Pass `--all` to override and force the full list
+    /// (root-only).
+    List {
+        /// List every configured mailbox regardless of ownership.
+        /// Root-only — non-root callers refused.
+        #[arg(long)]
+        all: bool,
+    },
 
     /// Show trust, hooks, and message counts for a single mailbox
     Show {
@@ -427,6 +434,17 @@ pub struct HookCreateArgs {
     /// derived from `(event, cmd, fire_on_untrusted)`.
     #[arg(long)]
     pub name: Option<String>,
+
+    /// Stdin delivery mode. `email` (default) pipes the raw `.md`
+    /// (frontmatter + body) into the hook's stdin. `none` closes
+    /// stdin immediately so the hook only sees env vars.
+    #[arg(long, value_parser = ["email", "none"])]
+    pub stdin: Option<String>,
+
+    /// Hard subprocess timeout in seconds. Default 60, max 600.
+    /// SIGTERM at the limit, SIGKILL 5s later.
+    #[arg(long)]
+    pub timeout_secs: Option<u32>,
 
     /// Opt into firing this hook on non-trusted inbound email. Only
     /// valid on `on_receive` hooks.

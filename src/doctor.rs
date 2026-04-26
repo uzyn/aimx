@@ -53,6 +53,19 @@ pub struct MailboxStatus {
     pub trusted_senders_count: usize,
     /// Number of hooks on this mailbox (aggregated across all events).
     pub hook_count: usize,
+    /// Configured `owner` username from `[mailboxes.<name>]`.
+    pub owner: String,
+    /// Resolved uid for `owner`, when `getpwnam` returns a record.
+    /// `None` means the user does not exist on the host (orphan).
+    /// Only meaningful for non-catchall mailboxes — the Ownership
+    /// section skips catchall rows.
+    pub owner_uid: Option<u32>,
+    /// True when this mailbox is the configured catchall. Catchall
+    /// rows are skipped by the Ownership section because the catchall
+    /// is always present after `aimx setup` and its owner is the
+    /// reserved `aimx-catchall` system user, which is not relevant to
+    /// the operator-vs-mailbox-owner authorization story.
+    pub is_catchall: bool,
 }
 
 pub fn gather_status(config: &Config) -> StatusInfo {
@@ -79,6 +92,12 @@ pub fn gather_status_with_ops<S: SystemOps>(
         .map(|(name, mb_config)| {
             let dir = config.mailbox_dir(name);
             let (total, unread) = count_messages(&dir);
+            // Resolve owner_uid via the same path the auth predicate
+            // uses. `Err` means the owner is orphaned on the host;
+            // surface as `None` so the Ownership section can render a
+            // fail mark.
+            let owner_uid = mb_config.owner_uid().ok();
+            let is_catchall = mb_config.is_catchall(config);
             MailboxStatus {
                 name: name.clone(),
                 address: mb_config.address.clone(),
@@ -87,6 +106,9 @@ pub fn gather_status_with_ops<S: SystemOps>(
                 trust: mb_config.effective_trust(config).to_string(),
                 trusted_senders_count: mb_config.effective_trusted_senders(config).len(),
                 hook_count: mb_config.hooks.len(),
+                owner: mb_config.owner.clone(),
+                owner_uid,
+                is_catchall,
             }
         })
         .collect();
@@ -348,6 +370,65 @@ fn render_mailbox_table(mailboxes: &[MailboxStatus]) -> String {
     out
 }
 
+/// Render the Ownership section's body. One indented line per
+/// non-catchall mailbox: `<name>  owner=<owner>  [mark]  uid=<n>` for
+/// resolvable owners, or `<name>  owner=<owner>  [mark]  user not
+/// found` for orphans. The mark uses `term::success_mark()` /
+/// `term::fail_mark()` so the unicode-vs-non-tty rendering is
+/// auto-handled.
+///
+/// Catchall mailboxes are skipped per the sprint plan: the catchall is
+/// always present after `aimx setup` and its owner is the reserved
+/// `aimx-catchall` system user, which has no shell and is not relevant
+/// to the operator-vs-mailbox-owner authorization story.
+pub fn format_ownership_section(mailboxes: &[MailboxStatus]) -> String {
+    let mut rows: Vec<&MailboxStatus> = mailboxes.iter().filter(|m| !m.is_catchall).collect();
+    rows.sort_by(|a, b| a.name.cmp(&b.name));
+
+    if rows.is_empty() {
+        return format!("  {}\n", term::dim("(no non-catchall mailboxes)"));
+    }
+
+    let name_width = rows
+        .iter()
+        .map(|m| m.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .max(8);
+
+    let mut out = String::new();
+    for mb in rows {
+        let mark = if mb.owner_uid.is_some() {
+            term::success_mark()
+        } else {
+            term::fail_mark()
+        };
+        let uid_text = match mb.owner_uid {
+            Some(uid) => format!("uid={uid}"),
+            None => "user not found".to_string(),
+        };
+        let pad = name_width - mb.name.chars().count();
+        out.push_str(&format!(
+            "  {}{:pad$}  owner={}  {}  {}\n",
+            term::highlight(&mb.name),
+            "",
+            mb.owner,
+            mark,
+            uid_text,
+            pad = pad,
+        ));
+    }
+    out
+}
+
+/// `true` when at least one non-catchall mailbox has an unresolvable
+/// owner. Drives the doctor exit code (orphan owners → non-zero exit).
+pub fn has_orphan_owner(mailboxes: &[MailboxStatus]) -> bool {
+    mailboxes
+        .iter()
+        .any(|m| !m.is_catchall && m.owner_uid.is_none())
+}
+
 pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
@@ -405,6 +486,9 @@ pub fn format_status(info: &StatusInfo) -> String {
         out.push('\n');
         out.push_str(&render_mailbox_table(&info.mailboxes));
     }
+
+    out.push_str(&format!("\n{}\n", term::header("Ownership")));
+    out.push_str(&format_ownership_section(&info.mailboxes));
 
     out.push_str(&format!("\n{}\n", term::header("DNS")));
     match &info.dns {
@@ -872,11 +956,109 @@ pub fn run(config: Config) -> Result<(), Box<dyn std::error::Error>> {
     print!("{}", format_checks(&findings));
 
     let any_fail = findings.iter().any(|f| f.severity == FindingSeverity::Fail);
-    if any_fail {
+    let any_orphan = has_orphan_owner(&info.mailboxes);
+    if any_fail || any_orphan {
         // `main.rs` converts any `Err` from this function into a
         // non-zero exit. The error message is deliberately short; the
-        // Checks section above already listed each failure.
+        // Checks / Ownership sections above already listed each
+        // failure or orphan.
+        if any_orphan && !any_fail {
+            return Err(
+                "aimx doctor found mailboxes with unresolvable owners (see Ownership section)"
+                    .into(),
+            );
+        }
         return Err("aimx doctor found failing checks (see Checks section above)".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    fn mb(name: &str, owner: &str, owner_uid: Option<u32>, is_catchall: bool) -> MailboxStatus {
+        MailboxStatus {
+            name: name.to_string(),
+            address: format!("{name}@agent.example.com"),
+            total: 0,
+            unread: 0,
+            trust: "none".to_string(),
+            trusted_senders_count: 0,
+            hook_count: 0,
+            owner: owner.to_string(),
+            owner_uid,
+            is_catchall,
+        }
+    }
+
+    #[test]
+    fn ownership_section_lists_each_non_catchall_mailbox() {
+        let mailboxes = vec![
+            mb("alice", "ubuntu", Some(1000), false),
+            mb("bob", "ubuntu", Some(1000), false),
+            mb("catchall", "aimx-catchall", Some(998), true),
+        ];
+        let out = format_ownership_section(&mailboxes);
+        assert!(out.contains("alice"), "{out}");
+        assert!(out.contains("bob"), "{out}");
+        // Catchall is skipped from the Ownership section.
+        assert!(!out.contains("catchall"), "{out}");
+        // Resolved uids appear inline.
+        assert!(out.contains("uid=1000"), "{out}");
+        // Owner field is rendered.
+        assert!(out.contains("owner=ubuntu"), "{out}");
+    }
+
+    #[test]
+    fn ownership_section_marks_orphan_owner() {
+        let mailboxes = vec![mb("alice", "aimx-nonexistent", None, false)];
+        let out = format_ownership_section(&mailboxes);
+        assert!(out.contains("user not found"), "{out}");
+        assert!(out.contains("owner=aimx-nonexistent"), "{out}");
+    }
+
+    #[test]
+    fn ownership_section_handles_empty_mailbox_list() {
+        let out = format_ownership_section(&[]);
+        assert!(out.contains("(no non-catchall mailboxes)"), "{out}");
+    }
+
+    #[test]
+    fn ownership_section_skips_when_only_catchall_present() {
+        let mailboxes = vec![mb("catchall", "aimx-catchall", Some(998), true)];
+        let out = format_ownership_section(&mailboxes);
+        assert!(out.contains("(no non-catchall mailboxes)"), "{out}");
+    }
+
+    #[test]
+    fn has_orphan_owner_true_for_non_catchall_orphan() {
+        let mailboxes = vec![
+            mb("alice", "ubuntu", Some(1000), false),
+            mb("bob", "aimx-nonexistent", None, false),
+        ];
+        assert!(has_orphan_owner(&mailboxes));
+    }
+
+    #[test]
+    fn has_orphan_owner_ignores_catchall_orphan() {
+        // A missing aimx-catchall user is its own check (CATCHALL-USER-MISSING)
+        // already; the Ownership section's exit-code gate explicitly
+        // skips catchall rows so adding `aimx-catchall` to the host is
+        // not a hard precondition for `aimx doctor` to exit zero.
+        let mailboxes = vec![
+            mb("alice", "ubuntu", Some(1000), false),
+            mb("catchall", "aimx-catchall", None, true),
+        ];
+        assert!(!has_orphan_owner(&mailboxes));
+    }
+
+    #[test]
+    fn has_orphan_owner_false_when_all_resolve() {
+        let mailboxes = vec![
+            mb("alice", "ubuntu", Some(1000), false),
+            mb("bob", "ubuntu", Some(1000), false),
+        ];
+        assert!(!has_orphan_owner(&mailboxes));
+    }
 }

@@ -328,8 +328,16 @@ pub fn render_root_refusal<E: io::Write>(stderr: &mut E) -> i32 {
 /// Map a daemon response to a CLI exit code + stderr/stdout messaging, then
 /// write the output through the caller-supplied sinks. Pure function so
 /// tests don't have to observe real stderr.
+///
+/// `from_address` is the `From:` header the CLI submitted. It is used
+/// to enrich the EACCES error so the operator sees the offending sender
+/// without having to re-read the command. The daemon's wire response is
+/// deliberately opaque ("not authorized" with no information leak) so
+/// the enrichment happens on the client side from the data the caller
+/// already supplied.
 pub fn render_outcome<O: io::Write, E: io::Write>(
     outcome: SubmitOutcome,
+    from_address: &str,
     stdout: &mut O,
     stderr: &mut E,
 ) -> i32 {
@@ -345,12 +353,20 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
             EXIT_OK
         }
         SubmitOutcome::Err { code, reason } => {
-            let _ = writeln!(
-                stderr,
-                "{} [{}]: {reason}",
-                term::error("Error"),
-                code.as_str()
-            );
+            if matches!(code, ErrCode::Eaccess) {
+                let _ = writeln!(
+                    stderr,
+                    "{} not authorized: {from_address}",
+                    term::error("Error:")
+                );
+            } else {
+                let _ = writeln!(
+                    stderr,
+                    "{} [{}]: {reason}",
+                    term::error("Error"),
+                    code.as_str()
+                );
+            }
             EXIT_DAEMON_ERR
         }
         SubmitOutcome::Malformed(reason) => {
@@ -405,7 +421,7 @@ fn run_inner(args: SendArgs) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    let code = render_outcome(outcome, &mut io::stdout(), &mut io::stderr());
+    let code = render_outcome(outcome, &args.from, &mut io::stdout(), &mut io::stderr());
     if code != EXIT_OK {
         std::process::exit(code);
     }
@@ -1074,6 +1090,7 @@ mod tests {
             SubmitOutcome::Ok {
                 message_id: "<x@example.com>".to_string(),
             },
+            "alice@example.com",
             &mut out,
             &mut err,
         );
@@ -1092,6 +1109,7 @@ mod tests {
                 code: ErrCode::Domain,
                 reason: "sender domain does not match aimx domain".to_string(),
             },
+            "alice@example.com",
             &mut out,
             &mut err,
         );
@@ -1107,12 +1125,38 @@ mod tests {
         let mut err = Vec::new();
         let code = render_outcome(
             SubmitOutcome::Malformed("garbage".to_string()),
+            "alice@example.com",
             &mut out,
             &mut err,
         );
         assert_eq!(code, EXIT_MALFORMED);
         let err_text = String::from_utf8_lossy(&err);
         assert!(err_text.contains("malformed response"));
+    }
+
+    #[test]
+    fn render_outcome_eaccess_renders_from_address() {
+        // The daemon's wire reason is opaque ("not authorized") to
+        // avoid leaking whether the mailbox exists; the CLI enriches
+        // the rendered message with the From: it submitted so the
+        // operator sees the address that was rejected.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_outcome(
+            SubmitOutcome::Err {
+                code: ErrCode::Eaccess,
+                reason: "not authorized".to_string(),
+            },
+            "alice@example.com",
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, EXIT_DAEMON_ERR);
+        let err_text = String::from_utf8_lossy(&err);
+        assert!(
+            err_text.contains("not authorized: alice@example.com"),
+            "{err_text}"
+        );
     }
 
     #[test]
@@ -1215,7 +1259,7 @@ mod tests {
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = render_outcome(outcome, &mut out, &mut err);
+        let code = render_outcome(outcome, "alice@other.org", &mut out, &mut err);
         assert_eq!(code, EXIT_DAEMON_ERR);
         let err_text = String::from_utf8_lossy(&err);
         assert!(err_text.contains("[DOMAIN]"));
@@ -1246,7 +1290,7 @@ mod tests {
 
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = render_outcome(outcome, &mut out, &mut err);
+        let code = render_outcome(outcome, "alice@example.com", &mut out, &mut err);
         assert_eq!(code, EXIT_MALFORMED);
     }
 }

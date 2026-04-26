@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
-use crate::hook::{Hook, HookEvent, effective_hook_name, is_valid_hook_name};
+use crate::hook::{
+    Hook, HookEvent, MAX_HOOK_TIMEOUT_SECS, effective_hook_name, is_valid_hook_name,
+};
 use crate::user_resolver::{ResolvedUser, resolve_user};
 
 /// Reserved `run_as` / `owner` values that never require a `getpwnam`
@@ -647,6 +649,19 @@ pub(crate) fn validate_hooks(config: &Config) -> Result<(), String> {
                     hook.event.as_str()
                 ));
             }
+            if hook.timeout_secs == 0 {
+                return Err(format!(
+                    "hook '{label}' on mailbox '{mailbox_name}' has \
+                     `timeout_secs = 0`: must be > 0"
+                ));
+            }
+            if hook.timeout_secs > MAX_HOOK_TIMEOUT_SECS {
+                return Err(format!(
+                    "hook '{label}' on mailbox '{mailbox_name}' has \
+                     `timeout_secs = {}` which exceeds the max of {MAX_HOOK_TIMEOUT_SECS}",
+                    hook.timeout_secs
+                ));
+            }
 
             let effective = effective_hook_name(hook);
             let is_explicit = hook.name.is_some();
@@ -715,6 +730,15 @@ pub(crate) fn validate_single_hook(hook: &Hook) -> Result<(), String> {
     }
     if hook.fire_on_untrusted && hook.event != HookEvent::OnReceive {
         return Err("`fire_on_untrusted = true` is `on_receive` only".into());
+    }
+    if hook.timeout_secs == 0 {
+        return Err("`timeout_secs = 0`: must be > 0".into());
+    }
+    if hook.timeout_secs > MAX_HOOK_TIMEOUT_SECS {
+        return Err(format!(
+            "`timeout_secs = {}` exceeds the max of {MAX_HOOK_TIMEOUT_SECS}",
+            hook.timeout_secs
+        ));
     }
     Ok(())
 }
@@ -1278,6 +1302,109 @@ cmd = ["/bin/true"]
         assert!(
             err.contains("catchall does not support hooks"),
             "error should reject catchall hooks: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_timeout_secs_zero() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = ["/bin/true"]
+timeout_secs = 0
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("timeout_secs") && err.contains("> 0"),
+            "error should reject timeout_secs=0: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_timeout_secs_over_max() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = ["/bin/true"]
+timeout_secs = 700
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("timeout_secs") && err.contains("600"),
+            "error should reject timeout_secs > 600: {err}"
+        );
+    }
+
+    #[test]
+    fn load_accepts_timeout_secs_at_max() {
+        let _g = ConfigDirOverride::set(Path::new("/tmp"));
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = ["/bin/true"]
+timeout_secs = 600
+"#,
+        );
+        let (_cfg, _warnings) =
+            Config::load(&path).expect("config with timeout_secs=600 must load");
+    }
+
+    #[test]
+    fn load_accepts_stdin_none() {
+        let _g = ConfigDirOverride::set(Path::new("/tmp"));
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+event = "on_receive"
+cmd = ["/bin/true"]
+stdin = "none"
+"#,
+        );
+        let (cfg, _warnings) = Config::load(&path).expect("config with stdin=none must load");
+        assert_eq!(
+            cfg.mailboxes["support"].hooks[0].stdin,
+            crate::hook::HookStdin::None
         );
     }
 

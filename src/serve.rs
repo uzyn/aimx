@@ -267,9 +267,13 @@ pub fn aimx_socket_path() -> PathBuf {
 
 /// Outcome of a SIGHUP-reload attempt from the CLI to a running daemon.
 ///
-/// Used by `aimx hooks create --cmd` and any other CLI
-/// path that writes `config.toml` directly and wants the daemon to pick
-/// up the change without a full restart.
+/// Used by CLI paths that write `config.toml` directly and want the
+/// daemon to pick up the change without a full restart. Today the hook
+/// CRUD CLI prefers the UDS path (`HOOK-CREATE` / `HOOK-DELETE`) which
+/// hot-swaps the in-memory `Config` directly; this SIGHUP path is kept
+/// for the daemon-down fallback (root only) where the CLI rewrites
+/// `config.toml` and emits a restart hint to the operator.
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub enum SighupOutcome {
     /// Delivered SIGHUP to pid `.0`.
@@ -298,6 +302,7 @@ pub enum SighupOutcome {
 ///    no `pgrep` fallback: matching by process name can return any
 ///    `aimx` binary on the host, including short-lived test
 ///    subprocesses, and SIGHUPing the wrong pid terminates it.
+#[allow(dead_code)]
 pub fn sighup_running_daemon() -> SighupOutcome {
     #[cfg(unix)]
     {
@@ -378,6 +383,7 @@ pub fn reload_config(
 /// test subprocesses) and could deliver SIGHUP to the wrong pid,
 /// terminating unrelated work under parallel tests.
 #[cfg(unix)]
+#[allow(dead_code)]
 fn find_daemon_pid() -> Option<i32> {
     let pid_path = runtime_dir().join("aimx.pid");
     let s = std::fs::read_to_string(&pid_path).ok()?;

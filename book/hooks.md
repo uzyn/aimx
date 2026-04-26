@@ -118,6 +118,8 @@ Raw-cmd hook creation requires `sudo` because it writes `/etc/aimx/config.toml` 
 | `event` | string | yes | `"on_receive"` or `"after_send"`. |
 | `type` | string | no | Trigger kind (default `"cmd"`). Only `cmd` is supported today. |
 | `cmd` | array of strings | yes | Argv exec'd directly. Must be non-empty; `cmd[0]` must be an absolute path. No shell wrapping — wrap in `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
+| `stdin` | string | no | `"email"` (default) pipes the raw `.md` (frontmatter + body) to the hook's stdin; `"none"` closes stdin immediately so the hook only sees env vars. |
+| `timeout_secs` | int | no | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `fire_on_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. |
 
 Multiple hooks can be defined per mailbox; each is evaluated independently. Unknown fields on a hook table are rejected at config load.
@@ -156,15 +158,16 @@ Email is always stored (inbound) or attempted (outbound) regardless of whether h
 
 Always expand env vars inside double quotes (`"$AIMX_SUBJECT"`). Values from sender-controlled headers can contain `$()`, backticks, quotes, or newlines — when you wrap your hook in `["/bin/sh", "-c", "..."]`, these pass through as literal bytes.
 
-### Stdin (template hooks only)
+### Stdin
 
-Templates declare one of three `stdin` modes:
+Each hook declares one of two `stdin` modes:
 
 | Mode | Payload | Notes |
 |------|---------|-------|
 | `"email"` | The raw `.md` (frontmatter + body) | Default. Useful when piping into a CLI that takes stdin directly. |
-| `"email_json"` | `{"raw": "<markdown>"}` | Wraps the `.md` in a JSON envelope. Used by the `webhook` template. |
 | `"none"` | Closed immediately | For hooks that just need env vars. |
+
+Override per-hook with `stdin = "none"` in `config.toml`, `--stdin none` from `aimx hooks create`, or `stdin: "none"` in the MCP `hook_create` payload. Default is `"email"` when omitted.
 
 ### Template placeholders
 

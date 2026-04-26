@@ -727,25 +727,64 @@ fn mcp_list_tools() {
 
     let resp = client.list_tools();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    // Hook tools were removed; 9 mail/mailbox tools remain.
-    assert_eq!(tools.len(), 9);
+    // Mailbox CRUD tools are gone (moved to root-only CLI). Hook
+    // tools are back under the new auth predicate. Surface: 7 mail
+    // tools + 3 hook tools = 10.
+    assert_eq!(tools.len(), 10);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"mailbox_create"));
     assert!(names.contains(&"mailbox_list"));
-    assert!(names.contains(&"mailbox_delete"));
     assert!(names.contains(&"email_list"));
     assert!(names.contains(&"email_read"));
     assert!(names.contains(&"email_mark_read"));
     assert!(names.contains(&"email_mark_unread"));
     assert!(names.contains(&"email_send"));
     assert!(names.contains(&"email_reply"));
+    assert!(names.contains(&"hook_create"));
+    assert!(names.contains(&"hook_list"));
+    assert!(names.contains(&"hook_delete"));
+    // mailbox_create / mailbox_delete moved to root-only CLI; the
+    // MCP surface no longer exposes them.
+    assert!(!names.contains(&"mailbox_create"));
+    assert!(!names.contains(&"mailbox_delete"));
+    // hook_list_templates was deleted alongside hook templates.
+    assert!(!names.contains(&"hook_list_templates"));
 
     client.shutdown();
 }
 
 #[test]
-fn mcp_mailbox_create_list_delete() {
+fn mcp_mailbox_list_returns_caller_owned() {
+    // After the CLI/MCP rework `mailbox_create` / `mailbox_delete` are
+    // gone from the MCP surface (moved to root-only CLI). What remains
+    // is `mailbox_list`, which returns mailboxes the caller owns. The
+    // shared fixture sets every mailbox to the test runner's own
+    // username so the listing is non-empty under non-root `cargo test`.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("alice"),
+        "expected alice in list, got: {text}"
+    );
+    assert!(
+        text.contains("catchall"),
+        "expected catchall in list, got: {text}"
+    );
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_mailbox_create_tool_no_longer_exposed() {
+    // `mailbox_create` was removed from the MCP surface (mailbox CRUD
+    // moved to root-only CLI). Calling the tool by name returns a
+    // tool-not-found error from the rmcp framework.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -753,39 +792,29 @@ fn mcp_mailbox_create_list_delete() {
     client.initialize();
 
     let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "support"}));
-    let text = get_tool_text(&resp);
+    // The framework's response shape is "tool not found" / unknown tool;
+    // the assertion is robust to small text drift.
     assert!(
-        text.contains("created"),
-        "Expected creation message, got: {text}"
+        is_tool_error(&resp) || resp.get("error").is_some(),
+        "expected mailbox_create to be rejected, got: {resp}"
     );
-    assert!(inbox(tmp.path(), "support").is_dir());
-
-    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("catchall"));
-    assert!(text.contains("support"));
-    assert!(text.contains("alice"));
-
-    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("deleted"));
-    assert!(!inbox(tmp.path(), "support").exists());
 
     client.shutdown();
 }
 
 #[test]
-fn mcp_mailbox_delete_catchall_error() {
+fn mcp_mailbox_delete_tool_no_longer_exposed() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "catchall"}));
-    assert!(is_tool_error(&resp));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("Cannot delete"), "Got: {text}");
+    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
+    assert!(
+        is_tool_error(&resp) || resp.get("error").is_some(),
+        "expected mailbox_delete to be rejected, got: {resp}"
+    );
 
     client.shutdown();
 }
@@ -1081,317 +1110,6 @@ fn mcp_clean_exit_on_stdin_close() {
     assert!(status.success() || status.code() == Some(0));
 }
 
-fn setup_test_env_with_triggers(tmp: &Path, trigger_marker: &Path) -> String {
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-
-[[mailboxes.catchall.hooks]]
-name = "catchalltrig"
-event = "on_receive"
-cmd = "touch {}"
-dangerously_support_untrusted = true
-"#,
-        tmp.display(),
-        trigger_marker.display()
-    );
-    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
-    let config_path = tmp.join("config.toml");
-    std::fs::write(&config_path, &config_content).unwrap();
-    config_path.to_string_lossy().to_string()
-}
-
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_trigger_executes_on_delivery() {
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("trigger.marker");
-    setup_test_env_with_triggers(tmp.path(), &marker);
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1);
-    assert!(
-        marker.exists(),
-        "Trigger marker file should have been created"
-    );
-}
-
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_failing_trigger_does_not_block_delivery() {
-    let tmp = TempDir::new().unwrap();
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-
-[[mailboxes.catchall.hooks]]
-name = "failtrigger1"
-event = "on_receive"
-cmd = "false"
-dangerously_support_untrusted = true
-"#,
-        tmp.path().display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(
-        md_files.len(),
-        1,
-        "Email should be saved despite trigger failure"
-    );
-}
-
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_trust_verified_blocks_unsigned_trigger() {
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("should_not_exist");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-trust = "verified"
-
-[[mailboxes.catchall.hooks]]
-name = "verifiedhook"
-event = "on_receive"
-cmd = "touch {}"
-"#,
-        tmp.path().display(),
-        marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1, "Email should still be saved");
-    assert!(
-        !marker.exists(),
-        "Trigger should NOT fire for unsigned email with trust=verified"
-    );
-}
-
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_trust_none_allows_unsigned_trigger() {
-    // Mailbox trust=none no longer fires hooks by default. The hook
-    // must explicitly opt in via `dangerously_support_untrusted` to
-    // keep the legacy "fire on unsigned" behavior.
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("triggered");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-trust = "none"
-
-[[mailboxes.catchall.hooks]]
-name = "trustnonefir"
-event = "on_receive"
-cmd = "touch {}"
-dangerously_support_untrusted = true
-"#,
-        tmp.path().display(),
-        marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1);
-    assert!(
-        marker.exists(),
-        "Trigger should fire with trust=none even for unsigned email"
-    );
-}
-
-/// Verifies the end-to-end global-trust inherit path: the top-level
-/// `trust` + `trusted_senders` on `Config` apply to a mailbox that has
-/// neither field set. On ingest the frontmatter's `trusted` value and the
-/// hook gate must both reflect the inherited policy.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_inherits_global_trust_when_mailbox_has_no_override() {
-    // The hook gate fires iff the evaluated `trusted == "true"` OR
-    // the hook opts in explicitly.
-    // Unsigned fixture means `trusted == "false"` even with allowlist, so
-    // the hook must opt in or it won't fire. We keep the original intent
-    // of this test (inheriting global trust into the mailbox row) by
-    // asserting the frontmatter value and NOT asserting the marker exists.
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("triggered");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-trust = "verified"
-trusted_senders = ["*@example.com"]
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-
-[[mailboxes.catchall.hooks]]
-name = "inheritglobs"
-event = "on_receive"
-cmd = "touch {}"
-"#,
-        tmp.path().display(),
-        marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1);
-
-    // The hook gate reads `trusted` from frontmatter. The
-    // unsigned fixture produces `trusted = "false"` even with the global
-    // allowlist covering the sender, so a default hook does NOT fire.
-    assert!(
-        !marker.exists(),
-        "Default hook must not fire for trusted=false"
-    );
-
-    // The strict `trusted` field evaluation requires BOTH allowlist AND
-    // DKIM pass. Unsigned fixture → DKIM is not "pass" → trusted = "false".
-    // This proves the inherit path wired through `trust::evaluate_trust`.
-    let parsed = read_frontmatter(&md_files[0]);
-    let table = parsed.as_table().unwrap();
-    assert_eq!(
-        get_toml_str(table, "trusted"),
-        "false",
-        "global verified + allowlisted sender + DKIM != pass → trusted=false"
-    );
-}
-
-/// Per-mailbox `trust = "none"` override yields `trusted = "none"`
-/// on the email, which is no longer treated as "fire hooks by default."
-/// To preserve the original intent (mailbox override beats global),
-/// the hook opts in explicitly.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_mailbox_trust_none_override_beats_global_verified() {
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("triggered");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-trust = "verified"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-trust = "none"
-
-[[mailboxes.catchall.hooks]]
-name = "mbtrustover1"
-event = "on_receive"
-cmd = "touch {}"
-dangerously_support_untrusted = true
-"#,
-        tmp.path().display(),
-        marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1);
-    assert!(
-        marker.exists(),
-        "Trigger should fire because mailbox trust=none overrides global verified"
-    );
-
-    let parsed = read_frontmatter(&md_files[0]);
-    let table = parsed.as_table().unwrap();
-    assert_eq!(
-        get_toml_str(table, "trusted"),
-        "none",
-        "mailbox trust=none override → no evaluation → trusted=none"
-    );
-}
-
 #[test]
 fn ingest_frontmatter_contains_dkim_spf() {
     let tmp = TempDir::new().unwrap();
@@ -1423,129 +1141,6 @@ fn ingest_frontmatter_contains_dkim_spf() {
     assert!(
         spf == "none" || spf == "pass" || spf == "fail",
         "spf should be pass|fail|none, got: {spf}"
-    );
-}
-
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn ingest_trusted_sender_bypasses_dkim() {
-    // trusted_senders alone no longer yields `trusted = "true"`;
-    // both allowlist AND DKIM pass are required for `trusted = "true"`.
-    // To mirror the "bypass DKIM for trusted senders" affordance, the hook
-    // opts in explicitly.
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("triggered");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-trust = "verified"
-trusted_senders = ["*@example.com"]
-
-[[mailboxes.catchall.hooks]]
-name = "trustedsend1"
-event = "on_receive"
-cmd = "touch {}"
-dangerously_support_untrusted = true
-"#,
-        tmp.path().display(),
-        marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(md_files.len(), 1);
-    assert!(
-        marker.exists(),
-        "Trigger should fire for trusted sender even with trust=verified"
-    );
-}
-
-/// End-to-end hook-recipe test.
-///
-/// Drives the full ingest -> hook-match -> templated shell command path with
-/// an assert-able one-liner that writes `$AIMX_FILEPATH` and `$AIMX_SUBJECT`
-/// into a marker file. A second hook exits non-zero to prove that hook
-/// failure does NOT block delivery. Both hooks opt in via
-/// `dangerously_support_untrusted` so they fire on the unsigned fixture.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn hook_recipe_end_to_end_with_templated_args() {
-    let tmp = TempDir::new().unwrap();
-    let marker = tmp.path().join("recipe.marker");
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{data_dir}"
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-
-[[mailboxes.catchall.hooks]]
-name = "recipehook01"
-event = "on_receive"
-cmd = 'printf "filepath=%s\nsubject=%s\n" "$AIMX_FILEPATH" "$AIMX_SUBJECT" > {marker}'
-dangerously_support_untrusted = true
-
-[[mailboxes.catchall.hooks]]
-name = "recipehook02"
-event = "on_receive"
-cmd = "false"
-dangerously_support_untrusted = true
-"#,
-        data_dir = tmp.path().display(),
-        marker = marker.display()
-    );
-    std::fs::create_dir_all(inbox(tmp.path(), "catchall")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-
-    let eml = std::fs::read("tests/fixtures/plain.eml").unwrap();
-
-    aimx_cmd(tmp.path())
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("ingest")
-        .arg("catchall@agent.example.com")
-        .write_stdin(eml)
-        .assert()
-        .success();
-
-    let md_files = find_md_files(&inbox(tmp.path(), "catchall"));
-    assert_eq!(
-        md_files.len(),
-        1,
-        "Email should be ingested even when a sibling trigger fails"
-    );
-
-    assert!(
-        marker.exists(),
-        "Channel-recipe trigger should have written the marker file"
-    );
-
-    let contents = std::fs::read_to_string(&marker).unwrap();
-    let md_path = md_files[0].to_string_lossy().to_string();
-    assert!(
-        contents.contains(&format!("filepath={md_path}")),
-        "Marker should contain the $AIMX_FILEPATH value; got: {contents}"
-    );
-    assert!(
-        contents.contains("subject=Plain text test"),
-        "Marker should contain the $AIMX_SUBJECT value; got: {contents}"
     );
 }
 
@@ -3288,8 +2883,12 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
 
+    // Mailbox CRUD is root-only via the central auth predicate; tests
+    // bypass via `AIMX_TEST_SKIP_ROOT_CHECK` so the post-gate fallback
+    // path stays exercised under non-root `cargo test`.
     let assert = aimx_cmd(tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailbox")
@@ -3556,7 +3155,10 @@ fn mailbox_delete_force_refuses_catchall() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
+    // Mailbox CRUD is root-only; bypass via the test env var so the
+    // catchall-refusal logic itself runs under non-root `cargo test`.
     let assert = aimx_cmd(tmp.path())
+        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailboxes")
@@ -4219,6 +3821,93 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
     );
 }
 
+/// `aimx hooks create --stdin none --timeout-secs 5` round-trips
+/// through the direct-edit fallback into `config.toml` and shows up in
+/// `aimx hooks list`.
+#[test]
+fn hooks_create_with_stdin_and_timeout_flags_persists_to_config() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let create = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            r#"["/bin/echo", "noinput"]"#,
+            "--name",
+            "stdinhook",
+            "--stdin",
+            "none",
+            "--timeout-secs",
+            "5",
+        ])
+        .assert()
+        .success();
+    let out = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(out.contains("Hook created"), "{out}");
+
+    let toml_contents = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        toml_contents.contains("stdin = \"none\""),
+        "stdin override missing from config.toml: {toml_contents}"
+    );
+    assert!(
+        toml_contents.contains("timeout_secs = 5"),
+        "timeout_secs override missing from config.toml: {toml_contents}"
+    );
+
+    let list = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args(["hooks", "list"])
+        .assert()
+        .success();
+    let list_out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
+    assert!(list_out.contains("stdinhook"), "{list_out}");
+    assert!(list_out.contains("none"), "{list_out}");
+    assert!(list_out.contains("5"), "{list_out}");
+}
+
+/// `aimx hooks create --timeout-secs 700` is rejected because the value
+/// exceeds the schema cap of 600s.
+#[test]
+fn hooks_create_rejects_timeout_secs_over_max() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let attempt = aimx_cmd_isolated(tmp.path())
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .args([
+            "hooks",
+            "create",
+            "--mailbox",
+            "alice",
+            "--event",
+            "on_receive",
+            "--cmd",
+            r#"["/bin/true"]"#,
+            "--name",
+            "toolong",
+            "--timeout-secs",
+            "700",
+        ])
+        .assert()
+        .failure();
+    let stderr = String::from_utf8_lossy(&attempt.get_output().stderr).to_string();
+    assert!(
+        stderr.contains("timeout_secs") || stderr.contains("600"),
+        "expected timeout_secs rejection: {stderr}"
+    );
+}
+
 #[test]
 fn hooks_create_anonymous_prints_derived_name() {
     let tmp = TempDir::new().unwrap();
@@ -4387,9 +4076,9 @@ fn hooks_delete_unknown_name_errors() {
 // ---------------------------------------------------------------------
 
 /// Spin up `aimx serve`, issue `aimx hooks create --cmd`, confirm the
-/// CLI wrote `config.toml` directly (raw-cmd bypasses UDS entirely)
-/// and SIGHUP'd the running daemon. The success path prints a
-/// `Reload:` banner and no `Hint:` restart banner.
+/// CLI routed through the daemon's UDS HOOK-CREATE verb so `config.toml`
+/// hot-swaps without a restart. The success path prints the
+/// `(live via daemon)` marker and no `Hint:` restart banner.
 #[test]
 fn hooks_raw_cmd_sighup_hot_swaps_config() {
     let tmp = TempDir::new().unwrap();
@@ -4422,22 +4111,23 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
         create_out.contains("Hook created"),
         "create output: {create_out}"
     );
-    // Raw-cmd hooks write config.toml directly and
-    // SIGHUP the daemon. Positive signal: stdout must carry the
-    // `Reload:` banner (which only prints on SighupOutcome::Sent).
-    // Negative signal: no `Hint:` restart banner (that would indicate
-    // the SIGHUP path fell through to DaemonNotRunning).
+    // The CLI now routes through the daemon's UDS HOOK-CREATE verb —
+    // the daemon atomically rewrites config.toml and hot-swaps the
+    // in-memory Config so SIGHUP is not required. Positive signal:
+    // stdout carries the `(live via daemon)` marker. Negative
+    // signal: no `Hint:` restart banner (the daemon-down fallback
+    // path would have produced one).
     assert!(
-        create_out.contains("Reload:"),
-        "daemon-success should print Reload: banner: {create_out}"
+        create_out.contains("live via daemon"),
+        "daemon-success should print the live-via-daemon marker: {create_out}"
     );
     assert!(
         !create_out.contains("Hint:"),
         "daemon-success should not print restart hint: {create_out}"
     );
 
-    // On-disk config.toml should contain the new hook argv (CLI wrote
-    // it directly — raw-cmd never traverses UDS).
+    // The daemon writes config.toml atomically when handling
+    // HOOK-CREATE. The new hook argv must appear there.
     let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
         content.contains("via-daemon"),
@@ -4534,105 +4224,16 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
 }
 
 // ---------------------------------------------------------------------
-// MCP hook tools (hook_list_templates, hook_create, hook_list,
-// hook_delete)
+// MCP hook tools (hook_create, hook_list, hook_delete)
 // ---------------------------------------------------------------------
 
-/// Like `setup_test_env`, but also registers a single `invoke-claude`
-/// template so the MCP tool tests have something to bind to.
-fn setup_test_env_with_template(tmp: &Path) -> String {
-    // `run_as = "root"` is used here so the fixture loads on any CI
-    // host (`root` always resolves and is invariant-safe for any
-    // mailbox owner). A future test user could flip this back to
-    // exercise the orphan-tolerance path.
-    let owner = current_username();
-    let config_content = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n\
-         [[hook_template]]\n\
-         name = \"invoke-claude\"\n\
-         description = \"Test invoke-claude template\"\n\
-         cmd = [\"/usr/bin/true\", \"{{prompt}}\"]\n\
-         params = [\"prompt\"]\n\
-         stdin = \"email\"\n\
-         run_as = \"root\"\n\
-         timeout_secs = 60\n\
-         allowed_events = [\"on_receive\", \"after_send\"]\n\n\
-         [mailboxes.catchall]\n\
-         address = \"*@agent.example.com\"\n\
-         owner = \"aimx-catchall\"\n\n\
-         [mailboxes.alice]\n\
-         address = \"alice@agent.example.com\"\n\
-         owner = \"{owner}\"\n",
-        tmp.display()
-    );
-    std::fs::create_dir_all(tmp.join("inbox").join("catchall")).unwrap();
-    std::fs::create_dir_all(tmp.join("inbox").join("alice")).unwrap();
-    std::fs::create_dir_all(tmp.join("sent").join("alice")).unwrap();
-    let config_path = tmp.join("config.toml");
-    std::fs::write(&config_path, &config_content).unwrap();
-    install_cached_dkim_keys(tmp);
-    config_path.to_string_lossy().to_string()
-}
-
-/// `hook_list_templates` with zero templates returns `[]`.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_list_templates_empty_returns_empty_array() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env(tmp.path());
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    let resp = client.call_tool("hook_list_templates", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    assert_eq!(text, "[]", "empty config must return []: {text}");
-
-    client.shutdown();
-}
-
-/// With one template registered, `hook_list_templates` returns
-/// the PRD-specified shape.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_list_templates_returns_registered_template() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    let resp = client.call_tool("hook_list_templates", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
-    let arr = json.as_array().unwrap();
-    assert_eq!(arr.len(), 1);
-    assert_eq!(arr[0]["name"], "invoke-claude");
-    assert_eq!(arr[0]["description"], "Test invoke-claude template");
-    assert_eq!(arr[0]["params"][0], "prompt");
-    let events: Vec<&str> = arr[0]["allowed_events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|v| v.as_str().unwrap())
-        .collect();
-    assert!(events.contains(&"on_receive"));
-    assert!(events.contains(&"after_send"));
-    // Internals must not leak.
-    assert!(arr[0].get("cmd").is_none());
-    assert!(arr[0].get("run_as").is_none());
-    assert!(arr[0].get("timeout_secs").is_none());
-
-    client.shutdown();
-}
-
 /// `hook_create` without a running daemon returns a precise
-/// socket-missing error rather than panicking.
+/// socket-missing error rather than panicking. Exercised against the
+/// new MCP signature (`mailbox`, `event`, `cmd: Vec<String>`).
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
 fn mcp_hook_create_without_daemon_reports_missing_socket() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
+    setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4642,8 +4243,7 @@ fn mcp_hook_create_without_daemon_reports_missing_socket() {
         serde_json::json!({
             "mailbox": "alice",
             "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {"prompt": "hi"}
+            "cmd": ["/bin/echo", "hi"]
         }),
     );
     assert!(
@@ -4659,16 +4259,52 @@ fn mcp_hook_create_without_daemon_reports_missing_socket() {
     client.shutdown();
 }
 
-/// Full round-trip against a live daemon. `hook_create` submits
-/// via UDS, the daemon stamps `origin = "mcp"` in `config.toml`, and
-/// the tool response includes the effective name + substituted argv.
+/// `hook_create` against a mailbox the caller does not own returns
+/// the canonical "not authorized" error from the auth predicate. The
+/// daemon is not even started: the MCP-side pre-flight check rejects
+/// before any wire I/O.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_create_end_to_end_against_daemon() {
+fn mcp_hook_create_unowned_mailbox_returns_not_authorized() {
+    // Skip this assertion when running the test runner as root (CI
+    // tier 1 runs in containers as root). The auth predicate
+    // unconditionally allows root, so the unowned-mailbox negative
+    // path can only fire as a non-root caller.
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root {
+        eprintln!("skipping unowned-mailbox negative-auth test under root caller");
+        return;
+    }
+
+    // Plant a mailbox owned by `nobody` (uid !=
+    // current_euid() on every supported Linux deployment) so the
+    // current test user is *not* the owner.
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-    let port = find_free_port();
-    let daemon = start_serve(tmp.path(), port);
+    let owner = current_username();
+    let config = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{tmp_dir}\"\n\n\
+         [mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.foreign]\naddress = \"foreign@agent.example.com\"\nowner = \"nobody\"\n",
+        tmp_dir = tmp.path().display()
+    );
+    for sub in [
+        "inbox/catchall",
+        "sent/catchall",
+        "inbox/alice",
+        "sent/alice",
+        "inbox/foreign",
+        "sent/foreign",
+    ] {
+        let dir = tmp.path().join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
+    install_cached_dkim_keys(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4676,97 +4312,111 @@ fn mcp_hook_create_end_to_end_against_daemon() {
     let resp = client.call_tool(
         "hook_create",
         serde_json::json!({
-            "mailbox": "alice",
+            "mailbox": "foreign",
             "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {"prompt": "You are an assistant"},
-            "name": "mcp_test_hook"
+            "cmd": ["/bin/echo", "hi"]
         }),
     );
-    assert!(!is_tool_error(&resp), "expected success, got {resp}");
+    assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    let json: serde_json::Value = serde_json::from_str(&text).expect(&text);
-    assert_eq!(json["effective_name"], "mcp_test_hook");
-    assert_eq!(json["substituted_argv"][0], "/usr/bin/true");
-    assert_eq!(json["substituted_argv"][1], "You are an assistant");
-
-    // config.toml must now carry the hook with origin = "mcp".
-    let content = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(content.contains("name = \"mcp_test_hook\""), "{content}");
-    assert!(content.contains("origin = \"mcp\""), "{content}");
     assert!(
-        content.contains("template = \"invoke-claude\""),
-        "{content}"
+        text.contains("not authorized"),
+        "expected not-authorized error, got: {text}"
     );
 
     client.shutdown();
-    stop_serve(daemon);
 }
 
-/// The daemon's `unknown-template` error surfaces verbatim.
+/// `hook_delete` against a hook that does not exist returns the
+/// canonical "not found" error without ever reaching the daemon. The
+/// test deliberately uses the standard fixture (no daemon spawned) to
+/// pin behavior under the new MCP shape.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_create_unknown_template_returns_error() {
+fn mcp_hook_delete_unknown_hook_returns_not_found() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
+    setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    let resp = client.call_tool(
-        "hook_create",
-        serde_json::json!({
-            "mailbox": "alice",
-            "event": "on_receive",
-            "template": "does-not-exist",
-            "params": {}
-        }),
-    );
-    assert!(is_tool_error(&resp));
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "no_such_hook"}));
+    assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    assert!(text.contains("Unknown template"), "{text}");
-    assert!(text.contains("hook_list_templates"), "{text}");
+    assert!(text.contains("not found"), "{text}");
 
     client.shutdown();
 }
 
-/// Missing required params fail at the pre-flight substitution
-/// check on the MCP side (daemon-side re-validates).
+/// `hook_delete` against a hook that lives on a mailbox the caller
+/// does not own surfaces as `not found` — same shape as `hook_delete`
+/// for a name that doesn't exist anywhere. The MCP error must NOT
+/// leak the foreign mailbox name through a "caller does not own
+/// mailbox 'X'" message.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_create_missing_param_returns_error() {
+fn mcp_hook_delete_unowned_hook_returns_not_found_not_unauthorized() {
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if is_root {
+        eprintln!("skipping unowned-hook negative test under root caller");
+        return;
+    }
+
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-    let port = find_free_port();
-    let daemon = start_serve(tmp.path(), port);
+    let owner = current_username();
+    let config = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{tmp_dir}\"\n\n\
+         [mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{owner}\"\n\n\
+         [mailboxes.othersmbx]\naddress = \"other@agent.example.com\"\nowner = \"nobody\"\n\n\
+         [[mailboxes.othersmbx.hooks]]\nname = \"hidden_hook\"\nevent = \"on_receive\"\n\
+         cmd = [\"/bin/true\"]\n",
+        tmp_dir = tmp.path().display()
+    );
+    for sub in [
+        "inbox/catchall",
+        "sent/catchall",
+        "inbox/alice",
+        "sent/alice",
+        "inbox/othersmbx",
+        "sent/othersmbx",
+    ] {
+        let dir = tmp.path().join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
+    install_cached_dkim_keys(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    let resp = client.call_tool(
-        "hook_create",
-        serde_json::json!({
-            "mailbox": "alice",
-            "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {}
-        }),
-    );
-    assert!(is_tool_error(&resp), "expected error: {resp}");
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "hidden_hook"}));
+    assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    // The daemon returns `missing-param: ...`; MCP surfaces verbatim.
-    assert!(text.contains("missing-param"), "{text}");
+    assert!(text.contains("not found"), "expected `not found`: {text}");
+    // Crucially, the foreign mailbox name must not appear in the error
+    // shown to a non-owner caller.
+    assert!(
+        !text.contains("othersmbx"),
+        "MCP error must not leak unowned mailbox name: {text}"
+    );
+    assert!(
+        !text.contains("not authorized"),
+        "MCP error must collapse `not authorized` to `not found`: {text}"
+    );
 
     client.shutdown();
-    stop_serve(daemon);
 }
 
-/// `hook_list` emits an empty array when no hooks are configured.
+/// `hook_list` with no hooks configured returns `[]`. Exercises the
+/// new MCP `hook_list` tool's empty-output shape end-to-end.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
 fn mcp_hook_list_empty_returns_empty_array() {
     let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
+    setup_test_env(tmp.path());
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4776,478 +4426,6 @@ fn mcp_hook_list_empty_returns_empty_array() {
     assert_eq!(text, "[]", "{text}");
 
     client.shutdown();
-}
-
-/// Origin-masking is enforced end-to-end. Operator-origin hooks
-/// written to `config.toml` expose only name/mailbox/event/origin;
-/// MCP-origin hooks (created via the daemon in this test) expose the
-/// template + params too.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_list_masks_operator_origin() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-
-    // Append an operator-origin hook to the config before spinning up.
-    let config_path = tmp.path().join("config.toml");
-    let existing = std::fs::read_to_string(&config_path).unwrap();
-    let extra = "\n[[mailboxes.alice.hooks]]\nname = \"op_hook\"\n\
-                 event = \"on_receive\"\ncmd = \"echo operator-secret\"\n\
-                 origin = \"operator\"\n";
-    std::fs::write(&config_path, format!("{existing}{extra}")).unwrap();
-
-    let port = find_free_port();
-    let daemon = start_serve(tmp.path(), port);
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    // Create an MCP-origin hook alongside the operator one.
-    let resp = client.call_tool(
-        "hook_create",
-        serde_json::json!({
-            "mailbox": "alice",
-            "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {"prompt": "agent secret"},
-            "name": "mcp_hook"
-        }),
-    );
-    assert!(!is_tool_error(&resp), "{resp}");
-
-    // Now query hook_list.
-    let resp = client.call_tool("hook_list", serde_json::json!({}));
-    let text = get_tool_text(&resp);
-    let json: serde_json::Value = serde_json::from_str(&text).expect(&text);
-    let rows = json.as_array().unwrap();
-    assert_eq!(rows.len(), 2);
-
-    let op = rows.iter().find(|r| r["name"] == "op_hook").unwrap();
-    assert_eq!(op["origin"], "operator");
-    assert_eq!(op["mailbox"], "alice");
-    // Masking: the operator's cmd / template / params must not appear
-    // in the MCP-facing row.
-    assert!(op.get("template").is_none(), "{op}");
-    assert!(op.get("params").is_none(), "{op}");
-    assert!(op.get("cmd").is_none(), "{op}");
-    // And operator's command text must not appear anywhere in the
-    // serialized payload.
-    assert!(
-        !text.contains("operator-secret"),
-        "operator cmd leaked via hook_list: {text}"
-    );
-
-    let mcp = rows.iter().find(|r| r["name"] == "mcp_hook").unwrap();
-    assert_eq!(mcp["origin"], "mcp");
-    assert_eq!(mcp["template"], "invoke-claude");
-    assert_eq!(mcp["params"]["prompt"], "agent secret");
-
-    client.shutdown();
-    stop_serve(daemon);
-}
-
-/// `hook_delete` on an MCP-origin hook succeeds; on an operator-
-/// origin hook the daemon's `origin-protected` message surfaces verbatim.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_delete_respects_origin_protection() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-
-    // Plant an operator-origin hook on disk before starting the daemon.
-    let config_path = tmp.path().join("config.toml");
-    let existing = std::fs::read_to_string(&config_path).unwrap();
-    let extra = "\n[[mailboxes.alice.hooks]]\nname = \"op_hook\"\n\
-                 event = \"on_receive\"\ncmd = \"echo operator\"\n\
-                 origin = \"operator\"\n";
-    std::fs::write(&config_path, format!("{existing}{extra}")).unwrap();
-
-    let port = find_free_port();
-    let daemon = start_serve(tmp.path(), port);
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    // Create an MCP-origin hook to delete.
-    let resp = client.call_tool(
-        "hook_create",
-        serde_json::json!({
-            "mailbox": "alice",
-            "event": "on_receive",
-            "template": "invoke-claude",
-            "params": {"prompt": "hi"},
-            "name": "mcp_hook"
-        }),
-    );
-    assert!(!is_tool_error(&resp), "{resp}");
-
-    // Delete MCP-origin hook: success.
-    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "mcp_hook"}));
-    assert!(!is_tool_error(&resp), "{resp}");
-    let text = get_tool_text(&resp);
-    assert!(text.contains("deleted"), "{text}");
-
-    // Delete operator-origin hook: daemon returns origin-protected.
-    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "op_hook"}));
-    assert!(is_tool_error(&resp), "{resp}");
-    let text = get_tool_text(&resp);
-    assert!(text.contains("origin-protected"), "{text}");
-    assert!(text.contains("sudo aimx hooks delete"), "{text}");
-
-    // The operator hook must still be present on disk.
-    let content = std::fs::read_to_string(&config_path).unwrap();
-    assert!(
-        content.contains("name = \"op_hook\""),
-        "operator hook must survive protected-delete attempt: {content}"
-    );
-
-    client.shutdown();
-    stop_serve(daemon);
-}
-
-/// `hook_delete` without a running daemon returns a precise
-/// socket-missing error.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn mcp_hook_delete_without_daemon_reports_missing_socket() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env_with_template(tmp.path());
-
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "anything"}));
-    assert!(is_tool_error(&resp));
-    let text = get_tool_text(&resp);
-    assert!(text.contains("daemon not running"), "{text}");
-
-    client.shutdown();
-}
-
-// ---------------------------------------------------------------------
-// End-to-end MCP → hook fire → sandbox verify
-// ---------------------------------------------------------------------
-
-/// Write a tiny mock-curl shell script to `path` that records its argv
-/// (one per line) plus the full stdin to two sibling files:
-///
-/// * `<path>.argv` — one argv entry per line, the first line is `argv[0]`.
-/// * `<path>.stdin` — raw bytes piped on stdin.
-/// * `<path>.uid` — output of `id -u` so the root-gated UID assertion
-///   the test can verify the daemon actually dropped privileges.
-///
-/// Returns the path to the script. Marked +x by the caller.
-#[cfg(unix)]
-fn write_mock_curl_script(path: &Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-    let argv_log = path.with_extension("argv");
-    let stdin_log = path.with_extension("stdin");
-    let uid_log = path.with_extension("uid");
-    let script = format!(
-        "#!/bin/sh\n\
-         # Mock curl for hook-template e2e test. Records argv + stdin.\n\
-         echo \"$0\" > '{argv}'\n\
-         for a in \"$@\"; do echo \"$a\" >> '{argv}'; done\n\
-         cat > '{stdin}'\n\
-         id -u > '{uid}'\n\
-         exit 0\n",
-        argv = argv_log.display(),
-        stdin = stdin_log.display(),
-        uid = uid_log.display(),
-    );
-    std::fs::write(path, script).expect("write mock curl script");
-    let mut perms = std::fs::metadata(path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(path, perms).unwrap();
-    path.to_path_buf()
-}
-
-/// Full MCP → daemon → hook fire round-trip.
-///
-/// Flow:
-/// 1. Spin up `aimx serve` with a `webhook` template whose `cmd[0]` is a
-///    mock-curl shell script in the test's tempdir.
-/// 2. Connect an MCP client and call `hook_list_templates`. Expect the
-///    `webhook` template to appear (validates the MCP surface against
-///    the actual config).
-/// 3. Call `hook_create(mailbox=alice, event=after_send, template=webhook,
-///    params={url=https://example.com/hook})`. Expect success and an
-///    `origin = "mcp"` row in `config.toml`.
-/// 4. Trigger the hook by submitting an outbound message via `aimx send`.
-///    `after_send` fires through the same sandboxed executor as
-///    `on_receive` (PRD §6.7) — and unlike `on_receive` it has no trust
-///    gate, so an MCP-origin hook can fire without `dangerously_*` opt-in.
-///    On-receive trust gating is exercised by separate tests.
-/// 5. Assert the mock-curl recorded the substituted argv (URL ends up at
-///    the right slot, `cmd[0]` is the mock binary verbatim) and the JSON
-///    stdin (the webhook template's `stdin = "email_json"` mode wraps
-///    the persisted `.md` body in a `{ "raw": ... }` envelope).
-#[cfg(unix)]
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn hook_templates_end_to_end_mcp_to_sandbox() {
-    let tmp = TempDir::new().unwrap();
-
-    // Set up the mock-curl binary in the test tempdir. The webhook
-    // template's `cmd[0]` will point at this script directly.
-    let mock_curl = tmp.path().join("mock_curl.sh");
-    let mock_curl_path = write_mock_curl_script(&mock_curl);
-    let argv_log = mock_curl.with_extension("argv");
-    let stdin_log = mock_curl.with_extension("stdin");
-    let uid_log = mock_curl.with_extension("uid");
-
-    // Build a config carrying the webhook template (cmd[0] points at the
-    // mock) plus an `alice` mailbox. We use the `after_send` event so the
-    // hook fire path is exercised end-to-end without depending on a real
-    // DKIM signature on the inbound side (`evaluate_trust`
-    // requires DKIM=pass for `trusted = true`, which the test fixtures
-    // can't satisfy — see hook_substitute fuzz tests for substitution
-    // edge cases that complement this end-to-end coverage).
-    let webhook_url = "https://example.com/aimx-hook";
-    // Template + mailbox `run_as` / `owner` use `root` in this fixture
-    // so the CI runner (whose username isn't `aimx-hook` anymore, per
-    // path) still resolves the template to an active template
-    // and the alice mailbox to an active mailbox. The invariant check
-    // still holds: the `root` hook run_as is allowed for any owner.
-    let owner = current_username();
-    let config_content = format!(
-        r#"domain = "agent.example.com"
-data_dir = "{data_dir}"
-
-[[hook_template]]
-name = "webhook"
-description = "POST the email as JSON to a URL"
-cmd = ["{mock}", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "{{url}}"]
-params = ["url"]
-stdin = "email_json"
-run_as = "root"
-timeout_secs = 30
-allowed_events = ["on_receive", "after_send"]
-
-[mailboxes.catchall]
-address = "*@agent.example.com"
-owner = "aimx-catchall"
-
-[mailboxes.alice]
-address = "alice@agent.example.com"
-owner = "{owner}"
-"#,
-        data_dir = tmp.path().display(),
-        mock = mock_curl_path.display(),
-    );
-    std::fs::create_dir_all(tmp.path().join("inbox").join("catchall")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("inbox").join("alice")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("sent").join("alice")).unwrap();
-    std::fs::write(tmp.path().join("config.toml"), &config_content).unwrap();
-    install_cached_dkim_keys(tmp.path());
-
-    let port = find_free_port();
-    let mail_drop = tmp.path().join("outbound.log");
-    let (daemon, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
-
-    // ----- Step 1: hook_list_templates surfaces the configured template.
-    let mut client = McpClient::spawn(tmp.path());
-    client.initialize();
-
-    let templates_resp = client.call_tool("hook_list_templates", serde_json::json!({}));
-    let templates_text = get_tool_text(&templates_resp);
-    let templates_json: serde_json::Value =
-        serde_json::from_str(&templates_text).expect(&templates_text);
-    let arr = templates_json
-        .as_array()
-        .expect("hook_list_templates must return array");
-    assert!(
-        arr.iter().any(|t| t["name"] == "webhook"),
-        "webhook template must appear in hook_list_templates: {templates_text}"
-    );
-
-    // ----- Step 2: hook_create through MCP → UDS → daemon stamps origin.
-    let create_resp = client.call_tool(
-        "hook_create",
-        serde_json::json!({
-            "mailbox": "alice",
-            "event": "after_send",
-            "template": "webhook",
-            "params": {"url": webhook_url},
-            "name": "s61_e2e_hook"
-        }),
-    );
-    assert!(
-        !is_tool_error(&create_resp),
-        "hook_create must succeed: {create_resp}"
-    );
-    let create_text = get_tool_text(&create_resp);
-    let create_json: serde_json::Value = serde_json::from_str(&create_text).expect(&create_text);
-    assert_eq!(create_json["effective_name"], "s61_e2e_hook");
-    let argv_field = create_json["substituted_argv"]
-        .as_array()
-        .expect("substituted_argv must be array");
-    // First entry is the mock-curl path; last entry must be the URL slot.
-    assert_eq!(
-        argv_field[0],
-        serde_json::json!(mock_curl_path.to_string_lossy().to_string())
-    );
-    assert_eq!(
-        argv_field[argv_field.len() - 1],
-        serde_json::json!(webhook_url),
-        "last argv slot must carry the substituted URL: {argv_field:?}"
-    );
-
-    // ----- Step 3: confirm the daemon stamped origin = "mcp" in config.
-    let cfg_after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(
-        cfg_after.contains("origin = \"mcp\""),
-        "daemon must stamp origin = \"mcp\" on UDS-created hook: {cfg_after}"
-    );
-    assert!(
-        cfg_after.contains("template = \"webhook\""),
-        "config.toml must reference the bound template name: {cfg_after}"
-    );
-
-    // ----- Step 4: trigger after_send via `aimx send`. The daemon awaits
-    // hook subprocess completion before replying to the SEND verb, so by
-    // the time `aimx send` returns the mock-curl will have written its
-    // argv + stdin files.
-    let runtime = tmp.path().join("run");
-    let output = Command::cargo_bin("aimx")
-        .unwrap()
-        .env("AIMX_CONFIG_DIR", tmp.path())
-        .env("AIMX_RUNTIME_DIR", &runtime)
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .arg("send")
-        .arg("--from")
-        .arg("alice@agent.example.com")
-        .arg("--to")
-        .arg("recipient@example.com")
-        .arg("--subject")
-        .arg("end-to-end test")
-        .arg("--body")
-        .arg("Test body for end-to-end hook fire")
-        .output()
-        .expect("aimx send failed to spawn");
-    assert!(
-        output.status.success(),
-        "aimx send must succeed; stderr: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-
-    client.shutdown();
-    let daemon_stderr = stop_serve_capture_stderr(daemon);
-
-    // ----- Step 4b: structured hook-fire log line carries run_as = "root"
-    // (the `aimx-hook` default has been retired; this fixture opts
-    // into `root` explicitly) and template = "webhook". The fallback
-    // executor logs at info level via tracing, which `aimx serve`
-    // mirrors to stderr by default.
-    let log_plain = strip_ansi(&daemon_stderr);
-    assert!(
-        log_plain.contains("template=webhook"),
-        "daemon stderr must include `template=webhook` log field; got: {log_plain}"
-    );
-    assert!(
-        log_plain.contains("run_as=root"),
-        "daemon stderr must include `run_as=root` log field; got: {log_plain}"
-    );
-
-    // ----- Step 5: inspect the captured argv + stdin from mock-curl.
-    assert!(
-        argv_log.exists(),
-        "mock-curl must have written argv log at {}",
-        argv_log.display()
-    );
-    let argv_lines: Vec<String> = std::fs::read_to_string(&argv_log)
-        .unwrap()
-        .lines()
-        .map(|s| s.to_string())
-        .collect();
-    // First line is `$0` (the script path itself); subsequent lines are
-    // the argv entries the daemon passed in. The webhook template
-    // declares 8 arguments after `cmd[0]` so we expect 9 lines total
-    // (argv[0] + 8 args).
-    assert_eq!(
-        argv_lines.len(),
-        9,
-        "expected 9 argv entries (1 cmd + 8 args); got {argv_lines:?}"
-    );
-    assert_eq!(
-        argv_lines[0],
-        mock_curl_path.to_string_lossy(),
-        "argv[0] must be the mock-curl path verbatim"
-    );
-    // Header argument must land verbatim — proves the daemon did NOT
-    // shell-split substituted values across argv slots.
-    assert!(
-        argv_lines
-            .iter()
-            .any(|a| a == "Content-Type: application/json"),
-        "argv must contain unsplit Content-Type header: {argv_lines:?}"
-    );
-    // Final URL slot must carry the substituted value.
-    assert_eq!(
-        argv_lines.last().unwrap(),
-        webhook_url,
-        "last argv slot must be the substituted URL: {argv_lines:?}"
-    );
-
-    // The stdin file must contain a JSON object (webhook template uses
-    // `stdin = "email_json"`). The daemon wraps the persisted `.md`
-    // payload as `{"raw": "..."}` per the stdin handling.
-    assert!(
-        stdin_log.exists(),
-        "mock-curl must have captured stdin at {}",
-        stdin_log.display()
-    );
-    let stdin_text = std::fs::read_to_string(&stdin_log).unwrap();
-    let stdin_json: serde_json::Value = serde_json::from_str(&stdin_text).unwrap_or_else(|e| {
-        panic!("stdin must be valid JSON for stdin=email_json mode (err {e}): {stdin_text}");
-    });
-    let raw = stdin_json
-        .get("raw")
-        .and_then(|v| v.as_str())
-        .expect("email_json stdin must carry a `raw` key with the email markdown body");
-    assert!(
-        raw.contains("end-to-end test")
-            || raw.contains("Test body for end-to-end hook fire")
-            || raw.contains("alice@agent.example.com"),
-        "stdin payload must reflect the sent email content: {raw}"
-    );
-
-    // ----- Step 6: root-gated UID assertion (skipped on non-root CI).
-    // This fixture uses `run_as = "root"` (see the note at
-    // top of the test), so when the harness runs as root the hook's
-    // subprocess stays at uid 0 — no privilege drop required. The
-    // assertion covers the log-correctness path; the privilege-drop
-    // semantics are tested by the dedicated hook spawn unit tests.
-    let is_root = unsafe { libc::geteuid() == 0 };
-    if is_root {
-        let uid_str = std::fs::read_to_string(&uid_log)
-            .expect("mock-curl uid log must exist when running as root");
-        let uid: u32 = uid_str.trim().parse().expect("uid log must be numeric");
-        // This template uses `run_as = "root"`, so the hook
-        // subprocess stays at uid 0 under a root-invoked harness — no
-        // privilege drop to observe here. The actual privilege-drop
-        // semantics (uid != 0 after `setresuid` into a real Linux
-        // user) are exercised by `tests/isolation.rs`, which creates
-        // `aimx-it-alice` / `aimx-it-bob` via `useradd` under the
-        // `integration-isolation` CI job.
-        assert_eq!(
-            uid, 0,
-            "subprocess must run as root when template sets run_as = root"
-        );
-    } else {
-        // Non-root path: the UID file should still exist (mock-curl ran),
-        // but its value is the current test user's UID.
-        if uid_log.exists() {
-            let uid_str = std::fs::read_to_string(&uid_log).unwrap();
-            let uid: u32 = uid_str.trim().parse().unwrap_or(0);
-            let current_uid = unsafe { libc::geteuid() };
-            assert_eq!(
-                uid, current_uid,
-                "non-root path: subprocess should run as the current test user"
-            );
-        }
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -5325,159 +4503,6 @@ fn ingest_succeeds_and_chown_failure_is_nonfatal() {
     // The test only asserts success (no panic) on the non-root path;
     // the real isolation assertion lives in tests/isolation.rs which
     // creates real users for both alice and bob.
-}
-
-/// `aimx hooks prune --orphans --dry-run` surfaces the
-/// proposed diff without mutating `config.toml`, and a second pass
-/// actually rewrites the file atomically.
-///
-/// Root check is bypassed via `AIMX_TEST_SKIP_ROOT_CHECK=1`; doctor's
-/// pre-flight runs against a minimal fixture whose only `Fail`
-/// findings are the orphan-cleanup kind, so prune proceeds.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn hooks_prune_orphans_dry_run_then_apply() {
-    let tmp = TempDir::new().unwrap();
-    let owner = current_username();
-    // Config has one orphan template + one hook referencing it. The
-    // mailbox owner is the current user so non-orphan MAILBOX-OWNER
-    // checks stay clean.
-    let config = format!(
-        "domain = \"agent.example.com\"\ndata_dir = \"{dir}\"\n\n\
-         [[hook_template]]\n\
-         name = \"invoke-foo\"\n\
-         description = \"orphan\"\n\
-         cmd = [\"/bin/true\"]\n\
-         run_as = \"aimxghost\"\n\
-         timeout_secs = 60\n\
-         allowed_events = [\"on_receive\"]\n\n\
-         [mailboxes.alice]\n\
-         address = \"alice@agent.example.com\"\n\
-         owner = \"{owner}\"\n",
-        dir = tmp.path().display(),
-    );
-    std::fs::create_dir_all(tmp.path().join("inbox/alice")).unwrap();
-    std::fs::create_dir_all(tmp.path().join("sent/alice")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(
-            tmp.path().join("inbox/alice"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            tmp.path().join("sent/alice"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
-    }
-    std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
-    install_cached_dkim_keys(tmp.path());
-
-    // Dry run.
-    let dry = Command::cargo_bin("aimx")
-        .unwrap()
-        .env("AIMX_CONFIG_DIR", tmp.path())
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .args(["hooks", "prune", "--orphans", "--dry-run"])
-        .assert()
-        .success();
-    let dry_stdout = String::from_utf8_lossy(&dry.get_output().stdout).to_string();
-    assert!(
-        dry_stdout.contains("invoke-foo"),
-        "dry-run must mention the orphan template, got:\n{dry_stdout}"
-    );
-    assert!(
-        dry_stdout.contains("dry-run"),
-        "dry-run must say so, got:\n{dry_stdout}"
-    );
-    // Config file should be unchanged.
-    let after_dry = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(
-        after_dry.contains("invoke-foo"),
-        "dry-run must not rewrite config.toml"
-    );
-
-    // Apply.
-    let apply = Command::cargo_bin("aimx")
-        .unwrap()
-        .env("AIMX_CONFIG_DIR", tmp.path())
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .args(["hooks", "prune", "--orphans"])
-        .assert()
-        .success();
-    let apply_stdout = String::from_utf8_lossy(&apply.get_output().stdout).to_string();
-    assert!(
-        apply_stdout.contains("Pruned:"),
-        "apply must print Pruned: summary, got:\n{apply_stdout}"
-    );
-
-    // Config file must no longer reference the orphan template.
-    let after_apply = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(
-        !after_apply.contains("invoke-foo"),
-        "applied prune must remove the orphan template, got:\n{after_apply}"
-    );
-
-    // Second apply is idempotent: no orphans left → "No orphan ... to prune."
-    let second = Command::cargo_bin("aimx")
-        .unwrap()
-        .env("AIMX_CONFIG_DIR", tmp.path())
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .args(["hooks", "prune", "--orphans"])
-        .assert()
-        .success();
-    let second_stdout = String::from_utf8_lossy(&second.get_output().stdout).to_string();
-    assert!(
-        second_stdout.contains("No orphan"),
-        "second pass must report no orphans, got:\n{second_stdout}"
-    );
-}
-
-/// `aimx hooks prune --orphans` without the flag fails
-/// fast, and without root (and without the skip-root env var) it
-/// refuses.
-#[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
-fn hooks_prune_requires_orphans_and_root() {
-    let tmp = TempDir::new().unwrap();
-    setup_test_env(tmp.path());
-
-    // Missing --orphans: hard error.
-    Command::cargo_bin("aimx")
-        .unwrap()
-        .env("AIMX_CONFIG_DIR", tmp.path())
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
-        .arg("--data-dir")
-        .arg(tmp.path())
-        .args(["hooks", "prune"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("--orphans"));
-
-    // No skip-root env: refuses with "requires root" when euid != 0.
-    // Skip this assertion when running the tests as root (CI tier 1
-    // runs as root in containers) since the command would actually
-    // proceed.
-    let is_root = unsafe { libc::geteuid() == 0 };
-    if !is_root {
-        Command::cargo_bin("aimx")
-            .unwrap()
-            .env("AIMX_CONFIG_DIR", tmp.path())
-            .arg("--data-dir")
-            .arg(tmp.path())
-            .args(["hooks", "prune", "--orphans"])
-            .assert()
-            .failure()
-            .stderr(predicate::str::contains("requires root"));
-    }
 }
 
 /// `aimx --version` must render
