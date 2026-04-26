@@ -2,6 +2,7 @@ mod agents_cleanup;
 mod agents_remove;
 mod agents_setup;
 mod agents_tui;
+mod auth;
 mod cli;
 mod config;
 mod datadir_readme;
