@@ -15,3 +15,64 @@ extensions:
     description: >
       aimx MCP server. Nine tools for mailbox and email operations.
 prompt: |
+  ## Wiring yourself up as a mailbox hook (Goose)
+
+  When the user asks you to act on inbound mail automatically (for example
+  "reply to anything that lands in `support@`"), create an `on_receive`
+  hook that re-launches `goose run` with the email piped on stdin.
+
+  Two recipes are supported. The recipe-based form is preferred for
+  production because it pre-binds the `aimx mcp` extension and the
+  inbound-email path:
+
+  Production (recipe-based):
+
+  ```
+  hook_create(
+    mailbox: "support",
+    event: "on_receive",
+    cmd: ["goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"],
+    stdin: "email"
+  )
+  ```
+
+  The referenced recipe pre-binds the `aimx` MCP extension and
+  parameterizes `$AIMX_FILEPATH`. A minimal `/etc/aimx/goose-aimx-hook.yaml`:
+
+  ```yaml
+  version: "1.0.0"
+  title: "aimx mailbox hook"
+  description: "Read the inbound email and act on it via aimx MCP."
+  extensions:
+    - type: stdio
+      name: aimx
+      cmd: /usr/local/bin/aimx
+      args: [mcp]
+      timeout: 300
+  prompt: |
+    Read the email at the path in env var AIMX_FILEPATH and act on it
+    via the aimx MCP server (e.g. email_reply or email_mark_read).
+  ```
+
+  Ad-hoc (direct prompt over stdin):
+
+  ```
+  hook_create(
+    mailbox: "support",
+    event: "on_receive",
+    cmd: ["goose", "run", "--instructions", "-", "--quiet"],
+    stdin: "email"
+  )
+  ```
+
+  `--instructions -` reads the prompt from stdin; the daemon pipes the
+  raw email `.md` into that channel when `stdin: "email"` is set.
+  `--quiet` keeps the run free of progress chatter that would otherwise
+  pollute the structured log.
+
+  Note: the user the hook runs as (the mailbox's owner) must have the
+  aimx skill installed too — re-run `aimx agents setup goose` as that
+  user before creating the hook, or the headless invocation will start
+  without the skill loaded and the agent won't know what to do with the
+  email.
+

@@ -4,3 +4,38 @@ description: Self-hosted email for AI agents. Send, read, reply to, and manage e
 author: U-Zyn Chua <chua@uzyn.com>
 ---
 
+## Wiring yourself up as a mailbox hook (Gemini CLI)
+
+When the user asks you to act on inbound mail automatically (for example
+"reply to anything that lands in `support@`"), create an `on_receive`
+hook that re-launches `gemini` with the email piped on stdin:
+
+```
+hook_create(
+  mailbox: "support",
+  event: "on_receive",
+  cmd: ["gemini", "-p", "<instruction-string>", "--yolo"],
+  stdin: "email"
+)
+```
+
+Replace `<instruction-string>` with the prompt you want the headless
+run to follow (for example: `"You are the support agent. The email
+arrives on stdin. Reply via the aimx MCP server."`). Notes:
+
+- `--yolo` auto-approves tool calls, which is required for
+  unattended operation. Without it the headless run blocks on
+  approval prompts and never calls MCP.
+- The `cat file | gemini -p "..."` pipe-from-stdin pattern is the
+  official non-interactive contract — Gemini reads the piped content
+  as additional context alongside the `-p` prompt. The aimx daemon
+  performs the same pipe automatically when `stdin: "email"` is set.
+- Optional: pass `-m gemini-2.5-flash` (or another model) to pin the
+  model explicitly.
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup gemini` as that
+user before creating the hook, or the headless invocation will start
+without the skill loaded and the agent won't know what to do with the
+email.
+

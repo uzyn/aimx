@@ -1,133 +1,88 @@
 # aimx hooks: creating and managing automations via MCP
 
-Hooks are shell commands the aimx daemon fires on mail events:
+Hooks are commands the aimx daemon fires on mail events:
 
 - `on_receive`: an inbound email has been ingested. Fires only on
   **trusted** mail (`trusted == "true"` in frontmatter) unless the
-  operator explicitly opted the hook out of the trust gate — and that
-  opt-out is not settable via MCP.
+  hook itself sets `fire_on_untrusted = true`.
 - `after_send`: an outbound email has resolved (delivered, deferred,
   or failed). Fires on every send regardless of trust.
+  `fire_on_untrusted` is rejected on `after_send` hooks at config-load
+  time — there is no untrusted gate to bypass on outbound.
 
-You do not ship arbitrary shell. You pick a **template** (either the
-bundled `webhook`, or an `invoke-<agent>-<username>` template the
-caller — you, effectively — registered via `aimx agents setup <agent>`)
-and fill its declared parameters. The daemon substitutes your values
-into the template's argv, drops privileges to the template's `run_as`
-user, and spawns the child with a per-hook timeout. The local
-operator is the only party who can install raw-cmd hooks (via
-`sudo aimx hooks create --cmd "..."` on the host).
+Hooks belong to mailboxes you own. Use `hook_create` with the right
+`cmd` for your runtime — see your agent's skill for the exact argv.
+There is no template indirection, no per-hook `run_as` field, and no
+shared "hook user" with read access to other mailboxes. The child
+process always executes as the mailbox's owning Linux user, so a hook
+on mailbox `alice` can do exactly what `alice` can do — read her own
+inbox, run her own MCP server — and no more.
 
-## The four MCP hook tools
+## The three MCP hook tools
 
-### `hook_list_templates`
+### `hook_create(mailbox, event, cmd, name?, stdin?, timeout_secs?, fire_on_untrusted?)`
 
-List every hook template visible to the caller's Linux user. A
-template is visible when its `run_as` equals the caller's username, or
-when `run_as` is a reserved sentinel (`aimx-catchall` or `root`). Call
-this first, always, before `hook_create`. The list is empty until the
-caller has run `aimx agents setup <agent>` (no sudo) to register their
-`invoke-<agent>-<username>` template.
-
-**Parameters:** none.
-
-**Returns:** JSON array. Each entry:
-
-```json
-{
-  "name": "invoke-claude-alice",
-  "description": "Pipe the received/sent email into Claude Code with a custom prompt.",
-  "params": ["prompt"],
-  "allowed_events": ["on_receive", "after_send"]
-}
-```
-
-The `params` array lists every parameter you must bind when calling
-`hook_create`. The `allowed_events` array tells you which events this
-template may be wired to — passing a disallowed event returns an error.
-
-### `hook_create(mailbox, event, template, params, name?)`
-
-Attach a template-bound hook to a mailbox.
+Attach a hook to a mailbox you own.
 
 **Parameters:**
 
-| Name       | Type              | Required | Description |
-|------------|-------------------|----------|-------------|
-| `mailbox`  | string            | yes      | Mailbox name (e.g. `"alice"`) — must exist |
-| `event`    | string            | yes      | `"on_receive"` or `"after_send"` |
-| `template` | string            | yes      | Template name from `hook_list_templates` |
-| `params`   | object (str→str)  | yes      | Key=value map matching the template's declared params exactly |
-| `name`     | string (optional) | no       | Explicit hook name. When omitted, the daemon derives a 12-hex-char name from `(event, template, sorted params)` |
+| Name                | Type              | Required | Description |
+|---------------------|-------------------|----------|-------------|
+| `mailbox`           | string            | yes      | Mailbox name (e.g. `"alice"`) — must exist and be owned by you |
+| `event`             | string            | yes      | `"on_receive"` or `"after_send"` |
+| `cmd`               | string[]          | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
+| `name`              | string            | no       | Explicit hook name. Omitted → daemon derives a 12-hex-char name from `(event, cmd, fire_on_untrusted)` |
+| `stdin`             | string            | no       | `"email"` (default; pipes the raw `.md` to the child) or `"none"` (closes stdin; child reads `$AIMX_FILEPATH` instead) |
+| `timeout_secs`      | u32               | no       | Per-fire timeout in seconds. Default 60, max 600. SIGTERM at expiry, SIGKILL +5s |
+| `fire_on_untrusted` | bool              | no       | Default `false`. Legal only on `on_receive`. When `true`, the hook fires on any inbound mail regardless of `trusted` |
 
-**Returns:** JSON with the effective name and the final substituted
-argv so you can confirm the wiring in your reply to the user:
-
-```json
-{
-  "effective_name": "mcp_test_hook",
-  "substituted_argv": ["/home/alice/.local/bin/claude", "-p", "You are an assistant"]
-}
-```
+**Returns:** confirmation containing the effective name and the argv
+that will run.
 
 **Errors:**
 
-- `Mailbox '…' does not exist.`: create it first with `mailbox_create`.
-- `Unknown template '…'.`: call `hook_list_templates` to see the list.
-- `Template '…' does not permit event '…'.`: pick a different event
-  or a different template.
-- `missing-param: template '…' requires '…'.`: bind every declared
-  param.
-- `unknown-param: template '…' does not declare '…'.`: you sent a key
-  not in the template's `params` list. Remove it.
-- `param-invalid: parameter '…' contains an ASCII control character`
-  or `contains a NUL byte` or `is N bytes (max 8192)`: sanitize your
-  value.
+- `not authorized`: the target mailbox is not owned by your uid.
+  `mailbox_list()` shows what you can target.
+- `Mailbox '…' does not exist.`: ask the operator to provision it via
+  `sudo aimx mailboxes create <name> --owner <user>`.
 - `name-conflict: hook name '…' already exists`: pick a different
   explicit name, or omit `name` to get a derived one.
+- `daemon not running`: the `aimx serve` process is down. Hooks
+  cannot be created until it restarts.
+- `fire_on_untrusted is on_receive only`: drop the flag, or change
+  the event to `on_receive`.
+- `cmd[0] must be an absolute path`: the daemon refuses to spawn a
+  bare command name; supply the full path.
 
 ### `hook_list(mailbox?)`
 
-List hooks visible to MCP across all mailboxes (or a single one).
+List hooks on mailboxes you own.
 
 **Parameters:**
 
 | Name      | Type              | Required | Description |
 |-----------|-------------------|----------|-------------|
-| `mailbox` | string (optional) | no       | Filter to one mailbox |
+| `mailbox` | string (optional) | no       | Filter to one mailbox (must be owned by you) |
 
-**Returns:** JSON array. MCP-origin rows (created by you or by a
-CLI `--template` invocation) expose full details:
+**Returns:** JSON array. Each row carries the full hook definition:
 
 ```json
 {
-  "name": "agent_hook",
-  "mailbox": "alice",
+  "name": "support-replier",
+  "mailbox": "support",
   "event": "on_receive",
-  "origin": "mcp",
-  "template": "invoke-claude-alice",
-  "params": {"prompt": "You are an assistant"}
+  "cmd": ["claude", "-p", "You are the support agent...", "--dangerously-skip-permissions"],
+  "stdin": "email",
+  "timeout_secs": 60,
+  "fire_on_untrusted": false
 }
 ```
 
-Operator-origin rows (raw-cmd hooks the operator wrote on the host)
-are **masked** — only these four fields survive:
-
-```json
-{
-  "name": "daily-report",
-  "mailbox": "alice",
-  "event": "after_send",
-  "origin": "operator"
-}
-```
-
-This lets you see that a slot is taken without inspecting the operator's
-automation. Do not try to work around the masking.
+Hooks on mailboxes you do not own do not appear at all.
 
 ### `hook_delete(name)`
 
-Delete a hook by effective name.
+Delete a hook by effective name on a mailbox you own.
 
 **Parameters:**
 
@@ -139,178 +94,182 @@ Delete a hook by effective name.
 
 **Errors:**
 
-- `ERR origin-protected: hook '…' was created by the operator —
-  remove via \`sudo aimx hooks delete\` instead`: the target hook is
-  operator-origin. MCP cannot delete it. Tell the user to run
-  `sudo aimx hooks delete <name>` on the host.
-- `hook '…' not found`: no hook with that name exists. Re-list to
-  find the right name.
+- `Hook '…' not found`: no hook with that name exists in mailboxes
+  you own. (The daemon collapses "exists but you don't own it" into
+  the same not-found response so foreign mailbox names do not leak.)
 - `daemon not running`: the `aimx serve` process is down. Hooks
   cannot be deleted until it restarts.
 
-Note: the `origin` tag is a *submission channel*, not an authorship
-marker. Any hook that reached the daemon through the UDS (MCP
-`hook_create`, or `aimx hooks create --template` on the host) carries
-`origin = "mcp"` and is deletable via `hook_delete`. Operator-only
-hooks are the ones the operator direct-wrote to `config.toml` via
-`aimx hooks create --cmd "..."`.
+## The `cmd` argv shape
 
-## The template model, in detail
+`cmd` is the literal argv passed to `posix_spawn`. There is no shell
+wrapping, no string form, and no placeholder substitution. The only
+runtime context the daemon adds is via environment variables (see
+below).
 
-A template is one `[[hook_template]]` block the operator installed in
-`/etc/aimx/config.toml` at setup time. It looks like:
+- `cmd[0]` must be an absolute path. The daemon refuses bare command
+  names so the binary you mean is the binary that runs.
+- argv elements pass verbatim. Spaces, quotes, shell metacharacters,
+  none of them are special — each array element becomes one `argv[N]`
+  in the child.
+- The child runs with `setuid(<mailbox owner uid>)` from root before
+  `exec`. There is no `run_as` knob; ownership is the policy.
+- The daemon clears the environment and restores only `PATH`, `HOME`,
+  and the `AIMX_*` variables listed below.
 
-```toml
-[[hook_template]]
-name = "invoke-claude-alice"
-description = "Pipe the email into Claude Code with a custom prompt."
-cmd = ["/home/alice/.local/bin/claude", "-p", "{prompt}"]
-params = ["prompt"]
-stdin = "email"
-run_as = "alice"
-timeout_secs = 60
-allowed_events = ["on_receive", "after_send"]
-```
+### Environment variables set on every fire
 
-Key facts for agents:
+- `AIMX_FILEPATH`: absolute path to the email's `.md` file (the
+  bundle's main file, when attachments are present).
+- `AIMX_MAILBOX`: mailbox name.
+- `AIMX_EVENT`: `on_receive` or `after_send`.
+- `AIMX_MESSAGE_ID`: RFC 5322 Message-ID without angle brackets.
+- `AIMX_FROM`: sender address (header `From:`).
+- `AIMX_SUBJECT`: subject line.
 
-- `{placeholder}` tokens inside a `cmd` entry are the only places your
-  `params` values land. They never split into new argv entries — if
-  your value contains spaces, quotes, or shell metacharacters, they are
-  passed verbatim into one argv slot.
-- Built-in placeholders `{event}`, `{mailbox}`, `{message_id}`,
-  `{from}`, `{subject}` are populated by the daemon at fire time. You
-  do not bind them; you cannot supply them.
-- `cmd[0]` (the binary path) is never substituted. An operator who
-  trusts a template trusts the exact binary it will exec.
-- `stdin = "email"` pipes the raw Markdown (frontmatter + body) of the
-  email to the hook's child process on stdin. `"email_json"` wraps it
-  in `{frontmatter, body}` JSON. `"none"` closes stdin.
-- `run_as` is a Linux username. `aimx agents setup` sets it to the
-  caller's username so each user's hooks drop into that user's uid.
-  The reserved values are `aimx-catchall` (for catchall-mailbox
-  templates) and `root` (rare, operator-only). The daemon enforces
-  `hook.run_as == mailbox.owner OR hook.run_as == "root"` at every
-  write (catchall allows `aimx-catchall`), so your agent reads exactly
-  the files its matching mailbox owner can read.
-- `timeout_secs` is a hard ceiling; SIGTERM at `timeout_secs`, SIGKILL
-  at `+5s`.
+When `stdin = "email"` (the default) the same `.md` file is also
+piped to the child's stdin. When `stdin = "none"` stdin is closed
+and the child must use `$AIMX_FILEPATH` to read the email.
+
+### Per-agent recipes
+
+The exact `cmd` argv to use when wiring up an agent as the hook
+worker lives in the agent's skill bundle, not here, because the right
+flags depend on the agent's own headless-run contract. Look for the
+"Wiring yourself up as a mailbox hook" section in your agent's
+`SKILL.md`. As of Apr 2026 the supported set is:
+
+| Agent        | stdin       | Notes |
+|--------------|-------------|-------|
+| Claude Code  | `"email"`   | `claude -p <instruction> --dangerously-skip-permissions` |
+| Codex CLI    | `"email"`   | `codex exec --skip-git-repo-check --full-auto -` (trailing `-` reads stdin as the prompt) |
+| Gemini CLI   | `"email"`   | `gemini -p <instruction> --yolo` |
+| Goose        | `"email"`   | `goose run --recipe <path>` (preferred) or `goose run --instructions - --quiet` |
+| OpenCode     | `"none"`    | `opencode run --dangerously-skip-permissions <inline-prompt>` (reads `$AIMX_FILEPATH`) |
+| Hermes       | `"none"`    | `hermes chat -q <inline-prompt> --yolo` (reads `$AIMX_FILEPATH`; switch to `"email"` if a current install confirms `-q` accepts piped stdin) |
+| OpenClaw     | n/a         | No documented headless CLI as of Apr 2026 — see the OpenClaw skill |
 
 ## Example: "file + reply" hook on an accounts mailbox
 
-A user says: *"When I get an email from my bank, file it and reply
-with the current balance."*
+A user (alice) says: *"When I get an email from my bank, file it and
+reply with the current balance."*
 
-1. `hook_list_templates()` → verify `invoke-claude-<username>` (or
-   your agent's matching `invoke-<agent>-<username>` template) is
-   visible. If not, tell the user to run
-   `aimx agents setup <agent>` (no sudo) first.
-2. `hook_create(mailbox: "accounts", event: "on_receive", template:
-   "invoke-claude-alice", params: {prompt: "You are the accounts agent.
-   Read the email on stdin. If it is from the bank, file it via
-   email_mark_read and reply with email_reply including the current
-   balance from the local ledger. Otherwise mark it read and do
-   nothing."})`
-3. Echo the `substituted_argv` in your reply to the user so they can
-   see exactly what will run.
-4. If the user later says *"undo that"*, call `hook_delete(name:
-   <effective_name>)` with the name the daemon returned in step 2.
+```
+hook_create(
+  mailbox: "accounts",
+  event: "on_receive",
+  cmd: [
+    "claude", "-p",
+    "You are the accounts agent. Read the email on stdin. If it is from the bank, mark it read via email_mark_read and reply via email_reply with the current balance from the local ledger. Otherwise mark it read and do nothing.",
+    "--dangerously-skip-permissions"
+  ],
+  stdin: "email"
+)
+```
+
+If alice later says *"undo that"*, call `hook_delete(name:
+<effective_name>)` with the name returned by `hook_create` (or look
+it up via `hook_list(mailbox: "accounts")`).
 
 ## Example: webhook on outbound mail
 
-A user says: *"Ping https://ops.example.com/log every time I send an
-email."*
+A user says: *"Ping `https://ops.example.com/log` every time I send
+an email from this mailbox."*
 
-1. `hook_list_templates()` → verify `webhook` is in the list.
-2. `hook_create(mailbox: "agent", event: "after_send", template:
-   "webhook", params: {url: "https://ops.example.com/log"})`
-3. The template's `stdin = "email_json"` means the remote endpoint
-   receives the full message as JSON. Confirm that matches what the
-   user wants — if they need HTTP Basic auth or a custom header, the
-   `webhook` template does not support it (v1); tell them to ask the
-   operator to write a raw-cmd hook instead.
+```
+hook_create(
+  mailbox: "agent",
+  event: "after_send",
+  cmd: [
+    "/usr/bin/curl", "-sS", "-X", "POST",
+    "-H", "Content-Type: text/markdown",
+    "--data-binary", "@-",
+    "https://ops.example.com/log"
+  ],
+  stdin: "email"
+)
+```
+
+The remote endpoint receives the raw `.md` (frontmatter + body) on
+the request body. If the user needs JSON specifically, ask them to
+pre-process the file from a small wrapper script — the daemon ships
+no JSON-mode `stdin` variant; only `"email"` (raw) and `"none"`.
+
+## Trust gate
+
+`on_receive` hooks fire iff the email's `trusted` frontmatter is
+`"true"`, OR the hook sets `fire_on_untrusted = true`. The flag is
+the owner's choice — the relevant defense is mailbox isolation
+(your hook runs as you, on your mailbox), not template gating.
+
+If your hook does not fire on inbound mail, check `email_read`
+output for the message:
+
+- `trusted = "none"`: the mailbox's effective trust policy is
+  `"none"` (no evaluation). Either switch the mailbox to
+  `trust = "verified"` with a `trusted_senders` allowlist, or set
+  `fire_on_untrusted = true` on the hook.
+- `trusted = "false"`: the sender did not match the allowlist, or
+  DKIM did not pass. Same options as above.
+- `trusted = "true"` and the hook still didn't fire: ask the
+  operator to check `aimx logs` or `journalctl -u aimx`. Each fire
+  emits a structured line of the form
+  `hook_name=<n> event=<e> mailbox=<m> owner=<u> exit_code=<n>
+  duration_ms=<n> timed_out=<bool> stderr_tail=<…>`.
+
+## Daemon-down behavior
+
+When the `aimx serve` process is not running, MCP `hook_create` /
+`hook_delete` return `daemon not running` immediately — there is no
+fallback path that doesn't require config write, and you (as a
+non-root user) cannot edit the root-owned `config.toml`. Tell the
+user to bring the daemon back up (`sudo systemctl start aimx` on
+systemd, `sudo rc-service aimx start` on OpenRC) and retry.
 
 ## Troubleshooting
 
 ### "My hook does not fire on inbound mail."
 
-The `on_receive` trust gate is the most common cause. MCP-created
-hooks **always** honor the gate — they fire iff the email's `trusted`
-frontmatter is `"true"`. Check `email_read` output for the target
-email:
+Most common cause: the trust gate. See the "Trust gate" section above
+for the diagnosis flow.
 
-- `trusted = "none"`: the mailbox's trust policy is `"none"` (the
-  default). Ask the operator to set `trust = "verified"` and add a
-  `trusted_senders` allowlist in `config.toml`.
-- `trusted = "false"`: the sender did not match the allowlist, or
-  DKIM did not pass. Hooks do not fire on this mail. Ask the user
-  what they want (add sender to allowlist, or accept that this mail
-  is untrusted).
-- `trusted = "true"` but the hook still didn't fire: the daemon
-  logs a structured line per firing. Ask the operator to check
-  `aimx logs` or `journalctl -u aimx`.
+### "hook_create returned `not authorized`."
 
-### "hook_create returned `Unknown template`."
-
-Call `hook_list_templates` again — the owning user may not have run
-`aimx agents setup <agent>` yet, or your template name is misspelled
-(remember: `invoke-<agent>-<username>`, not the bare `invoke-<agent>`).
-The list is the authoritative source; never assume a template exists
-from a past install.
+Check `mailbox_list()`. The mailbox must be owned by your Linux uid.
+Ask the operator to run
+`sudo aimx mailboxes create <name> --owner <your-username>` (or
+re-`--owner` an existing one) on the host.
 
 ### "hook_create returned `Mailbox '…' does not exist`."
 
-Call `mailbox_list` to check spelling. `mailbox_create` first if you
-are setting up a new identity.
+Call `mailbox_list` to check spelling. Mailbox provisioning is
+root-only on the host CLI; you cannot create mailboxes from MCP.
 
-### "hook_delete returned `origin-protected`."
+### "hook_delete returned `Hook '…' not found`."
 
-The target hook was written to `config.toml` by the operator via
-`aimx hooks create --cmd "..."`. Only the operator can remove it:
-`sudo aimx hooks delete <name>` on the host. Tell the user exactly
-that command.
-
-### "I created a hook but `hook_list` does not show the full details."
-
-Check the `origin` field. If it is `"operator"`, the hook was
-hand-written; the details are deliberately masked. Your hooks (via
-`hook_create`) always show full details because they carry
-`origin = "mcp"`.
-
-### "The operator disabled a template I was using."
-
-Existing hooks bound to that template keep firing — the daemon
-resolves the template name at fire time, and a disabled template that
-still exists in `config.toml` remains callable. But new
-`hook_create` calls referencing it will fail with `Unknown template`.
-Ask the operator whether they want the template back, or whether the
-existing hooks should be removed.
-
-### "I can see an operator-origin hook in hook_list, but I'm told to stay away from it."
-
-Correct. You can see operator-origin hooks so you do not create
-duplicates or step on their names, but you cannot inspect, modify, or
-delete them. Treat operator hooks as opaque infrastructure.
+Either the hook name is wrong, or the hook lives on a mailbox you do
+not own (the daemon collapses "exists but unauthorized" into
+not-found so foreign mailbox names don't leak). Re-run
+`hook_list()` to see your hooks.
 
 ### "hook_create worked but the child process exits non-zero every time."
 
 Inspect the operator's logs — the daemon captures up to 64 KiB of
-stderr per hook fire and logs it at the end of the hook-fire
-structured log line. Common causes: the template's `cmd[0]` binary is
-not installed on this machine (template points at `/usr/local/bin/…`
-and the binary lives at `/usr/bin/…`), or the user / recipe path in a
-param value is wrong.
+stderr per hook fire and logs it at the end of the structured
+hook-fire log line. Common causes: `cmd[0]` is not installed for
+the owning user, the user is missing an agent skill (`aimx agents
+setup <agent>` was not re-run as that user), or a path in a `cmd`
+argument is wrong.
 
 ## What you must not do
 
-- **Do not submit raw `cmd` values to `hook_create`.** The tool does
-  not expose a `cmd` parameter. Templates are the only path.
-- **Do not try to bypass masking on operator-origin hooks.** The
-  daemon enforces it server-side.
-- **Do not assume `hook_list_templates` is stable across installs.**
-  Call it every time — the operator may add or remove templates.
+- **Do not target mailboxes you do not own.** The daemon rejects
+  every cross-owner write; do not waste tool calls.
+- **Do not assume `cmd[0]` resolves via `$PATH`.** It must be an
+  absolute path. The daemon refuses bare names.
+- **Do not embed shell quoting in argv elements.** argv is not
+  shell-expanded; each element is one `argv[N]`.
+- **Do not set `fire_on_untrusted = true` on `after_send` hooks.**
+  Config-load rejects it. There is no untrusted gate on outbound.
 - **Do not `hook_create` every time you reply to a user.** Hooks
-  persist across restarts; create them once and reuse by name.
-- **Do not set `dangerously_support_untrusted = true`.** It is not a
-  valid MCP-side field. Only operators can set it, and only by hand-
-  editing `config.toml`.
+  persist across restarts; create once, reuse by name.

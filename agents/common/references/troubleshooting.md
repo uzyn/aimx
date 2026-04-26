@@ -13,7 +13,8 @@ AIMX/1 ERR <CODE> <reason>
 
 | Code       | Meaning | Common cause | Recovery |
 |-----------|---------|--------------|----------|
-| `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` | Create the mailbox first with `mailbox_create` |
+| `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` or is not owned by you | Ask the operator to provision the mailbox via `sudo aimx mailboxes create <name> --owner <user>` |
+| `EACCES`  | Not authorized | Caller uid does not own the target mailbox | Confirm via `mailbox_list` that you own the mailbox you are targeting |
 | `DOMAIN`  | Sender domain mismatch | The sender domain does not match the configured primary domain | Use the correct domain; check `/etc/aimx/config.toml` |
 | `SIGN`    | DKIM signing failed | DKIM private key missing or corrupted | Re-run `aimx setup` to regenerate keys |
 | `DELIVERY`| Remote MX rejected mail | Recipient server refused the message (permanent) | Check the reason: invalid recipient, blocked sender, policy rejection |
@@ -59,14 +60,21 @@ the domain must match exactly (case-insensitive).
 
 ### Mailbox not found
 
-`email_send` or `email_reply` fails because the from-mailbox does not exist.
+`email_send` or `email_reply` fails because the from-mailbox does not
+exist or is not owned by you.
 
-**Cause:** Attempting to send from a mailbox that was not created.
+**Cause:** Attempting to send from a mailbox that was not created, or
+one whose `owner` is a different Linux user.
 
-**Recovery:**
+**Recovery:** Ask the operator to provision (or re-`--owner`) the
+mailbox on the host:
+
 ```
-mailbox_create(name: "your-mailbox")
+sudo aimx mailboxes create your-mailbox --owner your-username
 ```
+
+Mailbox CRUD is root-only — MCP does not expose `mailbox_create` or
+`mailbox_delete`.
 
 ### DKIM signature failure
 
@@ -105,25 +113,28 @@ Inbound mail is not showing up in the expected mailbox.
 
 **Possible causes:**
 - Mail was routed to `catchall` because the local part does not match a
-  configured mailbox.
+  configured mailbox. The catchall is owned by `aimx-catchall` and not
+  visible from your MCP session — ask the operator to inspect.
 - Mail was rejected during SMTP session (check `journalctl -u aimx`).
 - `aimx serve` is not running.
 
 **Recovery:**
-1. Check `catchall` inbox: `email_list(mailbox: "catchall")`
-2. Verify the mailbox exists: `mailbox_list()`
-3. Check daemon logs: `journalctl -u aimx -n 50`
+1. Verify the mailbox exists and is owned by you: `mailbox_list()`
+2. Ask the operator to check the catchall and the daemon logs:
+   `journalctl -u aimx -n 50`
 
 ### Permission denied reading emails
 
 Cannot read `.md` files from the filesystem directly.
 
-**Cause:** The data directory is world-readable by default, but the process
-may not have traversal permissions on parent directories.
+**Cause:** Mailbox directories are `0700 <owner>:<owner>`. Only the
+mailbox owner (and root) can traverse into `/var/lib/aimx/inbox/<mailbox>/`
+or `/var/lib/aimx/sent/<mailbox>/`.
 
-**Recovery:** Ensure the user running the agent has read access to
-`/var/lib/aimx/`. The data directory is `root:root 755`. Any local user
-should have read access.
+**Recovery:** Confirm via `mailbox_list()` that the mailbox you are
+trying to read is owned by your Linux uid. If you need a mailbox that
+is currently owned by a different user, ask the operator to re-create
+it with you as `--owner`, or run the MCP server as the owning user.
 
 ### Large attachment bundle
 
@@ -146,19 +157,26 @@ name), and `email_read` works with this ID normally.
 
 Full coverage lives in `references/hooks.md`. Quick entry points:
 
-- **`hook_list_templates` returned `[]`.** The operator has not
-  enabled any templates. Ask them to run `sudo aimx setup` on the
-  host and tick the templates they want.
-- **`hook_create` returned `Unknown template`.** Re-call
-  `hook_list_templates`; the operator may have disabled it or your
-  spelling is off.
-- **`hook_create` returned `missing-param` / `unknown-param` /
-  `param-invalid`.** The param map must match the template's `params`
-  list exactly, and values cannot contain ASCII control chars or NUL
-  bytes. Sanitize and retry.
-- **`hook_delete` returned `origin-protected`.** The hook is operator-
-  origin; MCP cannot delete it. Tell the user to run
-  `sudo aimx hooks delete <name>` on the host.
-- **My hook does not fire on inbound mail.** Check the target email's
-  `trusted` field via `email_read`. MCP-origin hooks fire only on
-  trusted mail. See `references/hooks.md` for the full trust checklist.
+- **`hook_create` returned `not authorized`.** The mailbox is not
+  owned by your Linux uid. Confirm via `mailbox_list()`; ask the
+  operator to provision the mailbox with you as `--owner` if needed.
+- **`hook_create` returned `Mailbox '…' does not exist`.** Mailbox
+  CRUD is root-only on the host CLI. Ask the operator to run
+  `sudo aimx mailboxes create <name> --owner <user>`.
+- **`hook_create` returned `cmd[0] must be an absolute path`.** Use
+  the full path to the binary; the daemon refuses bare command
+  names.
+- **`hook_create` returned `fire_on_untrusted is on_receive only`.**
+  Drop the flag, or change the event to `on_receive`. There is no
+  untrusted gate to bypass on outbound mail.
+- **`hook_delete` returned `Hook '…' not found`.** Either the name
+  is wrong, or the hook lives on a mailbox you do not own (the
+  daemon collapses "exists but unauthorized" into not-found so
+  foreign mailbox names do not leak). Re-run `hook_list()` to see
+  your hooks.
+- **My hook does not fire on inbound mail.** Check the target
+  email's `trusted` field via `email_read`. By default `on_receive`
+  hooks fire only on trusted mail; set `fire_on_untrusted = true`
+  on the hook (or switch the mailbox to `trust = "verified"` with
+  an allowlist) to widen the gate. See `references/hooks.md` for
+  the full checklist.

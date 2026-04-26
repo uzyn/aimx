@@ -583,11 +583,12 @@ impl DoctorFinding {
 /// Run every doctor check against `config`, merging in
 /// `load_warnings` returned by [`Config::load`]. The returned vector is
 /// in deterministic section order (mailbox ownership → catchall presence →
-/// load warnings).
+/// legacy aimx-hook user → load warnings).
 pub fn run_checks(config: &Config, load_warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
     let mut out = Vec::new();
     out.extend(check_mailbox_ownership(config));
     out.extend(check_catchall_user(config));
+    out.extend(check_legacy_aimx_hook_user());
     out.extend(translate_load_warnings(load_warnings));
     out
 }
@@ -810,6 +811,27 @@ pub fn check_catchall_user(config: &Config) -> Vec<DoctorFinding> {
     ]
 }
 
+/// One-line note when a stale `aimx-hook` system user is still on the
+/// host. aimx no longer manages the user; the operator's call whether
+/// to clean it up. `Info` severity so it does not flip the doctor exit
+/// code.
+pub fn check_legacy_aimx_hook_user() -> Vec<DoctorFinding> {
+    if resolve_user("aimx-hook").is_some() {
+        vec![
+            DoctorFinding::new(
+                "LEGACY-AIMX-HOOK-USER",
+                FindingSeverity::Info,
+                "stale 'aimx-hook' system user is still present; aimx no longer \
+                 manages it"
+                    .to_string(),
+            )
+            .with_fix("remove via `sudo userdel aimx-hook` when safe"),
+        ]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Surface `LoadWarning`s from `Config::load` as doctor
 /// findings so warnings the daemon logged on start-up are visible
 /// without scraping the journal.
@@ -828,9 +850,9 @@ pub fn translate_load_warnings(warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
                 );
             }
             LoadWarning::LegacyAimxHookUser => {
-                // Translated separately in `check_legacy_aimx_hook_user`
-                // so the doctor output is consistent regardless of
-                // whether `load` surfaced the warning yet.
+                // Translated separately by `check_legacy_aimx_hook_user`
+                // (probes the host directly) so the finding lands even
+                // when nobody pushed this variant onto the warning stream.
             }
             LoadWarning::RootCatchallAccepted { mailbox } => {
                 out.push(DoctorFinding::new(
@@ -1060,5 +1082,21 @@ mod ownership_tests {
             mb("bob", "ubuntu", Some(1000), false),
         ];
         assert!(!has_orphan_owner(&mailboxes));
+    }
+
+    #[test]
+    fn check_legacy_aimx_hook_user_returns_finding_only_when_user_present() {
+        // The probe's contract: silent on a clean host, one Info
+        // finding when `aimx-hook` is present. We can't add or remove
+        // the host user from a unit test, so assert the contract on
+        // whichever side of the host state we land in — the test
+        // proves the function never crashes and emits at most one
+        // finding with the documented severity.
+        let out = super::check_legacy_aimx_hook_user();
+        assert!(out.len() <= 1, "at most one finding: {out:?}");
+        if let Some(f) = out.first() {
+            assert_eq!(f.check, "LEGACY-AIMX-HOOK-USER");
+            assert_eq!(f.severity, FindingSeverity::Info);
+        }
     }
 }

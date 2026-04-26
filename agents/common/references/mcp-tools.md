@@ -7,57 +7,36 @@ launched on-demand by your MCP client. It is not a long-running process.
 ## Per-user visibility
 
 The MCP server inherits the uid of the user that launched the client.
-All tool calls that touch a mailbox consult the daemon over the world-
+Mutations that touch a mailbox consult the daemon over the world-
 writable UDS; the daemon reads `SO_PEERCRED` from the socket and
 rejects any request whose caller uid does not own the target mailbox
-(root is the only bypass). Effectively:
+(root is the only bypass). Reads are scoped by filesystem permissions
+(`/var/lib/aimx/inbox/<mailbox>/` is `0700 <owner>:<owner>`).
+
+Effectively:
 
 - `mailbox_list` returns only mailboxes whose `owner` equals the
-  caller's username (plus the catchall, which is owned by
-  `aimx-catchall`).
+  caller's username.
 - `email_list`, `email_read`, `email_send`, `email_reply`,
-  `email_mark_read`, `email_mark_unread` reject `EACCES` for any
-  mailbox the caller does not own.
-- `hook_list_templates` returns templates whose `run_as` equals the
-  caller's username, plus reserved templates (`run_as =
-  "aimx-catchall"` or `"root"`).
-- `hook_create` / `hook_delete` operate only on mailboxes the caller
-  owns. The constraint `hook.run_as == mailbox.owner OR hook.run_as ==
-  "root"` (exception: catchall allows `aimx-catchall`) is enforced at
-  every write.
+  `email_mark_read`, `email_mark_unread` reject for any mailbox the
+  caller does not own.
+- `hook_create` / `hook_list` / `hook_delete` operate only on
+  mailboxes the caller owns. Hooks always execute as the mailbox's
+  owning Linux user — there is no per-hook `run_as` field.
+
+Mailbox provisioning (`mailbox_create` / `mailbox_delete`) is **not
+exposed via MCP**. It is root-only on the host CLI (`sudo aimx
+mailboxes create | delete`) so that the namespace of mailboxes can
+never be widened by an agent.
 
 On a single-user box the caller always owns everything and the rules
 are invisible. On a multi-user box they give real isolation.
 
 ## Mailbox tools
 
-### `mailbox_create`
-
-Create a new mailbox. This creates both `inbox/<name>/` and `sent/<name>/`
-directories and registers the address in `config.toml`.
-
-**Parameters:**
-| Name   | Type   | Required | Description |
-|--------|--------|----------|-------------|
-| `name` | string | yes      | Local part of the email address (e.g. `agent` for `agent@domain`) |
-
-**Returns:** Confirmation string.
-
-**Example:**
-```
-mailbox_create(name: "reports")
-→ "Mailbox 'reports' created."
-```
-
-**Errors:**
-- Mailbox already exists.
-- Invalid name (must be valid email local part).
-
----
-
 ### `mailbox_list`
 
-List all mailboxes with total and unread message counts.
+List mailboxes you own with total and unread message counts.
 
 **Parameters:** None.
 
@@ -70,44 +49,10 @@ mailbox_list()
    reports (inbox: 0 total, 0 unread; sent: 0 total)"
 ```
 
----
-
-### `mailbox_delete`
-
-Delete a mailbox. Removes the `[mailboxes.<name>]` stanza from
-`config.toml` and hot-swaps the daemon's in-memory config. The
-`inbox/<name>/` and `sent/<name>/` directories must be empty first. The
-daemon refuses the delete otherwise. Empty directories are left on disk
-for the operator to clean up (e.g. `rmdir`).
-
-**Parameters:**
-| Name   | Type   | Required | Description |
-|--------|--------|----------|-------------|
-| `name` | string | yes      | Mailbox name to delete |
-
-**Returns:** Confirmation string. Mentions the empty directories that
-remain on disk so the operator isn't surprised.
-
-**Example:**
-```
-mailbox_delete(name: "old-project")
-→ "Mailbox 'old-project' deleted. Empty `inbox/old-project/` and
-   `sent/old-project/` directories remain on disk. Run `rmdir` to tidy
-   up if desired."
-```
-
-**Errors:**
-- Mailbox does not exist.
-- Mailbox is non-empty (inbox or sent contains files). The error
-  payload spells out the per-directory file counts and points at the
-  CLI command that wipes-and-deletes:
-  `Cannot delete mailbox 'foo'. inbox: 5 files, sent: 2 files. MCP
-  `mailbox_delete` does not wipe mail. Run `sudo aimx mailboxes delete
-  --force foo` on the host to wipe and remove.`
-  MCP deliberately does **not** expose a force variant. Destructive
-  wipes stay on the CLI where the operator sees the prompt and the
-  request can't be triggered remotely by an agent.
-- Attempt to delete the `catchall` mailbox.
+Mailboxes you do not own do not appear. To create or delete
+mailboxes, ask the operator to run
+`sudo aimx mailboxes create <name> --owner <user>` or
+`sudo aimx mailboxes delete <name>` on the host.
 
 ---
 
@@ -115,12 +60,13 @@ mailbox_delete(name: "old-project")
 
 ### `email_list`
 
-List emails in a mailbox with optional filters. All filters AND together.
+List emails in a mailbox you own with optional filters. All filters
+AND together.
 
 **Parameters:**
 | Name      | Type    | Required | Description |
 |-----------|---------|----------|-------------|
-| `mailbox` | string  | yes      | Mailbox name |
+| `mailbox` | string  | yes      | Mailbox name (must be owned by you) |
 | `folder`  | string  | no       | `"inbox"` (default) or `"sent"` |
 | `unread`  | bool    | no       | Filter to only unread emails |
 | `from`    | string  | no       | Filter by sender address (substring match) |
@@ -156,7 +102,7 @@ Return the full Markdown file (TOML frontmatter + body) for a single email.
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `mailbox` | string | yes      | Mailbox name |
+| `mailbox` | string | yes      | Mailbox name (must be owned by you) |
 | `id`      | string | yes      | Email ID. The filename stem (e.g. `2026-04-15-143022-meeting-notes`) |
 | `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
@@ -177,6 +123,7 @@ email_read(mailbox: "agent", id: "2026-04-15-143022-meeting-notes")
 **Errors:**
 - Email not found.
 - Invalid ID format.
+- Mailbox not owned by caller.
 
 ---
 
@@ -189,7 +136,7 @@ directly to the recipient's MX server.
 **Parameters:**
 | Name           | Type     | Required | Description |
 |---------------|----------|----------|-------------|
-| `from_mailbox` | string   | yes      | Mailbox name to send from (local part only) |
+| `from_mailbox` | string   | yes      | Mailbox name to send from (local part only); must be owned by you |
 | `to`           | string   | yes      | Recipient email address |
 | `subject`      | string   | yes      | Email subject |
 | `body`         | string   | yes      | Email body text |
@@ -246,7 +193,7 @@ email_send(
 ```
 
 **Errors:**
-- Mailbox does not exist.
+- Mailbox does not exist or is not owned by you.
 - Daemon not running (socket missing).
 - Sender domain mismatch.
 - Delivery failure (remote MX rejected).
@@ -261,7 +208,7 @@ Reply to an existing email. aimx automatically sets `In-Reply-To`,
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `mailbox` | string | yes      | Mailbox containing the email to reply to |
+| `mailbox` | string | yes      | Mailbox containing the email to reply to (must be owned by you) |
 | `id`      | string | yes      | Email ID to reply to |
 | `body`    | string | yes      | Reply body text |
 
@@ -286,7 +233,7 @@ Mark a single email as read (sets `read = true` in frontmatter).
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `mailbox` | string | yes      | Mailbox name |
+| `mailbox` | string | yes      | Mailbox name (must be owned by you) |
 | `id`      | string | yes      | Email ID |
 | `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
@@ -307,7 +254,7 @@ Mark a single email as unread (sets `read = false` in frontmatter).
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `mailbox` | string | yes      | Mailbox name |
+| `mailbox` | string | yes      | Mailbox name (must be owned by you) |
 | `id`      | string | yes      | Email ID |
 | `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
@@ -321,104 +268,76 @@ email_mark_unread(mailbox: "agent", id: "2026-04-15-143022-meeting-notes")
 
 ## Hook tools
 
-Hooks fire shell commands on mail events. Agents create hooks by
-referencing pre-vetted **templates**; the template model makes it
-impossible to submit arbitrary shell over the world-writable UDS. See
-`references/hooks.md` for the full model, worked examples, and
-troubleshooting.
-
-### `hook_list_templates`
-
-List hook templates visible to the caller. A template is visible when
-its `run_as` equals the caller's username, or when `run_as` is a
-reserved sentinel (`aimx-catchall` or `root`). Per-agent templates
-follow the naming scheme `invoke-<agent>-<username>` and are created
-by `aimx agents setup <agent>` (run without sudo by the owning user).
-
-**Parameters:** None.
-
-**Returns:** JSON array. Fields per entry: `name`, `description`,
-`params` (string array of declared parameter names), `allowed_events`
-(subset of `["on_receive", "after_send"]`).
-
-**Example, visible to alice after she runs `aimx agents setup claude-code`:**
-```
-hook_list_templates()
-→ [{"name":"invoke-claude-alice","description":"Pipe email into Claude with a prompt.",
-    "params":["prompt"],"allowed_events":["on_receive","after_send"]},
-   {"name":"webhook","description":"POST the email as JSON to a URL",
-    "params":["url"],"allowed_events":["on_receive","after_send"]}]
-```
-
----
+Hooks fire commands on mail events. You create hooks on mailboxes you
+own; the hook always executes as the mailbox's owning Linux user, with
+the email piped on stdin (or accessible via `$AIMX_FILEPATH` when
+stdin is closed). There is no template indirection — your `cmd` is
+the literal argv that runs. See `references/hooks.md` for the full
+model, worked examples, and troubleshooting.
 
 ### `hook_create`
 
-Attach a template-bound hook to a mailbox. The daemon substitutes the
-supplied params into the template's argv, stamps `origin = "mcp"` on
-the resulting hook, and writes it to `config.toml`.
+Attach a hook to a mailbox you own.
 
 **Parameters:**
-| Name       | Type              | Required | Description |
-|------------|-------------------|----------|-------------|
-| `mailbox`  | string            | yes      | Mailbox name (must exist) |
-| `event`    | string            | yes      | `"on_receive"` or `"after_send"` |
-| `template` | string            | yes      | Template name from `hook_list_templates` |
-| `params`   | object(str→str)   | yes      | Must match template's declared `params` exactly |
-| `name`     | string            | no       | Optional explicit name; derived from `(event, template, sorted params)` when omitted |
+| Name                | Type     | Required | Description |
+|---------------------|----------|----------|-------------|
+| `mailbox`           | string   | yes      | Mailbox name (must be owned by you) |
+| `event`             | string   | yes      | `"on_receive"` or `"after_send"` |
+| `cmd`               | string[] | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
+| `name`              | string   | no       | Optional explicit name; derived from `(event, cmd, fire_on_untrusted)` when omitted |
+| `stdin`             | string   | no       | `"email"` (default; pipes raw `.md`) or `"none"` (closes stdin; child reads `$AIMX_FILEPATH` instead) |
+| `timeout_secs`      | u32      | no       | Per-fire timeout in seconds. Default 60, max 600 |
+| `fire_on_untrusted` | bool     | no       | Default `false`. Legal only on `on_receive`; when `true`, fires regardless of `trusted` |
 
-**Returns:** JSON `{effective_name, substituted_argv}`.
+**Returns:** confirmation containing the effective name and the argv
+that will run.
 
 **Example:**
 ```
 hook_create(
-  mailbox: "agent",
+  mailbox: "support",
   event: "on_receive",
-  template: "invoke-claude-alice",
-  params: {"prompt": "You are an assistant."}
+  cmd: ["claude", "-p", "You are the support agent.", "--dangerously-skip-permissions"],
+  stdin: "email"
 )
-→ {"effective_name":"a1b2c3d4e5f6",
-   "substituted_argv":["/home/alice/.local/bin/claude","-p","You are an assistant."]}
+→ "Hook 'support-replier' created on mailbox 'support'. argv=['claude', '-p', 'You are the support agent.', '--dangerously-skip-permissions']"
 ```
 
 **Errors:**
-- Unknown template.
-- Unknown or missing param.
-- Event not allowed by the template.
+- Not authorized (mailbox not owned by you).
 - Mailbox not found.
-- Param validation (NUL / control chars / >8 KiB value).
+- `cmd[0]` not an absolute path.
+- `fire_on_untrusted` set on an `after_send` hook.
+- Name conflict with an existing hook.
 - Daemon not running.
 
 ---
 
 ### `hook_list`
 
-List hooks visible to MCP across all mailboxes (or one when `mailbox`
-is set). Operator-origin hooks are **masked** to `{name, mailbox,
-event, origin}`; MCP-origin hooks include `template` and `params`.
+List hooks on mailboxes you own (or one when `mailbox` is set).
 
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
-| `mailbox` | string | no       | Filter to one mailbox |
+| `mailbox` | string | no       | Filter to one mailbox (must be owned by you) |
 
-**Returns:** JSON array. See `references/hooks.md` for the exact
-shape of each origin variant.
+**Returns:** JSON array. See `references/hooks.md` for the row shape.
 
 **Example:**
 ```
 hook_list()
-→ [{"name":"daily-report","mailbox":"agent","event":"after_send","origin":"operator"},
-   {"name":"mcp_hook","mailbox":"agent","event":"on_receive","origin":"mcp",
-    "template":"invoke-claude-alice","params":{"prompt":"…"}}]
+→ [{"name":"support-replier","mailbox":"support","event":"on_receive",
+    "cmd":["claude","-p","...","--dangerously-skip-permissions"],
+    "stdin":"email","timeout_secs":60,"fire_on_untrusted":false}]
 ```
 
 ---
 
 ### `hook_delete`
 
-Delete a hook by effective name. Only MCP-origin hooks are deletable
-via this tool; operator-origin hooks refuse with `ERR origin-protected`.
+Delete a hook by effective name on a mailbox you own.
 
 **Parameters:**
 | Name   | Type   | Required | Description |
@@ -429,11 +348,11 @@ via this tool; operator-origin hooks refuse with `ERR origin-protected`.
 
 **Example:**
 ```
-hook_delete(name: "mcp_hook")
-→ "Hook 'mcp_hook' deleted."
+hook_delete(name: "support-replier")
+→ "Hook 'support-replier' deleted."
 
-hook_delete(name: "daily-report")
-→ Error: "[VALIDATION] origin-protected: hook 'daily-report' was
-   created by the operator — remove via `sudo aimx hooks delete`
-   instead"
+hook_delete(name: "someone-elses-hook")
+→ Error: "Hook 'someone-elses-hook' not found"
+   (the daemon collapses "exists but unauthorized" into not-found so
+   foreign mailbox names do not leak)
 ```

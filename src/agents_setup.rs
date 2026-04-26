@@ -1704,7 +1704,7 @@ mod tests {
         );
         assert!(skill.contains("name: aimx"));
         assert!(skill.contains("MCP tools"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
         assert!(skill.contains("Trust model"));
         // The template sentinel should NOT appear on disk.
         assert!(!dest.join("skills/aimx/SKILL.md.header").exists());
@@ -1925,7 +1925,7 @@ mod tests {
         assert!(skill.starts_with("---\n"));
         assert!(skill.contains("name: aimx"));
         assert!(skill.contains("MCP tools"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
     }
 
     #[test]
@@ -1980,7 +1980,7 @@ mod tests {
 
         let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\n"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
     }
 
     #[test]
@@ -2010,7 +2010,7 @@ mod tests {
 
         let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
         assert!(skill.starts_with("---\n"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
     }
 
     #[test]
@@ -2314,10 +2314,10 @@ mod tests {
             text.contains("  # aimx primer for agents"),
             "recipe: {text}"
         );
-        assert!(
-            text.contains("  - `mailbox_create(name)`"),
-            "recipe: {text}"
-        );
+        // The primer's MCP tool quick-reference is the canonical
+        // owner-first surface — `mailbox_list` is the one mailbox tool
+        // exposed via MCP after the user-vs-root rework.
+        assert!(text.contains("  - `mailbox_list()`"), "recipe: {text}");
         // Extensions section references the aimx stdio MCP server.
         assert!(text.contains("type: stdio"), "recipe: {text}");
         assert!(text.contains("name: aimx"), "recipe: {text}");
@@ -2419,7 +2419,7 @@ mod tests {
         );
         assert!(skill.contains("name: aimx"));
         assert!(skill.contains("description:"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
         assert!(skill.contains("Trust model"));
     }
 
@@ -2976,7 +2976,6 @@ mod tests {
     /// visible from the primer alone. A missing section means the
     /// primer edit got lost or reverted.
     #[test]
-    #[ignore = "primer content references removed MCP hook surface; reworked in a later sprint"]
     fn primer_contains_creating_hooks_section() {
         let primer = AGENTS_DIR
             .get_file("common/aimx-primer.md")
@@ -2987,11 +2986,22 @@ mod tests {
             text.contains("## Creating hooks"),
             "primer must contain 'Creating hooks' section"
         );
+        // Owner-first model: the primer must lead with mailbox
+        // ownership, not templates. Guard against a regression that
+        // re-introduces the legacy template language.
+        assert!(
+            !text.contains("hook_list_templates"),
+            "primer must not reference the removed `hook_list_templates` MCP tool"
+        );
+        assert!(
+            !text.contains("dangerously_support_untrusted"),
+            "primer must use `fire_on_untrusted`, not the legacy \
+             `dangerously_support_untrusted` flag"
+        );
     }
 
     /// Reference file must be present in the embedded bundle.
     #[test]
-    #[ignore = "references/hooks.md content references removed MCP hook surface; reworked in a later sprint"]
     fn hooks_reference_file_bundled_and_comprehensive() {
         let contents = AGENTS_DIR
             .get_file("common/references/hooks.md")
@@ -3000,6 +3010,18 @@ mod tests {
         let text = std::str::from_utf8(contents).unwrap();
         // Troubleshooting subsection.
         assert!(text.contains("Troubleshooting"), "{text}");
+        // Owner-first model: no template indirection, no
+        // `hook_list_templates`.
+        assert!(
+            !text.contains("hook_list_templates"),
+            "references/hooks.md must not reference the removed `hook_list_templates` MCP tool"
+        );
+        // The new contract is `hook_create(mailbox, event, cmd, ...)`.
+        assert!(
+            text.contains("hook_create(mailbox, event, cmd"),
+            "references/hooks.md must document the owner-first \
+             `hook_create` signature"
+        );
     }
 
     /// Progressive-disclosure bundles (Claude Code, Codex,
@@ -3080,7 +3102,7 @@ mod tests {
         assert!(skill.contains("license: MIT"));
         assert!(skill.contains("metadata:"));
         assert!(skill.contains("hermes:"));
-        assert!(skill.contains("mailbox_create"));
+        assert!(skill.contains("mailbox_list()"));
         assert!(skill.contains("Trust model"));
     }
 

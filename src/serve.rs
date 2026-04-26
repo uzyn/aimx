@@ -1373,6 +1373,11 @@ mod tests {
             unit.contains("User=root"),
             "User=root remains; the daemon still binds port 25"
         );
+        assert!(
+            !unit.contains("aimx-hook"),
+            "aimx-hook system user is no longer managed; the systemd unit \
+             must not reference it: {unit}"
+        );
     }
 
     #[test]
@@ -1390,6 +1395,11 @@ mod tests {
         assert!(
             !script.contains("root:aimx"),
             "no remaining root:aimx references"
+        );
+        assert!(
+            !script.contains("aimx-hook"),
+            "aimx-hook system user is no longer managed; the OpenRC script \
+             must not reference it: {script}"
         );
         assert!(
             script.contains("start_pre()"),

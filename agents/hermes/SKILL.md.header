@@ -10,3 +10,43 @@ metadata:
     requires_toolsets: [terminal]
 ---
 
+## Wiring yourself up as a mailbox hook (Hermes)
+
+When the user asks you to act on inbound mail automatically (for
+example "reply to anything that lands in `support@`"), create an
+`on_receive` hook that re-launches `hermes chat -q` with a fixed
+prompt that tells the agent to fetch the email itself:
+
+```
+hook_create(
+  mailbox: "support",
+  event: "on_receive",
+  cmd: ["hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"],
+  stdin: "none"
+)
+```
+
+Notes:
+
+- `--yolo` bypasses dangerous-command approval, which is required for
+  unattended runs. Without it the headless invocation blocks on
+  approvals and never calls MCP.
+- The daemon sets `AIMX_FILEPATH` to the absolute path of the
+  inbound email's `.md` file before spawning the hook; Hermes's
+  filesystem tooling expands it at run time. argv itself is not
+  shell-expanded — the literal token `AIMX_FILEPATH` reaches the
+  agent verbatim.
+- Stdin handling for `hermes chat -q` is undocumented as of Apr 2026;
+  this recipe ships the inline-only form (`stdin: "none"`). If a
+  current install confirms `-q` accepts piped stdin, switch to
+  `stdin: "email"` and shorten the inline prompt to just the
+  instruction (the daemon will pipe the raw `.md` directly).
+- Optional: pass `--ignore-user-config --ignore-rules` for fully
+  isolated runs that ignore the operator's personal config.
+
+Note: the user the hook runs as (the mailbox's owner) must have the
+aimx skill installed too — re-run `aimx agents setup hermes` as that
+user before creating the hook, or the headless invocation will start
+without the skill loaded and the agent won't know what to do with
+the email.
+

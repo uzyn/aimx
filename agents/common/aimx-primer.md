@@ -10,7 +10,7 @@ For full reference material, see the files in `references/`:
 - `references/mcp-tools.md`: full MCP tool signatures, types, and examples
 - `references/frontmatter.md`: complete frontmatter schema
 - `references/workflows.md`: worked examples for common tasks
-- `references/hooks.md`: creating hooks via MCP (template model, tools, origin)
+- `references/hooks.md`: creating hooks via MCP (mailbox-owner model)
 - `references/troubleshooting.md`: error codes and recovery steps
 
 At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
@@ -21,8 +21,8 @@ startup.
 
 aimx gives you two complementary ways to interact with email:
 
-1. **MCP tools** for all mutations (send, reply, create mailboxes, mark
-   read/unread). The `aimx` MCP server runs over stdio and is launched
+1. **MCP tools** for all mutations (send, reply, mark read/unread, create
+   hooks). The `aimx` MCP server runs over stdio and is launched
    on-demand by your MCP client.
 2. **Direct filesystem reads** for reading `.md` email files, scanning
    directories, or bulk-processing. Mailbox directories are mode `0700`
@@ -31,6 +31,11 @@ aimx gives you two complementary ways to interact with email:
 
 Writes always go through MCP. Never create, modify, or delete `.md` files
 directly. The daemon owns those paths.
+
+Mailbox provisioning (`aimx mailboxes create | delete`) is **root-only**
+and lives on the host CLI. MCP cannot create or delete mailboxes; if you
+need a new mailbox, ask the operator to run
+`sudo aimx mailboxes create <name> --owner <linux-user>` on the host.
 
 ## Per-user ownership model
 
@@ -41,44 +46,36 @@ every layer:
 - **Storage.** `/var/lib/aimx/inbox/<mailbox>/` and `sent/<mailbox>/` are
   chowned `<owner>:<owner>` mode `0700`. Non-owners cannot traverse in,
   regardless of group. The one exception is the catchall mailbox, owned
-  by the dedicated `aimx-catchall` system user.
+  by the dedicated `aimx-catchall` system user. The catchall is
+  inbound-only and **does not support hooks**.
 - **MCP visibility.** The MCP server runs as your Linux uid (launched
   over stdio by your MCP client). Tool calls that target a mailbox you
   do not own — `email_list`, `email_read`, `email_send`, `email_reply`,
   `email_mark_read`, `email_mark_unread`, `hook_create`, `hook_delete` —
-  are rejected by the daemon with `EACCES`. You only see the user's own
-  mailboxes from `mailbox_list()`.
-- **Hook templates.** The per-agent templates registered by
-  `aimx agents setup` follow the naming scheme
-  `invoke-<agent>-<username>` (for example
-  `invoke-claude-alice` when alice runs `aimx agents setup claude-code`).
-  Each template's `run_as` equals the user that registered it, so the
-  child process drops into that uid before executing. `hook_list_templates`
-  returns templates whose `run_as` matches the caller, plus reserved
-  templates whose `run_as` is `aimx-catchall` (catchall handlers) or
-  `root` (operator-only, rare).
+  are rejected by the daemon. `mailbox_list()` returns only your own
+  mailboxes.
+- **Hook execution.** A hook on mailbox `alice` always runs as the Linux
+  user who owns `alice` — there is no per-hook `run_as` override and no
+  shared "hook user" with read access to other mailboxes. The hook can
+  do whatever its owner can do (cron, `~/.bashrc`, `systemd --user`),
+  no more.
 - **Sending.** `email_send` with `from_mailbox` set to a mailbox you do
   not own is rejected by the daemon (UDS `SO_PEERCRED` check).
 
 On a single-user box (the common case) the model is invisible: your
-one user owns every mailbox and every template. On a multi-user box it
-gives real isolation — alice's agent cannot see, read, or act on bob's
-mail.
+one user owns every mailbox. On a multi-user box it gives real
+isolation — alice's agent cannot see, read, or act on bob's mail.
 
 ## MCP tools: quick reference
 
-All 13 tools are served by the `aimx` binary over stdio. They return strings
-on success and error strings on failure.
+All 9 tools are served by the `aimx` binary over stdio. They return
+strings on success and error strings on failure. Mailbox CRUD lives on
+the root-only host CLI (`sudo aimx mailboxes create | delete`); MCP
+does not expose `mailbox_create` or `mailbox_delete`.
 
 ### Mailbox tools
 
-- `mailbox_create(name)`: create a new mailbox identity (inbox + sent).
-- `mailbox_list()`: list all mailboxes with message counts.
-- `mailbox_delete(name)`: delete an empty mailbox. The daemon refuses
-  when `inbox/<name>/` or `sent/<name>/` still contains files. The MCP
-  error spells out the per-directory file counts and tells you to run
-  `sudo aimx mailboxes delete --force <name>` on the host. MCP does not
-  wipe mail. That stays on the CLI where the operator sees the prompt.
+- `mailbox_list()`: list mailboxes you own with message counts.
 
 ### Email tools
 
@@ -87,7 +84,8 @@ on success and error strings on failure.
 - `email_read(mailbox, id, folder?)`: return the full Markdown file
   (frontmatter + body) for one email.
 - `email_send(from_mailbox, to, subject, body, attachments?)`: compose,
-  DKIM-sign, and deliver an email. `from_mailbox` must be a real mailbox.
+  DKIM-sign, and deliver an email. `from_mailbox` must be a mailbox you
+  own.
 - `email_reply(mailbox, id, body)`: reply to an existing email. aimx sets
   `In-Reply-To`, `References`, and `Re:` subject automatically.
 - `email_mark_read(mailbox, id, folder?)`: mark a single email as read.
@@ -95,37 +93,40 @@ on success and error strings on failure.
 
 ### Hook tools
 
-Hooks are shell commands the daemon fires on mail events (`on_receive`,
-`after_send`). To keep the world-writable UDS socket safe, MCP cannot
-submit arbitrary shell. Every hook you create references a **template**
-that is either bundled (`webhook`) or registered on demand by
-`aimx agents setup` (`invoke-<agent>-<username>`). You only pick a
-template and fill its declared params.
+Hooks are commands the daemon fires on mail events (`on_receive`,
+`after_send`). You create a hook on a mailbox you own; the hook always
+executes as the mailbox's owning Linux user, with the email piped on
+stdin (or accessible via `$AIMX_FILEPATH` when stdin is closed). There
+is no template indirection — your `cmd` is the literal argv that runs.
 
-- `hook_list_templates()`: list templates visible to your Linux user
-  (your own `run_as` templates plus reserved ones such as `webhook`).
-  Call this first. An empty list means no templates are registered for
-  your user — ask the operator (or you, if you own an account) to run
-  `aimx agents setup <agent>` without sudo.
-- `hook_create(mailbox, event, template, params, name?)`: attach a
-  template hook. The daemon substitutes your `params` into the
-  template's argv and stamps `origin = "mcp"` on the resulting hook.
-- `hook_list(mailbox?)`: list all hooks. Your own hooks (created via
-  MCP) show full details; operator-authored hooks appear with only
-  `{name, mailbox, event, origin}` — their `cmd` / `params` are masked.
-- `hook_delete(name)`: delete a hook. Only works on MCP-origin hooks;
-  the daemon returns `ERR origin-protected` for operator-origin hooks
-  and tells the user to run `sudo aimx hooks delete` on the host.
+- `hook_create(mailbox, event, cmd, name?, stdin?, timeout_secs?, fire_on_untrusted?)`:
+  attach a hook. `cmd` is an argv array (e.g. `["claude", "-p", "...",
+  "--dangerously-skip-permissions"]`). `stdin` is `"email"` (default —
+  pipes the raw `.md` to the child) or `"none"` (closes stdin; the
+  child reads `$AIMX_FILEPATH` instead). `fire_on_untrusted` defaults
+  to `false`; set `true` only on `on_receive` hooks where you want the
+  hook to fire even on `trusted = "false"` mail.
+- `hook_list(mailbox?)`: list hooks on mailboxes you own.
+- `hook_delete(name)`: delete a hook on a mailbox you own.
 
-See `references/hooks.md` for worked examples, the full template model,
-and troubleshooting. See `references/mcp-tools.md` for full parameter
+See `references/hooks.md` for the per-event model, the `cmd` argv rules,
+and worked examples. See `references/mcp-tools.md` for full parameter
 types and return values across every tool.
+
+## Self-trigger as a mailbox hook
+
+If you want to be triggered automatically when mail arrives, see
+`references/hooks.md` (or the equivalent in your skill bundle) for your
+agent's `hook_create` recipe. Each agent's skill ships a
+"Wiring yourself up as a mailbox hook" section with the exact `cmd`
+argv to use.
 
 ## Storage layout
 
 <!-- The datadir layout is documented explicitly. The real security
-     boundary is DKIM keys at /etc/aimx/ (root-only) and the UDS socket at
-     /run/aimx/aimx.sock, not filesystem obscurity. -->
+     boundary is DKIM keys at /etc/aimx/ (root-only) and the per-mailbox
+     `0700 <owner>:<owner>` perms enforced by the daemon, not filesystem
+     obscurity. -->
 
 aimx stores mail under a data directory (default `/var/lib/aimx/`):
 
@@ -156,7 +157,8 @@ sees mailboxes you own.
 - **Attachment bundles.** Zero attachments produce a flat `.md` file. One or
   more produce a directory containing `<stem>.md` plus attachment files as
   siblings (Zola-style bundle).
-- **`catchall`** receives mail addressed to unrecognised local parts.
+- **`catchall`** receives mail addressed to unrecognised local parts;
+  hooks on the catchall are forbidden.
 - **`inbox/`** holds inbound mail. **`sent/`** holds outbound copies.
 
 Configuration and secrets live separately under `/etc/aimx/` (root-owned,
@@ -223,7 +225,8 @@ email_send(
 )
 ```
 
-The mailbox must exist. Create it first with `mailbox_create` if needed.
+The mailbox must exist and you must own it. Ask the operator to provision
+new mailboxes via `sudo aimx mailboxes create <name> --owner <user>`.
 `from_mailbox` is the local part only (e.g. `"agent"`, not
 `"agent@example.com"`). aimx DKIM-signs the message and delivers it via
 direct SMTP to the recipient's MX server.
@@ -265,62 +268,42 @@ triage, filtering by list, handling attachments, reply-all, and mark-all-read.
 
 ## Creating hooks
 
-Hooks are shell commands that fire when mail arrives (`on_receive`) or is
-sent (`after_send`). They are how you go from "the agent reads mail" to
-"the agent acts on mail automatically."
+Hooks are commands that fire when mail arrives (`on_receive`) or is
+sent (`after_send`). They are how you go from "the agent reads mail"
+to "the agent acts on mail automatically."
 
-The safety model: you cannot submit raw shell via MCP. Every hook you
-create must reference a **template** registered either at install time
-(the bundled `webhook`) or per-user by `aimx agents setup <agent>`
-(names follow `invoke-<agent>-<username>`). A template declares an argv
-shape plus the parameter names you are allowed to fill. Your
-`hook_create` call supplies values for those params, and the daemon
-substitutes them into the template's argv slots — no shell
-interpretation, no argv splitting, no way to escape the value slot. The
-spawned child drops privilege to the template's `run_as` before
-executing, which must match your uid.
+The model is straightforward: hooks belong to mailboxes, and you can
+only create hooks on mailboxes you own. The hook's `cmd` is the literal
+argv that the daemon spawns; there is no template substitution and no
+per-hook `run_as` field. The child always executes as the mailbox's
+owning Linux user (`setuid` from root before `exec`), so a hook can
+do whatever its owner can already do — no more, no less.
 
-The four tools work together:
+The trust gate still applies: an `on_receive` hook fires only on
+mail whose `trusted` frontmatter is `"true"`, unless you opt the hook
+in with `fire_on_untrusted = true`. `after_send` hooks fire on every
+send regardless of trust.
 
-1. **Discover**: call `hook_list_templates` to see what is installed.
-   Each entry names the template, its params, and which events it
-   allows (`on_receive`, `after_send`, or both).
-2. **Create**: call `hook_create` with a mailbox, an event, a template
-   name, and param values. The daemon stamps `origin = "mcp"` on the
-   resulting hook, returns the effective name, and echoes the final
-   substituted argv so you can confirm the wiring.
-3. **Inspect**: call `hook_list` to see what is configured. Your hooks
-   show full details; operator hooks are masked to just name + mailbox
-   + event + origin (the operator's automation logic is private).
-4. **Remove**: call `hook_delete(name)` to remove a hook you created.
-   Operator-origin hooks cannot be deleted via MCP — the daemon returns
-   `ERR origin-protected` pointing at `sudo aimx hooks delete` on the
-   host.
+Three tools cover the lifecycle:
 
-If `hook_list_templates` is empty, no amount of calling `hook_create`
-will help — the user needs to run `aimx agents setup <agent>` (no sudo)
-to register `invoke-<agent>-<username>`. Tell them that, with the exact
-command. Do not guess at template names.
+1. **Create**: call `hook_create(mailbox, event, cmd, ...)` with an
+   argv array. `cmd[0]` must be an absolute path the owning user can
+   execute. The daemon validates and writes the hook to `config.toml`,
+   then hot-swaps its in-memory state — no restart needed.
+2. **Inspect**: call `hook_list(mailbox?)` to see hooks on mailboxes
+   you own.
+3. **Remove**: call `hook_delete(name)` with the effective name from
+   `hook_list`.
 
-### Template naming: `invoke-<agent>-<username>`
+For the exact `cmd` argv to use when wiring yourself up as the hook,
+see your agent's skill bundle — each agent ships a "Wiring yourself
+up as a mailbox hook" section with a verified recipe. The argv for
+every supported agent (Claude Code, Codex CLI, OpenCode, Gemini CLI,
+Goose, Hermes) plus the OpenClaw gap is documented per agent.
 
-Per-agent templates are registered by the user who will run them. On a
-host where alice runs `aimx agents setup claude-code`, aimx probes her
-`$PATH`, finds `/home/alice/.local/bin/claude`, and submits a
-`TEMPLATE-CREATE` over the UDS. The resulting template is named
-`invoke-claude-alice` with `run_as = "alice"` and
-`cmd = ["/home/alice/.local/bin/claude", ...]`. When bob does the same
-on the same box he gets `invoke-claude-bob`, bound to his path.
-`hook_list_templates` returns only the templates for your uid's
-username plus any reserved-`run_as` templates, so you should always
-expect to see `invoke-<agent>-<your-username>` (for example
-`invoke-claude-alice` when the MCP client ran as alice).
-
-Template hooks fire only on **trusted** inbound mail (`trusted == "true"`
-on the email's frontmatter). If your hook does not fire, check the
-email's `trusted` field first. See `references/hooks.md` for the full
-troubleshooting checklist (template registered for your user? mailbox
-owned by your user? event allowed?) and several worked example prompts.
+If you need to invoke an arbitrary command that doesn't fit your
+agent's recipe (a webhook, a custom script, etc.), build the argv
+yourself; `cmd` is just an argv array.
 
 ## Trust model
 
@@ -352,14 +335,15 @@ the global list entirely (no merging). Valid values:
   senders.
 
 Mail is always stored regardless of trust outcome. Trust gates hooks
-(shell commands fired on email events): an `on_receive`
-hook fires iff `trusted == "true"` OR the hook explicitly opts in via
-`dangerously_support_untrusted = true`. `trust = "none"` therefore fires
-**no** hooks by default. The operator must either switch to
-`trust = "verified"` with an allowlist, or set the opt-in on each hook that
-should still run on untrusted mail. When deciding whether to act on an
-email's content (e.g. following a link), consult `trusted`, `dkim`, and
-`spf`. Treat `"false"` and `"none"` as untrusted.
+(commands fired on email events): an `on_receive` hook fires iff
+`trusted == "true"` OR the hook explicitly opts in via
+`fire_on_untrusted = true`. `trust = "none"` therefore fires **no**
+hooks by default. The operator (or you, on your own mailbox) must
+either switch to `trust = "verified"` with an allowlist, or set
+`fire_on_untrusted = true` on each hook that should still run on
+untrusted mail. When deciding whether to act on an email's content
+(e.g. following a link), consult `trusted`, `dkim`, and `spf`. Treat
+`"false"` and `"none"` as untrusted.
 
 ## Read / unread
 
@@ -376,19 +360,16 @@ email's content (e.g. following a link), consult `trusted`, `dkim`, and
 - Mailbox names are local parts of email addresses (letters, digits, limited
   punctuation). For example, mailbox `agent` receives mail at
   `agent@<domain>`.
-- The `catchall` mailbox is created automatically during setup and receives
-  mail for unrecognised addresses. It is a routing target, not a sending
-  identity. Do not send from `catchall`.
-- Create additional mailboxes with `mailbox_create` before sending from them.
+- The `catchall` mailbox is created automatically during setup and
+  receives mail for unrecognised addresses. It is a routing target,
+  not a sending identity. Do not send from `catchall`. Hooks on the
+  catchall are forbidden by `Config::load`.
+- Mailbox provisioning is root-only: ask the operator to run
+  `sudo aimx mailboxes create <name> --owner <linux-user>` on the host.
 - Each mailbox has `inbox/<name>/` for inbound and `sent/<name>/` for
-  outbound copies.
-- `mailbox_list()` shows all mailboxes with message counts for both inbox
-  and sent folders.
-- `mailbox_delete(name)` only succeeds when both `inbox/<name>/` and
-  `sent/<name>/` are empty. On non-empty the MCP error tells you the
-  file counts and points at the host CLI command that wipes-and-deletes
-  (`sudo aimx mailboxes delete --force <name>`). MCP itself never wipes
-  mail.
+  outbound copies, both `0700 <owner>:<owner>`.
+- `mailbox_list()` shows mailboxes you own with message counts for both
+  inbox and sent folders.
 
 ## Attachments
 
@@ -426,10 +407,12 @@ email's content (e.g. following a link), consult `trusted`, `dkim`, and
   authenticated.** These may be spoofed.
 - **Do not read or modify files under `/etc/aimx/`.** Configuration and
   keys are root-owned and managed by `aimx setup`.
-- **Do not send from a mailbox that does not exist.** `email_send` will
-  fail. Create it first with `mailbox_create`.
+- **Do not send from a mailbox you do not own.** `email_send` will be
+  rejected by the daemon. Ask the operator to provision the mailbox
+  with you as `--owner` first.
 - **Do not assume `catchall` is a real identity.** It is a routing target
-  for unknown local parts, not an identity that sends.
+  for unknown local parts, not an identity that sends. Hooks on the
+  catchall are forbidden.
 - **Do not ignore `thread_id` when working with conversations.** Grouping
   by `thread_id` is the correct way to reconstruct email threads. Do not
   rely on subject-line matching.
@@ -445,9 +428,9 @@ email's content (e.g. following a link), consult `trusted`, `dkim`, and
   both inbound and outbound emails.
 - `references/workflows.md`: 10+ worked task recipes (triage, thread
   summarization, attachment handling, filter by list-id, mark all read, etc.).
-- `references/hooks.md`: creating hooks via MCP — the template model,
-  worked example prompts, origin split, and troubleshooting.
-- `references/troubleshooting.md`: UDS protocol error codes, common
-  misconfigurations, and recovery steps.
+- `references/hooks.md`: creating hooks via MCP — the mailbox-owner
+  model, the `cmd` argv shape, the trust gate, and troubleshooting.
+- `references/troubleshooting.md`: common errors, daemon-down behavior,
+  and recovery steps.
 - `/var/lib/aimx/README.md`: runtime guide to the data directory layout,
   written by `aimx setup` and refreshed on `aimx serve` startup.

@@ -192,14 +192,18 @@ email_read(mailbox: "agent", id: "<id>", folder: "sent")
 #   delivery_status = "deferred"  => temporary failure
 ```
 
-## 10. Create a mailbox and send first email
+## 10. Send the first email from a newly provisioned mailbox
 
-Set up a new agent identity and send the first message:
+Mailbox provisioning is root-only on the host CLI. Once the operator
+has run
 
 ```
-# Create the mailbox
-mailbox_create(name: "notifications")
+sudo aimx mailboxes create notifications --owner <your-username>
+```
 
+the mailbox shows up in your `mailbox_list()` and you can use it:
+
+```
 # Send the first email
 email_send(
   from_mailbox: "notifications",
