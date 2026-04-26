@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) skill source tree for OpenClaw. This directory
 wires aimx into [OpenClaw](https://docs.openclaw.ai/). Contents are bundled
 into the `aimx` binary at compile time (via `include_dir!`) and
-installed by `aimx agent-setup openclaw`.
+installed by `aimx agents setup openclaw`.
 
 ## What gets installed
 
@@ -24,7 +24,7 @@ paste into your shell to register the aimx MCP server with one step.
 ## Install
 
 ```bash
-aimx agent-setup openclaw
+aimx agents setup openclaw
 ```
 
 Default skill destination: `~/.openclaw/skills/aimx/SKILL.md`.
@@ -48,7 +48,7 @@ If aimx was set up with a non-default data directory, re-run the
 installer with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup openclaw
+aimx --data-dir /custom/path agents setup openclaw
 ```
 
 The printed `openclaw mcp set` command's JSON will include

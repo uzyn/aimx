@@ -7,7 +7,7 @@
 #
 # Thin wrapper around the binary: download → install → exec `aimx setup`.
 # The binary owns the operator-facing wizard (welcome banner, six-step
-# checklist, agent-setup handoff, closing message). Upgrades are
+# checklist, agents setup handoff, closing message). Upgrades are
 # non-interactive: stop service → swap binary → start service.
 #
 # Modelled on `just.systems/install.sh` — `say` / `err` / `need` /
@@ -265,7 +265,7 @@ ensure_sudo() {
 }
 
 # detect_invoker
-#   Prints the non-root user that should run `aimx agent-setup`.
+#   Prints the non-root user that should run `aimx agents setup`.
 #   Returns 0 with stdout set on success, non-zero when no non-root
 #   user can be identified. Kept as a helper for tests + possible future
 #   use; the wizard's drop-through reads $SUDO_USER directly so this is
@@ -764,7 +764,7 @@ main() {
     ui_success "aimx ${TAG} installed to ${_install_path}"
 
     # Hand off to the binary. `aimx setup` owns the welcome banner, the
-    # six-step checklist, the agent-setup drop-through, and the closing
+    # six-step checklist, the agents setup drop-through, and the closing
     # message. Use `exec` so the shell is replaced cleanly. Backup any
     # pre-existing config first so the wizard's writes don't clobber it.
     backup_existing_config

@@ -2,7 +2,7 @@
 
 `aimx agents setup <agent>` is the one command that wires an AI agent into aimx. It installs the agent's plugin/skill package under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching hook template (`invoke-<agent>-<username>`) over the daemon's UDS socket so the agent can immediately create `on_receive` / `after_send` hooks via MCP. No sudo, no manual config edit, no second `aimx setup` run. When you are done, `aimx agents remove <agent>` removes what was installed.
 
-> **Names and aliases.** `aimx agents` (plural noun, with `setup` / `remove` / `list` verbs) matches the rest of the CLI's CRUD shape (`aimx mailboxes`, `aimx hooks`). The singular `aimx agent` works as a clap alias, and the historical hyphenated `aimx agent-setup <agent>` flat verb is preserved as a hidden legacy alias so existing scripts and `install.sh` invocations keep working.
+> **Names.** `aimx agents` (plural noun, with `setup` / `remove` / `list` verbs) matches the rest of the CLI's CRUD shape (`aimx mailboxes`, `aimx hooks`).
 
 For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
@@ -37,7 +37,7 @@ After this, alice can create hooks via MCP by referencing `invoke-claude-alice` 
 
 After you press `Enter`, the TUI renders a confirmation screen listing each task with the right verb (`Install AIMX MCP for ...` / `Re-install AIMX MCP for ...`) and reads `Confirm? [Y/n]` before any files are written. Pressing `n` returns to the picker with your previous selections preserved.
 
-`aimx agents list` prints the same registry as a plain table with no prompt (alias of `aimx agents setup --list`). `aimx agents setup --no-interactive` prints the same table when invoked with no agent argument. Piping the output to `cat` / `less` also falls back to the plain table automatically.
+`aimx agents list` prints the same registry as a plain table with no prompt. `aimx agents setup --no-interactive` prints the same table when invoked with no agent argument. Piping the output to `cat` / `less` also falls back to the plain table automatically.
 
 ### Reference: TUI visual
 
@@ -98,8 +98,6 @@ aimx agents remove claude-code
 ```
 
 If the daemon is down (`/run/aimx/aimx.sock` is missing), the plugin files are still removed and the command prints: "daemon unreachable; run `sudo aimx hooks prune --orphans` after restarting to clean up templates." The command exits `2` so scripts can detect the partial cleanup.
-
-The historical `aimx agent-cleanup <agent>` (with `--full` to also wipe plugin files) is preserved as a hidden alias for back-compat. New scripts should prefer `aimx agents remove`.
 
 ## Supported agents
 
@@ -446,7 +444,7 @@ tools.
 
 The `$PATH` probe did not find the agent's canonical binary. Install the agent CLI first (for example `npm install -g @anthropic-ai/claude-code` for Claude Code), confirm it lands in a directory on your `$PATH`, then re-run `aimx agents setup <agent>`. If the binary is installed but the probe still misses it (shell alias, non-`$PATH` location), open a fresh shell so the login `$PATH` is in effect, or temporarily `export PATH="$HOME/.local/bin:$PATH"` before re-running.
 
-### `aimx serve is not running; start it and re-run aimx agent-setup <agent>`
+### `aimx serve is not running; start it and re-run aimx agents setup <agent>`
 
 The UDS socket at `/run/aimx/aimx.sock` is missing. Start the daemon with `sudo systemctl start aimx` (or `sudo rc-service aimx start` on Alpine) and re-run `aimx agents setup <agent>`. The template-registration step is all-or-nothing for v1: if the daemon is down, the plugin files are still written but no template is registered.
 

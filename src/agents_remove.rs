@@ -11,8 +11,8 @@
 //! root-login VPS setups; on any machine with a regular user, prefer
 //! `sudo -u <user> aimx agents remove <agent>`.
 
-use crate::agent_cleanup::{self, plugin_removal_target};
-use crate::agent_setup::{
+use crate::agents_cleanup::{self, plugin_removal_target};
+use crate::agents_setup::{
     AgentEnv, AgentSpec, ROOT_REFUSAL_MESSAGE, RealAgentEnv, find_agent, home_dir_for_user,
     resolve_dest,
 };
@@ -20,7 +20,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 
 /// Exit code emitted when the daemon was unreachable. Mirrors
-/// `aimx agents setup` / `aimx agent-cleanup`'s socket-missing exit
+/// `aimx agents setup` / `aimx agents remove`'s socket-missing exit
 /// code so operators can script both commands against the same non-zero
 /// return.
 const EXIT_DAEMON_UNREACHABLE: i32 = 2;
@@ -36,8 +36,8 @@ pub fn run(opts: RunOpts) -> Result<(), Box<dyn std::error::Error>> {
     let env = RealAgentEnv;
     let outcome = run_with_env(opts, &env, &mut io::stdout())?;
     match outcome {
-        agent_cleanup::CleanupOutcome::Ok => Ok(()),
-        agent_cleanup::CleanupOutcome::DaemonUnreachable => {
+        agents_cleanup::CleanupOutcome::Ok => Ok(()),
+        agents_cleanup::CleanupOutcome::DaemonUnreachable => {
             std::process::exit(EXIT_DAEMON_UNREACHABLE)
         }
     }
@@ -45,13 +45,13 @@ pub fn run(opts: RunOpts) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Testable core of [`run`]. Removes plugin files unconditionally
 /// (no per-agent file-vs-directory prompt), submits the
-/// `TEMPLATE-DELETE` over UDS via [`agent_cleanup::run_with_env`], then
+/// `TEMPLATE-DELETE` over UDS via [`agents_cleanup::run_with_env`], then
 /// prints the per-agent cleanup hint via [`removal_hint`].
 pub(crate) fn run_with_env(
     opts: RunOpts,
     env: &dyn AgentEnv,
     out: &mut dyn Write,
-) -> Result<agent_cleanup::CleanupOutcome, Box<dyn std::error::Error>> {
+) -> Result<agents_cleanup::CleanupOutcome, Box<dyn std::error::Error>> {
     if env.is_root() && !opts.dangerously_allow_root {
         return Err(ROOT_REFUSAL_MESSAGE.into());
     }
@@ -64,11 +64,11 @@ pub(crate) fn run_with_env(
     })?;
 
     // Apply the same `--dangerously-allow-root` home override as
-    // `agent_setup::run_with_env_to_writer` so the resolved dest path
+    // `agents_setup::run_with_env_to_writer` so the resolved dest path
     // points at /root's home, not the ambient $HOME.
     let result = if env.is_root() && opts.dangerously_allow_root {
         let root_home = home_dir_for_user("root").unwrap_or_else(|| PathBuf::from("/root"));
-        let override_env = crate::agent_setup::OverrideHomeEnv::new(env, root_home);
+        let override_env = crate::agents_setup::OverrideHomeEnv::new(env, root_home);
         do_remove(spec, opts.dangerously_allow_root, &override_env, out)?
     } else {
         do_remove(spec, opts.dangerously_allow_root, env, out)?
@@ -82,7 +82,7 @@ fn do_remove(
     dangerously_allow_root: bool,
     env: &dyn AgentEnv,
     out: &mut dyn Write,
-) -> Result<agent_cleanup::CleanupOutcome, Box<dyn std::error::Error>> {
+) -> Result<agents_cleanup::CleanupOutcome, Box<dyn std::error::Error>> {
     // Resolve the removal target up front so we can report whether the
     // wiring actually existed before the daemon call.
     let dest_root = resolve_dest(spec.dest_template, env)?;
@@ -92,7 +92,7 @@ fn do_remove(
     // Delegate to the existing cleanup core in `--full --yes` mode.
     // It removes plugin files and submits TEMPLATE-DELETE in one
     // pass, with the same warning + non-zero exit on daemon-down.
-    let cleanup_opts = agent_cleanup::RunOpts {
+    let cleanup_opts = agents_cleanup::RunOpts {
         agent: spec.name.to_string(),
         full: true,
         yes: true,
@@ -103,9 +103,9 @@ fn do_remove(
     // refusal by passing through a wrapper env that masks is_root.
     let outcome = if dangerously_allow_root {
         let masked = MaskRootEnv { inner: env };
-        agent_cleanup::run_with_env(cleanup_opts, &masked, out)?
+        agents_cleanup::run_with_env(cleanup_opts, &masked, out)?
     } else {
-        agent_cleanup::run_with_env(cleanup_opts, env, out)?
+        agents_cleanup::run_with_env(cleanup_opts, env, out)?
     };
 
     if !pre_existed {
@@ -153,7 +153,7 @@ pub fn removal_hint(spec: &AgentSpec) -> String {
 }
 
 /// Wrapper that hides the underlying env's root status so the
-/// `agent_cleanup` core's per-user refusal doesn't trip when we've
+/// `agents_cleanup` core's per-user refusal doesn't trip when we've
 /// already accepted `--dangerously-allow-root` here.
 struct MaskRootEnv<'a> {
     inner: &'a dyn AgentEnv,
@@ -302,7 +302,7 @@ mod tests {
         };
         let mut out = Vec::new();
         let outcome = run_with_env(opts, &env, &mut out).expect("remove must succeed");
-        assert!(matches!(outcome, agent_cleanup::CleanupOutcome::Ok));
+        assert!(matches!(outcome, agents_cleanup::CleanupOutcome::Ok));
         assert!(!dest.exists(), "dest must be removed");
     }
 
@@ -384,7 +384,7 @@ mod tests {
         // `(No agent-specific cleanup hint ...)` fallback for known
         // agents). Walk the registry; the fallback path uses
         // parentheses + the literal "No agent-specific" prefix.
-        for spec in crate::agent_setup::registry() {
+        for spec in crate::agents_setup::registry() {
             let hint = removal_hint(spec);
             assert!(
                 !hint.starts_with("(No agent-specific"),

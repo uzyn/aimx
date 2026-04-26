@@ -11,7 +11,7 @@ Hooks are shell commands the aimx daemon fires on mail events:
 
 You do not ship arbitrary shell. You pick a **template** (either the
 bundled `webhook`, or an `invoke-<agent>-<username>` template the
-caller — you, effectively — registered via `aimx agent-setup <agent>`)
+caller — you, effectively — registered via `aimx agents setup <agent>`)
 and fill its declared parameters. The daemon substitutes your values
 into the template's argv, drops privileges to the template's `run_as`
 user, and spawns the child with a per-hook timeout. The local
@@ -26,7 +26,7 @@ List every hook template visible to the caller's Linux user. A
 template is visible when its `run_as` equals the caller's username, or
 when `run_as` is a reserved sentinel (`aimx-catchall` or `root`). Call
 this first, always, before `hook_create`. The list is empty until the
-caller has run `aimx agent-setup <agent>` (no sudo) to register their
+caller has run `aimx agents setup <agent>` (no sudo) to register their
 `invoke-<agent>-<username>` template.
 
 **Parameters:** none.
@@ -186,7 +186,7 @@ Key facts for agents:
 - `stdin = "email"` pipes the raw Markdown (frontmatter + body) of the
   email to the hook's child process on stdin. `"email_json"` wraps it
   in `{frontmatter, body}` JSON. `"none"` closes stdin.
-- `run_as` is a Linux username. `aimx agent-setup` sets it to the
+- `run_as` is a Linux username. `aimx agents setup` sets it to the
   caller's username so each user's hooks drop into that user's uid.
   The reserved values are `aimx-catchall` (for catchall-mailbox
   templates) and `root` (rare, operator-only). The daemon enforces
@@ -204,7 +204,7 @@ with the current balance."*
 1. `hook_list_templates()` → verify `invoke-claude-<username>` (or
    your agent's matching `invoke-<agent>-<username>` template) is
    visible. If not, tell the user to run
-   `aimx agent-setup <agent>` (no sudo) first.
+   `aimx agents setup <agent>` (no sudo) first.
 2. `hook_create(mailbox: "accounts", event: "on_receive", template:
    "invoke-claude-alice", params: {prompt: "You are the accounts agent.
    Read the email on stdin. If it is from the bank, file it via
@@ -253,7 +253,7 @@ email:
 ### "hook_create returned `Unknown template`."
 
 Call `hook_list_templates` again — the owning user may not have run
-`aimx agent-setup <agent>` yet, or your template name is misspelled
+`aimx agents setup <agent>` yet, or your template name is misspelled
 (remember: `invoke-<agent>-<username>`, not the bare `invoke-<agent>`).
 The list is the authoritative source; never assume a template exists
 from a past install.

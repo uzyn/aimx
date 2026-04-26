@@ -1,4 +1,4 @@
-//! Interactive checkbox TUI for `aimx agent-setup`.
+//! Interactive checkbox TUI for `aimx agents setup`.
 //!
 //! Hand-rolled renderer on top of `console::Term` / `console::Key`. Used
 //! instead of `dialoguer::MultiSelect` because:
@@ -30,11 +30,11 @@
 //! - Clean left-aligned single column, no box-drawing.
 //!
 //! Non-TTY fallback: `run_with_env_to_writer` never calls this path when
-//! `stderr()` isn't a TTY (see `agent_setup::is_tty_for_tui`) — scripts
+//! `stderr()` isn't a TTY (see `agents_setup::is_tty_for_tui`) — scripts
 //! get the plain registry dump instead. The TUI draws to `Term::stderr`
 //! so detection on stderr matches where output actually lands.
 
-use crate::agent_setup::{
+use crate::agents_setup::{
     AgentEnv, InstallState, RunOpts, detect_install_state, registry, resolve_dest,
     run_with_env_post_gate,
 };
@@ -63,7 +63,7 @@ impl Row {
 pub(crate) fn build_rows(env: &dyn AgentEnv) -> Vec<Row> {
     let home = env
         .home_dir()
-        .expect("agent-setup TUI requires HOME to be resolved by the caller");
+        .expect("agents setup TUI requires HOME to be resolved by the caller");
     let xdg = env.xdg_config_home();
     registry()
         .iter()
@@ -118,7 +118,7 @@ pub fn run_tui(
         writeln!(
             out,
             "Install one of the above (e.g. Claude Code, Codex CLI, Gemini CLI, \
-             OpenCode, Goose, OpenClaw, or Hermes) and re-run `aimx agent-setup`."
+             OpenCode, Goose, OpenClaw, or Hermes) and re-run `aimx agents setup`."
         )?;
         return Ok(());
     }
@@ -651,7 +651,7 @@ mod tests {
             "expected agent name list, got: {out}"
         );
         assert!(
-            out.contains("re-run `aimx agent-setup`"),
+            out.contains("re-run `aimx agents setup`"),
             "expected retry hint, got: {out}"
         );
     }
@@ -732,11 +732,11 @@ mod tests {
     fn render_header_uses_new_spec_wording() {
         // The user-visible header must match the cycle-5 wording
         // exactly so the operator immediately sees what `aimx
-        // agent-setup` is for and whose home it's writing to. We walk
+        // agents setup` is for and whose home it's writing to. We walk
         // just the `render` body (not the whole file) so this test's
         // own asserts can mention the new strings without
         // self-tripping a "old wording must not appear" check.
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         let render_start = source.find("fn render(").expect("render fn must exist");
         let render_end = source[render_start..]
             .find("\nfn ")
@@ -767,7 +767,7 @@ mod tests {
         // when present. When `caller_username()` returns None, the
         // header drops the trailing `for `<user>`` clause entirely —
         // no placeholder is shown.
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         assert!(
             source.contains("env.caller_username()"),
             "run_tui must surface the invoking username via AgentEnv"
@@ -786,7 +786,7 @@ mod tests {
         // Walk just the `render` body (top-level `fn render(` to its
         // matching closing `}` at column 1) so test code that mentions
         // the old placeholder doesn't self-trip.
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         let render_start = source.find("fn render(").expect("render fn must exist");
         // First column-1 `}\n` after the opening — that's where the
         // function body closes (private fns in this module sit at
@@ -821,7 +821,7 @@ mod tests {
     /// (including these tests, whose bodies otherwise self-trip on the
     /// "(already wired)" / "term::very_dim" tokens).
     fn render_fn_body() -> &'static str {
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         let start = source.find("fn render(").expect("render fn must exist");
         let end = source[start..]
             .find("\n}\n")
@@ -947,7 +947,7 @@ mod tests {
         // The previous selections are carried forward via a recompute
         // of `row.selected` against the picked-spec indices, not by
         // overwriting them with the freshly-built defaults.
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         let run_start = source.find("pub fn run_tui(").expect("run_tui must exist");
         let run_end = source[run_start..]
             .find("\nfn ")
@@ -982,7 +982,7 @@ mod tests {
         // the cursor where it's most useful. Source-grep both
         // invariants: the hint string is present, and it's emitted
         // AFTER the row loop in `render`.
-        let source = include_str!("agent_tui.rs");
+        let source = include_str!("agents_tui.rs");
         let render_start = source.find("fn render(").expect("render fn must exist");
         let render_end = source[render_start..]
             .find("\nfn ")

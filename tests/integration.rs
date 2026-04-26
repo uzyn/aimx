@@ -5552,8 +5552,8 @@ fn aimx_version_renders_full_metadata() {
 
 // ===== aimx agents <command> CLI surface =================================
 
-/// `aimx agents list` is a thin alias of `aimx agents setup --list`. Both
-/// must succeed and emit at least one of the registered agent names.
+/// `aimx agents list` is the canonical wiring-state dump. Must succeed
+/// and emit at least one of the registered agent names.
 #[test]
 fn agents_list_works() {
     Command::cargo_bin("aimx")
@@ -5587,26 +5587,33 @@ fn agents_remove_unknown_agent_errors_clearly() {
         .stderr(predicate::str::contains("nonesuch"));
 }
 
-/// `aimx agent setup --list` (singular alias) must keep working —
-/// the `Agents` subcommand carries an `agent` clap alias.
+/// `aimx agent-setup` was a legacy hyphenated alias retired alongside
+/// the canonical `aimx agents setup` migration. It must now error with
+/// clap's standard "unrecognized subcommand" message instead of silently
+/// dispatching, so scripts pinned to the old form fail loudly and
+/// surface in CI / journalctl.
 #[test]
-fn agent_setup_singular_alias_works() {
-    Command::cargo_bin("aimx")
-        .unwrap()
-        .args(["agent", "setup", "--list"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("claude-code"));
-}
-
-/// `aimx agent-setup --list` (legacy hyphenated flat verb) must keep
-/// working — install.sh and existing scripts call it this way.
-#[test]
-fn legacy_agent_setup_hyphenated_alias_works() {
+fn aimx_agent_setup_legacy_form_errors() {
     Command::cargo_bin("aimx")
         .unwrap()
         .args(["agent-setup", "--list"])
         .assert()
-        .success()
-        .stdout(predicate::str::contains("claude-code"));
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"))
+        .stderr(predicate::str::contains("agent-setup"));
+}
+
+/// `aimx agent setup` (singular noun) was a clap alias retired alongside
+/// the canonical `aimx agents setup` migration. It must now error with
+/// clap's standard "unrecognized subcommand" message rather than silently
+/// dispatching to `agents`.
+#[test]
+fn aimx_agent_singular_form_errors() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agent", "setup", "--list"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("unrecognized subcommand"))
+        .stderr(predicate::str::contains("agent"));
 }

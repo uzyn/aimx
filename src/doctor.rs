@@ -769,7 +769,7 @@ fn format_hook_templates_section(section: &HookTemplatesSection) -> String {
     if section.templates.is_empty() {
         out.push_str(&format!(
             "  {}\n",
-            term::dim("No hook templates enabled. Run `aimx agent-setup <agent>` to install one."),
+            term::dim("No hook templates enabled. Run `aimx agents setup` to install one."),
         ));
         return out;
     }
@@ -1253,7 +1253,7 @@ fn check_templates_with_runner(config: &Config, runner: &dyn AccessRunner) -> Ve
                     ),
                 )
                 .with_fix(
-                    "run `aimx agent-setup <agent> --redetect` to re-probe $PATH, \
+                    "run `aimx agents setup <agent> --redetect` to re-probe $PATH, \
                      or fix the binary path in `/etc/aimx/config.toml`",
                 ),
             );
@@ -1282,7 +1282,7 @@ fn check_templates_with_runner(config: &Config, runner: &dyn AccessRunner) -> Ve
                     )
                     .with_fix(format!(
                         "chmod the binary (`sudo chmod o+rx {cmd0}`) or re-run \
-                         `aimx agent-setup <agent> --redetect` to pick a \
+                         `aimx agents setup <agent> --redetect` to pick a \
                          run_as-readable path"
                     )),
                 );

@@ -49,9 +49,9 @@ every layer:
   are rejected by the daemon with `EACCES`. You only see the user's own
   mailboxes from `mailbox_list()`.
 - **Hook templates.** The per-agent templates registered by
-  `aimx agent-setup` follow the naming scheme
+  `aimx agents setup` follow the naming scheme
   `invoke-<agent>-<username>` (for example
-  `invoke-claude-alice` when alice runs `aimx agent-setup claude-code`).
+  `invoke-claude-alice` when alice runs `aimx agents setup claude-code`).
   Each template's `run_as` equals the user that registered it, so the
   child process drops into that uid before executing. `hook_list_templates`
   returns templates whose `run_as` matches the caller, plus reserved
@@ -99,14 +99,14 @@ Hooks are shell commands the daemon fires on mail events (`on_receive`,
 `after_send`). To keep the world-writable UDS socket safe, MCP cannot
 submit arbitrary shell. Every hook you create references a **template**
 that is either bundled (`webhook`) or registered on demand by
-`aimx agent-setup` (`invoke-<agent>-<username>`). You only pick a
+`aimx agents setup` (`invoke-<agent>-<username>`). You only pick a
 template and fill its declared params.
 
 - `hook_list_templates()`: list templates visible to your Linux user
   (your own `run_as` templates plus reserved ones such as `webhook`).
   Call this first. An empty list means no templates are registered for
   your user — ask the operator (or you, if you own an account) to run
-  `aimx agent-setup <agent>` without sudo.
+  `aimx agents setup <agent>` without sudo.
 - `hook_create(mailbox, event, template, params, name?)`: attach a
   template hook. The daemon substitutes your `params` into the
   template's argv and stamps `origin = "mcp"` on the resulting hook.
@@ -271,7 +271,7 @@ sent (`after_send`). They are how you go from "the agent reads mail" to
 
 The safety model: you cannot submit raw shell via MCP. Every hook you
 create must reference a **template** registered either at install time
-(the bundled `webhook`) or per-user by `aimx agent-setup <agent>`
+(the bundled `webhook`) or per-user by `aimx agents setup <agent>`
 (names follow `invoke-<agent>-<username>`). A template declares an argv
 shape plus the parameter names you are allowed to fill. Your
 `hook_create` call supplies values for those params, and the daemon
@@ -298,14 +298,14 @@ The four tools work together:
    host.
 
 If `hook_list_templates` is empty, no amount of calling `hook_create`
-will help — the user needs to run `aimx agent-setup <agent>` (no sudo)
+will help — the user needs to run `aimx agents setup <agent>` (no sudo)
 to register `invoke-<agent>-<username>`. Tell them that, with the exact
 command. Do not guess at template names.
 
 ### Template naming: `invoke-<agent>-<username>`
 
 Per-agent templates are registered by the user who will run them. On a
-host where alice runs `aimx agent-setup claude-code`, aimx probes her
+host where alice runs `aimx agents setup claude-code`, aimx probes her
 `$PATH`, finds `/home/alice/.local/bin/claude`, and submits a
 `TEMPLATE-CREATE` over the UDS. The resulting template is named
 `invoke-claude-alice` with `run_as = "alice"` and

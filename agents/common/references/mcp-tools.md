@@ -333,7 +333,7 @@ List hook templates visible to the caller. A template is visible when
 its `run_as` equals the caller's username, or when `run_as` is a
 reserved sentinel (`aimx-catchall` or `root`). Per-agent templates
 follow the naming scheme `invoke-<agent>-<username>` and are created
-by `aimx agent-setup <agent>` (run without sudo by the owning user).
+by `aimx agents setup <agent>` (run without sudo by the owning user).
 
 **Parameters:** None.
 
@@ -341,7 +341,7 @@ by `aimx agent-setup <agent>` (run without sudo by the owning user).
 `params` (string array of declared parameter names), `allowed_events`
 (subset of `["on_receive", "after_send"]`).
 
-**Example, visible to alice after she runs `aimx agent-setup claude-code`:**
+**Example, visible to alice after she runs `aimx agents setup claude-code`:**
 ```
 hook_list_templates()
 → [{"name":"invoke-claude-alice","description":"Pipe email into Claude with a prompt.",

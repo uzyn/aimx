@@ -219,11 +219,9 @@ Install the aimx plugin / skill for a supported agent into the current user's co
 
 See [Agent Integration](agent-integration.md) for per-agent activation steps.
 
-The hyphenated `aimx agent-setup` form (and the singular `aimx agent setup`) are preserved as hidden aliases for back-compat. New scripts should prefer `aimx agents setup`.
-
 ### `aimx agents list`
 
-Print the supported-agent registry as a plain table (agent name, destination path, activation hint). Alias of `aimx agents setup --list`.
+Print the supported-agent registry as a plain table (agent name, destination path, activation hint).
 
 ### `aimx agents remove <agent>`
 
@@ -233,8 +231,6 @@ Inverse of `aimx agents setup`. Removes the plugin files under `$HOME` and submi
 |------|-------------|
 | `<agent>` (positional) | Short name; must match the agent previously passed to `aimx agents setup`. |
 | `--dangerously-allow-root` | Footgun. Bypass the root-refusal check. |
-
-The hyphenated `aimx agent-cleanup <agent>` form (with `--full` to wipe plugin files) is preserved as a hidden alias for back-compat. New scripts should prefer `aimx agents remove`.
 
 ## Utilities
 

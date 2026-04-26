@@ -81,8 +81,6 @@ No hook-template checkbox, no Gmail / deliverability section, no `none | verifie
 
 The MCP section prints a short summary listing the `aimx agents setup` commands for each supported agent before re-execing the TUI. The summary is informational — the drop-through itself handles the actual wiring. After the TUI exits, `aimx setup` prints the closing message and the wizard returns control to the shell.
 
-The hyphenated `aimx agent-setup` form (the historical flat verb) is preserved as a hidden alias and still works in scripts.
-
 Third-party mail-client workarounds (e.g. Gmail spam-filter whitelists) are **not** part of `aimx setup`'s surface. A correct SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider is the canonical deliverability story.
 
 ### Mailbox-owner prompt

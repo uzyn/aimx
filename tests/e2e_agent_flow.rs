@@ -1,10 +1,10 @@
 //! End-to-end happy path for the agent flow.
 //!
 //! Runs the full `aimx setup` (non-interactive, via direct config
-//! layout) → `aimx agent-setup` (with a fake `claude` binary on a
+//! layout) → `aimx agents setup` (with a fake `claude` binary on a
 //! controlled `$PATH`) → ingest of a trusted `.eml` → assertion that
 //! the hook fired under the matching uid (via a sentinel file the
-//! fake binary writes) → `aimx agent-cleanup --full` → assertion that
+//! fake binary writes) → `aimx agents remove --full` → assertion that
 //! plugin files and the registered template are gone.
 //!
 //! Gated on `AIMX_INTEGRATION_SUDO=1` + root, matching `isolation.rs`.
@@ -272,7 +272,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Make the fake binary + its parent traversable by the test user.
     chmod(&path_dir, 0o755);
 
-    // The user's $HOME (used by `agent-setup` for plugin install).
+    // The user's $HOME (used by `agents setup` for plugin install).
     let user_home = home_dir.join(USER);
     std::fs::create_dir_all(&user_home).unwrap();
     chown(&user_home, user_uid, user_gid);
@@ -284,7 +284,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // passwd entry, so set both sources to the same path to be safe.
     // Without this, `runuser -u aimx-it-agentflow` inherits the
     // default `/home/aimx-it-agentflow/` (which doesn't exist because
-    // we `useradd --no-create-home`), and `agent-setup` then fails
+    // we `useradd --no-create-home`), and `agents setup` then fails
     // with EACCES trying to `mkdir $HOME/.claude/plugins/...`.
     let usermod_status = Command::new("usermod")
         .arg("-d")
@@ -340,14 +340,14 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     let sock = runtime_dir.join("aimx.sock");
     wait_for_socket(&sock, Duration::from_secs(30));
 
-    // Run `aimx agent-setup claude-code` as the test user. Feed it a
+    // Run `aimx agents setup claude-code` as the test user. Feed it a
     // curated `$PATH` containing only the fake claude so the probe
     // resolves deterministically, and a `$HOME` under tmp.
     let agent_setup_out = Command::new(runuser_path())
         // `-m` preserves HOME/SHELL/USER/LOGNAME from the parent env —
         // without it, runuser+PAM resets HOME to the target user's
         // `/etc/passwd` entry (which doesn't exist because we
-        // `useradd --no-create-home`) and `agent-setup` then fails with
+        // `useradd --no-create-home`) and `agents setup` then fails with
         // EACCES trying to `mkdir /home/<USER>/.claude/...`.
         .arg("-m")
         .arg("-u")
@@ -359,14 +359,14 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
         .env("HOME", &user_home)
         .env("PATH", &path_dir)
-        .arg("agent-setup")
+        .args(["agents", "setup"])
         .arg("claude-code")
         .arg("--force")
         .output()
-        .expect("failed to run aimx agent-setup");
+        .expect("failed to run aimx agents setup");
     assert!(
         agent_setup_out.status.success(),
-        "agent-setup failed: stdout={:?} stderr={:?}",
+        "agents setup failed: stdout={:?} stderr={:?}",
         String::from_utf8_lossy(&agent_setup_out.stdout),
         String::from_utf8_lossy(&agent_setup_out.stderr)
     );
@@ -376,14 +376,14 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     let template_name = format!("invoke-claude-code-{USER}");
     assert!(
         setup_stdout.contains(&template_name),
-        "agent-setup stdout should mention {template_name}: {setup_stdout}"
+        "agents setup stdout should mention {template_name}: {setup_stdout}"
     );
 
     // Plugin files landed under $HOME/.claude/plugins/aimx.
     let plugin_dir = user_home.join(".claude/plugins/aimx");
     assert!(
         plugin_dir.exists(),
-        "plugin dir {} should exist after agent-setup",
+        "plugin dir {} should exist after agents setup",
         plugin_dir.display()
     );
 
@@ -397,7 +397,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // the unprivileged `aimx hooks create` process-wide config load
     // can read it.
     ensure_config_readable(&config_path);
-    // The `claude-code` agent template (see `agent_setup::registry()`)
+    // The `claude-code` agent template (see `agents_setup::registry()`)
     // declares `params: &[]` — it feeds the raw email into the binary
     // via stdin rather than taking any operator-supplied placeholder.
     // So `hooks create` must not carry any `--param K=V`.
@@ -549,7 +549,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         "hook did not fire under uid {user_uid}: {sentinel_body}"
     );
 
-    // Before `agent-cleanup` runs TEMPLATE-DELETE over UDS, the daemon's
+    // Before `agents remove` runs TEMPLATE-DELETE over UDS, the daemon's
     // hook-invariant validator would reject the delete because our
     // template is still bound by the hook we hand-patched above. A
     // production operator would use `sudo aimx hooks delete <name>`
@@ -579,7 +579,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     }
     std::thread::sleep(Duration::from_millis(300));
 
-    // Now run `aimx agent-cleanup claude-code --full --yes` as the
+    // Now run `aimx agents remove claude-code --full --yes` as the
     // test user. Should remove the template via UDS and the plugin
     // dir under $HOME.
     let cleanup_out = Command::new(runuser_path())
@@ -592,15 +592,13 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         .env("AIMX_DATA_DIR", &data_dir)
         .env("AIMX_RUNTIME_DIR", &runtime_dir)
         .env("HOME", &user_home)
-        .arg("agent-cleanup")
+        .args(["agents", "remove"])
         .arg("claude-code")
-        .arg("--full")
-        .arg("--yes")
         .output()
-        .expect("failed to run aimx agent-cleanup");
+        .expect("failed to run aimx agents remove");
     assert!(
         cleanup_out.status.success(),
-        "agent-cleanup failed: stdout={:?} stderr={:?}",
+        "agents remove failed: stdout={:?} stderr={:?}",
         String::from_utf8_lossy(&cleanup_out.stdout),
         String::from_utf8_lossy(&cleanup_out.stderr)
     );
@@ -615,7 +613,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // re-creating a hook against it; the daemon should refuse with
     // `unknown-template`.
     //
-    // The preceding `agent-cleanup` / hook fire rewrote `config.toml`
+    // The preceding `agents remove` / hook fire rewrote `config.toml`
     // via the daemon, clamping the mode back to 0600. Restore 0644
     // so this unprivileged CLI invocation can still read the file.
     ensure_config_readable(&config_path);

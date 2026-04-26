@@ -1409,12 +1409,12 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     lines.push("Wire aimx into your AI agent with one command per agent:".to_string());
     lines.push(String::new());
 
-    for spec in crate::agent_setup::registry() {
+    for spec in crate::agents_setup::registry() {
         let cmd = if data_dir == Path::new("/var/lib/aimx") {
-            format!("aimx agent-setup {}", spec.name)
+            format!("aimx agents setup {}", spec.name)
         } else {
             format!(
-                "aimx --data-dir {} agent-setup {}",
+                "aimx --data-dir {} agents setup {}",
                 data_dir.display(),
                 spec.name
             )
@@ -1423,9 +1423,7 @@ pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
     }
 
     lines.push(String::new());
-    lines.push(
-        "Run `aimx agent-setup --list` to see supported agents and destination paths.".to_string(),
-    );
+    lines.push("Run `aimx agents list` to see supported agents and destination paths.".to_string());
     lines.push(
         "See `book/agent-integration.md` for the full list and manual MCP wiring.".to_string(),
     );
@@ -2452,22 +2450,22 @@ pub fn run_setup(
     display_mcp_section(data_dir);
 
     // Print the interim banner BEFORE the drop-through so the operator sees
-    // ☑ on 1–5 and ◐ on 6 right before the agent-setup TUI takes over.
+    // ☑ on 1–5 and ◐ on 6 right before the agents setup TUI takes over.
     let mut pre_handoff = checklist;
     pre_handoff.set(6, term::StepState::Running);
     print_final_banner(&pre_handoff);
 
     // Drive the drop-through. Returns `Some(true)` on success, `Some(false)`
-    // on agent-setup non-zero exit (treated as skipped, not fatal),
+    // on agents setup non-zero exit (treated as skipped, not fatal),
     // `None` when skipped (no SUDO_USER, AIMX_NONINTERACTIVE=1, or
     // runuser unavailable).
     let mcp_state = if is_noninteractive_env() {
         term::StepState::Skipped
     } else {
-        match drop_through_to_agent_setup(explicit_data_dir.as_deref()) {
-            AgentSetupOutcome::Done => term::StepState::Done,
-            AgentSetupOutcome::Skipped => term::StepState::Skipped,
-            AgentSetupOutcome::Failed => term::StepState::Skipped,
+        match drop_through_to_agents_setup(explicit_data_dir.as_deref()) {
+            AgentsSetupOutcome::Done => term::StepState::Done,
+            AgentsSetupOutcome::Skipped => term::StepState::Skipped,
+            AgentsSetupOutcome::Failed => term::StepState::Skipped,
         }
     };
     checklist.set(6, mcp_state);
@@ -2482,20 +2480,20 @@ pub fn run_setup(
     Ok(())
 }
 
-/// Outcome of the drop-through to `aimx agent-setup`. Maps to the step-6
+/// Outcome of the drop-through to `aimx agents setup`. Maps to the step-6
 /// state in the wizard's checklist so the closing message can render the
-/// right glyph regardless of whether the agent-setup TUI ran, was skipped,
+/// right glyph regardless of whether the agents setup TUI ran, was skipped,
 /// or returned non-zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentSetupOutcome {
-    /// agent-setup ran and exited zero — step 6 ☑.
+enum AgentsSetupOutcome {
+    /// agents setup ran and exited zero — step 6 ☑.
     Done,
     /// $SUDO_USER unset, or runuser missing on PATH — step 6 ☒
     /// (with operator guidance printed).
     Skipped,
-    /// agent-setup ran and exited non-zero — surfaced as step 6 ☒
+    /// agents setup ran and exited non-zero — surfaced as step 6 ☒
     /// rather than a hard error so a TUI quirk doesn't void a successful
-    /// setup. The operator can re-run `aimx agent-setup` by hand.
+    /// setup. The operator can re-run `aimx agents setup` by hand.
     Failed,
 }
 
@@ -2520,18 +2518,18 @@ fn print_closing_message(domain: &str) {
 }
 
 /// Build the argv we'd hand to `runuser -u <sudo_user> --` so the drop-
-/// through re-execs `aimx agent-setup` as the invoking user. Pure helper
+/// through re-execs `aimx agents setup` as the invoking user. Pure helper
 /// — no syscalls — so unit tests can assert on the exact argv without
 /// spinning up a process.
 ///
 /// Layout:
 ///
 /// ```text
-/// [exe, "agent-setup",
+/// [exe, "agents", "setup",
 ///  // --data-dir is only appended when the operator explicitly named a
 ///  // path on the `aimx setup` command line. The default
 ///  // `/var/lib/aimx` is left implicit so it matches what a standalone
-///  // `aimx agent-setup` invocation would resolve.
+///  // `aimx agents setup` invocation would resolve.
 ///  "--data-dir", <path>]
 /// ```
 ///
@@ -2539,14 +2537,15 @@ fn print_closing_message(domain: &str) {
 /// fires only when `$SUDO_USER` is set, and implicit
 /// `--dangerously-allow-root` is forbidden (operators must opt in by
 /// hand).
-pub(crate) fn build_agent_setup_argv(
+pub(crate) fn build_agents_setup_argv(
     exe: &Path,
     explicit_data_dir: Option<&Path>,
 ) -> Vec<std::ffi::OsString> {
     use std::ffi::OsString;
     let mut argv: Vec<OsString> = Vec::with_capacity(4);
     argv.push(exe.as_os_str().to_os_string());
-    argv.push(OsString::from("agent-setup"));
+    argv.push(OsString::from("agents"));
+    argv.push(OsString::from("setup"));
     if let Some(p) = explicit_data_dir {
         argv.push(OsString::from("--data-dir"));
         argv.push(p.as_os_str().to_os_string());
@@ -2554,45 +2553,45 @@ pub(crate) fn build_agent_setup_argv(
     argv
 }
 
-/// Drive the drop-through to `aimx agent-setup` and return an outcome
+/// Drive the drop-through to `aimx agents setup` and return an outcome
 /// the caller maps onto step 6's checklist state.
 ///
 /// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
-///    /proc/self/exe agent-setup [--data-dir …]` via `Command::status()`
+///    /proc/self/exe agents setup [--data-dir …]` via `Command::status()`
 ///    so the parent `aimx setup` regains control after the TUI exits.
 ///    The closing message is printed AFTER this call returns.
 /// 2. If `$SUDO_USER` is unset → print the guidance message (naming
 ///    `--dangerously-allow-root` as the root-login option) and return
-///    [`AgentSetupOutcome::Skipped`].
+///    [`AgentsSetupOutcome::Skipped`].
 ///
 /// On spawn failure (e.g. `runuser` not installed on a stripped
 /// container image) print the same guidance and return
-/// [`AgentSetupOutcome::Skipped`].
+/// [`AgentsSetupOutcome::Skipped`].
 ///
-/// agent-setup non-zero exit returns [`AgentSetupOutcome::Failed`] so
+/// agents setup non-zero exit returns [`AgentsSetupOutcome::Failed`] so
 /// the caller can render step 6 as ☒ without aborting the wizard.
-fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) -> AgentSetupOutcome {
+fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetupOutcome {
     let sudo_user = std::env::var("SUDO_USER").unwrap_or_default();
     if sudo_user.is_empty() {
         // Direct root login path. Print the guidance and return.
         println!(
             "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
             term::prompt_mark(),
-            term::highlight("aimx agent-setup")
+            term::highlight("aimx agents setup")
         );
         println!(
             "  (On a single-user root-login VPS, pass `{}` to wire aimx into /root's home.)",
-            term::highlight("aimx agent-setup --dangerously-allow-root")
+            term::highlight("aimx agents setup --dangerously-allow-root")
         );
-        return AgentSetupOutcome::Skipped;
+        return AgentsSetupOutcome::Skipped;
     }
 
     // Resolve in OUR context (not runuser's). Passing the literal
     // string "/proc/self/exe" makes `runuser` `execve` it relative to
     // its own /proc/self — which points at /usr/sbin/runuser — so the
-    // child re-execs runuser with argv ["exe", "agent-setup"]; the
-    // second runuser parses "agent-setup" as a username and dies with
-    // `exe: user agent-setup does not exist`. Resolve with
+    // child re-execs runuser with argv ["exe", "agents", "setup"]; the
+    // second runuser parses "agents" as a username and dies with
+    // `exe: user agents does not exist`. Resolve with
     // `current_exe()` here so the child receives the actual aimx
     // binary path. On the rare target where `current_exe()` errors
     // (chroot / no-procfs container) we surface the failure and treat
@@ -2610,24 +2609,24 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) -> AgentSetupOu
             println!(
                 "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
                 term::prompt_mark(),
-                term::highlight("aimx agent-setup"),
+                term::highlight("aimx agents setup"),
                 term::highlight(&sudo_user)
             );
-            return AgentSetupOutcome::Skipped;
+            return AgentsSetupOutcome::Skipped;
         }
     };
-    let argv = build_agent_setup_argv(&exe, explicit_data_dir);
+    let argv = build_agents_setup_argv(&exe, explicit_data_dir);
 
     println!();
     println!(
         "{} Dropping through to `{}` as {}...",
         term::prompt_mark(),
-        term::highlight("aimx agent-setup"),
+        term::highlight("aimx agents setup"),
         term::highlight(&sudo_user)
     );
 
     // Hand off via `Command::status()` so control returns here once the
-    // TUI exits, allowing the closing message to print AFTER agent-setup.
+    // TUI exits, allowing the closing message to print AFTER agents setup.
     match std::process::Command::new("runuser")
         .arg("-u")
         .arg(&sudo_user)
@@ -2635,29 +2634,29 @@ fn drop_through_to_agent_setup(explicit_data_dir: Option<&Path>) -> AgentSetupOu
         .args(&argv)
         .status()
     {
-        Ok(status) if status.success() => AgentSetupOutcome::Done,
+        Ok(status) if status.success() => AgentsSetupOutcome::Done,
         Ok(status) => {
             eprintln!(
-                "{} `aimx agent-setup` exited with {status}. \
+                "{} `aimx agents setup` exited with {status}. \
                  Re-run as {} to wire aimx into Claude Code, Codex, etc.",
                 term::warn("warning:"),
                 term::highlight(&sudo_user)
             );
-            AgentSetupOutcome::Failed
+            AgentsSetupOutcome::Failed
         }
         Err(e) => {
             eprintln!(
-                "{} Could not drop through to `aimx agent-setup` automatically: {}",
+                "{} Could not drop through to `aimx agents setup` automatically: {}",
                 term::warn("warning:"),
                 e
             );
             println!(
                 "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
                 term::prompt_mark(),
-                term::highlight("aimx agent-setup"),
+                term::highlight("aimx agents setup"),
                 term::highlight(&sudo_user)
             );
-            AgentSetupOutcome::Skipped
+            AgentsSetupOutcome::Skipped
         }
     }
 }
@@ -3288,7 +3287,7 @@ owner = "aimx-catchall"
 
         assert!(
             walker.found_retired.is_empty(),
-            "retired helper(s) resurfaced — agent-setup owns template wiring now: {:?}",
+            "retired helper(s) resurfaced — agents setup owns template wiring now: {:?}",
             walker.found_retired
         );
         assert!(
@@ -3859,7 +3858,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
         let joined = lines.join("\n");
         assert!(
-            joined.contains("aimx agent-setup claude-code"),
+            joined.contains("aimx agents setup claude-code"),
             "expected claude-code install command in:\n{joined}"
         );
         assert!(!joined.contains("mcpServers"));
@@ -3871,7 +3870,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/custom/data"));
         let joined = lines.join("\n");
         assert!(
-            joined.contains("aimx --data-dir /custom/data agent-setup claude-code"),
+            joined.contains("aimx --data-dir /custom/data agents setup claude-code"),
             "expected --data-dir override in install command:\n{joined}"
         );
         assert!(!joined.contains("mcpServers"));
@@ -3882,7 +3881,7 @@ owner = "aimx-catchall"
         let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
         let joined = lines.join("\n");
         assert!(joined.contains("agent-integration.md"));
-        assert!(joined.contains("aimx agent-setup --list"));
+        assert!(joined.contains("aimx agents list"));
     }
 
     #[test]
@@ -5827,7 +5826,7 @@ owner = "aimx-catchall"
         // Bug #1 from the cycle-3 review: the operator never saw step 6
         // flip from ◐ to ☑ / ☒ because `print_final_banner` was only
         // called once — BEFORE the drop-through — and was not reprinted
-        // after `drop_through_to_agent_setup` returned. Lock in the
+        // after `drop_through_to_agents_setup` returned. Lock in the
         // two-call contract by source-grep so a future refactor can't
         // silently drop the second call.
         let source = include_str!("setup.rs");
@@ -5849,13 +5848,13 @@ owner = "aimx-catchall"
         // The second call must come AFTER the drop-through call site so
         // the reprinted banner reflects the resolved step-6 state.
         let drop_through_pos = body
-            .find("drop_through_to_agent_setup(")
-            .expect("drop_through_to_agent_setup call site");
+            .find("drop_through_to_agents_setup(")
+            .expect("drop_through_to_agents_setup call site");
         let after_drop_through = &body[drop_through_pos..];
         assert!(
             after_drop_through.contains("print_final_banner("),
             "the second `print_final_banner` call must come AFTER \
-             `drop_through_to_agent_setup` so the operator sees step 6 \
+             `drop_through_to_agents_setup` so the operator sees step 6 \
              flip from ◐ to ☑ / ☒ before the closing message."
         );
     }
@@ -5903,35 +5902,37 @@ owner = "aimx-catchall"
     // ----- drop-through argv construction -----------------------------------
 
     #[test]
-    fn build_agent_setup_argv_without_data_dir() {
+    fn build_agents_setup_argv_without_data_dir() {
         let exe = Path::new("/usr/local/bin/aimx");
-        let argv = super::build_agent_setup_argv(exe, None);
-        assert_eq!(argv.len(), 2);
+        let argv = super::build_agents_setup_argv(exe, None);
+        assert_eq!(argv.len(), 3);
         assert_eq!(argv[0], std::ffi::OsStr::new("/usr/local/bin/aimx"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
+        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
     }
 
     #[test]
-    fn build_agent_setup_argv_appends_explicit_data_dir() {
+    fn build_agents_setup_argv_appends_explicit_data_dir() {
         // When the operator passed `--data-dir /custom` to `aimx setup`,
-        // the drop-through must carry it through so `aimx agent-setup`
+        // the drop-through must carry it through so `aimx agents setup`
         // emits activation hints referencing the same path.
         let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
-        assert_eq!(argv.len(), 4);
+        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
+        assert_eq!(argv.len(), 5);
         assert_eq!(argv[0], std::ffi::OsStr::new("/proc/self/exe"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agent-setup"));
-        assert_eq!(argv[2], std::ffi::OsStr::new("--data-dir"));
-        assert_eq!(argv[3], std::ffi::OsStr::new("/srv/aimx-data"));
+        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
+        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
+        assert_eq!(argv[3], std::ffi::OsStr::new("--data-dir"));
+        assert_eq!(argv[4], std::ffi::OsStr::new("/srv/aimx-data"));
     }
 
     #[test]
-    fn build_agent_setup_argv_never_includes_dangerously_allow_root() {
+    fn build_agents_setup_argv_never_includes_dangerously_allow_root() {
         // The drop-through MUST NOT pass
         // `--dangerously-allow-root` implicitly. Regression guard — if
         // someone adds the flag in the future, this test fails loudly.
         let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agent_setup_argv(exe, Some(Path::new("/opt/data")));
+        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/opt/data")));
         for part in &argv {
             assert_ne!(
                 part,
@@ -5942,13 +5943,13 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn build_agent_setup_argv_uses_resolved_exe_path() {
+    fn build_agents_setup_argv_uses_resolved_exe_path() {
         // Regression guard for the cycle-5 fix: `runuser` re-execs
         // `argv[0]` in its own context. Passing the literal string
         // `/proc/self/exe` makes the child runuser resolve
-        // `/proc/self` → `/usr/sbin/runuser` and treat `agent-setup`
+        // `/proc/self` → `/usr/sbin/runuser` and treat `agents`
         // as a username, dying with
-        // `exe: user agent-setup does not exist`. The drop-through
+        // `exe: user agents does not exist`. The drop-through
         // must instead resolve the binary in the parent process via
         // `std::env::current_exe()`. Lock that invariant in by
         // source-grep so a future refactor can't silently regress
@@ -5961,12 +5962,12 @@ owner = "aimx-catchall"
              absolute path"
         );
         // The literal `"/proc/self/exe"` string is forbidden as the
-        // `runuser` argv[0]. Walk just the `drop_through_to_agent_setup`
+        // `runuser` argv[0]. Walk just the `drop_through_to_agents_setup`
         // body so doc comments / unrelated paths in this file don't
         // false-positive.
         let drop_through_start = source
-            .find("fn drop_through_to_agent_setup(")
-            .expect("drop_through_to_agent_setup must exist");
+            .find("fn drop_through_to_agents_setup(")
+            .expect("drop_through_to_agents_setup must exist");
         let drop_through_end = source[drop_through_start..]
             .find("\nfn ")
             .map(|off| drop_through_start + off)
@@ -5974,7 +5975,7 @@ owner = "aimx-catchall"
         let body = &source[drop_through_start..drop_through_end];
         assert!(
             !body.contains("PathBuf::from(\"/proc/self/exe\")"),
-            "drop_through_to_agent_setup must NOT pass the literal \
+            "drop_through_to_agents_setup must NOT pass the literal \
              string \"/proc/self/exe\" to runuser — runuser would \
              re-exec itself in its own /proc context"
         );
@@ -6094,25 +6095,25 @@ owner = "aimx-catchall"
     #[test]
     fn run_setup_marks_step_six_skipped_when_sudo_user_unset() {
         // The drop-through helper enters its `$SUDO_USER` unset branch and
-        // returns AgentSetupOutcome::Skipped. `run_setup` then maps that
+        // returns AgentsSetupOutcome::Skipped. `run_setup` then maps that
         // onto step-6 = Skipped. We assert that the call site exists so
         // a future refactor that drops the mapping can't sneak past
         // review.
         let source = include_str!("setup.rs");
-        // The mapping is in run_setup near the drop_through_to_agent_setup
+        // The mapping is in run_setup near the drop_through_to_agents_setup
         // call; it sets `mcp_state` to Skipped on Skipped/Failed outcomes.
         let run_setup_start = source.find("pub fn run_setup(").unwrap();
         let body = &source[run_setup_start..];
         assert!(
-            body.contains("AgentSetupOutcome::Skipped"),
+            body.contains("AgentsSetupOutcome::Skipped"),
             "run_setup must handle the Skipped outcome from the drop-through"
         );
         assert!(
-            body.contains("AgentSetupOutcome::Failed"),
+            body.contains("AgentsSetupOutcome::Failed"),
             "run_setup must handle the Failed outcome from the drop-through"
         );
         assert!(
-            body.contains("AgentSetupOutcome::Done"),
+            body.contains("AgentsSetupOutcome::Done"),
             "run_setup must handle the Done outcome from the drop-through"
         );
     }

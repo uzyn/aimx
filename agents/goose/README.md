@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) recipe source tree for Goose. This directory wires
 aimx into [Goose](https://goose-docs.ai/). Contents are bundled into the
 `aimx` binary at compile time (via `include_dir!`) and installed by
-`aimx agent-setup goose`.
+`aimx agents setup goose`.
 
 ## What gets installed
 
@@ -23,7 +23,7 @@ install time. The raw `.header` file is not shipped.
 ## Install
 
 ```bash
-aimx agent-setup goose
+aimx agents setup goose
 ```
 
 Default recipe destination: `~/.config/goose/recipes/aimx.yaml`.
@@ -45,7 +45,7 @@ aimx`.
 If you set the `GOOSE_RECIPE_GITHUB_REPO` environment variable to a
 GitHub repo path (e.g. `myorg/goose-recipes`), Goose loads recipes from
 that repo instead of (or in addition to) your local directory. In that
-case, `aimx agent-setup goose` still writes the recipe locally, and the
+case, `aimx agents setup goose` still writes the recipe locally, and the
 activation hint tells you to commit `~/.config/goose/recipes/aimx.yaml`
 into your team repo so every user can invoke it.
 
@@ -55,7 +55,7 @@ If aimx was set up with a non-default data directory, re-run the
 installer with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup goose
+aimx --data-dir /custom/path agents setup goose
 ```
 
 The recipe's `extensions[0].args` will include `--data-dir /custom/path`

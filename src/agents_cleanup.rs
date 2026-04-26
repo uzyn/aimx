@@ -1,31 +1,23 @@
-//! Per-user inverse of `aimx agent-setup`.
+//! Internal cleanup core shared by `aimx agents remove`.
 //!
-//! `aimx agent-cleanup <agent>` drops the
-//! `invoke-<agent>-<caller_username>` template that the matching
-//! `agent-setup` registered over UDS. With `--full` it also removes
-//! the plugin files under `$HOME` that `agent-setup` laid down.
+//! Drops the `invoke-<agent>-<caller_username>` template that
+//! `aimx agents setup` registered over UDS. With `--full` it also
+//! removes the plugin files under `$HOME` that the installer laid down.
 //!
-//! The command runs per-user and refuses root. Daemon-down with
-//! `--full` still wipes plugin files and exits `2`, pointing the
-//! operator at `sudo aimx hooks prune --orphans` to clean up the
-//! template side after the daemon restarts. (PRD §6.11.)
+//! Refuses to run as root. Daemon-down with `--full` still wipes
+//! plugin files and reports `DaemonUnreachable` so the caller can
+//! exit non-zero, pointing the operator at
+//! `sudo aimx hooks prune --orphans` to clean up the template side
+//! after the daemon restarts.
 
-use crate::agent_setup::{
-    AgentEnv, AgentSpec, RealAgentEnv, derive_template_name, find_agent, resolve_dest,
-};
+use crate::agents_setup::{AgentEnv, AgentSpec, derive_template_name, find_agent, resolve_dest};
 use crate::hook_client::TemplateCrudFallback;
 use crate::send_protocol::TemplateDeleteRequest;
 use crate::term;
-use std::io::{self, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// Exit code emitted when the daemon is unreachable and `--full` had to
-/// fall back to plugin-file removal only. Mirrors `agent-setup`'s
-/// socket-missing exit code so operators can script both commands
-/// against the same non-zero return.
-const EXIT_DAEMON_UNREACHABLE: i32 = 2;
-
-/// CLI options for one `aimx agent-cleanup` invocation.
+/// Internal options for one cleanup pass.
 pub struct RunOpts {
     pub agent: String,
     pub full: bool,
@@ -33,23 +25,13 @@ pub struct RunOpts {
 }
 
 /// Internal outcome tag used for tests. Kept crate-private — the
-/// public surface is the exit code + writer output from `run`.
+/// public surface is the exit code + writer output from `agents_remove::run`.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CleanupOutcome {
     /// Template and (with `--full`) plugin files removed cleanly.
     Ok,
     /// Daemon was unreachable; plugin files were handled (or skipped).
     DaemonUnreachable,
-}
-
-/// Entry point called from `main.rs`.
-pub fn run(opts: RunOpts) -> Result<(), Box<dyn std::error::Error>> {
-    let env = RealAgentEnv;
-    let outcome = run_with_env(opts, &env, &mut io::stdout())?;
-    match outcome {
-        CleanupOutcome::Ok => Ok(()),
-        CleanupOutcome::DaemonUnreachable => std::process::exit(EXIT_DAEMON_UNREACHABLE),
-    }
 }
 
 /// Testable core of [`run`]. Writes human-facing output to `out`.
@@ -59,12 +41,12 @@ pub(crate) fn run_with_env(
     out: &mut dyn Write,
 ) -> Result<CleanupOutcome, Box<dyn std::error::Error>> {
     if env.is_root() {
-        return Err("agent-cleanup is a per-user operation. Run without sudo or as root".into());
+        return Err("agents remove is a per-user operation. Run without sudo or as root".into());
     }
 
     let spec = find_agent(&opts.agent).ok_or_else(|| {
         format!(
-            "unknown agent '{}'; run `aimx agent-setup --list` to see supported agents",
+            "unknown agent '{}'; run `aimx agents list` to see supported agents",
             opts.agent
         )
     })?;
@@ -134,7 +116,7 @@ pub(crate) fn run_with_env(
         }
     }
 
-    // 2. With `--full`, also remove the plugin files that `agent-setup`
+    // 2. With `--full`, also remove the plugin files that `agents setup`
     //    laid down under the caller's `$HOME`. This runs regardless of
     //    whether the daemon answered — the operator is uninstalling the
     //    agent and has already consented to destructive removal.
@@ -156,7 +138,7 @@ pub(crate) fn run_with_env(
     Ok(CleanupOutcome::Ok)
 }
 
-/// Remove plugin files previously laid down by `agent-setup`.
+/// Remove plugin files previously laid down by `agents setup`.
 ///
 /// `spec.dest_template` encodes the destination shape. Most agents
 /// install a directory tree (e.g. `~/.claude/plugins/aimx/`), so we
@@ -227,7 +209,7 @@ pub(crate) fn plugin_removal_target(spec: &AgentSpec, dest_root: &Path) -> (Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_setup::AgentEnv;
+    use crate::agents_setup::AgentEnv;
     use std::cell::RefCell;
     use std::path::PathBuf;
     use tempfile::TempDir;

@@ -2,7 +2,7 @@
 
 AIMX (AI Mail Exchange) skill source tree for Codex CLI. This directory
 wires aimx into Codex. Contents are bundled into the `aimx` binary at
-compile time (via `include_dir!`) and installed by `aimx agent-setup codex`.
+compile time (via `include_dir!`) and installed by `aimx agents setup codex`.
 
 ## What gets installed
 
@@ -17,7 +17,7 @@ compile time (via `include_dir!`) and installed by `aimx agent-setup codex`.
 ## Install
 
 ```bash
-aimx agent-setup codex
+aimx agents setup codex
 ```
 
 After install, the installer prints a `codex mcp add aimx -- /usr/local/bin/aimx mcp`
@@ -30,7 +30,7 @@ If aimx was set up with a non-default data directory, re-run the installer
 with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup codex
+aimx --data-dir /custom/path agents setup codex
 ```
 
 The printed `codex mcp add` command then includes `--data-dir /custom/path`

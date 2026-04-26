@@ -3,7 +3,7 @@
 AIMX (AI Mail Exchange) plugin source tree for Claude Code. This directory
 wires aimx into Claude Code. Contents are bundled into the `aimx` binary
 at compile time (via `include_dir!`) and installed by
-`aimx agent-setup claude-code`.
+`aimx agents setup claude-code`.
 
 ## What gets installed
 
@@ -21,7 +21,7 @@ at compile time (via `include_dir!`) and installed by
 ## Install
 
 ```bash
-aimx agent-setup claude-code
+aimx agents setup claude-code
 claude mcp add --scope user aimx /usr/local/bin/aimx mcp
 ```
 
@@ -37,7 +37,7 @@ If aimx was set up with a non-default data directory, re-run the installer
 and the MCP registration with `--data-dir`:
 
 ```bash
-aimx --data-dir /custom/path agent-setup claude-code
+aimx --data-dir /custom/path agents setup claude-code
 claude mcp add --scope user aimx /usr/local/bin/aimx --data-dir /custom/path mcp
 ```
 
