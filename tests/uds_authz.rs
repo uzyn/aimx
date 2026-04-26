@@ -123,13 +123,14 @@ fn raw_hook_delete_frame(name: &str) -> String {
 }
 
 fn raw_mailbox_create_frame(name: &str, owner: &str) -> String {
-    format!(
-        "AIMX/1 MAILBOX-CREATE\r\nMailbox: {name}\r\nOwner: {owner}\r\nContent-Length: 0\r\n\r\n"
-    )
+    // The MAILBOX-CREATE / MAILBOX-DELETE codec uses `Name:` for the
+    // mailbox-name header (see src/send_protocol.rs::parse_mailbox_crud_headers).
+    // Other verbs use `Mailbox:`; do not unify.
+    format!("AIMX/1 MAILBOX-CREATE\r\nName: {name}\r\nOwner: {owner}\r\nContent-Length: 0\r\n\r\n")
 }
 
 fn raw_mailbox_delete_frame(name: &str) -> String {
-    format!("AIMX/1 MAILBOX-DELETE\r\nMailbox: {name}\r\nContent-Length: 0\r\n\r\n")
+    format!("AIMX/1 MAILBOX-DELETE\r\nName: {name}\r\nContent-Length: 0\r\n\r\n")
 }
 
 /// Connect to the socket as `user` (None = current process) via

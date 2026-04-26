@@ -110,9 +110,19 @@ pub async fn handle_hook_create(
         };
     }
 
-    // Body shape: JSON object. `serde(deny_unknown_fields)` rejects
-    // legacy template/params/run_as/origin/dangerously_* fields so the
-    // wire schema stays in lock-step with `Config::load`.
+    // Pre-screen for the known-removed legacy fields so the wire error
+    // mirrors `Config::load` (operators see "book/hooks.md" / "renamed
+    // to fire_on_untrusted" / etc. on either surface). `deny_unknown_fields`
+    // below is the backstop for any other unknown key.
+    if let Err(reason) = reject_legacy_body_fields(&req.body) {
+        return AckResponse::Err {
+            code: ErrCode::Protocol,
+            reason,
+        };
+    }
+
+    // Body shape: JSON object. `serde(deny_unknown_fields)` is the
+    // catch-all for any other unknown key after the legacy pre-screen.
     let body: HookCreateBody = match serde_json::from_slice(&req.body) {
         Ok(b) => b,
         Err(e) => {
@@ -280,6 +290,50 @@ pub async fn handle_hook_delete(
     AckResponse::Ok
 }
 
+/// Pre-screen the raw `HOOK-CREATE` body for the known-removed legacy
+/// fields and return an error message that mirrors `Config::load` /
+/// `reject_legacy_schema` (so a migrated operator hitting the daemon
+/// over UDS sees the same actionable text as one editing `config.toml`).
+///
+/// On success returns `Ok(())` and the caller continues to the normal
+/// serde parse, which still rejects any other unknown field.
+fn reject_legacy_body_fields(body: &[u8]) -> Result<(), String> {
+    // Best-effort parse as a JSON object. If the body isn't a JSON
+    // object the regular serde parse below will surface the right error;
+    // we only short-circuit when one of the named removed fields is
+    // present.
+    let value: serde_json::Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Ok(()),
+    };
+    let Some(obj) = value.as_object() else {
+        return Ok(());
+    };
+    if obj.contains_key("template") || obj.contains_key("params") {
+        return Err(
+            "hook sets `template`/`params`; template hooks were removed. \
+             See book/hooks.md for the supported raw-cmd schema"
+                .to_string(),
+        );
+    }
+    if obj.contains_key("run_as") {
+        return Err(
+            "hook sets `run_as`; the field was removed — hooks now run as the mailbox's `owner`"
+                .to_string(),
+        );
+    }
+    if obj.contains_key("origin") {
+        return Err("hook sets `origin`; the field was removed".to_string());
+    }
+    if obj.contains_key("dangerously_support_untrusted") {
+        return Err(
+            "hook sets `dangerously_support_untrusted`; the field was renamed to `fire_on_untrusted`"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn parse_event(s: &str) -> Result<HookEvent, String> {
     match s {
         "on_receive" => Ok(HookEvent::OnReceive),
@@ -439,10 +493,35 @@ mod tests {
         match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Protocol);
-                assert!(
-                    reason.contains("template") || reason.contains("unknown"),
-                    "{reason}"
-                );
+                assert!(reason.contains("template"), "{reason}");
+                // Mirror `Config::load`: removed-field rejection points
+                // operators at the same docs page on either surface.
+                assert!(reason.contains("book/hooks.md"), "{reason}");
+            }
+            other => panic!("expected PROTOCOL, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_legacy_params_field_at_body_parse() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/echo", "hi"],
+            "params": {"foo": "bar"},
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Protocol);
+                assert!(reason.contains("book/hooks.md"), "{reason}");
             }
             other => panic!("expected PROTOCOL, got {other:?}"),
         }
@@ -465,7 +544,70 @@ mod tests {
             body,
         };
         match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
-            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Protocol),
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Protocol);
+                assert!(
+                    reason.contains("run_as") && reason.contains("removed"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected PROTOCOL, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_legacy_origin_field_at_body_parse() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/echo", "hi"],
+            "origin": "operator",
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Protocol);
+                assert!(
+                    reason.contains("origin") && reason.contains("removed"),
+                    "{reason}"
+                );
+            }
+            other => panic!("expected PROTOCOL, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_legacy_dangerously_support_untrusted_at_body_parse() {
+        let _r = install_tester_resolver();
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "cmd": ["/bin/echo", "hi"],
+            "dangerously_support_untrusted": true,
+        }))
+        .unwrap();
+        let req = HookCreateRequest {
+            mailbox: "alice".into(),
+            event: "on_receive".into(),
+            name: None,
+            body,
+        };
+        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Protocol);
+                assert!(
+                    reason.contains("dangerously_support_untrusted")
+                        && reason.contains("fire_on_untrusted"),
+                    "{reason}"
+                );
+            }
             other => panic!("expected PROTOCOL, got {other:?}"),
         }
     }

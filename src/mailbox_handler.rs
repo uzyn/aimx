@@ -537,20 +537,79 @@ mod tests {
 
     #[tokio::test]
     async fn create_duplicate_mailbox_returns_mailbox_error() {
+        let _r = install_tester_resolver();
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
-            name: "catchall".into(),
+        // Seed a non-reserved mailbox first.
+        let seed = MailboxCrudRequest {
+            name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
         };
-        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+        assert!(matches!(
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &seed, &Caller::internal_root()).await,
+            AckResponse::Ok
+        ));
+
+        let dup = MailboxCrudRequest {
+            name: "alice".into(),
+            create: true,
+            owner: Some("testowner".into()),
+        };
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &dup, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Mailbox);
                 assert!(reason.contains("already exists"), "{reason}");
             }
             other => panic!("expected Err(MAILBOX), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_reserved_name_catchall() {
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        for name in ["catchall", "aimx-catchall"] {
+            let req = MailboxCrudRequest {
+                name: name.into(),
+                create: true,
+                owner: Some("testowner".into()),
+            };
+            match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+                AckResponse::Err { code, reason } => {
+                    assert_eq!(code, ErrCode::Validation, "name {name:?}");
+                    assert!(
+                        reason.contains("reserved"),
+                        "name {name:?}: expected `reserved` in reason, got {reason}"
+                    );
+                }
+                other => panic!("name {name:?}: expected Err(VALIDATION), got {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_reserved_name_before_authz() {
+        // Defense-in-depth: reserved-name validation runs before the
+        // root-only authz check, so the rejection text is the same
+        // regardless of caller (root or non-root).
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let attacker = Caller::with_username(99999, 99999, "attacker");
+        let req = MailboxCrudRequest {
+            name: "catchall".into(),
+            create: true,
+            owner: Some("testowner".into()),
+        };
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &attacker).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert!(reason.contains("reserved"), "{reason}");
+            }
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
     }
 
@@ -667,6 +726,12 @@ mod tests {
 
     #[tokio::test]
     async fn delete_catchall_forbidden() {
+        // The catchall name is now reserved at `validate_mailbox_name`,
+        // so the rejection comes back as `Validation` ("reserved")
+        // before ever reaching the catchall-specific delete guard. Both
+        // the validation rejection and the deeper guard in
+        // `handle_delete` agree the catchall must not be deleted via
+        // UDS — the layer that fires first changed.
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
@@ -677,10 +742,10 @@ mod tests {
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
-                assert_eq!(code, ErrCode::Mailbox);
-                assert!(reason.contains("catchall"), "{reason}");
+                assert_eq!(code, ErrCode::Validation);
+                assert!(reason.contains("reserved"), "{reason}");
             }
-            other => panic!("expected Err(MAILBOX), got {other:?}"),
+            other => panic!("expected Err(VALIDATION), got {other:?}"),
         }
     }
 

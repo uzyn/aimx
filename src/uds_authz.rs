@@ -301,9 +301,24 @@ pub fn log_decision(
     }
 }
 
+/// Canonical wire reason on every authz reject.
+///
+/// Kept deliberately opaque so the wire response cannot be used to
+/// enumerate mailboxes or probe ownership ("does this mailbox exist?",
+/// "who owns it?"). The rich diagnostic text returned by `require_*`
+/// is logged at `warn` for the operator — see [`log_decision`] — but
+/// never sent over the socket.
+const WIRE_REASON_NOT_AUTHORIZED: &str = "not authorized";
+
 /// Convenience: evaluate + log in one call. Used by handlers that want
 /// the structured log for every decision (accept + reject + root_bypass)
 /// without duplicating the match arms.
+///
+/// On reject, the structured log keeps the rich diagnostic reason
+/// (`reason = "caller 'bob' is not the owner of mailbox 'alice' …"`)
+/// for operator-side debugging via `aimx logs`, but the wire response
+/// is tightened to the opaque [`WIRE_REASON_NOT_AUTHORIZED`] so the
+/// daemon does not leak whether the mailbox exists or who owns it.
 pub fn enforce_mailbox_owner_or_root(
     verb: &str,
     caller: &Caller,
@@ -333,14 +348,18 @@ pub fn enforce_mailbox_owner_or_root(
                 LogDecision::Reject,
                 Some(&reject.reason),
             );
-            Err(reject)
+            Err(AuthzReject {
+                code: reject.code,
+                reason: WIRE_REASON_NOT_AUTHORIZED.to_string(),
+            })
         }
     }
 }
 
 /// Convenience for verbs whose mailbox identity is not known up front
 /// (e.g. `MAILBOX-CREATE` / `MAILBOX-DELETE`). Logs without a `mailbox`
-/// field.
+/// field. Same wire/log split as [`enforce_mailbox_owner_or_root`]:
+/// rich reason in the log, opaque `not authorized` on the wire.
 pub fn enforce_root(
     verb: &str,
     caller: &Caller,
@@ -359,7 +378,10 @@ pub fn enforce_root(
                 LogDecision::Reject,
                 Some(&reject.reason),
             );
-            Err(reject)
+            Err(AuthzReject {
+                code: reject.code,
+                reason: WIRE_REASON_NOT_AUTHORIZED.to_string(),
+            })
         }
     }
 }
@@ -489,8 +511,33 @@ mod tests {
         let m = mb("alice");
         let err = enforce_mailbox_owner_or_root("SEND", &c, "alice", &m).unwrap_err();
         assert_eq!(err.code, ErrCode::Eaccess);
+        // Wire reason is opaque — does not leak owner/mailbox identity.
+        assert_eq!(err.reason, "not authorized");
+        // Log keeps the rich diagnostic for the operator.
         assert!(logs_contain("decision=\"reject\""));
         assert!(logs_contain("caller_username=\"bob\""));
+        assert!(logs_contain("not the owner of mailbox"));
+    }
+
+    #[test]
+    fn enforce_mailbox_owner_or_root_wire_reason_does_not_leak_identity() {
+        let c = Caller::new(1002, 1002, None);
+        let _ = c.username_cache.set(Some("bob".to_string()));
+        let m = mb("alice");
+        let err = enforce_mailbox_owner_or_root("SEND", &c, "alice", &m).unwrap_err();
+        // The wire reason must not contain the caller name, the
+        // mailbox name, or the owner name.
+        assert!(
+            !err.reason.contains("alice"),
+            "leaked mailbox: {}",
+            err.reason
+        );
+        assert!(!err.reason.contains("bob"), "leaked caller: {}", err.reason);
+        assert!(
+            !err.reason.contains("owner"),
+            "leaked owner: {}",
+            err.reason
+        );
     }
 
     #[test]
@@ -500,7 +547,11 @@ mod tests {
         let _ = c.username_cache.set(Some("bob".to_string()));
         let err = enforce_root("MAILBOX-CREATE", &c, Some("alice")).unwrap_err();
         assert_eq!(err.code, ErrCode::Eaccess);
+        // Wire reason is opaque.
+        assert_eq!(err.reason, "not authorized");
         assert!(logs_contain("decision=\"reject\""));
         assert!(logs_contain("verb=\"MAILBOX-CREATE\""));
+        // Log keeps the rich diagnostic naming the caller.
+        assert!(logs_contain("caller uid 1002"));
     }
 }
