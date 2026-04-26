@@ -98,6 +98,7 @@ impl Caller {
     /// peer whose `getpwuid` lookup resolves to a known name without
     /// touching the host's user database.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn with_username(uid: u32, gid: u32, username: &str) -> Self {
         let c = Self::new(uid, gid, None);
         let _ = c.username_cache.set(Some(username.to_string()));

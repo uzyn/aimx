@@ -364,7 +364,7 @@ pub fn reload_config(
     let summary = ReloadSummary {
         mailboxes: new_config.mailboxes.len(),
         hooks: new_config.mailboxes.values().map(|mb| mb.hooks.len()).sum(),
-        templates: new_config.hook_templates.len(),
+        templates: 0,
     };
     handle.store(new_config);
     Ok(summary)
@@ -863,24 +863,6 @@ async fn handle_uds_connection_with_timeout(
                 Reply::Ack(
                     crate::hook_handler::handle_hook_delete(&state_ctx, &mb_ctx, &req, &caller)
                         .await,
-                ),
-                false,
-            ),
-            Ok(Ok(Request::TemplateCreate(req))) => (
-                Reply::Ack(
-                    crate::hook_handler::handle_template_create(&mb_ctx, &req, &caller).await,
-                ),
-                false,
-            ),
-            Ok(Ok(Request::TemplateUpdate(req))) => (
-                Reply::Ack(
-                    crate::hook_handler::handle_template_update(&mb_ctx, &req, &caller).await,
-                ),
-                false,
-            ),
-            Ok(Ok(Request::TemplateDelete(req))) => (
-                Reply::Ack(
-                    crate::hook_handler::handle_template_delete(&mb_ctx, &req, &caller).await,
                 ),
                 false,
             ),
@@ -1546,7 +1528,6 @@ mod tests {
                 dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
-                hook_templates: Vec::new(),
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
@@ -1857,7 +1838,6 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
-            hook_templates: Vec::new(),
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
@@ -2018,7 +1998,6 @@ mod tests {
                 dkim_selector: "aimx".to_string(),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
-                hook_templates: Vec::new(),
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
@@ -2296,8 +2275,8 @@ mod tests {
         assert_eq!(handle.load().mailboxes.len(), 2);
     }
 
-    /// A reload that fails validation (unknown template referenced by
-    /// a hook) leaves the handle alone.
+    /// A reload that fails validation (empty cmd on a hook) leaves the
+    /// handle alone.
     #[test]
     fn reload_config_keeps_old_on_validation_failure() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -2306,8 +2285,8 @@ mod tests {
         cfg.save(&path).unwrap();
         let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
 
-        // Write a config that parses but fails `validate_hooks`:
-        // references an unknown template.
+        // Write a config that parses but fails `validate_hooks`: a hook
+        // with an empty `cmd`.
         let bad = r#"
 domain = "example.com"
 dkim_selector = "aimx"
@@ -2323,14 +2302,14 @@ owner = "ops"
 
   [[mailboxes.alice.hooks]]
   event = "on_receive"
-  template = "no-such-template"
+  cmd = ""
   name = "bad"
 "#;
         std::fs::write(&path, bad).unwrap();
 
         let err = reload_config(&path, &handle).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("no-such-template"), "{msg}");
+        assert!(msg.contains("empty"), "{msg}");
         // Handle still has the original empty hook list.
         assert_eq!(handle.load().mailboxes["alice"].hooks.len(), 0);
     }

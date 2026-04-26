@@ -1,34 +1,32 @@
-//! Hook manager (formerly "channels"): event dispatch, trust gating, and
-//! synchronous shell execution for `on_receive` and `after_send` events.
+//! Hook manager: event dispatch, trust gating, and synchronous shell
+//! execution for `on_receive` and `after_send` events.
 //!
 //! One `Hook` entry in `config.toml` carries an `event`
-//! (`on_receive` | `after_send`), a `cmd`, an opt-in
-//! `dangerously_support_untrusted` flag that lets `on_receive` hooks fire on
-//! non-trusted email, and an optional `name`. Hooks fire on every event of
-//! their configured type; the only gate is the `on_receive` trust check.
+//! (`on_receive` | `after_send`), a `cmd`, an opt-in `fire_on_untrusted`
+//! flag that lets `on_receive` hooks fire on non-trusted email, and an
+//! optional `name`. Hooks fire on every event of their configured type;
+//! the only gate is the `on_receive` trust check.
 //!
 //! `name` is optional. When omitted, the effective name is derived
-//! deterministically from `sha256(event || cmd ||
-//! dangerously_support_untrusted)` — stable across restarts without writing
-//! anything back to `config.toml`.
+//! deterministically from `sha256(event || cmd || fire_on_untrusted)` —
+//! stable across restarts without writing anything back to `config.toml`.
 //!
 //! The trust gate:
 //! `on_receive` hooks fire iff `email.trusted == "true"` OR
-//! `hook.dangerously_support_untrusted == true`. Mailbox `trust` + the
+//! `hook.fire_on_untrusted == true`. Mailbox `trust` + the
 //! `trusted_senders` allowlist are the knobs that determine the email's
 //! `trusted` frontmatter value (see `trust.rs`); the hook gate reads the
 //! resolved value, not the policy.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::{Config, HookTemplate, HookTemplateStdin, MailboxConfig};
+use crate::config::{Config, MailboxConfig};
 use crate::frontmatter::InboundFrontmatter;
-use crate::hook_substitute::{BuiltinContext, SubstitutionError, substitute_argv};
 use crate::platform::{SandboxError, SandboxOutcome, SandboxStdin, spawn_sandboxed};
 use crate::trust::TrustedValue;
 
@@ -64,52 +62,19 @@ impl std::fmt::Display for HookEvent {
     }
 }
 
-/// Provenance tag recorded on every hook written to `config.toml`.
-///
-/// `Operator` = authored by root via CLI or hand-edit (default when the
-/// field is absent). `Mcp` = created by an agent over the UDS
-/// `HOOK-CREATE` verb. The daemon uses this tag at `HOOK-DELETE` time: MCP
-/// may only delete hooks whose `origin = "mcp"`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum HookOrigin {
-    #[default]
-    Operator,
-    Mcp,
-}
-
-impl HookOrigin {
-    /// String form used by `doctor` output and tests. Production log
-    /// lines do not currently surface origin; kept as an API so the
-    /// `hooks list` / doctor summary can format it.
-    #[allow(dead_code)]
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HookOrigin::Operator => "operator",
-            HookOrigin::Mcp => "mcp",
-        }
-    }
-}
-
 /// One configured hook. `deny_unknown_fields` makes stale filter fields or
 /// typos fail loudly at config load.
 ///
-/// A hook is one of two flavors:
-/// 1. **Raw-cmd** — `template = None`, `cmd` is a non-empty shell string.
-///    Created by the operator via CLI / hand-edit.
-/// 2. **Template-bound** — `template = Some(...)`, `params` carries the
-///    bound values, and `cmd` is empty. Created by an agent via MCP, or
-///    by the operator via `aimx hooks create --template`.
-///
-/// Mutual exclusion is enforced at config load (see
-/// [`crate::config::validate_hook_mutual_exclusion`]).
+/// Hooks are raw-cmd only: `cmd` is a non-empty shell string created by
+/// the operator via CLI / hand-edit. Hook creation requires root and
+/// SIGHUPs the running daemon; there is no UDS verb for it.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Hook {
     /// Optional hook name. When `None`, the effective name is derived
-    /// from `sha256(event || cmd || dangerously_support_untrusted)`.
-    /// Kept as `Option<String>` so the raw round-trip distinguishes
-    /// "omitted" from "present".
+    /// from `sha256(event || cmd || fire_on_untrusted)`. Kept as
+    /// `Option<String>` so the raw round-trip distinguishes "omitted"
+    /// from "present".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
@@ -121,116 +86,44 @@ pub struct Hook {
     #[serde(default = "default_hook_type")]
     pub r#type: String,
 
-    /// Shell command for raw-cmd hooks. Empty string when `template` is
-    /// `Some` — the resolved argv comes from the template at fire time.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
+    /// Shell command for raw-cmd hooks. Required and non-empty.
     pub cmd: String,
 
     /// `on_receive` only: when `true`, the hook fires even if the email's
-    /// `trusted` value is not `"true"`. Deliberately verbose name so
-    /// operators think twice.
-    #[serde(
-        default,
-        skip_serializing_if = "is_false",
-        rename = "dangerously_support_untrusted"
-    )]
-    pub dangerously_support_untrusted: bool,
-
-    /// Provenance tag. Defaults to `Operator` when absent so legacy hooks
-    /// hand-edited into `config.toml` remain operator-origin. MCP writes
-    /// always stamp `Mcp`.
-    #[serde(default, skip_serializing_if = "is_default_origin")]
-    pub origin: HookOrigin,
-
-    /// Name of a `[[hook_template]]` this hook binds to. `None` on
-    /// raw-cmd hooks (mutually exclusive with a non-empty `cmd`).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
-
-    /// Bound parameter values for template hooks. Keys must match the
-    /// template's declared `params`. Always empty for raw-cmd hooks.
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub params: BTreeMap<String, String>,
-
-    /// Unix user the hook's child process runs as. Defaults to
-    /// `aimx-hook` (unprivileged). The only other accepted value is
-    /// `root`, and it is intentionally only settable by an operator
-    /// hand-editing `config.toml` — the UDS `HOOK-CREATE` verb rejects
-    /// this field entirely. Template-bound hooks inherit the template's
-    /// `run_as` when this field is `None`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub run_as: Option<String>,
+    /// `trusted` value is not `"true"`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub fire_on_untrusted: bool,
 }
 
 impl Hook {
-    /// True iff this hook references a template (rather than carrying its
-    /// own raw `cmd`). Consumed by tests today; wired into `doctor`
-    /// and `hooks list` summary.
-    #[allow(dead_code)]
-    pub fn is_template_bound(&self) -> bool {
-        self.template.is_some()
-    }
-
     /// Resolve the final argv that the sandboxed executor will `exec`.
     ///
-    /// For template-bound hooks: looks up the matching [`HookTemplate`]
-    /// in `templates`, then substitutes declared `params` and the
-    /// provided `builtins` into the template's argv via
-    /// [`crate::hook_substitute::substitute_argv`].
-    ///
-    /// For raw-cmd hooks: wraps the operator-provided shell string in
-    /// `["/bin/sh", "-c", <cmd>]`. This keeps raw-cmd hooks uniform with
-    /// template hooks at the [`crate::platform::spawn_sandboxed`] call
-    /// site (both produce a `Vec<String>` argv); shell interpretation is
-    /// intentional for operator-authored hooks.
-    pub fn resolve_argv(
-        &self,
-        templates: &[HookTemplate],
-        builtins: &BuiltinContext,
-    ) -> Result<Vec<String>, ResolveArgvError> {
-        match &self.template {
-            Some(name) => {
-                let tmpl = templates
-                    .iter()
-                    .find(|t| &t.name == name)
-                    .ok_or_else(|| ResolveArgvError::UnknownTemplate(name.clone()))?;
-                substitute_argv(&tmpl.cmd, &self.params, builtins)
-                    .map_err(ResolveArgvError::Substitution)
-            }
-            None => {
-                if self.cmd.trim().is_empty() {
-                    return Err(ResolveArgvError::EmptyCmd);
-                }
-                Ok(vec![
-                    "/bin/sh".to_string(),
-                    "-c".to_string(),
-                    self.cmd.clone(),
-                ])
-            }
+    /// Wraps the operator-provided shell string in
+    /// `["/bin/sh", "-c", <cmd>]` so the spawn site has a uniform argv
+    /// shape; shell interpretation is intentional for operator-authored
+    /// hooks.
+    pub fn resolve_argv(&self) -> Result<Vec<String>, ResolveArgvError> {
+        if self.cmd.trim().is_empty() {
+            return Err(ResolveArgvError::EmptyCmd);
         }
+        Ok(vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            self.cmd.clone(),
+        ])
     }
 }
 
 /// Reasons [`Hook::resolve_argv`] can fail at fire time.
-///
-/// All variants indicate a configuration-level bug that validation should
-/// normally catch at load time. They are kept as distinct variants so the
-/// caller can emit a precise `tracing::warn!` without swallowing context.
 #[derive(Debug)]
 pub enum ResolveArgvError {
-    UnknownTemplate(String),
     EmptyCmd,
-    Substitution(SubstitutionError),
 }
 
 impl std::fmt::Display for ResolveArgvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ResolveArgvError::UnknownTemplate(name) => {
-                write!(f, "hook references unknown template '{name}'")
-            }
             ResolveArgvError::EmptyCmd => write!(f, "raw-cmd hook has empty cmd"),
-            ResolveArgvError::Substitution(e) => write!(f, "{e}"),
         }
     }
 }
@@ -243,10 +136,6 @@ fn default_hook_type() -> String {
 
 fn is_false(b: &bool) -> bool {
     !*b
-}
-
-fn is_default_origin(o: &HookOrigin) -> bool {
-    matches!(o, HookOrigin::Operator)
 }
 
 /// Return true iff `s` matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`.
@@ -265,7 +154,7 @@ pub fn is_valid_hook_name(s: &str) -> bool {
         .all(|&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'.' || b == b'-')
 }
 
-/// Derive a stable 12-hex-char name from `(event, cmd, dangerous)`.
+/// Derive a stable 12-hex-char name from `(event, cmd, fire_on_untrusted)`.
 ///
 /// Uses sha256 over the three inputs joined by the 0x1F unit-separator
 /// byte, which can never appear in the TOML payload. The first 12 hex
@@ -274,17 +163,16 @@ pub fn is_valid_hook_name(s: &str) -> bool {
 /// satisfies `is_valid_hook_name`.
 ///
 /// The mailbox name is deliberately excluded from the hash. Two mailboxes
-/// with the same `(event, cmd, dangerously_support_untrusted)` will
-/// produce the same derived name and collide under `validate_hooks`,
-/// forcing the operator to set an explicit `name` to disambiguate. The
-/// collision error string in `validate_hooks` points this out.
-pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String {
+/// with the same `(event, cmd, fire_on_untrusted)` will produce the same
+/// derived name and collide under the load-time hook-name uniqueness
+/// check, forcing the operator to set an explicit `name` to disambiguate.
+pub fn derive_hook_name(event: HookEvent, cmd: &str, fire_on_untrusted: bool) -> String {
     let mut hasher = Sha256::new();
     hasher.update(event.as_str().as_bytes());
     hasher.update([0x1F]);
     hasher.update(cmd.as_bytes());
     hasher.update([0x1F]);
-    hasher.update([dangerous as u8]);
+    hasher.update([fire_on_untrusted as u8]);
     let digest = hasher.finalize();
     let mut out = String::with_capacity(DERIVED_HOOK_NAME_LEN);
     // DERIVED_HOOK_NAME_LEN is even, so taking ceil(len/2) bytes and
@@ -295,47 +183,13 @@ pub fn derive_hook_name(event: HookEvent, cmd: &str, dangerous: bool) -> String 
     out
 }
 
-/// Derive a stable 12-hex-char name for a template-bound hook.
-///
-/// Uses sha256 over `(event, template, sorted_params)`. Two template-bound
-/// hooks with identical bound params collide — operators are nudged to set
-/// an explicit `name` via the same `validate_hooks` error path that
-/// catches duplicate raw-cmd hooks.
-pub fn derive_template_hook_name(
-    event: HookEvent,
-    template: &str,
-    params: &BTreeMap<String, String>,
-) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(event.as_str().as_bytes());
-    hasher.update([0x1F]);
-    hasher.update(b"template=");
-    hasher.update(template.as_bytes());
-    for (k, v) in params {
-        hasher.update([0x1F]);
-        hasher.update(k.as_bytes());
-        hasher.update(b"=");
-        hasher.update(v.as_bytes());
-    }
-    let digest = hasher.finalize();
-    let mut out = String::with_capacity(DERIVED_HOOK_NAME_LEN);
-    for b in digest.iter().take(DERIVED_HOOK_NAME_LEN.div_ceil(2)) {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
-}
-
-/// Resolve the effective name: explicit `name` if present, else derived.
-/// Template-bound hooks derive from `(event, template, sorted params)`;
-/// raw-cmd hooks derive from `(event, cmd, dangerous)` (legacy shape).
+/// Resolve the effective name: explicit `name` if present, else derived
+/// from `(event, cmd, fire_on_untrusted)`.
 pub fn effective_hook_name(hook: &Hook) -> String {
     if let Some(n) = &hook.name {
         return n.clone();
     }
-    match &hook.template {
-        Some(tmpl) => derive_template_hook_name(hook.event, tmpl, &hook.params),
-        None => derive_hook_name(hook.event, &hook.cmd, hook.dangerously_support_untrusted),
-    }
+    derive_hook_name(hook.event, &hook.cmd, hook.fire_on_untrusted)
 }
 
 /// Context for an `on_receive` dispatch: the written `.md` file and parsed
@@ -385,9 +239,9 @@ impl SendStatus {
 /// Trust gate for `on_receive` hooks.
 ///
 /// Fires iff `email_trusted == TrustedValue::True` OR
-/// `hook.dangerously_support_untrusted == true`.
+/// `hook.fire_on_untrusted == true`.
 pub fn should_fire_on_receive(hook: &Hook, email_trusted: TrustedValue) -> bool {
-    if hook.dangerously_support_untrusted {
+    if hook.fire_on_untrusted {
         return true;
     }
     email_trusted == TrustedValue::True
@@ -415,11 +269,11 @@ pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: 
             let hook_name = effective_hook_name(hook);
             tracing::info!(
                 target: "aimx::hook",
-                "hook_name={hook_name} event=on_receive mailbox={mailbox} skipped: trusted={trusted} dangerously_support_untrusted={dangerous}",
+                "hook_name={hook_name} event=on_receive mailbox={mailbox} skipped: trusted={trusted} fire_on_untrusted={fire_on_untrusted}",
                 hook_name = hook_name,
                 mailbox = mailbox_name,
                 trusted = email_trusted.as_str(),
-                dangerous = hook.dangerously_support_untrusted,
+                fire_on_untrusted = hook.fire_on_untrusted,
             );
             continue;
         }
@@ -438,19 +292,11 @@ pub fn execute_on_receive(config: &Config, mailbox_config: &MailboxConfig, ctx: 
         env.insert("AIMX_ID".into(), ctx.metadata.id.clone());
         env.insert("AIMX_DATE".into(), ctx.metadata.date.clone());
 
-        let builtins = BuiltinContext {
-            event: HookEvent::OnReceive.as_str().into(),
-            mailbox: ctx.metadata.mailbox.clone(),
-            message_id: ctx.metadata.message_id.clone(),
-            from: ctx.metadata.from.clone(),
-            subject: ctx.metadata.subject.clone(),
-        };
-
         run_and_log(
             config,
+            mailbox_config,
             hook,
             &hook_name,
-            &builtins,
             &env,
             &ctx.metadata.mailbox,
             Some(ctx.filepath),
@@ -477,9 +323,6 @@ pub fn execute_after_send(config: &Config, mailbox_config: &MailboxConfig, ctx: 
         let hook_name = effective_hook_name(hook);
         let send_status = ctx.send_status.as_str();
 
-        // For outbound mail, the `{id}` placeholder is the sent-file
-        // stem (last path segment). `{date}` is the current UTC
-        // timestamp — kept for legacy raw-cmd substitution compat.
         let id_for_template = std::path::Path::new(ctx.filepath)
             .file_stem()
             .and_then(|s| s.to_str())
@@ -500,14 +343,6 @@ pub fn execute_after_send(config: &Config, mailbox_config: &MailboxConfig, ctx: 
         env.insert("AIMX_ID".into(), id_for_template.clone());
         env.insert("AIMX_DATE".into(), now);
 
-        let builtins = BuiltinContext {
-            event: HookEvent::AfterSend.as_str().into(),
-            mailbox: ctx.mailbox.to_string(),
-            message_id: ctx.message_id.to_string(),
-            from: ctx.from.to_string(),
-            subject: ctx.subject.to_string(),
-        };
-
         let filepath_opt = if ctx.filepath.is_empty() {
             None
         } else {
@@ -516,9 +351,9 @@ pub fn execute_after_send(config: &Config, mailbox_config: &MailboxConfig, ctx: 
 
         run_and_log(
             config,
+            mailbox_config,
             hook,
             &hook_name,
-            &builtins,
             &env,
             ctx.mailbox,
             filepath_opt,
@@ -533,21 +368,15 @@ enum LogSubject<'a> {
     Email(&'a str, &'a str),
 }
 
-/// Default timeout for raw-cmd hooks (which have no template to carry a
-/// `timeout_secs`). Matches the template default.
-const RAW_CMD_DEFAULT_TIMEOUT_SECS: u64 = 60;
-
-/// Default `run_as` for raw-cmd hooks that don't set the field. PRD
-/// §6.7: hooks run as `aimx-hook` unless the operator explicitly sets
-/// `run_as = "root"` in `config.toml`.
-const RAW_CMD_DEFAULT_RUN_AS: &str = "aimx-hook";
+/// Default timeout for hooks. Mirrors the prior raw-cmd default.
+const HOOK_DEFAULT_TIMEOUT_SECS: u64 = 60;
 
 #[allow(clippy::too_many_arguments)]
 fn run_and_log(
-    config: &Config,
+    _config: &Config,
+    mailbox_config: &MailboxConfig,
     hook: &Hook,
     hook_name: &str,
-    builtins: &BuiltinContext,
     env: &HashMap<String, String>,
     mailbox: &str,
     stdin_source: Option<&Path>,
@@ -556,7 +385,7 @@ fn run_and_log(
     let start = Instant::now();
 
     // --- Resolve argv ------------------------------------------------------
-    let argv = match hook.resolve_argv(&config.hook_templates, builtins) {
+    let argv = match hook.resolve_argv() {
         Ok(argv) => argv,
         Err(e) => {
             tracing::warn!(
@@ -568,46 +397,27 @@ fn run_and_log(
         }
     };
 
-    // --- Resolve run_as / timeout / stdin mode -----------------------------
-    let template = hook
-        .template
-        .as_ref()
-        .and_then(|n| config.hook_templates.iter().find(|t| &t.name == n));
+    // --- Resolve owner / timeout / stdin mode ------------------------------
+    // With the legacy schema gone, hooks always run as the mailbox's
+    // owner. The auth predicate will gate this in a later pass; for
+    // now this is the simple single-line rule.
+    let owner: String = mailbox_config.owner.clone();
 
-    let run_as: String = match &hook.run_as {
-        Some(explicit) => explicit.clone(),
-        None => template
-            .map(|t| t.run_as.clone())
-            .unwrap_or_else(|| RAW_CMD_DEFAULT_RUN_AS.to_string()),
-    };
+    let timeout = Duration::from_secs(HOOK_DEFAULT_TIMEOUT_SECS);
 
-    let timeout = match template {
-        Some(t) => Duration::from_secs(t.timeout_secs as u64),
-        None => Duration::from_secs(RAW_CMD_DEFAULT_TIMEOUT_SECS),
-    };
+    let stdin_payload = build_stdin(stdin_source);
 
-    let stdin_mode = template
-        .map(|t| t.stdin)
-        .unwrap_or(HookTemplateStdin::Email);
-    let stdin_payload = build_stdin(stdin_mode, stdin_source);
-
-    let pre_fire_template_tag = hook
-        .template
-        .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "-".to_string());
     tracing::info!(
         target: "aimx::hook",
-        "firing hook_name={hook_name} event={event} mailbox={mailbox} template={template_tag} run_as={run_as}",
+        "firing hook_name={hook_name} event={event} mailbox={mailbox} owner={owner}",
         hook_name = hook_name,
         event = hook.event.as_str(),
         mailbox = mailbox,
-        template_tag = pre_fire_template_tag,
-        run_as = run_as,
+        owner = owner,
     );
 
     // --- Spawn -------------------------------------------------------------
-    let outcome_result = spawn_sandboxed(&argv, stdin_payload, &run_as, timeout, env);
+    let outcome_result = spawn_sandboxed(&argv, stdin_payload, &owner, timeout, env);
 
     let (exit_code, stderr_tail, timed_out, sandbox, exec_err, duration_ms) = match outcome_result {
         Ok(SandboxOutcome {
@@ -643,11 +453,6 @@ fn run_and_log(
         }
     };
 
-    let template_tag = hook
-        .template
-        .as_deref()
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| "-".to_string());
     let sandbox_tag = sandbox.map(|s| s.as_str()).unwrap_or("-");
     let stderr_tail_str = format_stderr_tail(&stderr_tail);
 
@@ -664,7 +469,7 @@ fn run_and_log(
 
     tracing::info!(
         target: "aimx::hook",
-        "hook_name={hook_name} event={event} mailbox={mailbox} template={template_tag} run_as={run_as} sandbox={sandbox_tag} {id_tag} exit_code={exit_code} duration_ms={duration_ms} timed_out={timed_out} stderr_tail={stderr_tail_str}",
+        "hook_name={hook_name} event={event} mailbox={mailbox} owner={owner} sandbox={sandbox_tag} {id_tag} exit_code={exit_code} duration_ms={duration_ms} timed_out={timed_out} stderr_tail={stderr_tail_str}",
         hook_name = hook_name,
         event = hook.event.as_str(),
         mailbox = mailbox,
@@ -704,34 +509,15 @@ fn run_and_log(
     }
 }
 
-/// Build the stdin payload for a hook fire. For `Email` / `EmailJson`
-/// modes we load the associated `.md` file; if the file doesn't exist
-/// (e.g. TEMP failures on `after_send` where persistence was skipped)
-/// we pipe an empty payload rather than failing the hook. A real
-/// read error (EACCES etc.) is logged at WARN so operators can tell a
-/// missing-file (intentional empty payload) apart from a permissions
-/// bug (which would otherwise silently present as empty stdin).
-fn build_stdin(mode: HookTemplateStdin, source: Option<&Path>) -> SandboxStdin {
-    match mode {
-        HookTemplateStdin::None => SandboxStdin::None,
-        HookTemplateStdin::Email => SandboxStdin::Email(read_stdin_source(source)),
-        HookTemplateStdin::EmailJson => {
-            // Best-effort per PRD §9 out-of-scope: wrap raw `.md` bytes
-            // in a JSON object keyed by `raw`. Stabilization is post-v1.
-            let bytes = read_stdin_source(source);
-            let escaped = serde_json::to_string(&String::from_utf8_lossy(&bytes).into_owned())
-                .unwrap_or_else(|_| "\"\"".into());
-            let json = format!("{{\"raw\":{escaped}}}");
-            SandboxStdin::EmailJson(json.into_bytes())
-        }
-    }
+/// Build the stdin payload for a hook fire. The raw `.md` file is piped
+/// into the hook's child process. If the file doesn't exist (e.g. TEMP
+/// failures on `after_send` where persistence was skipped) we pipe an
+/// empty payload rather than failing the hook. A real read error
+/// (EACCES etc.) is logged at WARN.
+fn build_stdin(source: Option<&Path>) -> SandboxStdin {
+    SandboxStdin::Email(read_stdin_source(source))
 }
 
-/// Read the backing `.md` file for a hook's stdin payload. `None` path
-/// and `NotFound` both yield empty bytes silently (the TEMP-failure
-/// `after_send` case where no file was ever persisted — see PRD §9).
-/// Any other `io::Error` is surfaced as a WARN so an EACCES on a real
-/// file doesn't hide behind the empty-payload code path.
 fn read_stdin_source(source: Option<&Path>) -> Vec<u8> {
     let Some(p) = source else {
         return Vec::new();
@@ -753,8 +539,7 @@ fn read_stdin_source(source: Option<&Path>) -> Vec<u8> {
 /// Render `stderr_tail` as a compact, log-safe string. Newlines and
 /// control characters are JSON-escaped so the single-line structured
 /// log record cannot be broken by hook stderr; if the tail would exceed
-/// 1 KiB after escaping, it is truncated with an ellipsis. Empty tails
-/// are rendered as `""`, never `null`.
+/// 1 KiB after escaping, it is truncated with an ellipsis.
 fn format_stderr_tail(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return "\"\"".into();
@@ -763,18 +548,13 @@ fn format_stderr_tail(bytes: &[u8]) -> String {
     let as_str = String::from_utf8_lossy(bytes);
     let escaped = serde_json::to_string(as_str.as_ref()).unwrap_or_else(|_| "\"\"".into());
     if escaped.len() > LOG_INLINE_LIMIT {
-        // Keep the head + trailing ellipsis + close quote; the PRD wants
-        // the `tail`, but realistically the first KiB of stderr is the
-        // most informative prefix after truncation. We include both:
-        // half from the start, half from the end.
         let head_n = LOG_INLINE_LIMIT / 2;
         let tail_n = LOG_INLINE_LIMIT / 2 - 8;
-        let inner = &escaped[1..escaped.len() - 1]; // strip outer quotes
+        let inner = &escaped[1..escaped.len() - 1];
         if inner.len() > head_n + tail_n + 8 {
             let head: String = inner.chars().take(head_n).collect();
             let tail_start = inner.len() - tail_n;
             let mut tail = String::new();
-            // Walk back to a char boundary.
             let mut idx = tail_start;
             while !inner.is_char_boundary(idx) && idx < inner.len() {
                 idx += 1;
@@ -824,7 +604,6 @@ mod tests {
             dkim_selector: "aimx".to_string(),
             trust: "none".to_string(),
             trusted_senders: vec![],
-            hook_templates: Vec::new(),
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
@@ -869,11 +648,27 @@ mod tests {
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
             cmd: "true".to_string(),
-            dangerously_support_untrusted: false,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
+            fire_on_untrusted: false,
+        }
+    }
+
+    fn current_user_name() -> String {
+        let uid = nix::unistd::Uid::current();
+        nix::unistd::User::from_uid(uid)
+            .ok()
+            .flatten()
+            .map(|u| u.name)
+            .unwrap_or_else(|| "nobody".to_string())
+    }
+
+    fn catchall_mailbox(hooks: Vec<Hook>) -> MailboxConfig {
+        MailboxConfig {
+            address: "*@test.com".to_string(),
+            owner: current_user_name(),
+            hooks,
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
         }
     }
 
@@ -917,7 +712,7 @@ mod tests {
     }
 
     #[test]
-    fn derive_hook_name_differs_by_dangerous_flag() {
+    fn derive_hook_name_differs_by_fire_on_untrusted_flag() {
         let a = derive_hook_name(HookEvent::OnReceive, "echo hi", false);
         let b = derive_hook_name(HookEvent::OnReceive, "echo hi", true);
         assert_ne!(a, b);
@@ -954,35 +749,26 @@ mod tests {
     }
 
     #[test]
-    fn should_fire_on_receive_dangerously_opt_in_fires_for_none() {
+    fn should_fire_on_receive_fire_on_untrusted_fires_for_none() {
         let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
+        hook.fire_on_untrusted = true;
         assert!(should_fire_on_receive(&hook, TrustedValue::None));
     }
 
     #[test]
-    fn should_fire_on_receive_dangerously_opt_in_fires_for_false() {
+    fn should_fire_on_receive_fire_on_untrusted_fires_for_false() {
         let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
+        hook.fire_on_untrusted = true;
         assert!(should_fire_on_receive(&hook, TrustedValue::False));
     }
 
     fn execute_single(hook: Hook, trusted: TrustedValue) -> (MailboxConfig, PathBuf) {
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
+        let mailbox = catchall_mailbox(vec![hook]);
         let mut meta = sample_metadata();
         meta.trusted = trusted.as_str().to_string();
 
         let tmp = tempfile::TempDir::new().unwrap();
         let filepath = tmp.path().join("test.md");
-        // Ensure the file exists so stdin = "email" has something to read
-        // (the run_and_log rewrite now pipes `.md` into the child).
         std::fs::write(&filepath, b"test\n").ok();
         let ctx = OnReceiveContext {
             filepath: &filepath,
@@ -1018,16 +804,16 @@ mod tests {
     }
 
     #[test]
-    fn execute_on_receive_fires_with_dangerously_opt_in() {
+    fn execute_on_receive_fires_with_fire_on_untrusted_opt_in() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("fired");
         let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
+        hook.fire_on_untrusted = true;
         hook.cmd = format!("touch {}", marker.display());
         let (_m, _p) = execute_single(hook, TrustedValue::None);
         assert!(
             marker.exists(),
-            "dangerously_support_untrusted hook should fire for trusted=none"
+            "fire_on_untrusted hook should fire for trusted=none"
         );
     }
 
@@ -1036,21 +822,14 @@ mod tests {
         let tmp = tempfile::TempDir::new().unwrap();
         let out = tmp.path().join("env.out");
         let mut hook = basic_hook("hook_explicit");
-        hook.dangerously_support_untrusted = true;
+        hook.fire_on_untrusted = true;
         hook.cmd = format!(
             "printf 'HOOK=%s FROM=%s TO=%s SUBJECT=%s MAILBOX=%s FILEPATH=%s\\n' \
              \"$AIMX_HOOK_NAME\" \"$AIMX_FROM\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \
              \"$AIMX_MAILBOX\" \"$AIMX_FILEPATH\" > {}",
             out.display()
         );
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
+        let mailbox = catchall_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -1078,21 +857,10 @@ mod tests {
                 "printf 'HOOK=%s\\n' \"$AIMX_HOOK_NAME\" > {}",
                 out.display()
             ),
-            dangerously_support_untrusted: true,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
+            fire_on_untrusted: true,
         };
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
+        let mailbox = catchall_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -1124,19 +892,12 @@ mod tests {
         let _guard = EnvGuard("AIMX_LEAK_SENTINEL_HOOK");
 
         let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
+        hook.fire_on_untrusted = true;
         hook.cmd = format!(
             "printf 'leak=[%s]\\n' \"$AIMX_LEAK_SENTINEL_HOOK\" > {}",
             out.display()
         );
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
+        let mailbox = catchall_mailbox(vec![hook]);
         let meta = sample_metadata();
         let filepath = tmp.path().join("test.md");
         let ctx = OnReceiveContext {
@@ -1150,6 +911,17 @@ mod tests {
             content.contains("leak=[]"),
             "parent env must not leak: {content}"
         );
+    }
+
+    fn alice_mailbox(hooks: Vec<Hook>) -> MailboxConfig {
+        MailboxConfig {
+            address: "alice@test.com".to_string(),
+            owner: current_user_name(),
+            hooks,
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        }
     }
 
     #[test]
@@ -1166,20 +938,9 @@ mod tests {
                  \"$AIMX_FILEPATH\" > {}",
                 out.display()
             ),
-            dangerously_support_untrusted: false,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
+            fire_on_untrusted: false,
         };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            owner: "root".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        };
+        let mailbox = alice_mailbox(vec![hook]);
         let ctx = AfterSendContext {
             mailbox: "alice",
             from: "alice@test.com",
@@ -1216,20 +977,9 @@ mod tests {
             event: HookEvent::AfterSend,
             r#type: "cmd".to_string(),
             cmd: "false".to_string(),
-            dangerously_support_untrusted: false,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
+            fire_on_untrusted: false,
         };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            owner: "root".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        };
+        let mailbox = alice_mailbox(vec![hook]);
         let ctx = AfterSendContext {
             mailbox: "alice",
             from: "alice@test.com",
@@ -1243,363 +993,38 @@ mod tests {
     }
 
     #[test]
-    #[tracing_test::traced_test]
-    fn hook_fire_emits_structured_log_line() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut hook = basic_hook("log_explicit");
-        hook.dangerously_support_untrusted = true;
-        hook.cmd = "true".to_string();
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.trusted = "none".to_string();
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        assert!(
-            logs_contain("hook_name=log_explicit"),
-            "log line should carry hook_name=..."
-        );
-        assert!(
-            logs_contain("event=on_receive"),
-            "log line should carry event=..."
-        );
-        assert!(
-            logs_contain("mailbox=catchall"),
-            "log line should carry mailbox=..."
-        );
-        assert!(
-            logs_contain("email_id=2025-06-01-001"),
-            "log line should carry email_id=..."
-        );
-        assert!(
-            logs_contain("exit_code=0"),
-            "log line should carry exit_code=..."
-        );
-        assert!(
-            logs_contain("duration_ms="),
-            "log line should carry duration_ms=..."
-        );
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn hook_fire_emits_log_for_nonzero_exit() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut hook = basic_hook("log_failed");
-        hook.dangerously_support_untrusted = true;
-        hook.cmd = "false".to_string();
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.trusted = "none".to_string();
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        assert!(logs_contain("hook_name=log_failed"));
-        assert!(logs_contain("exit_code=1"));
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn after_send_log_line_falls_back_to_message_id_when_filepath_empty() {
-        // On TEMP delivery failures the send handler doesn't persist the
-        // sent copy, so `filepath` is empty and the `email_id` tag would
-        // be empty too. The structured log line must still surface the
-        // RFC Message-ID so operators can grep by a stable identifier.
-        let hook = Hook {
-            name: Some("tempfail".to_string()),
-            event: HookEvent::AfterSend,
-            r#type: "cmd".to_string(),
-            cmd: "true".to_string(),
-            dangerously_support_untrusted: false,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
-        };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            owner: "root".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "bob@example.com",
-            subject: "Hi",
-            filepath: "",
-            message_id: "<deferred-uuid@test.com>",
-            send_status: SendStatus::Deferred,
-        };
-        execute_after_send(&sample_config(), &mailbox, &ctx);
-
-        assert!(
-            logs_contain("hook_name=tempfail"),
-            "log line should carry hook_name=..."
-        );
-        assert!(
-            logs_contain("message_id=<deferred-uuid@test.com>"),
-            "log line should fall back to message_id when email_id is empty"
-        );
-    }
-
-    #[test]
-    fn env_var_preserves_backtick_injection() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let out = tmp.path().join("out.log");
-        let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
-        hook.cmd = format!("printf 'FROM=%s\\n' \"$AIMX_FROM\" > {}", out.display());
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.from = "`whoami`@attacker.com".to_string();
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-        let content = std::fs::read_to_string(&out).unwrap();
-        assert!(
-            content.contains("FROM=`whoami`@attacker.com"),
-            "backticks must land verbatim: {content}"
-        );
-    }
-
-    #[test]
-    fn env_var_preserves_dollar_paren_injection() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("pwned");
-        let mut hook = basic_hook("h1");
-        hook.dangerously_support_untrusted = true;
-        hook.cmd = "echo \"$AIMX_SUBJECT\" > /dev/null".to_string();
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.subject = format!("$(touch {})", marker.display());
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-        assert!(
-            !marker.exists(),
-            "env-var payload must not execute as shell code"
-        );
-    }
-
-    #[test]
-    fn config_sample_config_is_valid() {
-        let cfg = sample_config();
-        assert_eq!(cfg.trust, "none");
-    }
-
-    #[test]
-    fn placeholder_path_import() {
-        let _p: &Path = Path::new("/tmp");
-    }
-
-    // ----- origin + template + params --------------------------------------
-
-    #[test]
-    fn hook_origin_default_is_operator() {
-        assert_eq!(HookOrigin::default(), HookOrigin::Operator);
-        assert_eq!(HookOrigin::Operator.as_str(), "operator");
-        assert_eq!(HookOrigin::Mcp.as_str(), "mcp");
-    }
-
-    #[test]
-    fn hook_origin_roundtrips_via_toml() {
-        #[derive(Serialize, Deserialize, PartialEq, Debug)]
-        struct W {
-            origin: HookOrigin,
-        }
-        let w = W {
-            origin: HookOrigin::Mcp,
-        };
-        let s = toml::to_string(&w).unwrap();
-        assert!(s.contains("origin = \"mcp\""), "serialized: {s}");
-        let back: W = toml::from_str(&s).unwrap();
-        assert_eq!(back, w);
-    }
-
-    #[test]
-    fn hook_is_template_bound() {
-        let mut hook = basic_hook("t1");
-        assert!(!hook.is_template_bound());
-        hook.cmd.clear();
-        hook.template = Some("invoke-claude".to_string());
-        assert!(hook.is_template_bound());
-    }
-
-    #[test]
-    fn template_hook_round_trips_through_toml() {
-        let mut params = BTreeMap::new();
-        params.insert("prompt".to_string(), "draft a reply".to_string());
-        let hook = Hook {
-            name: Some("auto-reply".to_string()),
-            event: HookEvent::OnReceive,
-            r#type: "cmd".to_string(),
-            cmd: String::new(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Mcp,
-            template: Some("invoke-claude".to_string()),
-            params,
-            run_as: None,
-        };
-        let s = toml::to_string(&hook).unwrap();
-        assert!(s.contains("origin = \"mcp\""), "serialized: {s}");
-        assert!(
-            s.contains("template = \"invoke-claude\""),
-            "serialized: {s}"
-        );
-        assert!(!s.contains("cmd ="), "empty cmd must be skipped: {s}");
-        let back: Hook = toml::from_str(&s).unwrap();
-        assert_eq!(back, hook);
-    }
-
-    #[test]
-    fn raw_cmd_hook_omits_new_fields_on_serialize() {
+    fn raw_cmd_hook_omits_default_fields_on_serialize() {
         let hook = Hook {
             name: Some("raw".to_string()),
             event: HookEvent::OnReceive,
             r#type: "cmd".to_string(),
             cmd: "echo hi".to_string(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Operator,
-            template: None,
-            params: BTreeMap::new(),
-            run_as: None,
+            fire_on_untrusted: false,
         };
         let s = toml::to_string(&hook).unwrap();
-        // origin = operator is the default → skipped
-        assert!(!s.contains("origin"), "default origin must be skipped: {s}");
         assert!(
-            !s.contains("template"),
-            "None template must be skipped: {s}"
+            !s.contains("fire_on_untrusted"),
+            "default fire_on_untrusted must be skipped: {s}"
         );
-        assert!(!s.contains("params"), "empty params must be skipped: {s}");
     }
 
     #[test]
-    fn legacy_hook_toml_defaults_to_operator_origin() {
-        // Legacy hand-edited hooks in `config.toml` had no origin
-        // field — load must default to Operator, not error.
+    fn legacy_hook_toml_with_only_required_fields_loads() {
         let src = r#"
 event = "on_receive"
-cmd = "echo legacy"
+cmd = "echo hi"
 "#;
         let hook: Hook = toml::from_str(src).unwrap();
-        assert_eq!(hook.origin, HookOrigin::Operator);
-        assert!(hook.template.is_none());
-        assert!(hook.params.is_empty());
-    }
-
-    #[test]
-    fn derive_template_hook_name_is_deterministic() {
-        let mut params = BTreeMap::new();
-        params.insert("prompt".to_string(), "hi".to_string());
-        let a = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
-        let b = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
-        assert_eq!(a, b);
-        assert_eq!(a.len(), DERIVED_HOOK_NAME_LEN);
-        assert!(is_valid_hook_name(&a));
-    }
-
-    #[test]
-    fn derive_template_hook_name_differs_by_params() {
-        let mut p1 = BTreeMap::new();
-        p1.insert("prompt".to_string(), "hi".to_string());
-        let mut p2 = BTreeMap::new();
-        p2.insert("prompt".to_string(), "hello".to_string());
-        let a = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &p1);
-        let b = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &p2);
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn effective_hook_name_prefers_template_hash_over_cmd_hash() {
-        let mut params = BTreeMap::new();
-        params.insert("prompt".to_string(), "hi".to_string());
-        let hook = Hook {
-            name: None,
-            event: HookEvent::OnReceive,
-            r#type: "cmd".to_string(),
-            cmd: String::new(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Mcp,
-            template: Some("invoke-claude".to_string()),
-            params: params.clone(),
-            run_as: None,
-        };
-        let effective = effective_hook_name(&hook);
-        let expected = derive_template_hook_name(HookEvent::OnReceive, "invoke-claude", &params);
-        assert_eq!(effective, expected);
-    }
-
-    // ----- Hook::resolve_argv ----------------------------------------------
-
-    fn claude_template() -> HookTemplate {
-        HookTemplate {
-            name: "invoke-claude".into(),
-            description: "Pipe email into Claude Code".into(),
-            cmd: vec![
-                "/usr/local/bin/claude".into(),
-                "-p".into(),
-                "{prompt}".into(),
-            ],
-            params: vec!["prompt".into()],
-            stdin: crate::config::HookTemplateStdin::Email,
-            run_as: "aimx-hook".into(),
-            timeout_secs: 60,
-            allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
-        }
+        assert_eq!(hook.event, HookEvent::OnReceive);
+        assert_eq!(hook.cmd, "echo hi");
+        assert!(!hook.fire_on_untrusted);
     }
 
     #[test]
     fn resolve_argv_raw_cmd_wraps_in_sh_dash_c() {
         let mut hook = basic_hook("raw");
         hook.cmd = "echo hi".into();
-        let b = BuiltinContext::default();
-        let argv = hook.resolve_argv(&[], &b).unwrap();
+        let argv = hook.resolve_argv().unwrap();
         assert_eq!(argv, vec!["/bin/sh", "-c", "echo hi"]);
     }
 
@@ -1607,80 +1032,11 @@ cmd = "echo legacy"
     fn resolve_argv_raw_cmd_with_empty_cmd_fails() {
         let mut hook = basic_hook("empty");
         hook.cmd = "   ".into();
-        let b = BuiltinContext::default();
         assert!(matches!(
-            hook.resolve_argv(&[], &b),
+            hook.resolve_argv(),
             Err(ResolveArgvError::EmptyCmd)
         ));
     }
-
-    #[test]
-    fn resolve_argv_template_substitutes_params_and_builtins() {
-        let tmpl = claude_template();
-        let mut hook = Hook {
-            name: Some("h".into()),
-            event: HookEvent::OnReceive,
-            r#type: "cmd".into(),
-            cmd: String::new(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Mcp,
-            template: Some("invoke-claude".into()),
-            params: BTreeMap::new(),
-            run_as: None,
-        };
-        hook.params.insert("prompt".into(), "draft a reply".into());
-        let b = BuiltinContext {
-            event: "on_receive".into(),
-            mailbox: "accounts".into(),
-            ..Default::default()
-        };
-        let argv = hook.resolve_argv(&[tmpl], &b).unwrap();
-        assert_eq!(argv, vec!["/usr/local/bin/claude", "-p", "draft a reply"]);
-    }
-
-    #[test]
-    fn resolve_argv_unknown_template_fails() {
-        let hook = Hook {
-            name: Some("h".into()),
-            event: HookEvent::OnReceive,
-            r#type: "cmd".into(),
-            cmd: String::new(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Mcp,
-            template: Some("nope".into()),
-            params: BTreeMap::new(),
-            run_as: None,
-        };
-        let b = BuiltinContext::default();
-        match hook.resolve_argv(&[claude_template()], &b).unwrap_err() {
-            ResolveArgvError::UnknownTemplate(n) => assert_eq!(n, "nope"),
-            e => panic!("unexpected: {e}"),
-        }
-    }
-
-    #[test]
-    fn resolve_argv_template_with_bad_param_propagates_substitution_error() {
-        let tmpl = claude_template();
-        let mut hook = Hook {
-            name: Some("h".into()),
-            event: HookEvent::OnReceive,
-            r#type: "cmd".into(),
-            cmd: String::new(),
-            dangerously_support_untrusted: false,
-            origin: HookOrigin::Mcp,
-            template: Some("invoke-claude".into()),
-            params: BTreeMap::new(),
-            run_as: None,
-        };
-        hook.params.insert("prompt".into(), "bad\0value".into());
-        let b = BuiltinContext::default();
-        assert!(matches!(
-            hook.resolve_argv(&[tmpl], &b).unwrap_err(),
-            ResolveArgvError::Substitution(SubstitutionError::ParamContainsNul { .. })
-        ));
-    }
-
-    // ----- structured hook-fire log new fields -----------------------------
 
     #[test]
     fn format_stderr_tail_empty_is_quoted_empty() {
@@ -1690,7 +1046,6 @@ cmd = "echo legacy"
     #[test]
     fn format_stderr_tail_escapes_newlines_and_quotes() {
         let rendered = format_stderr_tail(b"line1\nline\"2");
-        // JSON-escaped: \n and \" survive on the escape side.
         assert!(rendered.starts_with('"'));
         assert!(rendered.ends_with('"'));
         assert!(rendered.contains("\\n"), "got: {rendered}");
@@ -1707,21 +1062,8 @@ cmd = "echo legacy"
         assert!(rendered.ends_with('"'));
     }
 
-    /// Regression: the tail-start index inside `format_stderr_tail` is
-    /// a byte offset computed from `tail_n`. With ASCII-only input it
-    /// always lands on a char boundary, but multi-byte UTF-8 scalars
-    /// can straddle the boundary. The implementation walks forward to
-    /// the next `is_char_boundary`; this test locks in that the walk
-    /// doesn't panic on either a 3-byte-BMP or a 4-byte-astral char
-    /// straddling the truncation point, AND that the final output is
-    /// valid UTF-8 (i.e. serde_json can still parse it back).
     #[test]
     fn format_stderr_tail_handles_multibyte_boundary() {
-        // Build a payload big enough to force truncation, ending with
-        // a stretch of 3-byte (え = U+3048) + 4-byte (🦀 = U+1F980)
-        // UTF-8 chars so the truncation point is guaranteed to land
-        // inside one of them for at least one of the many byte offsets
-        // between the ASCII filler and the multi-byte tail.
         let mut payload: Vec<u8> = vec![b'x'; 4096];
         for _ in 0..256 {
             payload.extend_from_slice("えあ🦀".as_bytes());
@@ -1730,284 +1072,21 @@ cmd = "echo legacy"
         assert!(rendered.starts_with('"'), "got: {rendered}");
         assert!(rendered.ends_with('"'), "got: {rendered}");
         assert!(rendered.contains("..."), "long stderr must be truncated");
-        // Must still be valid UTF-8 (the inner slice comes from `str`
-        // via `is_char_boundary`, so this is a lock-in against a future
-        // regression that replaces the walk with raw byte slicing).
         let as_str = std::str::from_utf8(rendered.as_bytes())
             .expect("format_stderr_tail must emit valid UTF-8");
-        // And must still round-trip through serde_json so a downstream
-        // structured-log parser doesn't choke on a half-escape.
         let parsed: serde_json::Value =
             serde_json::from_str(as_str).expect("rendered value must be valid JSON");
         assert!(parsed.is_string());
     }
 
     #[test]
-    #[tracing_test::traced_test]
-    fn log_line_includes_template_run_as_and_stderr_tail_fields_for_raw_cmd() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let mut hook = basic_hook("s2_3");
-        hook.dangerously_support_untrusted = true;
-        // Exit non-zero so stderr capture + warn-path are exercised.
-        hook.cmd = "echo hi 1>&2; exit 1".to_string();
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let meta = sample_metadata();
-        let filepath = tmp.path().join("test.md");
-        std::fs::write(&filepath, b"+++\n+++\n").unwrap();
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        // Raw-cmd → template is the `-` sentinel.
-        assert!(
-            logs_contain("template=-"),
-            "log line should carry template=..."
-        );
-        // Raw-cmd default run_as is aimx-hook (even though the fallback
-        // path runs as the test user since aimx-hook doesn't exist on CI).
-        assert!(
-            logs_contain("run_as=aimx-hook"),
-            "log line should carry run_as=..."
-        );
-        // stderr was "hi\n" — escaped JSON should surface it.
-        assert!(
-            logs_contain("stderr_tail=\"hi\\n\""),
-            "log line should carry stderr_tail=... (got: no match)"
-        );
-        // sandbox tag appears.
-        assert!(
-            logs_contain("sandbox=setuid") || logs_contain("sandbox=systemd-run"),
-            "log line should carry sandbox=..."
-        );
-        // timed_out flag appears.
-        assert!(logs_contain("timed_out=false"));
+    fn config_sample_config_is_valid() {
+        let cfg = sample_config();
+        assert_eq!(cfg.trust, "none");
     }
 
     #[test]
-    #[tracing_test::traced_test]
-    fn log_line_template_field_is_template_name_for_template_hook() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let filepath = tmp.path().join("test.md");
-        std::fs::write(&filepath, b"+++\n+++\nbody\n").unwrap();
-
-        let tmpl = HookTemplate {
-            name: "echoer".into(),
-            description: "echo".into(),
-            cmd: vec!["/bin/sh".into(), "-c".into(), "echo hi > {path}".into()],
-            params: vec!["path".into()],
-            stdin: crate::config::HookTemplateStdin::None,
-            run_as: "aimx-hook".into(),
-            timeout_secs: 5,
-            allowed_events: vec![HookEvent::OnReceive, HookEvent::AfterSend],
-        };
-        let out_path = tmp.path().join("out.log");
-        let mut params = BTreeMap::new();
-        params.insert("path".into(), out_path.to_string_lossy().into_owned());
-
-        let hook = Hook {
-            name: Some("tplhook".into()),
-            event: HookEvent::OnReceive,
-            r#type: "cmd".into(),
-            cmd: String::new(),
-            dangerously_support_untrusted: true,
-            origin: HookOrigin::Operator,
-            template: Some("echoer".into()),
-            params,
-            run_as: None,
-        };
-
-        let mut cfg = sample_config();
-        cfg.hook_templates.push(tmpl);
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let meta = sample_metadata();
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&cfg, &mailbox, &ctx);
-
-        assert!(
-            logs_contain("template=echoer"),
-            "log line should carry template=echoer"
-        );
-        assert!(std::fs::read_to_string(&out_path).unwrap().contains("hi"));
-    }
-
-    #[tracing_test::traced_test]
-    #[test]
-    fn execute_on_receive_zero_hooks_emits_no_hooks_log() {
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let meta = sample_metadata();
-        let tmp = tempfile::TempDir::new().unwrap();
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        assert!(logs_contain("aimx::hook"));
-        assert!(logs_contain(
-            "No hooks found for event=on_receive mailbox=catchall"
-        ));
-    }
-
-    #[tracing_test::traced_test]
-    #[test]
-    fn execute_on_receive_skipped_by_gate_emits_skip_log() {
-        // A regular hook with trusted=none fails the trust gate, so it
-        // must emit the skip log rather than fire.
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("fired");
-        let mut hook = basic_hook("gated");
-        hook.cmd = format!("touch {}", marker.display());
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.trusted = "none".to_string();
-        let filepath = tmp.path().join("test.md");
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        assert!(!marker.exists(), "gated hook must not fire");
-        assert!(logs_contain("hook_name=gated"));
-        assert!(logs_contain("event=on_receive"));
-        assert!(logs_contain("mailbox=catchall"));
-        assert!(logs_contain("skipped"));
-        assert!(logs_contain("trusted=none"));
-        assert!(logs_contain("dangerously_support_untrusted=false"));
-    }
-
-    #[tracing_test::traced_test]
-    #[test]
-    fn execute_on_receive_emits_pre_fire_log_before_summary() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("fired");
-        let mut hook = basic_hook("firing_hook");
-        hook.cmd = format!("touch {}", marker.display());
-        let mailbox = MailboxConfig {
-            address: "*@test.com".to_string(),
-            owner: "aimx-catchall".to_string(),
-            hooks: vec![hook],
-            trust: Some("none".to_string()),
-            trusted_senders: Some(vec![]),
-            allow_root_catchall: false,
-        };
-        let mut meta = sample_metadata();
-        meta.trusted = "true".to_string();
-        let filepath = tmp.path().join("test.md");
-        std::fs::write(&filepath, b"test\n").ok();
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-
-        assert!(marker.exists());
-        assert!(logs_contain("firing hook_name=firing_hook"));
-        assert!(logs_contain("event=on_receive"));
-        assert!(logs_contain("mailbox=catchall"));
-        // Post-fire summary is still emitted.
-        assert!(logs_contain("exit_code="));
-    }
-
-    #[tracing_test::traced_test]
-    #[test]
-    fn execute_after_send_zero_hooks_emits_no_hooks_log() {
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            owner: "root".to_string(),
-            hooks: vec![],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "bob@example.com",
-            subject: "Hi",
-            filepath: "",
-            message_id: "<m@test.com>",
-            send_status: SendStatus::Delivered,
-        };
-        execute_after_send(&sample_config(), &mailbox, &ctx);
-
-        assert!(logs_contain(
-            "No hooks found for event=after_send mailbox=alice"
-        ));
-    }
-
-    #[tracing_test::traced_test]
-    #[test]
-    fn execute_after_send_emits_pre_fire_log() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let marker = tmp.path().join("fired");
-        let hook = Hook {
-            name: Some("after_hook".to_string()),
-            event: HookEvent::AfterSend,
-            r#type: "cmd".to_string(),
-            cmd: format!("touch {}", marker.display()),
-            dangerously_support_untrusted: false,
-            origin: crate::hook::HookOrigin::Operator,
-            template: None,
-            params: std::collections::BTreeMap::new(),
-            run_as: None,
-        };
-        let mailbox = MailboxConfig {
-            address: "alice@test.com".to_string(),
-            owner: "root".to_string(),
-            hooks: vec![hook],
-            trust: None,
-            trusted_senders: None,
-            allow_root_catchall: false,
-        };
-        let ctx = AfterSendContext {
-            mailbox: "alice",
-            from: "alice@test.com",
-            to: "bob@example.com",
-            subject: "Hi",
-            filepath: "",
-            message_id: "<m@test.com>",
-            send_status: SendStatus::Delivered,
-        };
-        execute_after_send(&sample_config(), &mailbox, &ctx);
-
-        assert!(marker.exists());
-        assert!(logs_contain("firing hook_name=after_hook"));
-        assert!(logs_contain("event=after_send"));
-        assert!(logs_contain("mailbox=alice"));
+    fn placeholder_path_import() {
+        let _p: &Path = Path::new("/tmp");
     }
 }

@@ -1,9 +1,8 @@
 //! `aimx agents remove <agent>`: per-user inverse of `aimx agents setup`.
 //!
 //! Removes the plugin files under `$HOME` that `agents setup` laid
-//! down, drops the matching `invoke-<agent>-<username>` template over
-//! the daemon UDS, and prints a per-agent cleanup hint pointing at any
-//! external command the operator still needs to run (for example
+//! down and prints a per-agent cleanup hint pointing at any external
+//! command the operator still needs to run (for example
 //! `claude mcp remove aimx`).
 //!
 //! Refuses to run as root by default. The same `--dangerously-allow-root`
@@ -19,12 +18,6 @@ use crate::agents_setup::{
 use std::io::{self, Write};
 use std::path::PathBuf;
 
-/// Exit code emitted when the daemon was unreachable. Mirrors
-/// `aimx agents setup` / `aimx agents remove`'s socket-missing exit
-/// code so operators can script both commands against the same non-zero
-/// return.
-const EXIT_DAEMON_UNREACHABLE: i32 = 2;
-
 /// CLI options for one `aimx agents remove` invocation.
 pub struct RunOpts {
     pub agent: String,
@@ -34,19 +27,13 @@ pub struct RunOpts {
 /// Entry point called from `main.rs`.
 pub fn run(opts: RunOpts) -> Result<(), Box<dyn std::error::Error>> {
     let env = RealAgentEnv;
-    let outcome = run_with_env(opts, &env, &mut io::stdout())?;
-    match outcome {
-        agents_cleanup::CleanupOutcome::Ok => Ok(()),
-        agents_cleanup::CleanupOutcome::DaemonUnreachable => {
-            std::process::exit(EXIT_DAEMON_UNREACHABLE)
-        }
-    }
+    run_with_env(opts, &env, &mut io::stdout())?;
+    Ok(())
 }
 
 /// Testable core of [`run`]. Removes plugin files unconditionally
-/// (no per-agent file-vs-directory prompt), submits the
-/// `TEMPLATE-DELETE` over UDS via [`agents_cleanup::run_with_env`], then
-/// prints the per-agent cleanup hint via [`removal_hint`].
+/// (no per-agent file-vs-directory prompt), then prints the per-agent
+/// cleanup hint via [`removal_hint`].
 pub(crate) fn run_with_env(
     opts: RunOpts,
     env: &dyn AgentEnv,
@@ -84,14 +71,12 @@ fn do_remove(
     out: &mut dyn Write,
 ) -> Result<agents_cleanup::CleanupOutcome, Box<dyn std::error::Error>> {
     // Resolve the removal target up front so we can report whether the
-    // wiring actually existed before the daemon call.
+    // wiring actually existed before the cleanup ran.
     let dest_root = resolve_dest(spec.dest_template, env)?;
     let (target_desc, removal_target) = plugin_removal_target(spec, &dest_root);
     let pre_existed = removal_target.exists();
 
     // Delegate to the existing cleanup core in `--full --yes` mode.
-    // It removes plugin files and submits TEMPLATE-DELETE in one
-    // pass, with the same warning + non-zero exit on daemon-down.
     let cleanup_opts = agents_cleanup::RunOpts {
         agent: spec.name.to_string(),
         full: true,
@@ -178,33 +163,11 @@ impl<'a> AgentEnv for MaskRootEnv<'a> {
     fn caller_username(&self) -> Option<String> {
         self.inner.caller_username()
     }
-    fn submit_template_create(
-        &self,
-        request: &crate::send_protocol::TemplateCreateRequest,
-    ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
-        self.inner.submit_template_create(request)
-    }
-    fn submit_template_update(
-        &self,
-        request: &crate::send_protocol::TemplateUpdateRequest,
-    ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
-        self.inner.submit_template_update(request)
-    }
-    fn submit_template_delete(
-        &self,
-        request: &crate::send_protocol::TemplateDeleteRequest,
-    ) -> Result<(), crate::hook_client::TemplateCrudFallback> {
-        self.inner.submit_template_delete(request)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hook_client::TemplateCrudFallback;
-    use crate::send_protocol::{
-        TemplateCreateRequest, TemplateDeleteRequest, TemplateUpdateRequest,
-    };
     use std::cell::RefCell;
     use tempfile::TempDir;
 
@@ -212,8 +175,7 @@ mod tests {
         home: PathBuf,
         username: String,
         is_root: bool,
-        delete_calls: RefCell<Vec<String>>,
-        delete_result: RefCell<Result<(), TemplateCrudFallback>>,
+        scripted_input: RefCell<Vec<String>>,
     }
 
     impl TestEnv {
@@ -222,8 +184,7 @@ mod tests {
                 home,
                 username: username.to_string(),
                 is_root: false,
-                delete_calls: RefCell::new(Vec::new()),
-                delete_result: RefCell::new(Ok(())),
+                scripted_input: RefCell::new(Vec::new()),
             }
         }
     }
@@ -242,43 +203,13 @@ mod tests {
             false
         }
         fn read_line(&self) -> io::Result<String> {
-            Err(io::Error::other("not used in remove tests"))
+            self.scripted_input
+                .borrow_mut()
+                .pop()
+                .ok_or_else(|| io::Error::other("not used in remove tests"))
         }
         fn caller_username(&self) -> Option<String> {
             Some(self.username.clone())
-        }
-        fn submit_template_create(
-            &self,
-            _request: &TemplateCreateRequest,
-        ) -> Result<(), TemplateCrudFallback> {
-            Err(TemplateCrudFallback::Local("not used".into()))
-        }
-        fn submit_template_update(
-            &self,
-            _request: &TemplateUpdateRequest,
-        ) -> Result<(), TemplateCrudFallback> {
-            Err(TemplateCrudFallback::Local("not used".into()))
-        }
-        fn submit_template_delete(
-            &self,
-            request: &TemplateDeleteRequest,
-        ) -> Result<(), TemplateCrudFallback> {
-            self.delete_calls.borrow_mut().push(request.name.clone());
-            match &*self.delete_result.borrow() {
-                Ok(()) => Ok(()),
-                Err(TemplateCrudFallback::SocketMissing) => {
-                    Err(TemplateCrudFallback::SocketMissing)
-                }
-                Err(TemplateCrudFallback::Daemon { code, reason }) => {
-                    Err(TemplateCrudFallback::Daemon {
-                        code: code.clone(),
-                        reason: reason.clone(),
-                    })
-                }
-                Err(TemplateCrudFallback::Local(msg)) => {
-                    Err(TemplateCrudFallback::Local(msg.clone()))
-                }
-            }
         }
     }
 
@@ -304,23 +235,6 @@ mod tests {
         let outcome = run_with_env(opts, &env, &mut out).expect("remove must succeed");
         assert!(matches!(outcome, agents_cleanup::CleanupOutcome::Ok));
         assert!(!dest.exists(), "dest must be removed");
-    }
-
-    #[test]
-    fn agents_remove_unregisters_template() {
-        let tmp = TempDir::new().unwrap();
-        let env = TestEnv::new(tmp.path().to_path_buf(), "alice");
-        let opts = RunOpts {
-            agent: "claude-code".to_string(),
-            dangerously_allow_root: false,
-        };
-        let mut out = Vec::new();
-        run_with_env(opts, &env, &mut out).expect("remove must succeed");
-        assert_eq!(
-            env.delete_calls.borrow().as_slice(),
-            &["invoke-claude-code-alice".to_string()],
-            "remove must submit TEMPLATE-DELETE for the derived name"
-        );
     }
 
     #[test]
