@@ -68,8 +68,10 @@ jobs:
           sudo useradd --system --no-create-home --shell /usr/sbin/nologin aimx-test-bob || \
             id aimx-test-bob
 
-      - name: Build the isolation test binary
-        run: cargo test --no-run --test mailbox_isolation
+      - name: Build the isolation test binaries
+        run: |
+          cargo test --no-run --test mailbox_isolation
+          cargo test --no-run --test uds_authz
 
       - name: Run mailbox isolation test (under sudo)
         run: |
@@ -82,6 +84,17 @@ jobs:
           BIN=$(ls -t target/debug/deps/mailbox_isolation-* | grep -v '\.d$' | head -n 1)
           test -x "$BIN"
           sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored
+
+      - name: Run UDS authz tests (under sudo)
+        run: |
+          # Same shape as the mailbox-isolation step. The uds_authz
+          # tests spin up a real `aimx serve` subprocess under a
+          # tempdir, then poke each verb as alice / bob / root over
+          # the unix socket. Authz rejections must surface as
+          # `EACCES` on the wire; root must always pass.
+          BIN=$(ls -t target/debug/deps/uds_authz-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored --test-threads=1
 
       - name: Tear down test users
         if: always()

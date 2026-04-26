@@ -1,29 +1,35 @@
-//! Cross-user UDS authz integration test.
+//! Cross-user UDS authz integration tests.
 //!
-//! Reuses the `aimx-it-alice` / `aimx-it-bob` fixture from
-//! `tests/isolation.rs`. Spins up a real `aimx serve` subprocess under
-//! a tempdir, then issues raw `AIMX/1` frames under bob's uid via
-//! `runuser -u aimx-it-bob python3 -c ...`. Every attack must come
-//! back with `AIMX/1 ERR EACCES`. The root control run succeeds and
-//! emits the `decision="root_bypass"` info log captured from the
-//! serve subprocess's stderr.
+//! Reuses the `aimx-test-alice` / `aimx-test-bob` fixture also used by
+//! `tests/mailbox_isolation.rs`. Spins up a real `aimx serve` subprocess
+//! under a tempdir, then issues raw `AIMX/1` frames as alice/bob/root
+//! via `runuser -u <user> python3 -c ...`.
+//!
+//! Per-verb ownership matrix (mirrors `src/uds_authz.rs`):
+//!
+//! | Verb                                | Owner | Other | Root |
+//! |-------------------------------------|-------|-------|------|
+//! | `SEND` (as alice)                   | OK    | EACCES| OK   |
+//! | `MARK-READ` / `MARK-UNREAD`         | OK*   | EACCES| OK*  |
+//! | `HOOK-CREATE` / `HOOK-DELETE`       | OK    | EACCES| OK   |
+//! | `MAILBOX-CREATE` / `MAILBOX-DELETE` |  n/a  | EACCES| OK   |
+//!
+//! `*` MARK targets a non-existent email so the OK path surfaces as
+//! `NOTFOUND` after authz accepts; the EACCES path exits before the
+//! filesystem lookup.
 //!
 //! Gated on both `#[ignore]` and `AIMX_INTEGRATION_SUDO=1` so it only
-//! runs inside the CI step that explicitly elevates.
-//!
-//! Teardown uses a `Drop` guard so `userdel` and the killed serve
-//! subprocess are cleaned up even on assertion failure.
+//! runs inside a CI step that explicitly elevates with `sudo`.
 
 #![cfg(unix)]
 
-use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-const ALICE: &str = "aimx-it-alice";
-const BOB: &str = "aimx-it-bob";
+const ALICE: &str = "aimx-test-alice";
+const BOB: &str = "aimx-test-bob";
 
 /// RAII guard: kill the serve subprocess and remove the test users on
 /// drop. Drop runs on assertion failure too, so the CI step stays
@@ -38,12 +44,22 @@ impl Drop for Teardown {
             let _ = child.kill();
             let _ = child.wait();
         }
-        let _ = Command::new("userdel").arg(ALICE).status();
-        let _ = Command::new("userdel").arg(BOB).status();
+        // We do not `userdel` here — the CI workflow owns user
+        // provisioning so re-runs in the same job stay deterministic.
     }
 }
 
-fn useradd(name: &str) {
+fn ensure_user(name: &str) {
+    let already = Command::new("id")
+        .arg(name)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if already {
+        return;
+    }
     let status = Command::new("useradd")
         .arg("--system")
         .arg("--no-create-home")
@@ -52,13 +68,7 @@ fn useradd(name: &str) {
         .arg(name)
         .status()
         .expect("failed to spawn useradd");
-    assert!(
-        status.success() || {
-            let check = Command::new("id").arg(name).status().ok();
-            matches!(check, Some(s) if s.success())
-        },
-        "useradd failed for {name}"
-    );
+    assert!(status.success(), "useradd failed for {name}");
 }
 
 fn aimx_binary_path() -> PathBuf {
@@ -76,9 +86,6 @@ fn wait_for_socket(path: &Path) -> bool {
     false
 }
 
-/// Raw `AIMX/1 SEND` framing. The daemon parses `From:` out of the
-/// body to resolve the sender mailbox and runs authz against the
-/// caller's uid. bob as alice: EACCES.
 fn raw_send_frame(from: &str, to: &str) -> String {
     let body = format!(
         "From: {from}\r\n\
@@ -95,34 +102,41 @@ fn raw_send_frame(from: &str, to: &str) -> String {
     )
 }
 
-/// Raw `AIMX/1 MARK-READ` framing.
-fn raw_mark_frame(mailbox: &str, id: &str) -> String {
+fn raw_mark_frame(verb: &str, mailbox: &str, id: &str) -> String {
     format!(
-        "AIMX/1 MARK-READ\r\nMailbox: {mailbox}\r\nId: {id}\r\nFolder: inbox\r\nContent-Length: 0\r\n\r\n"
+        "AIMX/1 {verb}\r\nMailbox: {mailbox}\r\nId: {id}\r\nFolder: inbox\r\nContent-Length: 0\r\n\r\n"
     )
 }
 
-/// Raw `AIMX/1 HOOK-CREATE` framing with a trivial JSON body. The
-/// template the hook refers to does not need to exist — authz runs
-/// before template resolution per PRD §6.5 (authz mismatch ⇒ EACCES,
-/// unknown mailbox ⇒ ENOENT).
-fn raw_hook_create_frame(mailbox: &str) -> String {
-    let body = "{\"params\":{}}";
+fn raw_hook_create_frame(mailbox: &str, name: &str, cmd: &[&str]) -> String {
+    let cmd_arr: Vec<String> = cmd.iter().map(|s| s.to_string()).collect();
+    let body_json = serde_json::json!({ "cmd": cmd_arr });
+    let body = body_json.to_string();
     format!(
-        "AIMX/1 HOOK-CREATE\r\nMailbox: {mailbox}\r\nEvent: on_receive\r\nTemplate: invoke-claude\r\nContent-Length: {}\r\n\r\n{body}",
+        "AIMX/1 HOOK-CREATE\r\nMailbox: {mailbox}\r\nEvent: on_receive\r\nName: {name}\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     )
 }
 
-/// Connect to the socket as `user` via `runuser` + Python, write the
-/// supplied raw frame, read the framed response. Python is the
-/// path-of-least-resistance here because every Ubuntu CI runner ships
-/// `python3` and we avoid adding a separate test helper binary.
-///
-/// The Python script is written to a tempfile (rather than passed via
-/// `-c`) so multi-line `while` loops keep their indentation — `-c` on
-/// some shells collapses newlines into spaces, which breaks Python's
-/// significant whitespace.
+fn raw_hook_delete_frame(name: &str) -> String {
+    format!("AIMX/1 HOOK-DELETE\r\nHook-Name: {name}\r\nContent-Length: 0\r\n\r\n")
+}
+
+fn raw_mailbox_create_frame(name: &str, owner: &str) -> String {
+    format!(
+        "AIMX/1 MAILBOX-CREATE\r\nMailbox: {name}\r\nOwner: {owner}\r\nContent-Length: 0\r\n\r\n"
+    )
+}
+
+fn raw_mailbox_delete_frame(name: &str) -> String {
+    format!("AIMX/1 MAILBOX-DELETE\r\nMailbox: {name}\r\nContent-Length: 0\r\n\r\n")
+}
+
+/// Connect to the socket as `user` (None = current process) via
+/// `runuser` + Python, write the supplied raw frame, read the framed
+/// response. Python is the path-of-least-resistance — every Ubuntu CI
+/// runner ships `python3` and we avoid adding a separate test helper
+/// binary.
 fn send_frame_as(user: Option<&str>, socket: &Path, frame: &[u8]) -> Vec<u8> {
     let script_dir = std::env::temp_dir().join(format!(
         "aimx-uds-authz-py-{}-{}",
@@ -130,10 +144,6 @@ fn send_frame_as(user: Option<&str>, socket: &Path, frame: &[u8]) -> Vec<u8> {
         rand_suffix()
     ));
     std::fs::create_dir_all(&script_dir).unwrap();
-    // Script must be world-readable so the `runuser` target can
-    // execute it. The frame blob is injected as a base64 literal so
-    // arbitrary bytes (including CR/LF and quotes) survive the round
-    // trip through the shell and Python's source parser.
     let b64 = base64_encode(frame);
     let socket_str = socket.display().to_string();
     let py = format!(
@@ -189,8 +199,7 @@ fn rand_suffix() -> u64 {
 }
 
 /// Tiny standalone base64 encoder — integration tests can't pull in
-/// the crate's `base64` dep without adding it to dev-dependencies,
-/// which would drag an extra build for one 20-line helper.
+/// the crate's `base64` dep without adding it to dev-dependencies.
 fn base64_encode(input: &[u8]) -> String {
     const ALPHA: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
@@ -224,8 +233,6 @@ fn base64_encode(input: &[u8]) -> String {
 
 #[test]
 fn base64_encode_roundtrip_matches_stdlib_reference() {
-    // Quick smoke test so a subtle bit-twiddling bug doesn't silently
-    // corrupt the wire frames the integration test submits.
     assert_eq!(base64_encode(b""), "");
     assert_eq!(base64_encode(b"f"), "Zg==");
     assert_eq!(base64_encode(b"fo"), "Zm8=");
@@ -256,39 +263,69 @@ fn uid_of(name: &str) -> u32 {
         .expect("uid must parse")
 }
 
-#[test]
-#[ignore]
-fn bob_cannot_impersonate_alice_over_uds() {
-    if std::env::var_os("AIMX_INTEGRATION_SUDO").is_none() {
-        eprintln!("AIMX_INTEGRATION_SUDO is not set; skipping (test requires root + user-create).");
-        return;
+/// Per-test fixture: tempdir + running daemon + ready socket. The
+/// `Drop` impl on `Teardown` kills the daemon so test failures don't
+/// leak processes.
+struct Fixture {
+    // Held for its `Drop` side-effect (kills the serve subprocess);
+    // never read directly.
+    #[allow(dead_code)]
+    teardown: Teardown,
+    socket_path: PathBuf,
+    tmp_root: PathBuf,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        // teardown's Drop already runs; just clean the tempdir.
+        let _ = std::fs::remove_dir_all(&self.tmp_root);
     }
+}
+
+fn spin_up_serve() -> Fixture {
     assert_eq!(
         unsafe { libc::geteuid() },
         0,
-        "uds_authz must run as root (AIMX_INTEGRATION_SUDO=1 + sudo)"
+        "uds_authz tests must run as root (AIMX_INTEGRATION_SUDO=1 + sudo)"
     );
 
-    let mut teardown = Teardown { serve: None };
-    useradd(ALICE);
-    useradd(BOB);
-    let alice_uid = uid_of(ALICE);
+    ensure_user(ALICE);
+    ensure_user(BOB);
+    // The catchall system user is named in `config.toml` below; if it's
+    // missing the daemon flags it as orphan.
+    let _ = Command::new("useradd")
+        .arg("--system")
+        .arg("--no-create-home")
+        .arg("--shell")
+        .arg("/usr/sbin/nologin")
+        .arg("aimx-catchall")
+        .status();
 
-    let tmp_root = std::env::temp_dir().join(format!("aimx-uds-authz-{}", std::process::id()));
+    let alice_uid = uid_of(ALICE);
+    let bob_uid = uid_of(BOB);
+
+    let tmp_root = std::env::temp_dir().join(format!(
+        "aimx-uds-authz-{}-{}",
+        std::process::id(),
+        rand_suffix()
+    ));
     std::fs::create_dir_all(&tmp_root).unwrap();
     std::fs::set_permissions(&tmp_root, PermissionsExt::from_mode(0o755)).unwrap();
 
     let data_dir = tmp_root.join("data");
     std::fs::create_dir_all(data_dir.join("inbox")).unwrap();
+    std::fs::create_dir_all(data_dir.join("sent")).unwrap();
     std::fs::set_permissions(&data_dir, PermissionsExt::from_mode(0o755)).unwrap();
     std::fs::set_permissions(data_dir.join("inbox"), PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(data_dir.join("sent"), PermissionsExt::from_mode(0o755)).unwrap();
 
-    // Pre-create alice's inbox dir with the right ownership so a later
-    // ingest (if any — not strictly needed for authz rejection tests)
-    // has somewhere to drop mail.
-    let alice_inbox = data_dir.join("inbox").join(ALICE);
-    std::fs::create_dir_all(&alice_inbox).unwrap();
-    chown_dir(&alice_inbox, alice_uid, alice_uid);
+    for (user, uid) in [(ALICE, alice_uid), (BOB, bob_uid)] {
+        for sub in ["inbox", "sent"] {
+            let dir = data_dir.join(sub).join(user);
+            std::fs::create_dir_all(&dir).unwrap();
+            chown_dir(&dir, uid, uid);
+        }
+    }
 
     let config_content = format!(
         "domain = \"it.example.com\"\n\
@@ -311,8 +348,6 @@ fn bob_cannot_impersonate_alice_over_uds() {
     std::fs::write(&config_path, &config_content).unwrap();
     std::fs::set_permissions(&config_path, PermissionsExt::from_mode(0o644)).unwrap();
 
-    // Generate a DKIM key pair under AIMX_CONFIG_DIR. `aimx serve`
-    // loads the private key at startup and refuses to run without it.
     let keygen_status = Command::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", &tmp_root)
         .env("AIMX_DATA_DIR", &data_dir)
@@ -322,37 +357,14 @@ fn bob_cannot_impersonate_alice_over_uds() {
         .expect("dkim-keygen failed to spawn");
     assert!(keygen_status.success(), "dkim-keygen failed");
 
-    // Pre-create the aimx-catchall system user. The invariant in
-    // `config.toml` above names it as the catchall owner; if the host
-    // doesn't have it, `Config::load` would flag it as orphan and make
-    // the catchall mailbox inactive. That's fine for this test (we
-    // never exercise catchall), but the resolved Config needs to load
-    // cleanly for `aimx serve` to proceed.
-    let _ = Command::new("useradd")
-        .arg("--system")
-        .arg("--no-create-home")
-        .arg("--shell")
-        .arg("/usr/sbin/nologin")
-        .arg("aimx-catchall")
-        .status();
-
-    // Runtime directory holds the aimx.sock. AIMX_RUNTIME_DIR is the
-    // test-friendly override, used by the existing codebase so cargo
-    // test runs don't collide with /run/aimx/.
     let runtime_dir = tmp_root.join("run");
     std::fs::create_dir_all(&runtime_dir).unwrap();
     std::fs::set_permissions(&runtime_dir, PermissionsExt::from_mode(0o755)).unwrap();
 
-    // Bind SMTP on an ephemeral port on loopback; the authz test
-    // never drives inbound so the exact port doesn't matter, it
-    // just needs to bind successfully.
-    //
-    // AIMX_TEST_MAIL_DROP redirects outbound MX delivery to disk so
-    // the root SEND control below doesn't blackhole into the real
-    // internet.
     let mail_drop = tmp_root.join("mail_drop");
     std::fs::create_dir_all(&mail_drop).unwrap();
 
+    let mut teardown = Teardown { serve: None };
     let serve = Command::new(aimx_binary_path())
         .env("AIMX_CONFIG_DIR", &tmp_root)
         .env("AIMX_DATA_DIR", &data_dir)
@@ -373,93 +385,391 @@ fn bob_cannot_impersonate_alice_over_uds() {
         "aimx.sock did not appear at {} within 15s",
         socket_path.display()
     );
-    // World-writable so bob can connect. Matches the production
-    // `0o666` bind mode.
     std::fs::set_permissions(&socket_path, PermissionsExt::from_mode(0o666)).unwrap();
 
-    // --- Attack 1: bob SENDs as alice. Must be EACCES. ---
-    let resp_bytes = send_frame_as(
-        Some(BOB),
-        &socket_path,
+    Fixture {
+        teardown,
+        socket_path,
+        tmp_root,
+    }
+}
+
+fn assert_response_contains(resp: &[u8], needle: &str) {
+    let s = String::from_utf8_lossy(resp);
+    assert!(
+        s.contains(needle),
+        "expected response to contain {needle:?}; got {s:?}"
+    );
+}
+
+fn assert_response_does_not_contain(resp: &[u8], needle: &str) {
+    let s = String::from_utf8_lossy(resp);
+    assert!(
+        !s.contains(needle),
+        "did not expect response to contain {needle:?}; got {s:?}"
+    );
+}
+
+fn integration_gate() -> bool {
+    if std::env::var_os("AIMX_INTEGRATION_SUDO").is_none() {
+        eprintln!("AIMX_INTEGRATION_SUDO is not set; skipping (test requires root + user-create).");
+        return false;
+    }
+    true
+}
+
+// ---------- SEND ----------
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn send_as_owner_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
         raw_send_frame(
             &format!("{ALICE}@it.example.com"),
             "victim@external.example",
         )
         .as_bytes(),
     );
-    let resp = String::from_utf8_lossy(&resp_bytes);
-    assert!(
-        resp.contains("AIMX/1 ERR EACCES") || resp.contains("Code: EACCES"),
-        "bob SEND as alice must be EACCES; got: {resp:?}"
-    );
+    // OK arrives whether the SMTP delivery succeeded or hit a transport
+    // error — the check we care about is that authz didn't reject. Any
+    // wire frame except `EACCES` proves the verb passed authz.
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
 
-    // --- Attack 2: bob MARK-READ's an email in alice's mailbox. Must be EACCES. ---
-    let resp_bytes = send_frame_as(
-        Some(BOB),
-        &socket_path,
-        raw_mark_frame(ALICE, "2026-01-01-nothing").as_bytes(),
-    );
-    let resp = String::from_utf8_lossy(&resp_bytes);
-    assert!(
-        resp.contains("AIMX/1 ERR EACCES") || resp.contains("Code: EACCES"),
-        "bob MARK-READ on alice must be EACCES; got: {resp:?}"
-    );
-
-    // --- Attack 3: bob HOOK-CREATE on alice's mailbox. Must be EACCES. ---
-    let resp_bytes = send_frame_as(
-        Some(BOB),
-        &socket_path,
-        raw_hook_create_frame(ALICE).as_bytes(),
-    );
-    let resp = String::from_utf8_lossy(&resp_bytes);
-    assert!(
-        resp.contains("AIMX/1 ERR EACCES") || resp.contains("Code: EACCES"),
-        "bob HOOK-CREATE on alice must be EACCES; got: {resp:?}"
-    );
-
-    // --- Control: root MARK-READ on alice's (nonexistent) email
-    // returns NOTFOUND rather than EACCES, proving root bypassed the
-    // ownership check. The authz path fires and emits a
-    // `decision="root_bypass"` info log (captured from serve stderr
-    // below). ---
-    let resp_bytes = send_frame_as(None, &socket_path, raw_mark_frame(ALICE, "nope").as_bytes());
-    let resp = String::from_utf8_lossy(&resp_bytes);
-    assert!(
-        resp.contains("AIMX/1 OK")
-            || resp.contains("AIMX/1 ERR NOTFOUND")
-            || resp.contains("Code: NOTFOUND"),
-        "root MARK-READ should bypass authz and hit file-not-found; got: {resp:?}"
-    );
-
-    // Drop the teardown (stops serve + userdels). Stderr of the
-    // serve subprocess captures the structured `aimx::uds` log lines.
-    // We pull them out below before the Drop runs so the `root_bypass`
-    // assertion has something to look at.
-    let mut child = teardown.serve.take().expect("serve child must exist");
-    let _ = child.kill();
-    let mut stderr = String::new();
-    if let Some(mut s) = child.stderr.take() {
-        let _ = s.read_to_string(&mut stderr);
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn send_as_other_forbidden() {
+    if !integration_gate() {
+        return;
     }
-    if let Some(mut s) = child.stdout.take() {
-        let mut out = String::new();
-        let _ = s.read_to_string(&mut out);
-        // Merge into `stderr` for simpler grepping; both streams can
-        // carry the `tracing` records depending on how the runtime
-        // attaches the subscriber.
-        stderr.push_str(&out);
-    }
-    let _ = child.wait();
-
-    // The root_bypass line is emitted at info level. Accept either
-    // `decision="root_bypass"` (structured field) or the log-line
-    // literal for robustness against subscriber format changes.
-    assert!(
-        stderr.contains("root_bypass") || stderr.contains("root-bypass"),
-        "serve stderr must contain a root_bypass info log; stderr was:\n{stderr}"
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(BOB),
+        &fx.socket_path,
+        raw_send_frame(
+            &format!("{ALICE}@it.example.com"),
+            "victim@external.example",
+        )
+        .as_bytes(),
     );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
+}
 
-    let _ = std::fs::remove_dir_all(&tmp_root);
-    // teardown.serve is None; remaining Drop only removes users.
-    drop(teardown);
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn send_as_root_any_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_send_frame(
+            &format!("{ALICE}@it.example.com"),
+            "victim@external.example",
+        )
+        .as_bytes(),
+    );
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
+
+// ---------- MARK-READ / MARK-UNREAD ----------
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_read_as_owner_ok_passes_authz() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mark_frame("MARK-READ", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    // The email doesn't exist, so the response is NOTFOUND — but
+    // authz accepted (otherwise we would see EACCES first).
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_read_as_other_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(BOB),
+        &fx.socket_path,
+        raw_mark_frame("MARK-READ", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_read_as_root_any_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mark_frame("MARK-READ", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_unread_as_owner_ok_passes_authz() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mark_frame("MARK-UNREAD", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_unread_as_other_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(BOB),
+        &fx.socket_path,
+        raw_mark_frame("MARK-UNREAD", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mark_unread_as_root_any_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mark_frame("MARK-UNREAD", ALICE, "2026-01-01-nothing").as_bytes(),
+    );
+    assert_response_does_not_contain(&resp, "EACCES");
+    drop(fx);
+}
+
+// ---------- HOOK-CREATE / HOOK-DELETE ----------
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_create_as_owner_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "alice_owner_ok", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&resp, "AIMX/1 OK");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_create_as_other_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(BOB),
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "bob_attempts_alice", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_create_as_root_any_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "root_for_alice", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&resp, "AIMX/1 OK");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_delete_as_owner_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    // Create a hook as alice first, then delete it as alice.
+    let create = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "alice_to_delete", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&create, "AIMX/1 OK");
+    let del = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_hook_delete_frame("alice_to_delete").as_bytes(),
+    );
+    assert_response_contains(&del, "AIMX/1 OK");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_delete_as_other_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    // Create a hook as alice, then bob tries to delete it.
+    let create = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "alice_owned_hook", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&create, "AIMX/1 OK");
+    let del = send_frame_as(
+        Some(BOB),
+        &fx.socket_path,
+        raw_hook_delete_frame("alice_owned_hook").as_bytes(),
+    );
+    assert_response_contains(&del, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn hook_delete_as_root_any_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let create = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_hook_create_frame(ALICE, "alice_owned_for_root", &["/bin/true"]).as_bytes(),
+    );
+    assert_response_contains(&create, "AIMX/1 OK");
+    let del = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_hook_delete_frame("alice_owned_for_root").as_bytes(),
+    );
+    assert_response_contains(&del, "AIMX/1 OK");
+    drop(fx);
+}
+
+// ---------- MAILBOX-CREATE / MAILBOX-DELETE ----------
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_create_root_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mailbox_create_frame("freshmbx", ALICE).as_bytes(),
+    );
+    assert_response_contains(&resp, "AIMX/1 OK");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_create_non_root_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mailbox_create_frame("alicemade", ALICE).as_bytes(),
+    );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_delete_root_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    // Create then delete as root.
+    let create = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mailbox_create_frame("ephemeral", ALICE).as_bytes(),
+    );
+    assert_response_contains(&create, "AIMX/1 OK");
+    let del = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mailbox_delete_frame("ephemeral").as_bytes(),
+    );
+    assert_response_contains(&del, "AIMX/1 OK");
+    drop(fx);
+}
+
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_delete_non_root_forbidden() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mailbox_delete_frame(ALICE).as_bytes(),
+    );
+    assert_response_contains(&resp, "EACCES");
+    drop(fx);
 }

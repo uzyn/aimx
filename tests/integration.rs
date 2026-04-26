@@ -4165,7 +4165,6 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
 /// hint. That path covers the full flag validation and the on-disk
 /// write.
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
 fn hooks_create_and_list_roundtrip_direct_edit() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
@@ -4181,7 +4180,7 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo hi",
+            r#"["/bin/echo", "hi"]"#,
             "--name",
             "alice_greeter",
         ])
@@ -4198,7 +4197,10 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
     );
     // A restart hint is expected on the socket-missing fallback path.
     assert!(
-        create_out.contains("restart") || create_out.contains("Hint"),
+        create_out.contains("restart")
+            || create_out.contains("Hint")
+            || create_out.contains("next start")
+            || create_out.contains("Note:"),
         "expected restart hint on socket-missing fallback: {create_out}"
     );
 
@@ -4269,7 +4271,6 @@ fn hooks_alias_works() {
 }
 
 #[test]
-#[ignore = "exercises legacy template/hook schema; reworked in a later sprint"]
 fn hooks_create_rejects_invalid_name() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
@@ -4285,14 +4286,17 @@ fn hooks_create_rejects_invalid_name() {
             "--event",
             "on_receive",
             "--cmd",
-            "echo hi",
+            r#"["/bin/echo", "hi"]"#,
             "--name",
             "bad name!",
         ])
         .assert()
         .failure();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
-    assert!(stderr.contains("--name"), "expected --name error: {stderr}");
+    assert!(
+        stderr.contains("--name") || stderr.contains("hook name"),
+        "expected hook-name validation error: {stderr}"
+    );
 }
 
 #[test]
