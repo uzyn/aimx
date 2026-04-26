@@ -22,56 +22,39 @@ The server runs in stdio mode. It reads from stdin and writes to stdout. It is l
 
 See [Agent Integration](agent-integration.md) for one-line `aimx agents setup <agent>` installers and the manual MCP wiring pattern for clients not yet in the registry.
 
-## Per-user visibility
+## Per-user authorization
 
-The MCP server inherits the uid of the user that launched the client (stdio transport — there is no server process doing multi-user auth). The daemon applies `SO_PEERCRED` on every UDS request made by the MCP server and enforces per-mailbox ownership:
+The MCP server inherits the uid of the user that launched the client (stdio transport — there is no server process doing multi-user auth). At startup the server records its euid as the authorization principal; every tool call checks the same predicate the daemon enforces over the UDS:
 
-- `mailbox_list` returns only mailboxes whose `owner` equals the caller's username. The catchall mailbox is visible because its owner is the reserved `aimx-catchall` user (visible to MCP clients regardless of caller).
-- `email_list`, `email_read`, `email_send`, `email_reply`, `email_mark_read`, `email_mark_unread` all reject with `EACCES` when the target mailbox is owned by another user.
-- `hook_list_templates` returns templates whose `run_as` equals the caller's username, plus reserved templates (`run_as = "aimx-catchall"` or `"root"`).
-- `hook_create` and `hook_delete` operate only on mailboxes the caller owns. The daemon also enforces `hook.run_as == mailbox.owner OR hook.run_as == "root"` (catchall exception: `aimx-catchall`) on every write.
+> Caller is root, or caller's uid equals the target mailbox's `owner_uid`.
+
+What that buys you per tool:
+
+- `mailbox_list` returns only mailboxes whose `owner` resolves to the caller's uid (catchalls are filtered for non-root callers since the catchall owner is `aimx-catchall`).
+- `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`, `email_send`, `email_reply` all reject with `EACCES not authorized` when the target mailbox is owned by another user.
+- `hook_create`, `hook_list`, `hook_delete` operate only on mailboxes the caller owns. `hook_delete` for a hook the caller does not own collapses to `Hook '<name>' not found` so foreign mailbox names do not leak.
 
 Filesystem enforcement backs this up: every mailbox directory is `0700 <owner>:<owner>`, so even direct `.md` reads only succeed for the mailbox's owner. On a single-user box the rules are invisible (one user owns everything); on a multi-user box they give real isolation between alice and bob.
 
 Root running the MCP server bypasses mailbox-ownership checks (and is logged at info level). Non-root callers see only their own world.
 
-See [Hooks § UDS authorization (`SO_PEERCRED`)](hooks.md#uds-authorization-so_peercred) for the full per-verb authz table and the reserved `run_as` values.
+> **Removed in this release.** `mailbox_create`, `mailbox_delete`, and `hook_list_templates` are no longer MCP tools. Mailbox CRUD moves to the root-only host CLI (`sudo aimx mailboxes create | delete`); template hooks have been retired in favor of the unified plain-`cmd` model. Agents that previously called these tools will get a "tool not found" error and should call `hook_create` directly with the `cmd` argv from their bundled plugin recipe.
+
+See [Hooks § UDS authorization (`SO_PEERCRED`)](hooks.md#uds-authorization-so_peercred) for the full per-verb authz table.
 
 ## MCP tools
 
-aimx exposes 13 MCP tools organized into mailbox management, email operations, and hook templates.
+aimx exposes 10 MCP tools organized into mailbox listing, email operations, and hook management.
 
 ### Mailbox tools
 
 #### `mailbox_list`
 
-List all mailboxes with message counts.
+List mailboxes you own.
 
 **Parameters:** none
 
-**Returns:** List of mailboxes with addresses, total count, and unread count.
-
----
-
-#### `mailbox_create`
-
-Create a new mailbox.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | yes | Mailbox name (becomes the local part of the email address) |
-
-Creates `<name>@yourdomain.com` and the corresponding directory. No mail server restart required.
-
----
-
-#### `mailbox_delete`
-
-Delete a mailbox and all its emails.
-
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `name` | string | yes | Mailbox name to delete |
+**Returns:** List of mailboxes with addresses, total count, and unread count. Filtered to caller-owned mailboxes for non-root; root sees everything.
 
 ---
 
@@ -83,14 +66,14 @@ List emails in a mailbox with optional filters.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | yes | Mailbox name to list emails from |
+| `mailbox` | string | yes | Mailbox name to list emails from. Must be owned by the caller. |
 | `folder` | string | no | `"inbox"` (default) or `"sent"`. Picks which side of the mailbox to list |
 | `unread` | bool | no | Filter to only unread emails |
 | `from` | string | no | Filter by sender address (substring match) |
 | `since` | string | no | Filter to emails since this datetime (RFC 3339 format) |
 | `subject` | string | no | Filter by subject (substring match, case-insensitive) |
 
-**Returns:** Email metadata (frontmatter only, not body).
+**Returns:** Email metadata (frontmatter only, not body). Returns `EACCES not authorized` if the caller does not own the target mailbox.
 
 ---
 
@@ -104,7 +87,7 @@ Read the full content of an email.
 | `id` | string | yes | Email ID, i.e. the filename stem (e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
-**Returns:** Complete `.md` file content including frontmatter and body.
+**Returns:** Complete `.md` file content including frontmatter and body. Returns `EACCES not authorized` if the caller does not own the target mailbox.
 
 ---
 
@@ -114,7 +97,7 @@ Compose and send an email with DKIM signing.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `from_mailbox` | string | yes | Mailbox name to send from |
+| `from_mailbox` | string | yes | Mailbox name to send from. Must be owned by the caller. |
 | `to` | string | yes | Recipient email address |
 | `subject` | string | yes | Email subject |
 | `body` | string | yes | Email body text |
@@ -122,7 +105,7 @@ Compose and send an email with DKIM signing.
 | `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
 | `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
-The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. `aimx serve` DKIM-signs the message and delivers it directly to the recipient's MX server via SMTP.
+The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. `aimx serve` parses `From:` from the body, validates that the caller's uid owns the resolved mailbox, DKIM-signs the message, and delivers it directly to the recipient's MX server via SMTP.
 
 For replies to a single sender, prefer `email_reply`. It handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
 
@@ -134,7 +117,7 @@ Reply to an email with correct threading.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | yes | Mailbox name containing the email to reply to |
+| `mailbox` | string | yes | Mailbox name containing the email to reply to. Must be owned by the caller. |
 | `id` | string | yes | Email ID to reply to (e.g. `2025-01-15-001`) |
 | `body` | string | yes | Reply body text |
 
@@ -148,7 +131,7 @@ Mark an email as read.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | yes | Mailbox name |
+| `mailbox` | string | yes | Mailbox name. Must be owned by the caller. |
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
@@ -162,7 +145,7 @@ Mark an email as unread.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | yes | Mailbox name |
+| `mailbox` | string | yes | Mailbox name. Must be owned by the caller. |
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
 | `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
@@ -170,78 +153,61 @@ Updates `read = false` in the email's frontmatter. Same daemon-mediated write pa
 
 ---
 
-### Hook template tools
+### Hook tools
 
-Four tools let agents safely self-configure hooks without shell access. See [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended) for the model and why raw `cmd` submission over MCP is rejected by design.
-
-#### `hook_list_templates`
-
-Enumerate hook templates enabled on this install.
-
-**Parameters:** none
-
-**Returns:** JSON array of template descriptors, each with `name`, `description`, `params`, and `allowed_events`. Empty `[]` when no templates are visible — for per-agent templates the caller should run `aimx agents setup <agent>` (no sudo) to register `invoke-<agent>-<username>`. Templates are filtered to the caller's visibility: only `run_as = <caller_username>` and reserved-`run_as` templates are returned.
-
-Example (for alice, after running `aimx agents setup claude-code`):
-
-```json
-[
-  {
-    "name": "invoke-claude-alice",
-    "description": "Pipe email into Claude Code with a prompt",
-    "params": ["prompt"],
-    "allowed_events": ["on_receive", "after_send"]
-  },
-  {
-    "name": "webhook",
-    "description": "POST the email as JSON to a URL",
-    "params": ["url"],
-    "allowed_events": ["on_receive", "after_send"]
-  }
-]
-```
-
----
+Three tools let agents self-configure hooks on mailboxes they own. See [Hooks & Trust](hooks.md) for the model and [Hook Recipes](hook-recipes.md) for verified per-agent `cmd` argv.
 
 #### `hook_create`
 
-Bind a template to a mailbox, creating a new hook. The daemon stamps `origin = "mcp"`.
+Create a new hook on a mailbox you own. The daemon validates the caller's uid against the mailbox's `owner_uid` via `SO_PEERCRED` and rejects with `EACCES not authorized` if the predicate fails.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | yes | Target mailbox name |
-| `event` | string | yes | `"on_receive"` or `"after_send"` (must be in the template's `allowed_events`) |
-| `template` | string | yes | Template name from `hook_list_templates` |
-| `params` | object | yes | Key/value map for the template's declared `params` |
-| `name` | string | no | Explicit hook name. When omitted, a stable 12-hex-char name is derived from `(event, template, params)` |
+| `mailbox` | string | yes | Target mailbox name. Must be owned by the caller. |
+| `event` | string | yes | `"on_receive"` or `"after_send"` |
+| `cmd` | array of strings | yes | Argv exec'd directly when the hook fires. `cmd[0]` must be an absolute path. |
+| `name` | string | no | Explicit hook name. When omitted, a stable 12-hex-char name is derived from `sha256(event + joined_argv + fire_on_untrusted)`. |
+| `stdin` | string | no | `"email"` (default) pipes the raw `.md` to the hook's stdin; `"none"` closes stdin immediately. |
+| `timeout_secs` | int | no | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. |
+| `fire_on_untrusted` | bool | no | `on_receive` only: fire even when `trusted != "true"`. Default `false`. Rejected on `after_send`. |
 
-**Returns:** `{effective_name, substituted_argv}` — the hook name the daemon wrote and the resolved argv the sandboxed executor will run, for confirmation in the agent's UI.
+**Returns:** `{effective_name}` — the hook name the daemon wrote.
 
-Safety model: the tool refuses any request body that contains a raw `cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, or `stdin` field. These are template properties, not hook properties. An agent cannot smuggle arbitrary shell past the template boundary.
+Example (Claude Code self-wiring):
+
+```json
+{"name": "hook_create", "arguments": {
+  "mailbox": "accounts",
+  "event": "on_receive",
+  "cmd": ["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"],
+  "stdin": "email",
+  "name": "accounts_claude"
+}}
+```
 
 **Error examples:**
 
-- `Unknown template: foo (run hook_list_templates to see enabled templates)`
-- `missing-param: prompt`
-- `event-not-allowed: after_send on template webhook_receive_only`
-- `mailbox-not-found: accounts`
+- `EACCES not authorized` — caller's uid does not own the target mailbox
+- `mailbox-not-found: <name>` — mailbox does not exist
+- `hook has non-absolute cmd[0]` — `cmd[0]` must be an absolute path
+- `fire_on_untrusted is on_receive only` — flag set on an `after_send` hook
+- `catchall does not support hooks` — target was a catchall mailbox
 
 ---
 
 #### `hook_list`
 
-List hooks visible to MCP across all (or one) mailbox.
+List hooks on mailboxes you own.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `mailbox` | string | no | Filter to one mailbox; omit to list all |
+| `mailbox` | string | no | Filter to one mailbox (must be owned by the caller); omit to list every owned mailbox |
 
-**Returns:** JSON array. Each entry has `name`, `mailbox`, `event`, `origin`, and — for `origin = "mcp"` only — `template` + `params`. Operator-origin hooks have `cmd` / `params` **masked** so an agent can avoid duplicates without snooping on operator logic.
+**Returns:** JSON array. Each entry has `name`, `mailbox`, `event`, `cmd`, `stdin`, `timeout_secs`, and `fire_on_untrusted`.
 
 ```json
 [
-  {"name": "accounts-auto-reply", "mailbox": "accounts", "event": "on_receive", "origin": "mcp", "template": "invoke-claude-alice", "params": {"prompt": "..."}},
-  {"name": "op_audit", "mailbox": "accounts", "event": "on_receive", "origin": "operator"}
+  {"name": "accounts_claude", "mailbox": "accounts", "event": "on_receive", "cmd": ["/usr/local/bin/claude", "-p", "...", "--dangerously-skip-permissions"], "stdin": "email", "timeout_secs": 60, "fire_on_untrusted": false}
 ]
 ```
 
@@ -249,19 +215,13 @@ List hooks visible to MCP across all (or one) mailbox.
 
 #### `hook_delete`
 
-Delete a hook by name.
+Delete a hook by name. Caller must own the hook's mailbox.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `name` | string | yes | Effective hook name (explicit or derived) |
 
-MCP can only delete hooks whose `origin = "mcp"`. Attempts to delete an operator-origin hook return `ERR origin-protected`:
-
-```text
-ERR origin-protected: hook was created by the operator — remove via `sudo aimx hooks delete` instead
-```
-
-The agent should surface this verbatim so the user knows the hook is operator-owned.
+Returns `Hook '<name>' not found` for hooks on mailboxes the caller does not own (the lookup is filtered before the existence check, so foreign mailbox names do not leak).
 
 ---
 
@@ -298,7 +258,7 @@ See [Mailboxes: Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the
 
 Two reference documents help agents understand aimx:
 
-- **`agents/common/aimx-primer.md`**: the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, and common workflows.
+- **`agents/common/aimx-primer.md`**: the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, common workflows, and a "Self-trigger as a mailbox hook" pointer to the agent's own recipe.
 - **`/var/lib/aimx/README.md`**: the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
 
 ## Compatible agent frameworks

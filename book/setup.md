@@ -83,28 +83,27 @@ The MCP section prints a short summary listing the `aimx agents setup` commands 
 
 Third-party mail-client workarounds (e.g. Gmail spam-filter whitelists) are **not** part of `aimx setup`'s surface. A correct SPF / DKIM / DMARC triple plus a reverse-DNS (PTR) record at your VPS provider is the canonical deliverability story.
 
-### Mailbox-owner prompt
-
-For every mailbox you configure, setup asks which Linux user should own it:
-
-```text
-[Mailboxes]
-Which Linux user should own `alice@agent.yourdomain.com`? [alice]
-```
-
-- The default (in brackets) is the address's local part if that user exists on the host. Press Enter to accept.
-- If the default user does not exist, setup requires explicit input and rejects unknown usernames with a hint to `useradd` first.
-- The catchall mailbox (if any) is always owned by the reserved `aimx-catchall` system user.
-
-The daemon chowns `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` to `<owner>:<owner>` mode `0700` at create time and keeps ownership consistent through every subsequent write (ingest, send, mark-read). Only the owner and root can read a mailbox's contents — there is no shared `aimx-hook` group in the current model.
-
 ### Catchall user (created on demand)
 
-When you configure a catchall mailbox, setup creates the `aimx-catchall` system user via `useradd --system --no-create-home --shell /usr/sbin/nologin` (or the BusyBox `adduser` equivalent on Alpine) and chowns the catchall mailbox to it. If you skip the catchall, no `aimx-catchall` user is created. The legacy `aimx-hook` shared-group model has been retired; setup does not create or chown against `aimx-hook` under any flow.
+When you configure a catchall mailbox, setup creates the `aimx-catchall` system user via `useradd --system --no-create-home --shell /usr/sbin/nologin` (or the BusyBox `adduser` equivalent on Alpine) and chowns the catchall mailbox to it. If you skip the catchall, no `aimx-catchall` user is created.
 
-### Registering agent templates
+`aimx-catchall` is the only system user that `aimx setup` creates. The catchall mailbox itself never executes hooks — `Config::load` rejects any `[[mailbox.<catchall>.hook]]` block because the catchall user has no shell and no resolvable login uid that `setuid` can drop into. To run automation on inbound mail, create a non-catchall mailbox owned by a regular Linux user and attach hooks to it after setup.
 
-Per-agent hook templates (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, etc.) are not ticked from a checkbox during setup. Instead, the `aimx agents setup` drop-through (step 6) runs as your regular user (not as root) and presents an interactive checkbox picker. For each selected agent, it lays down plugin files under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching `invoke-<agent>-<username>` template over the UDS. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
+### Provisioning your first mailbox
+
+The setup wizard does **not** prompt for a first mailbox. After setup completes, provision mailboxes from the host CLI as root:
+
+```bash
+sudo aimx mailboxes create hi --owner ubuntu
+```
+
+This registers `hi@agent.yourdomain.com`, creates `inbox/hi/` and `sent/hi/` chowned `ubuntu:ubuntu 0700`, and hot-reloads the daemon's in-memory config. The mailbox's owner (here `ubuntu`) can then read mail, send mail, and create hooks via CLI or MCP — no further root commands required.
+
+`aimx mailboxes create` and `aimx mailboxes delete` are root-only on both the CLI and the UDS (`MAILBOX-CREATE` / `MAILBOX-DELETE`). The `aimx mailboxes list` command is filtered to caller-owned mailboxes for non-root callers; `--all` is root-only.
+
+### Wiring agents
+
+The `aimx agents setup` drop-through (step 6) runs as your regular user (not as root) and presents an interactive checkbox picker. For each selected agent, it lays down plugin files under the caller's `$HOME`. The plugin teaches the agent how to call aimx's MCP tools, including a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with `hook_create`. See [Agent integration](agent-integration.md) for the full flow and troubleshooting.
 
 If you logged in directly as root (no `sudo`), the wizard prints a message pointing you at the same tool. You can either re-run `aimx agents setup` as a regular user on the box, or pass `--dangerously-allow-root` if this is a single-user VPS where you genuinely want AIMX wired into `root`'s home.
 

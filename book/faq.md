@@ -74,40 +74,30 @@ Yes for reads. `rsync -a` or a filesystem snapshot of `/var/lib/aimx/` will prod
 Check in this order:
 
 1. `journalctl -u aimx | grep hook_name=<name>`. Every fire emits one structured line. No line means the hook was gated.
-2. The target email's frontmatter: `trusted = "false"` plus `dangerously_support_untrusted` unset is the most common cause. See the [trust gate](hooks.md#trust-gate-on_receive-only).
-3. If the line is there with a non-zero `exit_code`, it's your shell command. Test the `cmd` string against the saved `.md` manually.
+2. The target email's frontmatter: `trusted = "false"` plus `fire_on_untrusted` unset is the most common cause. See the [trust gate](hooks.md#trust-gate-on_receive-only).
+3. If the line is there with a non-zero `exit_code`, it's your `cmd` argv. Test the argv manually: `sudo -u <owner> /path/to/cmd[0] cmd[1] ...` against the saved `.md`.
 
-### Why can my agent create hooks but not run arbitrary shell commands?
+### What does mailbox ownership mean for security?
 
-This is the core of the hook-templates safety model. A naive design would expose a `hook_create` MCP tool that takes a `cmd` string and writes it to `config.toml`. That's a local RCE waiting to happen: any process that speaks MCP (and the `aimx.sock` UDS is world-writable so hooks can be created without root) could talk the daemon into running arbitrary shell every time mail arrives.
+Every mailbox declares a single Linux `owner` (a user on the host). Ownership is the authorization predicate for everything that touches the mailbox, and it directly constrains what hooks can do:
 
-Hook templates split the problem. The **operator** installs a small set of pre-vetted command *shapes* once, during `aimx setup`:
+- **Storage.** `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` are `<owner>:<owner> 0700`. Only the owner — and root — can read or list the contents. Other Linux users cannot even traverse the directory.
+- **Hook execution.** The daemon `setuid`s to `mailbox.owner_uid()` before `exec`'ing the hook's `cmd` argv. There is no per-hook `run_as` override.
+- **CRUD authorization.** Creating, listing, and deleting hooks (and reading mail, sending mail) requires the caller to either be root or own the target mailbox. The CLI checks euid; the UDS checks `SO_PEERCRED` — the same predicate.
+
+The "no escalation" property: a hook can do anything the mailbox owner could already do (cron, `~/.bashrc`, systemd `--user`, etc.). It cannot escalate privilege, and it cannot read `bob`'s mail when `alice` owns the mailbox the hook is wired to. A prompt-injected agent running under `alice`'s uid stays scoped to `alice`'s data and `alice`'s file permissions — adding hooks does not widen that scope, because hooks always exec as `alice`.
+
+The previous template-sandbox design was scaffolding around a different question ("how do we let an agent create hooks without giving it shell?"). With mailbox-ownership-as-authorization, the answer is simpler: the agent already has shell as `alice` (it's running under `alice`'s uid); hooks are just one more thing `alice` can do, and the daemon enforces that the hook runs as `alice` regardless of what the agent asked for. To run a hook as root, an operator must hand-edit `/etc/aimx/config.toml` to set `mailbox.owner = "root"` — a path that requires root in the first place.
+
+### Env var expansion: how does it work?
+
+Hook `cmd` is exec'd directly — there is no shell. argv elements pass through verbatim. To get shell expansion of `$AIMX_*` env vars, wrap your `cmd` in `["/bin/sh", "-c", "..."]` explicitly:
 
 ```toml
-[[hook_template]]
-name = "invoke-claude"
-cmd = ["/usr/local/bin/claude", "-p", "{prompt}"]
-params = ["prompt"]
+cmd = ["/bin/sh", "-c", 'echo "$AIMX_SUBJECT" >> /tmp/log']
 ```
 
-The **agent** can then only bind to those shapes, filling declared `{placeholder}` slots with string values:
-
-```json
-{"template": "invoke-claude", "params": {"prompt": "File this email"}}
-```
-
-Two properties make this safe:
-
-1. **No shell invocation.** The daemon builds the argv vector directly from `cmd` + `params` and calls `execvp`. `/bin/sh -c` is never used for template hooks, so there is no string-to-argv parsing step for an attacker to subvert.
-2. **Values can't escape their slot.** Substitution happens after the argv is already split. A parameter value like `"; rm -rf /"` lands as one complete argv entry passed verbatim to the target binary; it cannot introduce new argv entries, redirections, pipes, or quote escapes. NUL, `\r`, and other control bytes are rejected outright.
-
-Raw `cmd` submission is physically impossible over the UDS: the `HOOK-CREATE` verb rejects any request body containing a `cmd`, `run_as`, `dangerously_support_untrusted`, `timeout_secs`, or `stdin` field. Those are template properties — not hook properties — so they can't leak through.
-
-The operator keeps the full-power escape hatch: `sudo aimx hooks create --cmd "..."` writes `config.toml` directly. That requires root, bypasses the UDS, and is intentionally not reachable from MCP.
-
-### Env var vs. `{id}`/`{date}` placeholder: when do I use which?
-
-Env vars (`$AIMX_FROM`, `$AIMX_SUBJECT`, …) carry sender-controlled header content. Always expand them inside double quotes. Never splice them into the `cmd` string. Placeholders (`{id}`, `{date}`) are AIMX-generated (slug and ISO-8601 date) and are substituted into `cmd` directly. Use them when you need the value in a filename or path literal, where a shell variable would not expand.
+Always expand env vars inside double quotes. Sender-controlled header values can contain `$()`, backticks, quotes, or newlines; the double-quoted form passes them through as literal bytes. The literal token `$AIMX_FILEPATH` (no shell wrapping) reaches argv unchanged — useful when the agent itself reads env vars (OpenCode, Hermes do this in inline-prompt mode).
 
 ### Can an `after_send` hook distinguish a deferral from a permanent failure?
 
@@ -123,9 +113,9 @@ Two conditions: the sender address matches a glob in the effective `trusted_send
 
 It replaces. Setting `trusted_senders` under a mailbox fully overrides the top-level list for that mailbox. There is no merge, and an empty per-mailbox list means "nobody" for that mailbox.
 
-### When is `dangerously_support_untrusted` actually appropriate?
+### When is `fire_on_untrusted` actually appropriate?
 
-When the hook's side effect is safe regardless of sender. A logger, a metric counter, a push notification with no email content in the payload. Never use it on a hook that hands the email body to an agent or to any shell command that quotes the body.
+When the hook's side effect is safe regardless of sender. A logger, a metric counter, a push notification with no email content in the payload. Never use it on a hook that hands the email body to an agent or to any shell command that quotes the body. Mailbox isolation (uid-scoped exec + uid-scoped storage) makes the flag a per-owner choice with bounded blast radius — even an adversarial fire on untrusted mail can do no more than what the mailbox owner could already do — but the trust gate is still the primary defense for irreversible side effects. The flag is illegal on `after_send` hooks and rejected at config load.
 
 ## Security model
 
@@ -133,15 +123,15 @@ When the hook's side effect is safe regardless of sender. A logger, a metric cou
 
 ### Can I use AIMX in place of Postfix or Stalwart?
 
-No, and that is intentional. AIMX is a single-operator mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication, no LMTP, no virtual alias tables, and no submission port on 587. Mailboxes are world-readable by design and every hook and MCP tool addresses the whole mailbox tree.
+No, and that is intentional. AIMX is a single-domain mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication on the SMTP submission path, no LMTP, no virtual alias tables, and no submission port on 587. Each mailbox is owned by exactly one Linux user, and hooks always run as that user — the boundary is per-mailbox, not per-server.
 
 ### `aimx.sock` is mode `0666`, why is that fine?
 
-Any local user can submit an outbound message, but the DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`. The UDS is a signing oracle for the configured mailboxes and that is the intended authorisation boundary. If local users on this host cannot be trusted to send mail under your domain at all, run AIMX on a dedicated host.
+Any local user can connect to the socket, but the daemon enforces per-verb authorization via `SO_PEERCRED` (kernel-supplied peer uid). `SEND` requires the caller to own the From mailbox; `MARK-*` and `HOOK-*` require ownership of the target mailbox; `MAILBOX-CREATE` / `MAILBOX-DELETE` are root-only. The DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`, so the socket is a signing oracle scoped to the caller's owned mailboxes — never a free pass to forge mail for someone else's mailbox.
 
-### The mailbox tree is world-readable, why is that fine?
+### The mailbox tree is per-owner, what does that buy me?
 
-AIMX assumes a single-operator server where every local user and agent is inside the trust boundary. If you need per-user mailbox isolation, AIMX is the wrong tool. Run a general-purpose MTA like Postfix or Stalwart instead (see [Can I use AIMX in place of Postfix or Stalwart?](#can-i-use-aimx-in-place-of-postfix-or-stalwart) above). The trade-off is documented in [Security model](getting-started.md#security-model).
+Each `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` is `<owner>:<owner> 0700`. On a multi-user host, alice cannot read bob's mail — she cannot even traverse the directory to stat its contents. Hooks on alice's mailbox run as alice, so a prompt-injected agent stays scoped to alice's filesystem perms. The trade-off vs. a single shared mailbox tree is that mailbox provisioning requires picking the right owner; `aimx mailboxes create` defaults the owner to a Linux user named after the mailbox if one exists.
 
 ### Who can read the DKIM private key, and what happens if it leaks?
 
@@ -155,7 +145,7 @@ No. `aimx mcp` uses stdio transport. Each MCP client spawns and owns its own pro
 
 ### How do I scope an agent to a single mailbox?
 
-AIMX does not implement MCP-level access control today. Every MCP tool call sees every mailbox. If you need isolation, run a second AIMX instance on a different host (or different IP + config dir) and give each agent its own.
+Every MCP tool call is scoped to mailboxes the calling uid owns: `mailbox_list` filters; `email_*` and `hook_*` reject with `EACCES not authorized` for foreign mailboxes. To pin a single agent to a single mailbox, run that agent under a Linux user that owns only the one mailbox you want (`sudo aimx mailboxes create <name> --owner <user>`). The agent's MCP server inherits the caller's uid via stdio transport, so authorization derives entirely from "which Linux user is running `aimx mcp`."
 
 ### How do I update the installed agent plugin after upgrading AIMX?
 

@@ -34,7 +34,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Emails landing in spam | Missing DNS records, bad reverse DNS, or receiver spam filter | Add all [DNS records](setup.md#dns-configuration), configure a PTR record at your VPS provider, use a Gmail filter |
 | `aimx serve` not running | Service crashed or not started | Check status and logs (see below) |
 | Emails not delivered to mailbox | `aimx serve` not running or misconfigured | Check service status with `systemctl status aimx` |
-| Hooks not firing | Trust gate | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `dangerously_support_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
+| Hooks not firing | Trust gate | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `fire_on_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
 | DKIM verification failing | DNS record mismatch or key regenerated | Ensure DKIM DNS record matches current public key |
 
 ## Restarting setup from scratch
@@ -167,80 +167,78 @@ head -20 /var/lib/aimx/inbox/catchall/*.md
 
 Look at the `dkim` and `spf` fields. They should show `pass` for properly authenticated senders.
 
-## Hook templates
+## Hooks and ownership
 
-### Hook `run_as` user missing
+### Mailbox owner does not exist on the host
 
-Symptom: `aimx doctor` lists a hook under `orphan hooks` with `reason = "run_as_missing"`, or journalctl shows a WARN for a hook fire with `user-not-found`.
+Symptom: `aimx doctor` Ownership section flags a mailbox with `[FAIL] user not found` for its owner, and hook fires for that mailbox are soft-skipped with a WARN carrying `reason = "owner-not-found"`.
 
-Fix: a hook's `run_as` points at a Linux user that has been removed (for example `userdel alice` after an agent cleanup). The daemon soft-skips the hook rather than falling back to a different uid. Either recreate the missing user with `sudo useradd --system --no-create-home --shell /usr/sbin/nologin <name>` and fix up the mailbox ownership, or run `sudo aimx hooks prune --orphans` to drop the stale hook entries. The legacy shared `aimx-hook` user has been retired and `aimx setup` no longer creates it.
-
-### MCP `hook_create` returns `Unknown template`
-
-Symptom: an agent calls `hook_create` with a template name and gets `ERR unknown-template` (or the MCP-surfaced form `Unknown template: ...`).
-
-Fix: the operator never enabled that template. Run `aimx hooks templates` to list what's on this box, then `sudo aimx setup` and tick the template in the checkbox UI. Re-running `aimx setup` is idempotent — it won't overwrite unrelated config.
-
-### MCP `hook_create` returns `missing-param` or `unknown-param`
-
-Symptom: daemon rejects the hook creation with `missing-param: prompt` or `unknown-param: foo`.
-
-Fix: the agent's `params` map didn't match the template's declared `params` list. Inspect the template via `hook_list_templates` (or `aimx hooks templates`) to see the exact parameter names, then re-issue `hook_create` with the complete set.
-
-### Template hook doesn't fire on inbound mail
-
-Symptom: the hook appears in `aimx hooks list` and `origin = "mcp"`, but it never fires when email lands.
-
-Fix: MCP-origin hooks always fire only on trusted mail (`trusted == "true"` in frontmatter). Check the email's frontmatter:
-
-```bash
-grep '^trusted =' /var/lib/aimx/inbox/<mailbox>/<id>.md
-```
-
-If it reads `trusted = "false"` or `trusted = "none"`, the hook gate blocks it. Either:
-
-- Set mailbox `trust = "verified"` + `trusted_senders = [...]` so legitimate senders evaluate to `true`, or
-- Create an operator-origin raw-cmd hook with `dangerously_support_untrusted = true` (only settable in `config.toml`, not via MCP).
-
-### Sandbox denied reading stdin
-
-Symptom: hook logs show `exit_code != 0` and stderr tail like `cat: '/var/lib/aimx/inbox/...': Permission denied`.
-
-Fix: the hook's `run_as` user does not match the mailbox's owner. Each mailbox is chowned to `<owner>:<owner>` at mode `0700`, so only that owner (and root) can read the piped email content. Either fix the hook's `run_as` to equal the mailbox `owner` (the CLI/UDS verbs enforce this; a hand-edited `config.toml` can desync), or reassign the mailbox:
+Fix: the mailbox's `owner =` value points at a Linux user that does not resolve via `getpwnam(3)` on this host (typo in `config.toml`, or the user was removed via `userdel`). Either create the missing user (`sudo useradd --system --no-create-home --shell /usr/sbin/nologin <name>`) and fix up mailbox directory ownership manually:
 
 ```bash
 sudo chown -R <owner>:<owner> /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
 sudo chmod -R u+rwX,go-rwx /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
 ```
 
-`aimx doctor` surfaces a WARN line when mailbox ownership has drifted from the configured `owner`.
+Or re-assign the mailbox to a user that does exist by hand-editing `[mailboxes.<name>]` in `/etc/aimx/config.toml` and `sudo systemctl reload aimx`. Doctor's overall exit code is non-zero whenever any mailbox has an unresolvable owner so monitoring can detect orphans.
+
+### Hook on catchall is forbidden
+
+Symptom: `Config::load` fails on daemon startup with `catchall does not support hooks`, or `aimx hooks create --mailbox catchall` returns `EACCES catchall does not support hooks`.
+
+Fix: `aimx-catchall` has no shell and no resolvable login uid that `setuid` can drop into, so hooks on the catchall mailbox have no safe owner to execute as. Move the hook to a non-catchall mailbox owned by a regular user, or — if the goal is "notify on every inbound mail" — create a separate non-catchall mailbox (`sudo aimx mailboxes create notify --owner ubuntu`) and attach the hook there.
+
+### `fire_on_untrusted` rejected on `after_send`
+
+Symptom: `Config::load` fails on daemon startup with `fire_on_untrusted is on_receive only`, or `aimx hooks create --event after_send --fire-on-untrusted` is rejected.
+
+Fix: `fire_on_untrusted` is the trust-gate escape hatch for `on_receive` hooks (which fire only on trusted mail by default). It has no meaning on `after_send` because there is no trust gate on outbound delivery. Remove the flag from any `after_send` hook entry.
+
+### `MAILBOX-CREATE` / `MAILBOX-DELETE` rejected for non-root
+
+Symptom: a non-root call to `aimx mailboxes create` or `aimx mailboxes delete` is rejected with exit code 2, or a `MAILBOX-CREATE` / `MAILBOX-DELETE` UDS request from a non-root caller returns `EACCES not authorized`.
+
+Fix: mailbox CRUD is root-only — both verbs check the caller's uid via `SO_PEERCRED` and refuse anything other than uid 0. Provision mailboxes with `sudo aimx mailboxes create <name> --owner <user>`; the named owner can then CRUD hooks and read/send mail without further root commands. The previous "any local user can create mailboxes via UDS" stance has been retired.
+
+### `aimx send` returns `not authorized: <local_part>@<domain>`
+
+Symptom: `aimx send --from alice@agent.yourdomain.com ...` exits 1 with `not authorized: alice@agent.yourdomain.com` even though the mailbox exists.
+
+Fix: `aimx send` validates the `From:` local part against the caller's owned mailboxes. The mailbox owner (the Linux user named in `[mailboxes.<name>]` `owner =`) is the only non-root caller authorized to send as that address. Run `aimx send` as the mailbox's owner (`sudo -u <owner> aimx send ...` if you're already root), or re-assign ownership in `config.toml`. `aimx send` refuses uid 0 — root cannot run it.
+
+### Hook reads "Permission denied" on stdin
+
+Symptom: hook logs show `exit_code != 0` and stderr tail like `cat: '/var/lib/aimx/inbox/...': Permission denied`.
+
+Fix: the running subprocess is not the mailbox owner. Each mailbox directory is `<owner>:<owner> 0700`, so only the owner (and root) can read the piped email content. The daemon `setuid`s to `mailbox.owner_uid()` before `exec`, so a fresh hook should always run with the right uid; mismatches usually mean someone hand-edited `config.toml` and the on-disk perms drifted. Re-chown to match:
+
+```bash
+sudo chown -R <owner>:<owner> /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
+sudo chmod -R u+rwX,go-rwx /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mailbox>
+```
 
 ### SIGHUP reload failed
 
-Symptom: `aimx hooks create --cmd` completes, prints `Reload:` banner, but the new hook never fires. journalctl shows a `config reloaded with error` warn line.
+Symptom: editing `config.toml` and `sudo systemctl reload aimx` reports success but the new hook never fires. journalctl shows a `config reloaded with error` warn line.
 
-Fix: the new `config.toml` failed validation (unknown field, duplicate hook name, malformed template) so the daemon kept running on the old config. Check the log:
+Fix: the new `config.toml` failed validation. Common culprits: legacy `template`, `params`, `run_as`, `origin`, or `dangerously_support_untrusted` fields on a hook (all rejected at config load with a pointer to `book/hooks.md`); duplicate hook name across mailboxes; `cmd[0]` not an absolute path; `fire_on_untrusted = true` on an `after_send` hook. Check the log:
 
 ```bash
 journalctl -u aimx --since="5 minutes ago" | grep -i reload
 ```
 
-Edit `/etc/aimx/config.toml` to fix the error, then `sudo kill -HUP $(cat /run/aimx/aimx.pid)` or `sudo systemctl reload aimx`.
+Fix the offending field in `/etc/aimx/config.toml`, then `sudo systemctl reload aimx`.
 
-### Template's `cmd[0]` binary not found
+### Hook's `cmd[0]` binary not found
 
-Symptom: `aimx doctor` flags a template with `cmd[0] (MISSING)`, or hook fires log `exit_code = -1` with `spawn-failed` kind.
+Symptom: hook fires log `exit_code = -1` with `spawn-failed` kind.
 
-Fix: the canonical path baked into the template doesn't exist on this box. Override the `cmd[0]` by editing the template in `/etc/aimx/config.toml`:
+Fix: the absolute path written into the hook's `cmd[0]` does not exist on the host. Run `which <agent>` as the mailbox owner to confirm the right path, then delete and re-create the hook with the corrected `cmd[0]`:
 
-```toml
-[[hook_template]]
-name = "invoke-claude"
-cmd = ["/home/alice/.local/bin/claude", "-p", "{prompt}"]
-# ... rest of fields unchanged
+```bash
+aimx hooks delete <name> --yes
+aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/agent", "..."]' --stdin email --name <name>
 ```
-
-SIGHUP the daemon (`sudo systemctl reload aimx`) and the new path takes effect on the next fire.
 
 ## Spam prevention
 

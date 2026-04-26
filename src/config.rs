@@ -385,14 +385,9 @@ pub enum LoadWarning {
     /// Mailbox `owner` doesn't resolve via `getpwnam`. Mailbox is
     /// flagged inactive for the session.
     OrphanMailboxOwner { mailbox: String, owner: String },
-    /// A stale `aimx-hook` system user is present on the host. aimx no
-    /// longer creates this user; doctor notes its presence so the
-    /// operator can clean up.
-    #[allow(dead_code)]
-    LegacyAimxHookUser,
     /// Catchall mailbox is configured with `owner = "root"` and the
-    /// `allow_root_catchall = true` escape hatch (PRD §6.2). Logged at
-    /// WARN so the audit trail records the elevation.
+    /// `allow_root_catchall = true` escape hatch. Logged at WARN so the
+    /// audit trail records the elevation.
     RootCatchallAccepted { mailbox: String },
 }
 
@@ -405,15 +400,10 @@ impl LoadWarning {
                 "mailbox '{mailbox}' owner '{owner}' does not resolve via getpwnam; \
                  mailbox marked inactive — create the user or update config.toml"
             ),
-            LoadWarning::LegacyAimxHookUser => {
-                "legacy 'aimx-hook' system user present; aimx no longer \
-                 manages it — remove via 'userdel aimx-hook' when safe"
-                    .to_string()
-            }
             LoadWarning::RootCatchallAccepted { mailbox } => format!(
                 "catchall mailbox '{mailbox}' is running with owner='root' \
                  and allow_root_catchall=true; this is a documented escape \
-                 hatch (PRD §6.2) — mail lands owned by uid 0"
+                 hatch — mail lands owned by uid 0"
             ),
         }
     }
@@ -1166,7 +1156,7 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 run_as = "ops"
 "#,
         );
@@ -1192,7 +1182,7 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 origin = "operator"
 "#,
         );
@@ -1218,7 +1208,7 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 dangerously_support_untrusted = true
 "#,
         );
@@ -1269,7 +1259,7 @@ owner = "ops"
 
 [[mailboxes.support.hooks]]
 event = "on_receive"
-cmd = "true"
+cmd = ["/bin/true"]
 stdin = "email_json"
 "#,
         );

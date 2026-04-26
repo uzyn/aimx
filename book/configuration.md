@@ -40,7 +40,7 @@ This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim
 | `AIMX_TEST_MAIL_DROP` | *(unset)* | When set to a directory path, `aimx serve` writes every outbound submission to that directory instead of delivering via SMTP. The daemon logs a startup warning so it cannot be left on in production by accident. |
 | `NO_COLOR` | *(unset)* | Standard convention. When set to any value, aimx CLI output disables ANSI color. |
 
-Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields. See [Hooks & Trust: Hook context](hooks.md#hook-context-env-vars-and-placeholders).
+Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields. See [Hooks & Trust: Hook context](hooks.md#hook-context-env-vars-and-stdin).
 
 ## Settings reference
 
@@ -71,9 +71,12 @@ Mailboxes are defined under `[mailboxes.<name>]`:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `address` | string | *(required)* | Email address pattern (e.g. `support@domain.com` or `*@domain.com` for catchall) |
+| `owner` | string | *(required)* | Linux username that owns the mailbox storage and runs hooks. Must resolve via `getpwnam(3)` at config load. The reserved username `aimx-catchall` is used for catchall mailboxes (created on demand by `aimx setup`); the reserved value `root` is allowed but only settable by hand-editing `config.toml`. |
 | `trust` | string | *(inherited)* | Override the global default. Allowed values: `none` or `verified`. Omit to inherit. |
 | `trusted_senders` | array | *(inherited)* | Override the global allowlist. Setting this **replaces** the global list (no merging). Omit to inherit. |
-| `hooks` | array | `[]` | Hooks fired on `on_receive` (inbound) and `after_send` (outbound) events |
+| `hooks` | array | `[]` | Hooks fired on `on_receive` (inbound) and `after_send` (outbound) events. Forbidden on catchall mailboxes (config-load error). |
+
+**Reserved mailbox names.** `catchall` and `aimx-catchall` are reserved literals; `aimx mailboxes create` rejects them, and `MAILBOX-CREATE` over the daemon's UDS rejects them with `Validation: reserved`. The catchall is provisioned by `aimx setup` (when configured) under the wildcard address `*@<domain>` and uses owner `aimx-catchall`.
 
 See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.md) for hook configuration.
 
@@ -101,7 +104,7 @@ Trust only gates hook execution (`on_receive`). All email is stored regardless o
 
 ### Hook settings
 
-Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is a **raw-cmd** stanza: `cmd` is an argv array exec'd directly as the mailbox's `owner`. The first element must be an absolute path; there is no shell wrapping. If you need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array exec'd directly as the mailbox's `owner` — the daemon `setuid`s to `mailbox.owner_uid()` before `exec`. The first element must be an absolute path; there is no shell wrapping. If you need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
 
 | Setting | Type | Description |
 |---------|------|-------------|
@@ -111,45 +114,9 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. Each hook is a **raw-c
 | `cmd` | array of strings | Argv exec'd directly. Required and non-empty; `cmd[0]` must be an absolute path. There is no shell wrapping — spell out `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
 | `stdin` | string | `"email"` (default) pipes the raw `.md` (frontmatter + body) to the hook's stdin; `"none"` closes stdin immediately so the hook only sees env vars. |
 | `timeout_secs` | int | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
-| `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. |
+| `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on `after_send` hooks at config load with `ERR fire_on_untrusted is on_receive only`. |
 
-Unknown fields on a hook table are rejected at config load. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
-
-### Hook templates
-
-`[[hook_template]]` blocks declare pre-vetted command shapes that agents can bind to via MCP `hook_create`. Each template's `cmd` is an argv array — no shell is ever invoked, and `{placeholder}` slots can only appear inside string argv entries (never as `cmd[0]` or as new argv entries).
-
-| Setting | Type | Default | Description |
-|---------|------|---------|-------------|
-| `name` | string | *(required)* | Unique across all templates. Pattern `[a-z0-9-]+`. |
-| `description` | string | *(required)* | One-liner for the `aimx setup` checkbox UI and the `hook_list_templates` MCP response. |
-| `cmd` | array of strings | *(required)* | Argv for the child process. `cmd[0]` is the binary path; subsequent entries may embed `{name}` placeholders in string values. |
-| `params` | array of strings | `[]` | Declared placeholder names the operator/agent fills at hook-create time. Must be a 1:1 set with the placeholders in `cmd` (minus built-ins). |
-| `stdin` | string | `"email"` | `"email"` (pipe the raw `.md`), `"email_json"` (`{"raw": ...}`), or `"none"`. |
-| `run_as` | string | *(required)* | Linux username the child process runs as. Any user resolvable via `getpwnam(3)` is accepted, plus the reserved `"aimx-catchall"` (for catchall-bound templates) and `"root"` (only settable via root-executed `config.toml` edit; the UDS verb rejects these two values). Templates registered via `aimx agents setup` default to the registering user's username. |
-| `timeout_secs` | int | `60` | Hard subprocess timeout. Range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
-| `allowed_events` | array of strings | `["on_receive", "after_send"]` | Events the template may be wired to. MCP `hook_create` with a disallowed event is rejected. |
-
-**Built-in placeholders** available in every template's `cmd` (no need to declare them in `params`): `{event}`, `{mailbox}`, `{message_id}`, `{from}`, `{subject}`. Populated at fire time; missing values become empty strings.
-
-Validation at config load rejects: duplicate template `name`, unknown placeholder references, declared-but-unused `params`, placeholder in `cmd[0]`, empty `cmd` array, `timeout_secs` out of range, unsupported `run_as`. A malformed template fails daemon startup rather than the first hook fire.
-
-#### Default hook templates
-
-The aimx binary embeds eight default templates you can enable via `aimx setup` or by pasting them into `config.toml`:
-
-| Template | `cmd[0]` | `params` | `stdin` |
-|----------|----------|----------|---------|
-| `invoke-claude` | `/usr/local/bin/claude` | `prompt` | `email` |
-| `invoke-codex` | `/usr/local/bin/codex` | `prompt` | `email` |
-| `invoke-opencode` | `/usr/local/bin/opencode` | `prompt` | `email` |
-| `invoke-gemini` | `/usr/local/bin/gemini` | `prompt` | `email` |
-| `invoke-goose` | `/usr/local/bin/goose` | `recipe` | `email` |
-| `invoke-openclaw` | `/usr/local/bin/openclaw` | `prompt` | `email` |
-| `invoke-hermes` | `/usr/local/bin/hermes` | `prompt` | `email` |
-| `webhook` | `/usr/bin/curl` | `url` | `email_json` |
-
-Override a template's `cmd[0]` in your `config.toml` if your agent binary lives elsewhere. `aimx doctor` flags any enabled template whose `cmd[0]` is not executable on this box.
+Unknown fields on a hook table are rejected at config load. The legacy fields `template`, `params`, `run_as`, `origin`, and `dangerously_support_untrusted` are also rejected with a pointer to `book/hooks.md` — the template-hook surface and `aimx-hook` shared-uid sandbox have been retired in favor of the per-mailbox owner model. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
 
 ## Storage layout
 
@@ -164,19 +131,21 @@ Override a template's `cmd[0]` in your `config.toml` if your agent binary lives 
 └── aimx.sock                # World-writable UDS for aimx send / hook / mailbox verbs
 
 /var/lib/aimx/               # Mailbox storage
-├── inbox/
-│   ├── catchall/            # Default mailbox
+├── inbox/                   # Each mailbox dir is `<owner>:<owner> 0700`
+│   ├── catchall/            # Default mailbox (owner: aimx-catchall)
 │   │   ├── 2025-04-15-143022-hello.md
 │   │   └── 2025-04-15-153300-invoice-march/   # Attachment bundle
 │   │       ├── 2025-04-15-153300-invoice-march.md
 │   │       ├── invoice.pdf
 │   │       └── receipt.png
-│   └── support/             # Named mailbox
+│   └── support/             # Named mailbox (owner: support-bot)
 │       └── ...
 └── sent/
     └── support/             # Outbound sent copies
         └── ...
 ```
+
+Each mailbox directory is chowned to `<owner>:<owner>` mode `0700` at create time and stays that way through every subsequent write (ingest, send, mark-read). Files inside are written by the daemon as `root:root 0644` — root bypasses dir perms regardless, while the mailbox owner reads via uid match. Other users cannot traverse the directory.
 
 ## IPv6 delivery (advanced)
 
@@ -248,22 +217,19 @@ dkim_selector = "aimx"
 # Mailboxes
 # ----------------------------
 
-# Catchall mailbox: receives all unmatched addresses
+# Catchall mailbox: receives all unmatched addresses.
+# Owned by the reserved `aimx-catchall` system user; hooks on the catchall
+# are forbidden at config load.
 [mailboxes.catchall]
 address = "*@agent.yourdomain.com"
-
-# Notify on any incoming email (opts in to fire on untrusted mail)
-[[mailboxes.catchall.hooks]]
-# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
-event = "on_receive"
-cmd = ["/bin/sh", "-c", 'ntfy pub agent-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"']
-fire_on_untrusted = true
+owner = "aimx-catchall"
 
 # ----------------------------
 # Named mailbox with a per-mailbox trust override
 # ----------------------------
 [mailboxes.support]
 address = "support@agent.yourdomain.com"
+owner = "support-bot"  # Linux user 'support-bot' must exist on the host
 
 # Per-mailbox overrides (both optional. Omit to inherit the top-level defaults).
 # Setting `trusted_senders` here fully replaces the global list (no merging).
@@ -274,19 +240,21 @@ trusted_senders = ["*@yourcompany.com", "boss@gmail.com"]
 [[mailboxes.support.hooks]]
 name = "support_log"
 event = "on_receive"
-cmd = ["/bin/sh", "-c", 'echo "{date} | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log']
+cmd = ["/bin/sh", "-c", 'echo "$AIMX_DATE | $AIMX_FROM | $AIMX_SUBJECT" >> /var/log/aimx-support.log']
 
-# Trigger agent on every trusted incoming email
+# Trigger Claude Code on every trusted incoming email; runs as `support-bot`.
 [[mailboxes.support.hooks]]
 name = "support_agent"
 event = "on_receive"
-cmd = ["/bin/sh", "-c", 'claude -p "Process this email: $(cat \"$AIMX_FILEPATH\")"']
+cmd = ["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"]
+stdin = "email"
 
 # ----------------------------
 # Another mailbox
 # ----------------------------
 [mailboxes.notifications]
 address = "notifications@agent.yourdomain.com"
+owner = "ubuntu"
 ```
 
 ---
