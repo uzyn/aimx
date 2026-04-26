@@ -2,291 +2,188 @@
 
 > **Note on log paths.** The `/var/log/aimx/<agent>.log` paths in the recipes below are user-chosen destinations for hook script output. They are NOT aimx's own logs. aimx itself logs to journald (systemd) or the system logger (OpenRC). See [Troubleshooting: Where are the logs?](troubleshooting.md#where-are-the-logs) for details.
 
-This chapter is the canonical cookbook for wiring aimx hooks to every supported AI agent. Each section shows a copy-paste `config.toml` snippet, the agent-specific CLI flags that matter for non-interactive invocation, and notes on exit codes, logs, and gotchas.
+This chapter is the canonical cookbook for wiring aimx hooks to every supported AI agent. Each section shows a copy-paste `aimx hooks create` invocation with the verified `cmd` argv for that agent.
 
-For the underlying mechanics (names, env vars, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the aimx plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
-
-## Template-first: the easy path
-
-For every agent with a bundled template (`invoke-claude`, `invoke-codex`, `invoke-opencode`, `invoke-gemini`, `invoke-goose`, `invoke-openclaw`, `invoke-hermes`, `webhook`), the recipe reduces to two steps:
-
-1. Operator ticks the template in `aimx setup`. Once per box.
-2. Agent or operator calls `hook_create` (MCP) or `aimx hooks create --template <name> --param <k=v>` (CLI). Per mailbox, per prompt.
-
-Example — wire Claude Code to the `schedule` mailbox:
-
-```bash
-# One-time: enable the template
-sudo aimx setup          # tick invoke-claude in the checkbox UI
-
-# Per mailbox: bind the template
-sudo aimx hooks create \
-  --mailbox schedule \
-  --event on_receive \
-  --template invoke-claude \
-  --param prompt="Handle this scheduling request."
-```
-
-The agent equivalent over MCP looks like:
-
-```json
-{"name": "hook_create", "arguments": {
-  "mailbox": "schedule",
-  "event": "on_receive",
-  "template": "invoke-claude",
-  "params": {"prompt": "Handle this scheduling request."}
-}}
-```
-
-Template hooks run sandboxed under the template's `run_as` user (the registering mailbox owner, never root) and can't be abused by prompt injection — see [Hooks & Trust § Template hooks](hooks.md#template-hooks-recommended).
-
-The raw-cmd recipes below are the **power-user path**: use them when you need a shell pipeline, an exit-code check, multiple output sinks, or a flag the template doesn't expose.
+For the underlying mechanics (ownership, env vars, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the aimx plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
 
 ## What counts as a hook recipe?
 
-A hook recipe is a `[[mailboxes.<name>.hooks]]` block whose `cmd` invokes an AI agent non-interactively against an incoming email. The recipe pattern is always:
+A hook recipe is a `[[mailboxes.<name>.hooks]]` block (or the equivalent `aimx hooks create` invocation) whose `cmd` invokes an AI agent or HTTP endpoint non-interactively against an incoming email. The recipe pattern is always:
 
 1. Email lands in the mailbox, aimx writes the `.md` file to disk.
-2. aimx evaluates the trust gate. A hook fires iff `trusted == "true"` on the email OR the hook sets `dangerously_support_untrusted = true`.
-3. aimx fires the shell `cmd`. User-controlled header values are delivered as env vars (`AIMX_HOOK_NAME`, `AIMX_FROM`, `AIMX_SUBJECT`, `AIMX_TO`, `AIMX_MAILBOX`, `AIMX_FILEPATH`). The two aimx-controlled placeholders `{id}` and `{date}` are substituted into the command string.
-4. The agent reads the email body (typically by `cat`-ing `"$AIMX_FILEPATH"`) and takes action: replying, filing a ticket, updating a calendar, whatever.
+2. aimx evaluates the trust gate. A hook fires iff `trusted == "true"` on the email OR the hook sets `fire_on_untrusted = true`.
+3. aimx exec's the argv directly as the mailbox's owner. There is no `/bin/sh` between aimx and the agent. The piped email body (`stdin = "email"`) or the `$AIMX_FILEPATH` env var (`stdin = "none"`) hands the agent the email content.
+4. The agent reads the email and takes action: replying, filing a ticket, updating a calendar, whatever.
 5. Exit code is logged (one structured line per fire) but does not block delivery.
 
-> **Why env vars, not `{from}`/`{subject}` substitution?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into the command string, even with shell-escape quoting, is fragile. Delivering them as env vars and expanding with `"$AIMX_FROM"` inside double quotes is safe no matter what the sender puts in the header.
+> **Why argv and not shell?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into a shell command, even with shell-escape quoting, is fragile. Delivering them as env vars and `exec`'ing argv directly avoids the shell parser entirely. When you do need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly so it's visible at the call site.
 
-Every recipe below assumes the agent binary (`claude`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `aider`) is on the `PATH` of the user running `aimx serve`. Since `aimx serve` runs as a system user under systemd/OpenRC, you will typically either install the agent CLI system-wide or set an explicit absolute path in the command.
+## Two stdin shapes
 
-## Summary table
+Recipes split into two camps depending on whether the agent reads stdin in headless mode:
 
-| Agent | MCP supported? | Hook CLI | Non-interactive / approval flag | Notes |
-|-------|----------------|----------|---------------------------------|-------|
-| Claude Code | Yes (`aimx agents setup claude-code`) | `claude -p "<prompt>"` | `--dangerously-skip-permissions` (or `--permission-mode=bypassPermissions`) | `-p` / `--print` runs headless and exits. Pipe the email via `$(cat "$AIMX_FILEPATH")`. |
-| Codex CLI | Yes (`aimx agents setup codex`) | `codex exec "<prompt>"` | `--dangerously-bypass-approvals-and-sandbox` (or `--full-auto`) | `exec` is the non-interactive subcommand. `--full-auto` enables auto-approval within sandbox. The bypass flag goes further. |
-| OpenCode | Yes (`aimx agents setup opencode`) | `opencode run "<prompt>"` | no confirmation prompts by design | `run` executes a single prompt and exits. Model selection via `-m/--model`. |
-| Gemini CLI | Yes (`aimx agents setup gemini`) | `gemini -p "<prompt>"` | `--yolo` (auto-accepts all actions) | `-p/--prompt` is the non-interactive flag. `--yolo` skips confirmations. |
-| Goose | Yes (`aimx agents setup goose`) | `goose run -t "<prompt>"` | `--no-session` (optional. Sessions default on) | `-t/--text` takes an inline prompt. `-i/--instructions` reads from a file. |
-| OpenClaw | Yes (`aimx agents setup openclaw`) | `openclaw agent --message "<prompt>" --deliver --json` | `--deliver` routes the reply back through OpenClaw. `--json` produces a stable, scriptable output envelope | The `agent` subcommand is non-interactive. See [OpenClaw](#openclaw) for a complete recipe. |
-| Hermes | Yes (`aimx agents setup hermes`) | *(no headless CLI)* | n/a | Hermes has no shell-side invocation for dispatching a one-shot prompt. Integrate via MCP instead. See [Hermes](#hermes) for the recommended pattern. |
-| Aider | No (no MCP server) | `aider --message "<prompt>"` | `--yes-always` | Aider is a code-editing agent. Recipes below pattern it as "take email, apply patch, commit." |
+- **Native-stdin** (Claude Code, Codex, Gemini, Goose, webhook): hook sets `stdin = "email"`, the daemon pipes the raw `.md` to the agent's stdin, and the prompt only tells the agent what to do with it. Smallest argv, cleanest pipeline.
+- **Inline-only** (OpenCode, Hermes): hook sets `stdin = "none"`; the `cmd` carries a fixed prompt that instructs the agent to read `$AIMX_FILEPATH` (env var set by the daemon) using its filesystem tool. argv is not shell-expanded — the literal `$AIMX_FILEPATH` token reaches the agent, which expands it via Bash/Read tooling at run time.
 
-Every agent with an `aimx agents setup <agent>` installer can ALSO be wired as a hook. MCP support and hook support are orthogonal. MCP gives the agent a way to read/send mail on demand. A hook is aimx pushing an email into the agent when it arrives.
+## Absolute paths
 
-> **Flag drift warning.** CLI flags for every agent below were verified against each project's current `--help` output and public docs at the time of writing. Agent CLIs evolve fast. Always run `<agent> --help` yourself before deploying a recipe to a production mailbox, and check the linked docs for current flag names.
+Every recipe uses `/usr/local/bin/<agent>` for `cmd[0]`. `Config::load` rejects relative paths (`hook has non-absolute cmd[0]`). Adjust the path to match your install — `which <agent>` shows where each binary lives. The `cmd[0]` literal in your `config.toml` (or in the `--cmd` argv array passed to `aimx hooks create`) must point at the binary that exists on the box.
+
+## Self-loop reminder
+
+The headless agent process runs as the **mailbox owner's uid** (the daemon `setuid`s to `mailbox.owner_uid()` before `exec`). That user must have:
+
+1. The agent binary installed and reachable at the path you reference in `cmd[0]`.
+2. The aimx skill installed (`aimx agents setup <agent>` was run as that user) so the agent loads the aimx MCP server when it starts.
+
+Without both, the headless invocation will start without the skill loaded and the agent won't know what to do with the email. `aimx doctor` could flag this gap in a future release; for now, run `aimx agents setup` as the mailbox owner before creating the hook.
 
 ## Claude Code
 
 - Docs: <https://docs.claude.com/en/docs/claude-code/cli-reference>
-- Non-interactive: `claude -p` (aliases: `--print`).
-- Bypass permissions: `--dangerously-skip-permissions` or `--permission-mode=bypassPermissions`.
-- Output: stdout by default. `--output-format text|json|stream-json` available.
+- Stdin: native (`-p` reads from stdin when `cmd[0]` is fed via pipe).
+- Bypass permissions: `--dangerously-skip-permissions` (alias `--permission-mode bypassPermissions`) is required for autonomous tool calls.
 
-### config.toml snippet
-
-```toml
-[mailboxes.inbox]
-address = "inbox@agent.yourdomain.com"
-trust = "verified"
-trusted_senders = ["*@yourcompany.com"]
-
-[[mailboxes.inbox.hooks]]
-name = "claudeinbox1"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-claude -p "You received a new email. Read it and file a summary ticket.
-
-Email path: $AIMX_FILEPATH
-Subject: $AIMX_SUBJECT
-From: $AIMX_FROM
-
-Use the Read tool to open \"$AIMX_FILEPATH\", then call the appropriate MCP tool." \
-  --permission-mode=bypassPermissions \
-  >> /var/log/aimx/claude.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox accounts \
+  --event on_receive \
+  --cmd '["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"]' \
+  --stdin email \
+  --name accounts_claude
 ```
 
-- `"$AIMX_FILEPATH"` is always safe. The shell quotes the value, so paths with spaces or unusual characters are handled correctly.
-- `claude -p` exits when the turn completes. The hook finishes quickly.
-- Redirect stdout and stderr to a log file because the hook runs detached under `aimx serve`. There is no TTY to print to.
-- Pair with `trust = "verified"` so only DKIM-passing allowlisted senders can steer Claude.
+Optional: `--mcp-config /path` + `--strict-mcp-config` to pin which MCP config Claude reads, and `--model sonnet` (or `--model opus`) to tune the routing model.
 
 ## Codex CLI
 
-- Docs: <https://github.com/openai/codex> (see `codex exec --help`).
-- Non-interactive: `codex exec "<prompt>"`.
-- Bypass approvals: `--dangerously-bypass-approvals-and-sandbox` or `--full-auto` (auto-approve within the sandbox).
+- Docs: <https://github.com/openai/codex> (run `codex exec --help`).
+- Stdin: native (the trailing `-` argument tells Codex to read stdin as the prompt — the email itself becomes Codex's task).
+- Bypass: `--full-auto` is the safe sandboxed default; `--dangerously-bypass-approvals-and-sandbox` only inside a contained host.
+- Required: `--skip-git-repo-check` because hooks fire from `/var/lib/aimx/inbox/<mailbox>/`, which is not a git repo.
 
-
-### config.toml snippet
-
-```toml
-[mailboxes.triage]
-address = "triage@agent.yourdomain.com"
-trust = "verified"
-
-[[mailboxes.triage.hooks]]
-name = "codextriage1"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-codex exec "Triage this email and update the issue tracker.
-
-Email file: $AIMX_FILEPATH
-From: $AIMX_FROM
-Subject: $AIMX_SUBJECT" \
-  --full-auto \
-  >> /var/log/aimx/codex.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox triage \
+  --event on_receive \
+  --cmd '["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"]' \
+  --stdin email \
+  --name triage_codex
 ```
-
-- `--full-auto` is the recommended default for hooks: Codex auto-approves tool use but stays inside its sandbox.
 
 ## OpenCode
 
 - Docs: <https://opencode.ai/docs/cli/>
-- Non-interactive: `opencode run "<prompt>"`.
-- Approval: OpenCode's `run` mode does not prompt for confirmation on tool use. Safe for hooks without a dedicated bypass flag.
+- Stdin: inline-only (`opencode run` does not read stdin in headless mode).
+- Bypass: `--dangerously-skip-permissions`.
 
-### config.toml snippet
-
-```toml
-[mailboxes.research]
-address = "research@agent.yourdomain.com"
-trust = "verified"
-
-[[mailboxes.research.hooks]]
-name = "ocresearch01"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-opencode run "A new research email arrived. Read \"$AIMX_FILEPATH\" and append a digest entry to docs/digest.md.
-
-From: $AIMX_FROM
-Subject: $AIMX_SUBJECT" \
-  >> /var/log/aimx/opencode.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox research \
+  --event on_receive \
+  --cmd '["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g. email_reply)."]' \
+  --stdin none \
+  --name research_opencode
 ```
+
+The literal token `$AIMX_FILEPATH` is **not** shell-expanded (argv is not shell-parsed). The agent sees the literal string `AIMX_FILEPATH` (or `$AIMX_FILEPATH` if you write it that way) inside its prompt and uses its Bash/Read tool to read the env var at run time. Optional: `--format json` for a structured run log.
 
 ## Gemini CLI
 
-- Docs: <https://github.com/google-gemini/gemini-cli> (see `gemini --help`).
-- Non-interactive: `gemini -p "<prompt>"` (alias `--prompt`).
-- Auto-approve: `--yolo` (accepts all tool-use confirmations).
+- Docs: <https://github.com/google-gemini/gemini-cli>
+- Stdin: native (`-p` reads from stdin when piped).
+- Bypass: `--yolo` auto-approves tool calls; required for unattended operation.
 
-### config.toml snippet
-
-```toml
-[mailboxes.notes]
-address = "notes@agent.yourdomain.com"
-trust = "verified"
-
-[[mailboxes.notes.hooks]]
-name = "geminines01"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-gemini -p "A new note arrived by email. Read \"$AIMX_FILEPATH\" and file it into my notes." \
-  --yolo \
-  >> /var/log/aimx/gemini.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox notes \
+  --event on_receive \
+  --cmd '["/usr/local/bin/gemini", "-p", "Read the piped email and file it into my notes via the aimx MCP server.", "--yolo"]' \
+  --stdin email \
+  --name notes_gemini
 ```
+
+Optional: `-m gemini-2.5-flash` to pin the routing model.
 
 ## Goose
 
 - Docs: <https://block.github.io/goose/docs/guides/headless-goose>
-- Non-interactive: `goose run -t "<prompt>"`.
+- Stdin: native via `--instructions -` (reads instructions from stdin; the recipe form is preferred for production).
+- Two recipes shown: ad-hoc (instructions piped via stdin) and recipe-based (the inner recipe pre-binds the `aimx mcp` extension).
 
-### config.toml snippet
+**Ad-hoc:**
 
-```toml
-[mailboxes.ops]
-address = "ops@agent.yourdomain.com"
-trust = "verified"
-
-[[mailboxes.ops.hooks]]
-name = "gooseops001"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-goose run -t "Ops email arrived. Read \"$AIMX_FILEPATH\", check if action is required, and page on-call if so.
-
-Subject: $AIMX_SUBJECT
-From: $AIMX_FROM" \
-  >> /var/log/aimx/goose.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox ops \
+  --event on_receive \
+  --cmd '["/usr/local/bin/goose", "run", "--instructions", "-", "--quiet"]' \
+  --stdin email \
+  --name ops_goose
 ```
+
+**Recipe-based (preferred for production):**
+
+```bash
+aimx hooks create \
+  --mailbox ops \
+  --event on_receive \
+  --cmd '["/usr/local/bin/goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"]' \
+  --stdin email \
+  --name ops_goose_recipe
+```
+
+The referenced recipe pre-binds the `aimx mcp` extension and parameterizes the inbound email path. See Goose's recipe documentation for the inner-recipe shape.
 
 ## OpenClaw
 
-- Docs: <https://docs.openclaw.ai/>
-- MCP server: `aimx agents setup openclaw` emits an `openclaw mcp set aimx '<json>'` command you paste once to register aimx's MCP tools with the OpenClaw gateway.
-- Non-interactive agent invocation: `openclaw agent --message "<prompt>" --deliver --json`.
+OpenClaw does not document a one-shot prompt mode as of Apr 2026. Its surfaces are interactive (chat-channel, Control-UI dashboard) plus admin subcommands; there is no `--prompt`-style entry point that fits the headless hook pattern.
 
-### config.toml snippet
+To use OpenClaw with aimx, treat aimx as a read source via the MCP server and trigger the agent through OpenClaw's documented interactive entry points. For shell-side notifications on new mail (so OpenClaw operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
 
-```toml
-[mailboxes.inbox]
-address = "inbox@agent.yourdomain.com"
-trust = "verified"
-trusted_senders = ["*@yourcompany.com"]
-
-[[mailboxes.inbox.hooks]]
-name = "openclaw0001"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-openclaw agent \
-    --message "An email arrived at $(basename \"$AIMX_FILEPATH\"). Read it at \"$AIMX_FILEPATH\", summarize the sender's request, and respond via the aimx MCP tools if a reply is appropriate." \
-    --deliver \
-    --json \
-    >> /var/log/aimx/openclaw.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox openclaw \
+  --event on_receive \
+  --cmd '["/bin/sh", "-c", "ntfy pub openclaw-mail \"New email: $AIMX_SUBJECT from $AIMX_FROM\""]' \
+  --stdin none \
+  --fire-on-untrusted \
+  --name openclaw_notify
 ```
+
+When OpenClaw later publishes a one-shot CLI, this section will be updated; track upstream at <https://docs.openclaw.ai/>.
 
 ## Hermes
 
 - Docs: <https://hermes-agent.nousresearch.com/>
-- Shell-side invocation: Hermes does not currently expose a headless CLI for dispatching a one-shot prompt (the `hermes mcp serve` subcommand runs Hermes *as* an MCP server, the opposite direction). Hook-driven agent dispatch therefore uses MCP on the inbound side.
+- Stdin: inline-only (stdin handling for `hermes chat -q` is undocumented as of Apr 2026; this recipe ships the inline-only form).
+- Bypass: `--yolo` skips dangerous-command approval; `--ignore-user-config --ignore-rules` for fully isolated runs.
 
-### Recommended pattern
-
-Register aimx as an MCP server inside Hermes (`aimx agents setup hermes` plus the YAML snippet it prints. See [Agent Integration: Hermes](agent-integration.md#hermes)). Inside Hermes, use the aimx skill's `email_list` / `email_read` tools to inspect the inbox on demand.
-
-For shell-side notifications on new mail (so Hermes operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
-
-```toml
-[mailboxes.hermes]
-address = "hermes@agent.yourdomain.com"
-trust = "verified"
-
-[[mailboxes.hermes.hooks]]
-# name is optional — a stable 12-char hex id is derived from event+cmd if omitted
-event = "on_receive"
-cmd = ["/bin/sh", "-c", 'ntfy pub hermes-mail "New email: $AIMX_SUBJECT from $AIMX_FROM"']
-fire_on_untrusted = true
+```bash
+aimx hooks create \
+  --mailbox hermes \
+  --event on_receive \
+  --cmd '["/usr/local/bin/hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"]' \
+  --stdin none \
+  --name hermes_chat
 ```
 
-When Hermes grows a headless `--message` / `exec`-style CLI, add it here mirroring the Claude Code or Codex recipe.
+If a future Hermes release confirms that `chat -q` accepts piped stdin, switch to `--stdin email` and shorten the inline prompt to "Read the piped email and act on it via the aimx MCP server."
 
-## Aider
+## Webhook (POST to URL)
 
-- Docs: <https://aider.chat/docs/usage.html>
-- Non-interactive: `aider --message "<prompt>"` (runs once and exits).
-- Auto-approve: `--yes-always` (skips all confirmation prompts).
+A pure-curl recipe that POSTs the raw `.md` to an HTTPS endpoint. No agent required.
 
-
-### config.toml snippet
-
-```toml
-[mailboxes.bugs]
-address = "bugs@agent.yourdomain.com"
-trust = "verified"
-trusted_senders = ["*@yourcompany.com"]
-
-[[mailboxes.bugs.hooks]]
-name = "aiderbugs01"
-event = "on_receive"
-cmd = ["/bin/sh", "-c", '''
-cd /srv/repos/myapp && \
-aider --yes-always \
-      --message "Bug report arrived by email. Read \"$AIMX_FILEPATH\", reproduce the issue if possible, apply a fix, and commit." \
-      >> /var/log/aimx/aider.log 2>&1
-''']
+```bash
+aimx hooks create \
+  --mailbox alerts \
+  --event on_receive \
+  --cmd '["/usr/bin/curl", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "https://hooks.example.com/aimx"]' \
+  --stdin email \
+  --name alerts_webhook
 ```
+
+`--data-binary @-` tells curl to POST whatever lands on its stdin verbatim. Combined with `stdin = "email"`, the receiver gets the raw `.md` (TOML frontmatter + body) as the request body. Use `Content-Type: text/markdown` instead if your receiver expects that explicitly.
 
 ## `after_send` recipes
 
@@ -294,78 +191,80 @@ Send-side hooks run after aimx resolves the MX delivery attempt. They cannot aff
 
 ### Append to an audit log
 
-```toml
-[[mailboxes.alice.hooks]]
-name = "auditlog0001"
-event = "after_send"
-cmd = ["/bin/sh", "-c", 'printf "%s %s %s %s\n" "$AIMX_SEND_STATUS" "$AIMX_TO" "$AIMX_SUBJECT" "$AIMX_HOOK_NAME" >> /var/log/aimx/alice-sent.log']
+```bash
+aimx hooks create \
+  --mailbox alice \
+  --event after_send \
+  --cmd '["/bin/sh", "-c", "printf \"%s %s %s %s\\n\" \"$AIMX_SEND_STATUS\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \"$AIMX_HOOK_NAME\" >> /var/log/aimx/alice-sent.log"]' \
+  --stdin none \
+  --name alice_audit
 ```
 
 ### Page on failed sends
 
-```toml
-[[mailboxes.alerts.hooks]]
-name = "failedpage01"
-event = "after_send"
-cmd = ["/bin/sh", "-c", '''
-if [ "$AIMX_SEND_STATUS" != "delivered" ]; then
-  ntfy pub on-call "aimx send to $AIMX_TO $AIMX_SEND_STATUS: $AIMX_SUBJECT"
-fi
-''']
+```bash
+aimx hooks create \
+  --mailbox alerts \
+  --event after_send \
+  --cmd '["/bin/sh", "-c", "if [ \"$AIMX_SEND_STATUS\" != \"delivered\" ]; then ntfy pub on-call \"aimx send to $AIMX_TO $AIMX_SEND_STATUS: $AIMX_SUBJECT\"; fi"]' \
+  --stdin none \
+  --name alerts_failed_page
 ```
 
-### Notify only on matching recipients (shell guard)
+### Recipient-based filtering (shell guard)
 
-Filter fields on hooks have been removed — do recipient/subject matching in the `cmd` itself with a shell guard.
+`after_send` hooks have no built-in filter fields — do recipient/subject matching in the `cmd` itself with a shell guard.
 
-```toml
-[[mailboxes.marketing.hooks]]
-name = "marknotify01"
-event = "after_send"
-cmd = ["/bin/sh", "-c", '''
-case "$AIMX_TO" in
-  *@customer-co.com)
-    curl -fsS -X POST https://hooks.internal/marketing-sent \
-         -d "to=$AIMX_TO&status=$AIMX_SEND_STATUS"
-    ;;
-esac
-''']
+```bash
+aimx hooks create \
+  --mailbox marketing \
+  --event after_send \
+  --cmd '["/bin/sh", "-c", "case \"$AIMX_TO\" in *@customer-co.com) curl -fsS -X POST https://hooks.internal/marketing-sent -d \"to=$AIMX_TO&status=$AIMX_SEND_STATUS\" ;; esac"]' \
+  --stdin none \
+  --name marketing_customer_notify
 ```
 
 ## Operational tips
 
 ### Logging
 
-Every recipe above redirects stdout and stderr to a log file because `aimx serve` runs detached. Without the redirect, the agent's output is lost. aimx itself emits one structured log line per hook fire to journald:
+aimx itself emits one structured log line per hook fire to journald:
 
 ```text
-hook_name=<name> event=<on_receive|after_send> mailbox=<m> (email_id=<id>|message_id=<id>) exit_code=<n> duration_ms=<n>
+hook_name=<name> event=<on_receive|after_send> mailbox=<m> owner=<u> exit_code=<n> duration_ms=<n>
 ```
 
-Grep by `hook_name=<name>` (`journalctl -u aimx | grep hook_name=claudeinbox1`) to trace every fire of a specific hook.
+Grep by `hook_name=<name>` (`journalctl -u aimx | grep hook_name=accounts_claude`) to trace every fire of a specific hook. Hook stdout / stderr are captured by the daemon (truncated at 64 KiB each) and surfaced as `stderr_tail=...` on the structured line.
+
+If you want a separate per-agent log file too, wrap the agent invocation in `["/bin/sh", "-c", "<agent> ... >> /var/log/aimx/<agent>.log 2>&1"]`. Most operators find the journald line sufficient.
 
 ### Exit codes
 
-A non-zero exit from the hook command is logged to `aimx serve`'s stderr at `warn` but does NOT block delivery or the send. Email is always stored as a `.md` file. This is intentional: you do not want flaky agent CLIs to stall your mailbox.
+A non-zero exit from the hook command is logged at `warn` but does **not** block delivery or the send. Email is always stored as a `.md` file. This is intentional: you do not want flaky agent CLIs to stall your mailbox.
 
 ### Concurrent hooks
 
-If two emails arrive in rapid succession, `aimx serve` fires two hook shells in parallel. Agent CLIs that lock a resource (e.g. an Aider-managed git repo) can collide. Serialise with `flock`:
+If two emails arrive in rapid succession, `aimx serve` fires two hook subprocesses in parallel. Agent CLIs that lock a resource (e.g. a per-repo Aider session) can collide. Serialise inside your own wrapper using `flock`:
 
 ```bash
-flock /tmp/aider-myapp.lock aider --yes-always --message "..." ...
+aimx hooks create \
+  --mailbox bugs \
+  --event on_receive \
+  --cmd '["/usr/bin/flock", "/tmp/myapp.lock", "/usr/local/bin/claude", "-p", "Reproduce the reported bug.", "--dangerously-skip-permissions"]' \
+  --stdin email \
+  --name bugs_serialised
 ```
 
 ### Testing a recipe locally
 
-Use the integration test fixture path to simulate a real delivery without a live SMTP exchange:
+Use the `aimx ingest` CLI to simulate a real delivery without a live SMTP exchange:
 
 ```bash
-aimx --data-dir /tmp/aimx-test ingest catchall@agent.example.com \
+sudo aimx --data-dir /tmp/aimx-test ingest catchall@agent.example.com \
      < tests/fixtures/plain.eml
 ```
 
-Check your log file and confirm the agent ran with the expected template values.
+Watch journald (`aimx logs --follow`) and confirm the agent ran with the expected env vars.
 
 ---
 

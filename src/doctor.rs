@@ -849,11 +849,6 @@ pub fn translate_load_warnings(warnings: &[LoadWarning]) -> Vec<DoctorFinding> {
                     .with_fix("create the user or run `sudo aimx hooks prune --orphans`"),
                 );
             }
-            LoadWarning::LegacyAimxHookUser => {
-                // Translated separately by `check_legacy_aimx_hook_user`
-                // (probes the host directly) so the finding lands even
-                // when nobody pushed this variant onto the warning stream.
-            }
             LoadWarning::RootCatchallAccepted { mailbox } => {
                 out.push(DoctorFinding::new(
                     "ROOT-CATCHALL-ACCEPTED",

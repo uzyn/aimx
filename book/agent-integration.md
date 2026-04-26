@@ -1,6 +1,6 @@
 # Agent Integration
 
-`aimx agents setup <agent>` is the one command that wires an AI agent into aimx. It installs the agent's plugin/skill package under the caller's `$HOME`, probes `$PATH` for the agent binary, and registers a matching hook template (`invoke-<agent>-<username>`) over the daemon's UDS socket so the agent can immediately create `on_receive` / `after_send` hooks via MCP. No sudo, no manual config edit, no second `aimx setup` run. When you are done, `aimx agents remove <agent>` removes what was installed.
+`aimx agents setup <agent>` is the one command that wires an AI agent into aimx. It installs the agent's plugin/skill package under the caller's `$HOME` so the agent can call aimx's MCP tools and (when the operator asks it to) create `on_receive` / `after_send` hooks via MCP. No sudo, no manual config edit, no second `aimx setup` run. When you are done, `aimx agents remove <agent>` removes what was installed.
 
 > **Names.** `aimx agents` (plural noun, with `setup` / `remove` / `list` verbs) matches the rest of the CLI's CRUD shape (`aimx mailboxes`, `aimx hooks`).
 
@@ -16,20 +16,16 @@ What this does, in order:
 
 1. **Refuse root.** `sudo aimx agents setup ...` is rejected. Run it as the user whose agent you are configuring.
 2. **Install plugin files.** The plugin tree embedded in the `aimx` binary is written under the agent's per-user destination (e.g. `~/.claude/plugins/aimx/`). File mode `0o644`, directory mode `0o755`.
-3. **Probe `$PATH`.** aimx walks `$PATH` in order looking for the agent's canonical binary name (for example `claude` for `claude-code`). First match wins.
-4. **Register the template.** aimx connects to `/run/aimx/aimx.sock` and submits a `TEMPLATE-CREATE` verb. The template is named `invoke-<agent>-<username>` (e.g. `invoke-claude-alice`), carries `cmd = [<found_path>, ...<spec args>]`, and sets `run_as` to the caller's username. The daemon hot-swaps its in-memory config so the template is live immediately — no SIGHUP, no restart.
-5. **Print confirmation.** The installer prints a single line confirming the template registration (plus any activation hint the agent requires, such as a `claude mcp add` command).
+3. **Print activation hint.** The installer prints any external command the agent still needs (such as a `claude mcp add` command) so MCP discovery picks up the new server.
 
 Example output for alice running `aimx agents setup claude-code`:
 
 ```text
 Installed plugin files to /home/alice/.claude/plugins/aimx/
-Template invoke-claude-alice registered
-  cmd:     /home/alice/.local/bin/claude -p {prompt}
-  run_as:  alice
+Next: run `claude mcp add --scope user aimx /usr/local/bin/aimx mcp` and restart Claude Code.
 ```
 
-After this, alice can create hooks via MCP by referencing `invoke-claude-alice` — no operator intervention required.
+After this, alice's agent can call aimx's MCP tools (including `hook_create` / `hook_list` / `hook_delete`) for any mailbox alice owns. The bundled plugin includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with `hook_create` — the agent reads its own skill at session start and writes its own `cmd` recipe at hook-creation time, no operator intervention required.
 
 ## Discovering supported agents
 
@@ -72,9 +68,9 @@ Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 - **Runs as the current user.** `aimx agents setup` refuses to run as root by default.
 - **`--dangerously-allow-root` escape hatch.** For single-user root-login VPS setups that have no separate operator account, pass `--dangerously-allow-root` to wire aimx into `/root`'s home. The flag applies uniformly to the TUI, per-agent runs, and `--no-interactive`. It is **never** passed implicitly by the `aimx setup` drop-through — you must opt in by hand. On any machine with a regular user, prefer `sudo -u <user> aimx agents setup` instead.
 - **Writes only to `$HOME`.** Nothing under `/etc` or `/var` is touched by the plugin-install step.
-- **Template registration uses UDS `SO_PEERCRED`.** The daemon reads the caller's uid directly from the socket; the `run_as` of the registered template must equal the caller's username. This is how isolation between users is enforced — alice cannot register a template that runs as bob.
+- **Hook authorization is by mailbox ownership.** When the agent later calls `hook_create`, the daemon reads the caller's uid via `SO_PEERCRED` and accepts the request only if the caller owns the target mailbox (or is root). Hooks always exec as the mailbox's owner uid — there is no per-hook `run_as` override.
 - **Offline.** The plugin tree is embedded at compile time. No network access is required.
-- **Idempotent re-runs.** Re-running `aimx agents setup <agent>` with `--force` overwrites existing plugin files. Use `--redetect` to re-probe `$PATH` and refresh `cmd[0]` if your agent binary moved. Use `--no-template` to skip the template-registration step entirely (plugin-install only).
+- **Idempotent re-runs.** Re-running `aimx agents setup <agent>` with `--force` overwrites existing plugin files.
 
 ## Flags
 
@@ -84,20 +80,16 @@ Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 | `--no-interactive` | Skip the checkbox TUI when no agent is named; print the same plain registry dump as `--list`. Intended for scripting. |
 | `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Applies uniformly across the TUI, per-agent runs, and `--no-interactive`. See Key properties above. |
 | `--force` | Overwrite existing destination files without prompting. |
-| `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. Also prints the template that would be registered. |
-| `--no-template` | Skip the `$PATH` probe and `TEMPLATE-CREATE` step. Plugin-install only. |
-| `--redetect` | Re-probe `$PATH` and refresh an existing `invoke-<agent>-<username>` template's `cmd[0]` if the binary moved. |
+| `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. |
 | `--data-dir <path>` | Global flag. If aimx was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
 
 ## Removing an agent: `aimx agents remove`
 
-`aimx agents remove <agent>` is the inverse of `aimx agents setup`. It runs per-user and refuses root. The command always removes both the plugin files under `$HOME` and the matching `invoke-<agent>-<caller_username>` template over UDS, then prints an agent-specific cleanup hint pointing at any external command you still need to run (for example `claude mcp remove aimx`).
+`aimx agents remove <agent>` is the inverse of `aimx agents setup`. It runs per-user and refuses root. The command removes the plugin files under `$HOME` and prints an agent-specific cleanup hint pointing at any external command you still need to run (for example `claude mcp remove aimx`).
 
 ```bash
 aimx agents remove claude-code
 ```
-
-If the daemon is down (`/run/aimx/aimx.sock` is missing), the plugin files are still removed and the command prints: "daemon unreachable; run `sudo aimx hooks prune --orphans` after restarting to clean up templates." The command exits `2` so scripts can detect the partial cleanup.
 
 ## Supported agents
 
@@ -113,23 +105,13 @@ If the daemon is down (`/run/aimx/aimx.sock` is missing), the plugin files are s
 
 > **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
 
-### Template naming and mapping
+### Per-agent hook recipes
 
-Every template registered by `aimx agents setup` follows the pattern `invoke-<agent>-<username>`. Mapping of agent → template prefix:
+The plugin bundle for each agent ships a "Wiring yourself up as a mailbox hook" section with a copy-paste `cmd` argv. The agent reads its own skill and writes the recipe at hook-creation time — see [Hook Recipes](hook-recipes.md) for the verified invocations.
 
-| Agent | Template name |
-|-------|---------------|
-| `claude-code` | `invoke-claude-<username>` |
-| `codex` | `invoke-codex-<username>` |
-| `opencode` | `invoke-opencode-<username>` |
-| `gemini` | `invoke-gemini-<username>` |
-| `goose` | `invoke-goose-<username>` |
-| `openclaw` | `invoke-openclaw-<username>` |
-| `hermes` | `invoke-hermes-<username>` |
+On a multi-user host, alice and bob each install their own per-`$HOME` copy of the plugin, and each can call `hook_create` only on the mailboxes they own — the daemon enforces ownership via `SO_PEERCRED` on every UDS request.
 
-On a host where alice and bob each run `aimx agents setup claude-code`, the daemon carries both `invoke-claude-alice` and `invoke-claude-bob`. `hook_list_templates` returns only the templates whose `run_as` equals the caller's username, so alice's MCP sees `invoke-claude-alice` and bob's sees `invoke-claude-bob` — never each other's.
-
-See [MCP Server § Hook template tools](mcp.md#hook-template-tools) for the full tool reference.
+See [MCP Server § Hook tools](mcp.md#hook-tools) for the full tool reference.
 
 ### Claude Code
 
@@ -440,21 +422,9 @@ tools.
 
 ## Troubleshooting
 
-### `Could not find <binary> in $PATH`
+### Agent binary not found at runtime
 
-The `$PATH` probe did not find the agent's canonical binary. Install the agent CLI first (for example `npm install -g @anthropic-ai/claude-code` for Claude Code), confirm it lands in a directory on your `$PATH`, then re-run `aimx agents setup <agent>`. If the binary is installed but the probe still misses it (shell alias, non-`$PATH` location), open a fresh shell so the login `$PATH` is in effect, or temporarily `export PATH="$HOME/.local/bin:$PATH"` before re-running.
-
-### `aimx serve is not running; start it and re-run aimx agents setup <agent>`
-
-The UDS socket at `/run/aimx/aimx.sock` is missing. Start the daemon with `sudo systemctl start aimx` (or `sudo rc-service aimx start` on Alpine) and re-run `aimx agents setup <agent>`. The template-registration step is all-or-nothing for v1: if the daemon is down, the plugin files are still written but no template is registered.
-
-### `template-already-exists: invoke-<agent>-<username>`
-
-You already ran `aimx agents setup <agent>` on this host. There are three paths forward:
-
-- **Change nothing.** The existing template is still registered and working; nothing to do.
-- **Refresh `cmd[0]`** (your agent binary moved): run `aimx agents setup <agent> --redetect`. This re-probes `$PATH` and updates the existing template's `cmd[0]` to the current path.
-- **Replace entirely.** Run `aimx agents remove <agent>` first to drop the existing template, then `aimx agents setup <agent>` again to register a fresh one.
+When the agent later fires as a hook, the daemon `exec`s the absolute path you wrote into the hook's `cmd[0]`. If that path doesn't exist, the hook log shows `exit_code = -1` with `spawn-failed`. Run `which <agent>` on the host as the mailbox owner to confirm the binary's path, then re-create the hook with the corrected `cmd[0]` (`aimx hooks delete <name>` followed by `aimx hooks create --cmd ...`).
 
 ### The agent does not see aimx after `agents setup` runs
 
