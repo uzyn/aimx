@@ -1262,6 +1262,11 @@ fn enumerate_email_ids(mailbox_dir: &std::path::Path) -> std::io::Result<Vec<(St
     };
 
     for entry in entries.filter_map(|e| e.ok()) {
+        // Symlinks are silently skipped: `file_type()` does not follow them,
+        // so a symlinked bundle dir / `.md` is neither `is_dir()` nor
+        // `is_file()` and falls through. aimx never writes symlinks here;
+        // if a backup tool restores one, it disappears from listings by
+        // design (no path-escape via `read_email_frontmatter`).
         let file_type = match entry.file_type() {
             Ok(ft) => ft,
             Err(_) => continue,
@@ -1286,6 +1291,13 @@ fn enumerate_email_ids(mailbox_dir: &std::path::Path) -> std::io::Result<Vec<(St
 /// without parsing; pass 2 reads frontmatter only for the page slice.
 /// Empty pages serialize to the literal `"[]"` string — never the old
 /// `"No emails found."` text.
+///
+/// The returned page may be SHORTER than `limit` even when more ids
+/// exist beyond `offset + limit`: the slice `[offset..end]` is fixed
+/// before iteration, and a row whose frontmatter cannot be read
+/// (`Ok(None)` — missing inner `.md` in a bundle, or content without
+/// `+++` delimiters) is silently dropped without backfilling. This is
+/// intentional graceful degradation; do not "fix" it by backfilling.
 fn list_email_page_json(
     mailbox_dir: &std::path::Path,
     folder: Folder,
@@ -1866,12 +1878,13 @@ mod email_list_tests {
         let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 50);
 
-        // Soft assertion: page-50 on 10k should be well under 500ms on
-        // any reasonable runner. The design target is <50ms cold but
-        // CI runners with cold disk + debug builds need slack.
+        // Soft assertion: page-50 on 10k must stay under 500ms (~10x
+        // the <50ms cold-cache design target). Tight enough to catch
+        // an order-of-magnitude regression on debug builds + warm CI
+        // disk; loose enough to not flake on a stressed runner.
         eprintln!("page-50 on 10k messages: {elapsed:?} ({reads} fm reads)");
         assert!(
-            elapsed.as_millis() < 5000,
+            elapsed.as_millis() < 500,
             "page-50 took {elapsed:?} — perf regression?"
         );
     }
@@ -1950,5 +1963,65 @@ mod email_list_tests {
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0]["id"], "2025-06-01-002");
         assert_eq!(rows[1]["id"], "2025-06-01-001-with-attach");
+    }
+
+    #[test]
+    fn bundle_without_inner_md_is_skipped_surrounding_rows_surface() {
+        // Pin the graceful-skip contract documented on `list_email_page_json`:
+        // a bundle dir whose inner `.md` is missing must not poison the
+        // page — the row drops out, neighbours stay.
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        // Empty bundle dir: the expected `<stem>/<stem>.md` is absent.
+        std::fs::create_dir_all(tmp.path().join("2025-06-01-002-broken")).unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "broken bundle drops; neighbours surface");
+        assert_eq!(rows[0]["id"], "2025-06-01-003");
+        assert_eq!(rows[1]["id"], "2025-06-01-001");
+    }
+
+    #[test]
+    fn missing_frontmatter_delimiters_skips_row() {
+        // A `.md` file without `+++` delimiters yields `Ok(None)` from
+        // `read_email_frontmatter` (the `splitn(3) < 3` branch) — the
+        // row is silently skipped, never errors.
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        std::fs::write(
+            tmp.path().join("2025-06-01-002.md"),
+            "no frontmatter here, just body\n",
+        )
+        .unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], "2025-06-01-003");
+        assert_eq!(rows[1]["id"], "2025-06-01-001");
+    }
+
+    #[test]
+    fn sent_row_with_missing_delivery_status_falls_back_to_empty_string() {
+        // `delivery_status` is `Option<String>` on the partial decoder;
+        // an outbound frontmatter without the field must surface as
+        // `""` (verbatim, no `null`) on the JSON row.
+        let tmp = TempDir::new().unwrap();
+        let id = "2025-06-01-001";
+        let body = format!(
+            "+++\nid = \"{id}\"\nmessage_id = \"<{id}@t>\"\nfrom = \"alice@test.com\"\nto = \"out@example.com\"\nsubject = \"S\"\ndate = \"2025-06-01T12:00:00Z\"\nmailbox = \"alice\"\nread = false\noutbound = true\n+++\n\nB.\n"
+        );
+        std::fs::write(tmp.path().join(format!("{id}.md")), body).unwrap();
+
+        let json = list_email_page_json(tmp.path(), Folder::Sent, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["delivery_status"], "");
     }
 }
