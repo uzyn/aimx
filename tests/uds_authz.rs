@@ -103,9 +103,7 @@ fn raw_send_frame(from: &str, to: &str) -> String {
 }
 
 fn raw_mark_frame(verb: &str, mailbox: &str, id: &str) -> String {
-    format!(
-        "AIMX/1 {verb}\r\nMailbox: {mailbox}\r\nId: {id}\r\nFolder: inbox\r\nContent-Length: 0\r\n\r\n"
-    )
+    format!("AIMX/1 {verb}\r\nMailbox: {mailbox}\r\nId: {id}\r\nContent-Length: 0\r\n\r\n")
 }
 
 fn raw_hook_create_frame(mailbox: &str, name: &str, cmd: &[&str]) -> String {

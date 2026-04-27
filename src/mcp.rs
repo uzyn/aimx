@@ -55,6 +55,7 @@ pub struct EmailReadParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EmailMarkParams {
     #[schemars(description = "Mailbox name")]
     pub mailbox: String,
@@ -2000,5 +2001,38 @@ mod email_list_tests {
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["delivery_status"], "");
+    }
+
+    #[test]
+    fn email_mark_params_rejects_stale_folder_arg() {
+        // Symmetric to how `hook_create` hard-rejects a removed `stdin`
+        // arg: a stale `folder` field on `email_mark_*` must surface as
+        // a parse error, not a silent drop that mutates inbox while the
+        // agent thinks it touched sent.
+        let json = serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-15-120000-hello",
+            "folder": "sent",
+        });
+        let err = match serde_json::from_value::<EmailMarkParams>(json) {
+            Ok(_) => panic!("expected unknown-field error, got Ok"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got {err}"
+        );
+    }
+
+    #[test]
+    fn email_mark_params_accepts_canonical_shape() {
+        let json = serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-15-120000-hello",
+        });
+        let params: EmailMarkParams =
+            serde_json::from_value(json).expect("canonical mark params must parse");
+        assert_eq!(params.mailbox, "alice");
+        assert_eq!(params.id, "2025-06-15-120000-hello");
     }
 }
