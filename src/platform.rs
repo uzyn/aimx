@@ -69,14 +69,12 @@ pub const DEFAULT_MEMORY_MAX: &str = "256M";
 /// Stdin delivery policy. The daemon writes the chosen payload to the
 /// child's stdin before starting the timeout clock, then closes stdin —
 /// no hook blocks mid-run on a stdin `read()`.
-#[allow(dead_code)]
 pub enum SandboxStdin {
     /// Raw `.md` bytes (TOML frontmatter + body) written to stdin.
     Email(Vec<u8>),
-    /// JSON object `{ "frontmatter": {...}, "body": "..." }` written to
-    /// stdin. Retained for the sprint-rework but not constructed today.
-    EmailJson(Vec<u8>),
-    /// Close stdin immediately (no payload).
+    /// Close stdin immediately (no payload). Constructed only by
+    /// `run_fallback` tests that exercise non-payload paths.
+    #[allow(dead_code)]
     None,
 }
 
@@ -393,7 +391,7 @@ fn run_child_with_timeout(
     let stdin_handle = thread::spawn(move || {
         if let Some(mut pipe) = child_stdin {
             let payload: &[u8] = match &stdin {
-                SandboxStdin::Email(b) | SandboxStdin::EmailJson(b) => b.as_slice(),
+                SandboxStdin::Email(b) => b.as_slice(),
                 SandboxStdin::None => &[],
             };
             if !payload.is_empty() {
