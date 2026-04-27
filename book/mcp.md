@@ -74,18 +74,23 @@ The empty case returns `[]`. Filtered to caller-owned mailboxes for non-root cal
 
 #### `email_list`
 
-List emails in a mailbox with optional filters.
+List a page of email metadata in a mailbox, sorted descending by
+filename (newest first). aimx never scans on the agent's behalf —
+agents page through the listing and filter client-side.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `mailbox` | string | yes | Mailbox name to list emails from. Must be owned by the caller. |
-| `folder` | string | no | `"inbox"` (default) or `"sent"`. Picks which side of the mailbox to list |
-| `unread` | bool | no | Filter to only unread emails |
-| `from` | string | no | Filter by sender address (substring match) |
-| `since` | string | no | Filter to emails since this datetime (RFC 3339 format) |
-| `subject` | string | no | Filter by subject (substring match, case-insensitive) |
+| Parameter | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `mailbox` | string | yes      | Mailbox name to list emails from. Must be owned by the caller. |
+| `folder`  | string | no       | `"inbox"` (default) or `"sent"`. Picks which side of the mailbox to list |
+| `limit`   | u32    | no       | Page size; default 50, hard-capped at 200. Values above 200 silently clamp |
+| `offset`  | u32    | no       | Number of newest rows to skip; default 0 |
 
-**Returns:** Email metadata (frontmatter only, not body). Returns `EACCES not authorized` if the caller does not own the target mailbox.
+**Returns:** A JSON array of metadata rows. Inbox rows carry
+`{ id, from, to, subject, date, read }`. Sent rows carry
+`{ id, from, to, subject, date, delivery_status }` — the `read` field
+is intentionally absent from sent rows, since agents do not mark sent
+mail. An empty mailbox returns the literal `[]`. Returns
+`EACCES not authorized` if the caller does not own the target mailbox.
 
 ---
 
@@ -287,8 +292,8 @@ Two reference documents help agents understand aimx:
 
 A typical agent email workflow:
 
-1. **Check for new mail.** Call `email_list` with `unread: true`
-2. **Read an email.** Call `email_read` with the mailbox and email ID
+1. **Check for new mail.** Call `email_list` and filter the JSON output to rows where `read == false`
+2. **Read an email.** Call `email_read` with the mailbox and email ID, or `Read` `<inbox_path>/<id>.md` directly
 3. **Process the content.** Agent decides how to respond
 4. **Reply.** Call `email_reply` with the response body
 5. **Mark as read.** Call `email_mark_read`

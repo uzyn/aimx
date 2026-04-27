@@ -87,37 +87,52 @@ the daemon to enforce path canonicalisation for you.
 
 ### `email_list`
 
-List emails in a mailbox you own with optional filters. All filters
-AND together.
+List a page of emails in a mailbox you own. Rows are sorted descending
+by filename (newest first). aimx never scans on your behalf — pass
+`offset` to page deeper, and filter client-side on the JSON output.
 
 **Parameters:**
-| Name      | Type    | Required | Description |
-|-----------|---------|----------|-------------|
-| `mailbox` | string  | yes      | Mailbox name (must be owned by you) |
-| `folder`  | string  | no       | `"inbox"` (default) or `"sent"` |
-| `unread`  | bool    | no       | Filter to only unread emails |
-| `from`    | string  | no       | Filter by sender address (substring match) |
-| `since`   | string  | no       | Filter to emails since this datetime (RFC 3339, e.g. `2026-01-01T00:00:00Z`) |
-| `subject` | string  | no       | Filter by subject (case-insensitive substring match) |
+| Name      | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `mailbox` | string | yes      | Mailbox name (must be owned by you) |
+| `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
+| `limit`   | u32    | no       | Page size; default 50, hard-capped at 200 (values above silently clamp) |
+| `offset`  | u32    | no       | Number of newest rows to skip; default 0 |
 
-**Returns:** Formatted list of matching emails.
+**Returns:** A JSON array. Inbox rows: `{ id, from, to, subject, date, read }`.
+Sent rows: `{ id, from, to, subject, date, delivery_status }` — `read`
+is intentionally absent from sent rows. Empty mailbox → `"[]"`.
 
-**Example, list unread inbox:**
+**Example, list newest inbox page (default 50):**
 ```
-email_list(mailbox: "agent", unread: true)
-→ "2026-04-15-143022-meeting-notes | From: alice@company.com | Subject: Meeting Notes | 2026-04-15T14:30:22Z
-   2026-04-15-153300-invoice-march | From: billing@vendor.com | Subject: Invoice March | 2026-04-15T15:33:00Z"
+email_list(mailbox: "agent")
+→ '[{"id":"2026-04-15-153300-invoice-march","from":"billing@vendor.com","to":"agent@your.tld","subject":"Invoice March","date":"2026-04-15T15:33:00Z","read":false},
+    {"id":"2026-04-15-143022-meeting-notes","from":"alice@company.com","to":"agent@your.tld","subject":"Meeting Notes","date":"2026-04-15T14:30:22Z","read":true}]'
+```
+
+**Next step:** read messages directly. Take the row's `id` and `Read`
+`<inbox_path>/<id>.md` (the `inbox_path` you got from `mailbox_list`).
+No need to call `email_read` unless you want the daemon to re-canonicalise
+the path for you.
+
+**Example, polling for unread:**
+```
+# List a page, then filter client-side.
+rows = JSON.parse(email_list(mailbox: "agent"))
+unread = rows.filter(r => r.read === false)
+# For each unread row, Read its .md or call email_read, then mark it read.
+```
+
+**Example, paging deeper:**
+```
+email_list(mailbox: "agent", limit: 50, offset: 50)
+# Newest 50 already seen; this returns rows 51..100.
 ```
 
 **Example, list sent mail:**
 ```
 email_list(mailbox: "agent", folder: "sent")
-→ "2026-04-15-160145-re-meeting-notes | To: alice@company.com | Subject: Re: Meeting Notes | 2026-04-15T16:01:45Z"
-```
-
-**Example, filter by sender since a date:**
-```
-email_list(mailbox: "agent", from: "alice", since: "2026-04-01T00:00:00Z")
+→ '[{"id":"2026-04-15-160145-re-meeting-notes","from":"agent@your.tld","to":"alice@company.com","subject":"Re: Meeting Notes","date":"2026-04-15T16:01:45Z","delivery_status":"delivered"}]'
 ```
 
 ---

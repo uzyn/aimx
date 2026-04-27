@@ -87,8 +87,12 @@ does not expose `mailbox_create` or `mailbox_delete`.
 
 ### Email tools
 
-- `email_list(mailbox, folder?, unread?, from?, since?, subject?)`: list
-  emails. `folder` is `"inbox"` (default) or `"sent"`. Filters AND together.
+- `email_list(mailbox, folder?, limit?, offset?)`: list a page of email
+  metadata, sorted descending by filename (newest first). `folder` is
+  `"inbox"` (default) or `"sent"`. `limit` defaults to 50, max 200; values
+  above 200 are silently clamped. Returns a JSON array — agents
+  filter client-side (e.g. `read == false` for triage). aimx never
+  scans on your behalf; pass `offset` to page deeper.
 - `email_read(mailbox, id, folder?)`: return the full Markdown file
   (frontmatter + body) for one email.
 - `email_send(from_mailbox, to, subject, body, attachments?)`: compose,
@@ -216,11 +220,15 @@ types, required/optional, and the outbound block.
 ### 1. Check inbox for new mail
 
 ```
-email_list(mailbox: "agent", unread: true)
+email_list(mailbox: "agent")
+# Returns a JSON array — filter to unread on your side.
+# JSON.parse(result).filter(r => r.read === false)
 ```
 
-Loop through results. For each, call `email_read` to get the content, then
-`email_mark_read` when done processing. This is the standard polling pattern.
+We no longer ask aimx to filter; we list a page and the agent decides.
+For each unread row, read the full `.md` directly with your filesystem
+tools (or call `email_read` if you prefer the daemon-mediated path), then
+`email_mark_read` when done. This is the standard polling pattern.
 
 ### 2. Send an email
 
@@ -355,8 +363,9 @@ untrusted mail. When deciding whether to act on an email's content
 
 ## Read / unread
 
-- `email_list` with `unread: true` returns only unread messages. Use this
-  to find new mail.
+- `email_list` returns the `read` flag on each inbox row. To find new
+  mail, page through descending by filename and filter client-side to
+  rows where `read == false`.
 - After processing, call `email_mark_read` to avoid reprocessing.
   `email_mark_unread` reverses the state.
 - Read state lives in the `read` frontmatter field. No separate database or

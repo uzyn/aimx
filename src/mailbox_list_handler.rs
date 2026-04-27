@@ -153,8 +153,8 @@ fn count_inbox(dir: &Path) -> (usize, usize) {
 
 /// Cheap "is this email already marked read?" check that parses the
 /// frontmatter just enough to find the `read = true|false` line.
-/// Avoids the full TOML decode that `crate::mcp::list_emails` did —
-/// the listing path stays cheap on huge mailboxes.
+/// Avoids the full TOML decode the older `mcp::list_emails` did — the
+/// listing path stays cheap on huge mailboxes.
 fn is_marked_read(md_path: &Path) -> bool {
     let content = match std::fs::read_to_string(md_path) {
         Ok(c) => c,

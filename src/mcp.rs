@@ -36,14 +36,12 @@ pub struct EmailListParams {
     pub mailbox: String,
     #[schemars(description = "Which folder to read: \"inbox\" (default) or \"sent\"")]
     pub folder: Option<String>,
-    #[schemars(description = "Filter to only unread emails")]
-    pub unread: Option<bool>,
-    #[schemars(description = "Filter by sender address (substring match)")]
-    pub from: Option<String>,
-    #[schemars(description = "Filter to emails since this datetime (RFC 3339 format)")]
-    pub since: Option<String>,
-    #[schemars(description = "Filter by subject (substring match, case-insensitive)")]
-    pub subject: Option<String>,
+    #[schemars(description = "Maximum number of rows to return. Default 50; \
+                              values above 200 are silently clamped to 200.")]
+    pub limit: Option<u32>,
+    #[schemars(description = "Number of rows to skip from the start of the \
+                              descending-by-filename listing. Default 0.")]
+    pub offset: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -226,7 +224,8 @@ impl AimxMcpServer {
 
     #[tool(
         name = "email_list",
-        description = "List emails in a mailbox with optional filters"
+        description = "List emails in a mailbox, paginated by descending filename. \
+                       Returns a JSON array; agents filter client-side."
     )]
     fn email_list(
         &self,
@@ -250,31 +249,11 @@ impl AimxMcpServer {
 
         let folder = resolve_folder(params.folder.as_deref())?;
         let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
-        let emails = list_emails(&mailbox_dir).map_err(|e| e.to_string())?;
 
-        let filtered = filter_emails(
-            emails,
-            params.unread,
-            params.from.as_deref(),
-            params.since.as_deref(),
-            params.subject.as_deref(),
-        )?;
+        let limit = clamp_limit(params.limit);
+        let offset = params.offset.unwrap_or(0) as usize;
 
-        if filtered.is_empty() {
-            return Ok("No emails found.".to_string());
-        }
-
-        let result: Vec<String> = filtered
-            .iter()
-            .map(|meta| {
-                let read_status = if meta.read { "read" } else { "unread" };
-                format!(
-                    "[{}] {} | From: {} | Subject: {} | Date: {}",
-                    read_status, meta.id, meta.from, meta.subject, meta.date
-                )
-            })
-            .collect();
-        Ok(result.join("\n"))
+        list_email_page_json(&mailbox_dir, folder, offset, limit).map_err(|e| e.to_string())
     }
 
     #[tool(name = "email_read", description = "Read the full content of an email")]
@@ -1208,41 +1187,229 @@ fn decode_mailbox_list_response(buf: &[u8]) -> Result<String, String> {
     Err(format!("unexpected response: {status_line:?}"))
 }
 
-/// List the emails in a single folder. Handles both flat `<stem>.md`
-/// entries and Zola-style bundle directories containing `<stem>.md`.
-pub fn list_emails(
-    mailbox_dir: &std::path::Path,
-) -> Result<Vec<InboundFrontmatter>, Box<dyn std::error::Error>> {
-    let mut emails = Vec::new();
+/// Default page size when the caller omits `limit`.
+const DEFAULT_LIMIT: u32 = 50;
+/// Hard cap on `limit`; values above this are silently clamped.
+const MAX_LIMIT: u32 = 200;
 
+/// Resolve the effective `limit` for a page request. Missing → 50;
+/// values above 200 silently clamp to 200; zero is allowed (returns an
+/// empty page without reading any frontmatter).
+fn clamp_limit(raw: Option<u32>) -> usize {
+    let v = raw.unwrap_or(DEFAULT_LIMIT);
+    v.min(MAX_LIMIT) as usize
+}
+
+/// Inbox row shape — matches the JSON output of `email_list` for
+/// `folder = "inbox"`. `read` is always present and populated.
+#[derive(Serialize)]
+struct InboxListRow {
+    id: String,
+    from: String,
+    to: String,
+    subject: String,
+    date: String,
+    read: bool,
+}
+
+/// Sent row shape — matches the JSON output of `email_list` for
+/// `folder = "sent"`. `read` is intentionally absent (agents never
+/// mark sent mail read/unread); `delivery_status` is the value from
+/// the outbound frontmatter, surfaced verbatim.
+#[derive(Serialize)]
+struct SentListRow {
+    id: String,
+    from: String,
+    to: String,
+    subject: String,
+    date: String,
+    delivery_status: String,
+}
+
+/// Minimal frontmatter projection used by `email_list`. Only fields
+/// surfaced by `InboxListRow` / `SentListRow` are decoded — the rest
+/// of the (potentially large) frontmatter block is skipped, keeping
+/// the parse cost bounded even with many headers / attachments.
+#[derive(Deserialize)]
+struct EmailListFm {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    from: String,
+    #[serde(default)]
+    to: String,
+    #[serde(default)]
+    subject: String,
+    #[serde(default)]
+    date: String,
+    #[serde(default)]
+    read: bool,
+    #[serde(default)]
+    delivery_status: Option<String>,
+}
+
+/// Enumerate `(id, frontmatter_path)` pairs in `mailbox_dir` without
+/// reading any file contents. Bundle directories surface as
+/// `(<stem>, <stem>/<stem>.md)`; flat `.md` files as `(<stem>, <stem>.md)`.
+/// Missing or unreadable directories return an empty list (the MCP tool
+/// never errors on an empty mailbox).
+fn enumerate_email_ids(mailbox_dir: &std::path::Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut ids: Vec<(String, PathBuf)> = Vec::new();
     let entries = match std::fs::read_dir(mailbox_dir) {
         Ok(e) => e,
-        Err(_) => return Ok(emails),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ids),
+        Err(e) => return Err(e),
     };
 
     for entry in entries.filter_map(|e| e.ok()) {
+        // Symlinks are silently skipped: `file_type()` does not follow them,
+        // so a symlinked bundle dir / `.md` is neither `is_dir()` nor
+        // `is_file()` and falls through. aimx never writes symlinks here;
+        // if a backup tool restores one, it disappears from listings by
+        // design (no path-escape via `read_email_frontmatter`).
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
         let path = entry.path();
-        if path.is_dir() {
-            // Bundle: read the `<stem>/<stem>.md` inside.
+        if file_type.is_dir() {
             if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
                 let md = path.join(format!("{stem}.md"));
-                if md.exists() {
-                    let content = std::fs::read_to_string(&md)?;
-                    if let Some(meta) = parse_frontmatter(&content) {
-                        emails.push(meta);
-                    }
-                }
+                ids.push((stem.to_string(), md));
             }
-        } else if path.extension().is_some_and(|ext| ext == "md") {
-            let content = std::fs::read_to_string(&path)?;
-            if let Some(meta) = parse_frontmatter(&content) {
-                emails.push(meta);
-            }
+        } else if file_type.is_file()
+            && path.extension().is_some_and(|ext| ext == "md")
+            && let Some(stem) = path.file_stem().and_then(|f| f.to_str())
+        {
+            ids.push((stem.to_string(), path));
         }
     }
+    Ok(ids)
+}
 
-    emails.sort_by(|a, b| a.date.cmp(&b.date));
-    Ok(emails)
+/// Build the JSON page response for `email_list`. Pass 1 enumerates ids
+/// without parsing; pass 2 reads frontmatter only for the page slice.
+/// Empty pages serialize to the literal `"[]"` string — never the old
+/// `"No emails found."` text.
+///
+/// The returned page may be SHORTER than `limit` even when more ids
+/// exist beyond `offset + limit`: the slice `[offset..end]` is fixed
+/// before iteration, and a row whose frontmatter cannot be read
+/// (`Ok(None)` — missing inner `.md` in a bundle, or content without
+/// `+++` delimiters) is silently dropped without backfilling. This is
+/// intentional graceful degradation; do not "fix" it by backfilling.
+fn list_email_page_json(
+    mailbox_dir: &std::path::Path,
+    folder: Folder,
+    offset: usize,
+    limit: usize,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let mut ids = enumerate_email_ids(mailbox_dir)?;
+    // Filenames are `YYYY-MM-DD-HHMMSS-<slug>` so descending
+    // lexicographic order is reverse chronological. Sort on the id
+    // (filename stem) only — the path component is irrelevant to the
+    // ordering invariant pinned by FR-B2.
+    ids.sort_by(|a, b| b.0.cmp(&a.0));
+
+    if offset >= ids.len() || limit == 0 {
+        return Ok("[]".to_string());
+    }
+    let end = (offset + limit).min(ids.len());
+    let page = &ids[offset..end];
+
+    match folder {
+        Folder::Inbox => {
+            let mut rows: Vec<InboxListRow> = Vec::with_capacity(page.len());
+            for (id, fm_path) in page {
+                let Some(fm) = read_email_frontmatter(fm_path)? else {
+                    continue;
+                };
+                rows.push(InboxListRow {
+                    id: choose_id(id, &fm.id),
+                    from: fm.from,
+                    to: fm.to,
+                    subject: fm.subject,
+                    date: fm.date,
+                    read: fm.read,
+                });
+            }
+            Ok(serde_json::to_string(&rows)?)
+        }
+        Folder::Sent => {
+            let mut rows: Vec<SentListRow> = Vec::with_capacity(page.len());
+            for (id, fm_path) in page {
+                let Some(fm) = read_email_frontmatter(fm_path)? else {
+                    continue;
+                };
+                rows.push(SentListRow {
+                    id: choose_id(id, &fm.id),
+                    from: fm.from,
+                    to: fm.to,
+                    subject: fm.subject,
+                    date: fm.date,
+                    delivery_status: fm.delivery_status.unwrap_or_default(),
+                });
+            }
+            Ok(serde_json::to_string(&rows)?)
+        }
+    }
+}
+
+/// Prefer the on-disk filename stem as the canonical id (it is the
+/// value the agent passes to `email_read` / `email_mark_*`). Fall back
+/// to the frontmatter `id` only when the filename could not be decoded
+/// — protects the response shape against unicode-broken filenames.
+fn choose_id(filename_stem: &str, fm_id: &str) -> String {
+    if !filename_stem.is_empty() {
+        filename_stem.to_string()
+    } else {
+        fm_id.to_string()
+    }
+}
+
+/// Read and parse the frontmatter for one email. Increments the
+/// test-only read counter so `email_list` perf tests can assert that
+/// page-N reads at most N frontmatter blocks. A missing file (`<id>/<id>.md`
+/// inside an empty bundle dir) returns `Ok(None)` so the caller can skip
+/// it without short-circuiting the whole page.
+fn read_email_frontmatter(
+    path: &std::path::Path,
+) -> Result<Option<EmailListFm>, Box<dyn std::error::Error>> {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(Box::new(e)),
+    };
+    #[cfg(test)]
+    fm_read_count_inc();
+    let parts: Vec<&str> = content.splitn(3, "+++").collect();
+    if parts.len() < 3 {
+        return Ok(None);
+    }
+    let toml_str = parts[1].trim();
+    let fm: EmailListFm = toml::from_str(toml_str)?;
+    Ok(Some(fm))
+}
+
+#[cfg(test)]
+thread_local! {
+    static FM_READ_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn fm_read_count_inc() {
+    FM_READ_COUNT.with(|c| c.set(c.get() + 1));
+}
+
+/// Reset the per-thread frontmatter-read counter and return its prior
+/// value. Test harness only — production callers do not increment.
+#[cfg(test)]
+pub fn fm_read_count_reset() -> usize {
+    FM_READ_COUNT.with(|c| {
+        let v = c.get();
+        c.set(0);
+        v
+    })
 }
 
 /// Strict email-path resolver used by every read/rewrite verb in the
@@ -1348,58 +1515,6 @@ pub fn parse_frontmatter(content: &str) -> Option<InboundFrontmatter> {
     }
     let toml_str = parts[1].trim();
     toml::from_str(toml_str).ok()
-}
-
-pub fn filter_emails(
-    emails: Vec<InboundFrontmatter>,
-    unread: Option<bool>,
-    from: Option<&str>,
-    since: Option<&str>,
-    subject: Option<&str>,
-) -> Result<Vec<InboundFrontmatter>, String> {
-    let since_dt = match since {
-        Some(s) => Some(
-            chrono::DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.with_timezone(&chrono::Utc))
-                .map_err(|e| format!("Invalid 'since' datetime '{}': {}", s, e))?,
-        ),
-        None => None,
-    };
-
-    let result = emails
-        .into_iter()
-        .filter(|e| {
-            if let Some(unread_filter) = unread {
-                if unread_filter && e.read {
-                    return false;
-                }
-                if !unread_filter && !e.read {
-                    return false;
-                }
-            }
-            if let Some(from_filter) = from
-                && !e.from.to_lowercase().contains(&from_filter.to_lowercase())
-            {
-                return false;
-            }
-            if let Some(ref since_dt) = since_dt
-                && let Ok(email_dt) = chrono::DateTime::parse_from_rfc3339(&e.date)
-                && email_dt.with_timezone(&chrono::Utc) < *since_dt
-            {
-                return false;
-            }
-            if let Some(subject_filter) = subject
-                && !e
-                    .subject
-                    .to_lowercase()
-                    .contains(&subject_filter.to_lowercase())
-            {
-                return false;
-            }
-            true
-        })
-        .collect();
-    Ok(result)
 }
 
 /// Direct-on-disk frontmatter rewrite. Not called by the MCP tool
@@ -1584,5 +1699,329 @@ mod auth_tests {
             .authorize_mailbox(Action::MailboxRead("missing".into()), &config)
             .unwrap_err();
         assert!(err.contains("not authorized"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod email_list_tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_inbox_md(dir: &std::path::Path, id: &str, from: &str, subject: &str, read: bool) {
+        std::fs::create_dir_all(dir).unwrap();
+        let body = format!(
+            "+++\n\
+             id = \"{id}\"\n\
+             message_id = \"<{id}@test.com>\"\n\
+             from = \"{from}\"\n\
+             to = \"alice@test.com\"\n\
+             subject = \"{subject}\"\n\
+             date = \"2025-06-01T12:00:00Z\"\n\
+             attachments = []\n\
+             mailbox = \"alice\"\n\
+             read = {read}\n\
+             dkim = \"none\"\n\
+             spf = \"none\"\n\
+             +++\n\nBody.\n"
+        );
+        std::fs::write(dir.join(format!("{id}.md")), body).unwrap();
+    }
+
+    fn write_sent_md(dir: &std::path::Path, id: &str, status: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        let body = format!(
+            "+++\n\
+             id = \"{id}\"\n\
+             message_id = \"<{id}@test.com>\"\n\
+             from = \"alice@test.com\"\n\
+             to = \"out@example.com\"\n\
+             subject = \"S\"\n\
+             date = \"2025-06-01T12:00:00Z\"\n\
+             mailbox = \"alice\"\n\
+             read = false\n\
+             outbound = true\n\
+             delivery_status = \"{status}\"\n\
+             +++\n\nBody.\n"
+        );
+        std::fs::write(dir.join(format!("{id}.md")), body).unwrap();
+    }
+
+    #[test]
+    fn page_reads_at_most_limit_frontmatter_blocks() {
+        // Seed 10 inbox files; ask for limit=3, offset=2; expect exactly
+        // 3 frontmatter reads (descending order), the rest untouched.
+        let tmp = TempDir::new().unwrap();
+        for i in 1..=10 {
+            let id = format!("2025-06-01-{i:03}");
+            write_inbox_md(tmp.path(), &id, "s@x.com", "S", false);
+        }
+
+        fm_read_count_reset();
+        let json =
+            list_email_page_json(tmp.path(), Folder::Inbox, 2, 3).expect("page returns JSON");
+        let reads = fm_read_count_reset();
+        assert_eq!(reads, 3, "page-3 must read exactly 3 frontmatter blocks");
+
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 3);
+        // Descending: 10, 9, 8 — offset=2 skips 10 and 9, takes 8, 7, 6.
+        assert_eq!(rows[0]["id"], "2025-06-01-008");
+        assert_eq!(rows[1]["id"], "2025-06-01-007");
+        assert_eq!(rows[2]["id"], "2025-06-01-006");
+    }
+
+    #[test]
+    fn empty_mailbox_returns_empty_array_no_reads() {
+        let tmp = TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path()).unwrap();
+        fm_read_count_reset();
+        let json =
+            list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).expect("page returns JSON");
+        assert_eq!(fm_read_count_reset(), 0);
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn missing_mailbox_dir_returns_empty_array() {
+        // No directory created — list call must surface an empty page,
+        // not an error.
+        let tmp = TempDir::new().unwrap();
+        let phantom = tmp.path().join("does-not-exist");
+        let json = list_email_page_json(&phantom, Folder::Inbox, 0, 50).unwrap();
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn offset_beyond_end_returns_empty_array() {
+        let tmp = TempDir::new().unwrap();
+        for i in 1..=3 {
+            let id = format!("2025-06-01-{i:03}");
+            write_inbox_md(tmp.path(), &id, "s@x.com", "S", false);
+        }
+        fm_read_count_reset();
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 99, 50).unwrap();
+        assert_eq!(fm_read_count_reset(), 0);
+        assert_eq!(json, "[]");
+    }
+
+    #[test]
+    fn sent_rows_omit_read_key() {
+        let tmp = TempDir::new().unwrap();
+        write_sent_md(tmp.path(), "2025-06-01-001", "delivered");
+        write_sent_md(tmp.path(), "2025-06-01-002", "failed");
+
+        let json = list_email_page_json(tmp.path(), Folder::Sent, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let obj = row.as_object().expect("row is object");
+            // `read` is gone — agents do not mark sent mail.
+            assert!(
+                !obj.contains_key("read"),
+                "sent row must not carry `read` key: {obj:?}"
+            );
+            assert!(obj.contains_key("delivery_status"));
+        }
+        // Newest first, status pass-through verbatim.
+        assert_eq!(rows[0]["id"], "2025-06-01-002");
+        assert_eq!(rows[0]["delivery_status"], "failed");
+        assert_eq!(rows[1]["delivery_status"], "delivered");
+    }
+
+    #[test]
+    fn inbox_rows_carry_read_key() {
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        write_inbox_md(tmp.path(), "2025-06-01-002", "s@x.com", "S", true);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        for row in rows {
+            let obj = row.as_object().expect("row is object");
+            assert!(obj.contains_key("read"));
+            assert!(
+                !obj.contains_key("delivery_status"),
+                "inbox row must not carry `delivery_status`"
+            );
+        }
+    }
+
+    #[test]
+    fn ten_thousand_message_page_50_reads_at_most_50_blocks() {
+        // Pin the perf claim: page-50 reads ≤ 50 frontmatter blocks
+        // regardless of mailbox size. Wall-clock is recorded but only
+        // fails on a generous bound — the cold-cache 50ms target is
+        // documented in the algorithm comments, not asserted here.
+        let tmp = TempDir::new().unwrap();
+        for i in 0..10_000 {
+            let id = format!("2025-06-01-{i:06}");
+            // Cheaper write loop — same content shape as
+            // `write_inbox_md` but inlined to avoid 10k function calls
+            // hitting create_dir_all unnecessarily.
+            let body = format!(
+                "+++\nid = \"{id}\"\nmessage_id = \"<{id}@t>\"\nfrom = \"a@b.c\"\nto = \"a@b.c\"\nsubject = \"S\"\ndate = \"2025-06-01T00:00:00Z\"\nattachments = []\nmailbox = \"alice\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\n\nB.\n"
+            );
+            std::fs::write(tmp.path().join(format!("{id}.md")), body).unwrap();
+        }
+
+        fm_read_count_reset();
+        let start = std::time::Instant::now();
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let elapsed = start.elapsed();
+        let reads = fm_read_count_reset();
+
+        assert!(reads <= 50, "page-50 read {reads} frontmatter blocks");
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 50);
+
+        // Soft assertion: page-50 on 10k must stay under 500ms (~10x
+        // the <50ms cold-cache design target). Tight enough to catch
+        // an order-of-magnitude regression on debug builds + warm CI
+        // disk; loose enough to not flake on a stressed runner.
+        eprintln!("page-50 on 10k messages: {elapsed:?} ({reads} fm reads)");
+        assert!(
+            elapsed.as_millis() < 500,
+            "page-50 took {elapsed:?} — perf regression?"
+        );
+    }
+
+    #[test]
+    fn descending_sort_matches_reverse_insertion_order() {
+        // Pin the FR-B2 invariant: filenames are
+        // `YYYY-MM-DD-HHMMSS-<slug>` so descending lex == reverse
+        // chronological. Seed 100 files with deliberately diverse
+        // slugs (digits, lowercase, uppercase, punctuation we permit)
+        // and assert sort order matches reverse insertion order — no
+        // slug character can hoist an older message above a newer one.
+        let tmp = TempDir::new().unwrap();
+        let slug_chars = [
+            "0", "1", "2", "9", "a", "b", "z", "A", "Z", "x-y", "x_y", "alpha", "ZZZ",
+        ];
+        let mut ids = Vec::new();
+        for i in 0..100 {
+            let slug = slug_chars[i % slug_chars.len()];
+            let id = format!("2025-06-01-{:06}-{slug}", i);
+            write_inbox_md(tmp.path(), &id, "s@x.com", "S", false);
+            ids.push(id);
+        }
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 100).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 100);
+
+        let actual: Vec<String> = rows
+            .iter()
+            .map(|r| r["id"].as_str().unwrap().to_string())
+            .collect();
+        let mut expected = ids.clone();
+        expected.reverse();
+        assert_eq!(
+            actual, expected,
+            "descending lex order must match reverse insertion order"
+        );
+    }
+
+    #[test]
+    fn limit_clamps_to_max() {
+        // Values above 200 silently clamp to 200; the schema-mandated
+        // default is 50; missing → 50.
+        assert_eq!(clamp_limit(None), 50);
+        assert_eq!(clamp_limit(Some(0)), 0);
+        assert_eq!(clamp_limit(Some(50)), 50);
+        assert_eq!(clamp_limit(Some(200)), 200);
+        assert_eq!(clamp_limit(Some(201)), 200);
+        assert_eq!(clamp_limit(Some(u32::MAX)), 200);
+    }
+
+    #[test]
+    fn bundle_dir_contributes_one_id_to_listing() {
+        // Bundle layout: `<stem>/<stem>.md`. Listing must surface the
+        // bundle as one id without recursing into the directory.
+        let tmp = TempDir::new().unwrap();
+        let bundle = tmp.path().join("2025-06-01-001-with-attach");
+        std::fs::create_dir_all(&bundle).unwrap();
+        let inner_id = "2025-06-01-001-with-attach";
+        let body = format!(
+            "+++\nid = \"{inner_id}\"\nmessage_id = \"<x@t>\"\nfrom = \"a@b.c\"\nto = \"a@b.c\"\nsubject = \"S\"\ndate = \"2025-06-01T00:00:00Z\"\nattachments = []\nmailbox = \"alice\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\n\nB.\n"
+        );
+        std::fs::write(bundle.join(format!("{inner_id}.md")), body).unwrap();
+        // Sibling attachment file inside the bundle — must NOT be
+        // listed as a separate id.
+        std::fs::write(bundle.join("invoice.pdf"), b"not-mail").unwrap();
+
+        // A flat `.md` next to the bundle.
+        write_inbox_md(tmp.path(), "2025-06-01-002", "s@x.com", "S", false);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], "2025-06-01-002");
+        assert_eq!(rows[1]["id"], "2025-06-01-001-with-attach");
+    }
+
+    #[test]
+    fn bundle_without_inner_md_is_skipped_surrounding_rows_surface() {
+        // Pin the graceful-skip contract documented on `list_email_page_json`:
+        // a bundle dir whose inner `.md` is missing must not poison the
+        // page — the row drops out, neighbours stay.
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        // Empty bundle dir: the expected `<stem>/<stem>.md` is absent.
+        std::fs::create_dir_all(tmp.path().join("2025-06-01-002-broken")).unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2, "broken bundle drops; neighbours surface");
+        assert_eq!(rows[0]["id"], "2025-06-01-003");
+        assert_eq!(rows[1]["id"], "2025-06-01-001");
+    }
+
+    #[test]
+    fn missing_frontmatter_delimiters_skips_row() {
+        // A `.md` file without `+++` delimiters yields `Ok(None)` from
+        // `read_email_frontmatter` (the `splitn(3) < 3` branch) — the
+        // row is silently skipped, never errors.
+        let tmp = TempDir::new().unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-001", "s@x.com", "S", false);
+        std::fs::write(
+            tmp.path().join("2025-06-01-002.md"),
+            "no frontmatter here, just body\n",
+        )
+        .unwrap();
+        write_inbox_md(tmp.path(), "2025-06-01-003", "s@x.com", "S", false);
+
+        let json = list_email_page_json(tmp.path(), Folder::Inbox, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["id"], "2025-06-01-003");
+        assert_eq!(rows[1]["id"], "2025-06-01-001");
+    }
+
+    #[test]
+    fn sent_row_with_missing_delivery_status_falls_back_to_empty_string() {
+        // `delivery_status` is `Option<String>` on the partial decoder;
+        // an outbound frontmatter without the field must surface as
+        // `""` (verbatim, no `null`) on the JSON row.
+        let tmp = TempDir::new().unwrap();
+        let id = "2025-06-01-001";
+        let body = format!(
+            "+++\nid = \"{id}\"\nmessage_id = \"<{id}@t>\"\nfrom = \"alice@test.com\"\nto = \"out@example.com\"\nsubject = \"S\"\ndate = \"2025-06-01T12:00:00Z\"\nmailbox = \"alice\"\nread = false\noutbound = true\n+++\n\nB.\n"
+        );
+        std::fs::write(tmp.path().join(format!("{id}.md")), body).unwrap();
+
+        let json = list_email_page_json(tmp.path(), Folder::Sent, 0, 50).unwrap();
+        let rows: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let rows = rows.as_array().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["delivery_status"], "");
     }
 }
