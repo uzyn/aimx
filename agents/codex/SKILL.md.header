@@ -15,8 +15,7 @@ prompt itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"],
-  stdin: "email"
+  cmd: ["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"]
 )
 ```
 
@@ -37,8 +36,8 @@ Notes:
   The harsher `--dangerously-bypass-approvals-and-sandbox` is only
   appropriate inside a contained host where escape from the sandbox is
   acceptable.
-- `stdin: "email"` pipes the raw `.md` (TOML frontmatter + body) to
-  Codex.
+- The daemon always pipes the raw `.md` (TOML frontmatter + body) to
+  the child's stdin, so Codex sees the email content as its task.
 
 Note: the user the hook runs as (the mailbox's owner) must have the
 aimx skill installed too — re-run `aimx agents setup codex` as that

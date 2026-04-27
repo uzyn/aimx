@@ -956,7 +956,6 @@ mod tests {
         let mark_req = crate::send_protocol::MarkRequest {
             mailbox: "alice".into(),
             id: "2025-06-01-001".into(),
-            folder: crate::send_protocol::MarkFolder::Inbox,
             read: true,
         };
         let resp = crate::state_handler::handle_mark(

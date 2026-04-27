@@ -521,11 +521,10 @@ fn reject_legacy_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error
             continue;
         }
 
-        let Some((key, value)) = trimmed.split_once('=') else {
+        let Some((key, _value)) = trimmed.split_once('=') else {
             continue;
         };
         let key = key.trim();
-        let value = value.trim();
 
         match key {
             "run_as" => {
@@ -552,15 +551,75 @@ fn reject_legacy_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error
                 )
                 .into());
             }
-            "stdin" if value.contains("email_json") => {
-                return Err("email_json stdin mode was removed; use stdin = \"email\""
-                    .to_string()
-                    .into());
-            }
             _ => {}
         }
     }
     Ok(())
+}
+
+/// Pre-`from_value` check: reject any `[[mailbox.<name>.hooks]]` block
+/// carrying a `stdin = ...` key. The field was removed and the email is
+/// always piped to hooks now.
+///
+/// The error names the hook by its explicit `name` if set, otherwise by
+/// the derived sha256-based effective name (matches `effective_hook_name`).
+fn reject_removed_stdin_field(parsed: &toml::Value) -> Result<(), String> {
+    let Some(mailboxes) = parsed.get("mailboxes").and_then(|v| v.as_table()) else {
+        return Ok(());
+    };
+    for (_mb_name, mb) in mailboxes {
+        let Some(mb_tbl) = mb.as_table() else {
+            continue;
+        };
+        let Some(hooks) = mb_tbl.get("hooks").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for hook in hooks {
+            let Some(tbl) = hook.as_table() else {
+                continue;
+            };
+            if !tbl.contains_key("stdin") {
+                continue;
+            }
+            // Resolve the effective name. Explicit `name` wins; otherwise
+            // derive from `(event, cmd, fire_on_untrusted)` so the error
+            // is greppable against `aimx hooks list` output.
+            let name = match tbl.get("name").and_then(|v| v.as_str()) {
+                Some(n) => n.to_string(),
+                None => derive_hook_name_from_toml(tbl),
+            };
+            return Err(format!(
+                "hook '{name}' carries removed field 'stdin' — remove this line and \
+                 restart aimx serve; the email is always piped to hooks"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Derive the effective hook name from a raw `toml::Table`. Mirrors
+/// `crate::hook::effective_hook_name` for the no-explicit-name case so
+/// the rejection error can name the hook by its derived sha256 stem.
+/// Best-effort: missing or wrong-typed fields fall back to defaults.
+fn derive_hook_name_from_toml(tbl: &toml::value::Table) -> String {
+    let event = match tbl.get("event").and_then(|v| v.as_str()) {
+        Some("after_send") => HookEvent::AfterSend,
+        _ => HookEvent::OnReceive,
+    };
+    let cmd: Vec<String> = tbl
+        .get("cmd")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let fire = tbl
+        .get("fire_on_untrusted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    crate::hook::derive_hook_name(event, &cmd, fire)
 }
 
 /// Reject `fire_on_untrusted = true` on `after_send` hooks, and any hook
@@ -848,7 +907,13 @@ impl Config {
             }
         })?;
         reject_legacy_schema(&content)?;
-        let config: Config = toml::from_str(&content)?;
+        // Peek at the parsed TOML value before `from_value` so we can
+        // reject the removed `stdin` field with a hook-named error
+        // before the structural deserializer trips on its absence.
+        let raw_value: toml::Value = toml::from_str(&content)?;
+        reject_removed_stdin_field(&raw_value)
+            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        let config: Config = raw_value.try_into()?;
         for (name, mb) in &config.mailboxes {
             if mb.owner.trim().is_empty() {
                 return Err(format!(
@@ -1244,8 +1309,44 @@ template = "invoke-claude"
         );
     }
 
+    /// Any `stdin = ...` value (including the legacy `email_json`)
+    /// rejects with the unified "always piped" error. The `stdin` field
+    /// was removed; its mere presence is the error.
     #[test]
-    fn load_rejects_email_json_stdin() {
+    fn load_rejects_stdin_field_for_every_value() {
+        for value in ["none", "email", "email_json"] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("config.toml");
+            write_cfg(
+                &path,
+                &format!(
+                    r#"
+domain = "test.com"
+
+[mailboxes.support]
+address = "support@test.com"
+owner = "ops"
+
+[[mailboxes.support.hooks]]
+name = "named_hook"
+event = "on_receive"
+cmd = ["/bin/true"]
+stdin = "{value}"
+"#
+                ),
+            );
+            let err = Config::load(&path).unwrap_err().to_string();
+            assert!(err.contains("named_hook"), "value={value}: {err}");
+            assert!(err.contains("stdin"), "value={value}: {err}");
+            assert!(err.contains("always piped"), "value={value}: {err}");
+        }
+    }
+
+    /// When the hook has no explicit `name`, the rejection error names
+    /// it by the derived sha256 effective name so operators can grep
+    /// the failing line against `aimx hooks list` output.
+    #[test]
+    fn load_rejects_stdin_field_with_derived_name_when_unnamed() {
         let tmp = TempDir::new().unwrap();
         let path = tmp.path().join("config.toml");
         write_cfg(
@@ -1260,14 +1361,18 @@ owner = "ops"
 [[mailboxes.support.hooks]]
 event = "on_receive"
 cmd = ["/bin/true"]
-stdin = "email_json"
+stdin = "none"
 "#,
         );
         let err = Config::load(&path).unwrap_err().to_string();
-        assert!(
-            err.contains("email_json"),
-            "error should mention email_json: {err}"
+        let derived = crate::hook::derive_hook_name(
+            crate::hook::HookEvent::OnReceive,
+            &["/bin/true".to_string()],
+            false,
         );
+        assert!(err.contains(&derived), "{err}");
+        assert!(err.contains("stdin"), "{err}");
+        assert!(err.contains("always piped"), "{err}");
     }
 
     #[test]
@@ -1369,33 +1474,6 @@ timeout_secs = 600
         );
         let (_cfg, _warnings) =
             Config::load(&path).expect("config with timeout_secs=600 must load");
-    }
-
-    #[test]
-    fn load_accepts_stdin_none() {
-        let _g = ConfigDirOverride::set(Path::new("/tmp"));
-        let tmp = TempDir::new().unwrap();
-        let path = tmp.path().join("config.toml");
-        write_cfg(
-            &path,
-            r#"
-domain = "test.com"
-
-[mailboxes.support]
-address = "support@test.com"
-owner = "ops"
-
-[[mailboxes.support.hooks]]
-event = "on_receive"
-cmd = ["/bin/true"]
-stdin = "none"
-"#,
-        );
-        let (cfg, _warnings) = Config::load(&path).expect("config with stdin=none must load");
-        assert_eq!(
-            cfg.mailboxes["support"].hooks[0].stdin,
-            crate::hook::HookStdin::None
-        );
     }
 
     #[test]

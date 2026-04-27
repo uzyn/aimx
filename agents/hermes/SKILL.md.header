@@ -21,8 +21,7 @@ prompt that tells the agent to fetch the email itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"],
-  stdin: "none"
+  cmd: ["/usr/local/bin/hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"]
 )
 ```
 
@@ -37,16 +36,13 @@ Notes:
 - `--yolo` bypasses dangerous-command approval, which is required for
   unattended runs. Without it the headless invocation blocks on
   approvals and never calls MCP.
-- The daemon sets `AIMX_FILEPATH` to the absolute path of the
-  inbound email's `.md` file before spawning the hook; Hermes's
-  filesystem tooling expands it at run time. argv itself is not
-  shell-expanded — the literal token `AIMX_FILEPATH` reaches the
-  agent verbatim.
-- Stdin handling for `hermes chat -q` is undocumented as of Apr 2026;
-  this recipe ships the inline-only form (`stdin: "none"`). If a
-  current install confirms `-q` accepts piped stdin, switch to
-  `stdin: "email"` and shorten the inline prompt to just the
-  instruction (the daemon will pipe the raw `.md` directly).
+- The daemon always pipes the raw `.md` to the child's stdin and sets
+  `AIMX_FILEPATH` to the same path. `hermes chat -q` does not read
+  stdin in headless mode as of Apr 2026, so this recipe instructs it
+  to read `$AIMX_FILEPATH` instead. If your hook only needs select
+  fields, the daemon also exposes `AIMX_SUBJECT`, `AIMX_FROM`,
+  `AIMX_MAILBOX`, etc. argv itself is not shell-expanded — the
+  literal token `AIMX_FILEPATH` reaches the agent verbatim.
 - Optional: pass `--ignore-user-config --ignore-rules` for fully
   isolated runs that ignore the operator's personal config.
 

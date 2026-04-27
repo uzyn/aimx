@@ -4,8 +4,8 @@ use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
 use crate::send_protocol::{
-    self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxCrudRequest, MarkFolder,
-    MarkRequest, SendRequest,
+    self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxCrudRequest, MarkRequest,
+    SendRequest,
 };
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -55,13 +55,12 @@ pub struct EmailReadParams {
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EmailMarkParams {
     #[schemars(description = "Mailbox name")]
     pub mailbox: String,
     #[schemars(description = "Email ID (e.g. 2025-06-15-120000-hello)")]
     pub id: String,
-    #[schemars(description = "Which folder to target: \"inbox\" (default) or \"sent\"")]
-    pub folder: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -116,11 +115,6 @@ pub struct HookCreateParams {
                        12-char hex name is derived from (event, cmd, \
                        fire_on_untrusted).")]
     pub name: Option<String>,
-    #[schemars(description = "Stdin delivery mode. \"email\" (default) pipes the \
-                       raw .md (frontmatter + body) into the child's stdin. \
-                       \"none\" closes stdin immediately so the hook only \
-                       sees env vars.")]
-    pub stdin: Option<String>,
     #[schemars(description = "Hard subprocess timeout in seconds. Default 60, \
                        max 600. SIGTERM at the limit, SIGKILL 5s later.")]
     pub timeout_secs: Option<u32>,
@@ -288,7 +282,11 @@ impl AimxMcpServer {
         std::fs::read_to_string(&filepath).map_err(|e| format!("Failed to read email: {e}"))
     }
 
-    #[tool(name = "email_mark_read", description = "Mark an email as read")]
+    #[tool(
+        name = "email_mark_read",
+        description = "Mark an inbox email as read. Sent-mail mark has no \
+                       agent use case and is not supported."
+    )]
     fn email_mark_read(
         &self,
         Parameters(params): Parameters<EmailMarkParams>,
@@ -299,16 +297,19 @@ impl AimxMcpServer {
             crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
             &config,
         )?;
-        let folder = resolve_folder(params.folder.as_deref())?;
         // Route through the daemon; mailbox files are root-owned and
         // the MCP process runs as the invoking user. The daemon
         // re-checks via SO_PEERCRED, so MCP's pre-flight authz is
         // defense in depth, not the security boundary.
-        submit_mark_via_daemon(&params.mailbox, &params.id, folder, true)?;
+        submit_mark_via_daemon(&params.mailbox, &params.id, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
 
-    #[tool(name = "email_mark_unread", description = "Mark an email as unread")]
+    #[tool(
+        name = "email_mark_unread",
+        description = "Mark an inbox email as unread. Sent-mail mark has no \
+                       agent use case and is not supported."
+    )]
     fn email_mark_unread(
         &self,
         Parameters(params): Parameters<EmailMarkParams>,
@@ -319,8 +320,7 @@ impl AimxMcpServer {
             crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
             &config,
         )?;
-        let folder = resolve_folder(params.folder.as_deref())?;
-        submit_mark_via_daemon(&params.mailbox, &params.id, folder, false)?;
+        submit_mark_via_daemon(&params.mailbox, &params.id, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
     }
 
@@ -460,23 +460,11 @@ impl AimxMcpServer {
         }
         let fire_on_untrusted = params.fire_on_untrusted.unwrap_or(false);
 
-        // Validate stdin at the MCP layer so callers get a precise error
-        // before any wire I/O. The daemon would re-validate on the wire,
-        // but the local check produces a more actionable message.
-        if let Some(s) = params.stdin.as_deref()
-            && let Err(e) = crate::hook::HookStdin::parse(s)
-        {
-            return Err(e);
-        }
-
         let mut body = serde_json::json!({
             "cmd": params.cmd,
             "fire_on_untrusted": fire_on_untrusted,
             "type": "cmd",
         });
-        if let Some(stdin) = params.stdin.as_deref() {
-            body["stdin"] = serde_json::Value::String(stdin.to_string());
-        }
         if let Some(t) = params.timeout_secs {
             body["timeout_secs"] = serde_json::Value::Number(t.into());
         }
@@ -532,7 +520,6 @@ impl AimxMcpServer {
                     "event": hook.event.as_str(),
                     "cmd": hook.cmd,
                     "fire_on_untrusted": hook.fire_on_untrusted,
-                    "stdin": hook.stdin.as_str(),
                     "timeout_secs": hook.timeout_secs,
                 }));
             }
@@ -677,21 +664,12 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
 /// Submit a `MARK-READ` or `MARK-UNREAD` request to the daemon over UDS.
 /// MCP's `email_mark_read` / `email_mark_unread` tools route through this
 /// path so the non-root MCP process doesn't need write access to the
-/// root-owned mailbox files.
-fn submit_mark_via_daemon(
-    mailbox: &str,
-    id: &str,
-    folder: Folder,
-    read: bool,
-) -> Result<(), String> {
-    let folder = match folder {
-        Folder::Inbox => MarkFolder::Inbox,
-        Folder::Sent => MarkFolder::Sent,
-    };
+/// root-owned mailbox files. Targets the inbox unconditionally; the
+/// sent folder has no agent use case.
+fn submit_mark_via_daemon(mailbox: &str, id: &str, read: bool) -> Result<(), String> {
     let request = MarkRequest {
         mailbox: mailbox.to_string(),
         id: id.to_string(),
-        folder,
         read,
     };
     let socket = crate::serve::aimx_socket_path();
@@ -2023,5 +2001,38 @@ mod email_list_tests {
         let rows = rows.as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["delivery_status"], "");
+    }
+
+    #[test]
+    fn email_mark_params_rejects_stale_folder_arg() {
+        // Symmetric to how `hook_create` hard-rejects a removed `stdin`
+        // arg: a stale `folder` field on `email_mark_*` must surface as
+        // a parse error, not a silent drop that mutates inbox while the
+        // agent thinks it touched sent.
+        let json = serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-15-120000-hello",
+            "folder": "sent",
+        });
+        let err = match serde_json::from_value::<EmailMarkParams>(json) {
+            Ok(_) => panic!("expected unknown-field error, got Ok"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got {err}"
+        );
+    }
+
+    #[test]
+    fn email_mark_params_accepts_canonical_shape() {
+        let json = serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-15-120000-hello",
+        });
+        let params: EmailMarkParams =
+            serde_json::from_value(json).expect("canonical mark params must parse");
+        assert_eq!(params.mailbox, "alice");
+        assert_eq!(params.id, "2025-06-15-120000-hello");
     }
 }

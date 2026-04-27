@@ -161,10 +161,11 @@ Create a hook. `--cmd` takes the argv as a JSON array string; `cmd[0]` must be a
 | `--mailbox <name>` | Owning mailbox. Must already exist and be owned by the caller (or caller is root). |
 | `--event <event>` | `on_receive` or `after_send`. |
 | `--cmd <json-array>` | Argv exec'd directly when the hook fires. Required. JSON array string with `cmd[0]` as an absolute path. No shell wrapping — wrap in `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
-| `--stdin <mode>` | `email` (default) pipes the raw `.md` to the hook's stdin; `none` closes stdin immediately. |
 | `--timeout-secs <N>` | Hard subprocess timeout. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `--fire-on-untrusted` | Fire even when `trusted != "true"`. Only valid on `--event on_receive`. Rejected on `--event after_send`. |
 | `--name <name>` | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. Must be globally unique across all mailboxes. When omitted, a derived 12-char hex name is used. |
+
+The raw `.md` (frontmatter + body) is always piped to the hook's stdin and the same path is also exposed as `$AIMX_FILEPATH`. If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
 
 Example (as the mailbox owner — no sudo needed when the daemon is running):
 
@@ -173,7 +174,6 @@ aimx hooks create \
   --mailbox accounts \
   --event on_receive \
   --cmd '["/usr/local/bin/claude", "-p", "Read the piped email and act on it.", "--dangerously-skip-permissions"]' \
-  --stdin email \
   --name accounts_claude
 ```
 

@@ -112,11 +112,12 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
 | `cmd` | array of strings | Argv exec'd directly. Required and non-empty; `cmd[0]` must be an absolute path. There is no shell wrapping — spell out `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
-| `stdin` | string | `"email"` (default) pipes the raw `.md` (frontmatter + body) to the hook's stdin; `"none"` closes stdin immediately so the hook only sees env vars. |
 | `timeout_secs` | int | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on `after_send` hooks at config load with `ERR fire_on_untrusted is on_receive only`. |
 
-Unknown fields on a hook table are rejected at config load. The legacy fields `template`, `params`, `run_as`, `origin`, and `dangerously_support_untrusted` are also rejected with a pointer to `book/hooks.md` — the template-hook surface and `aimx-hook` shared-uid sandbox have been retired in favor of the per-mailbox owner model. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
+The raw `.md` (frontmatter + body) is always piped to the hook's stdin and the same path is also exposed as `$AIMX_FILEPATH`. If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
+
+Unknown fields on a hook table are rejected at config load. The legacy fields `stdin`, `template`, `params`, `run_as`, `origin`, and `dangerously_support_untrusted` are also rejected with a pointer to `book/hooks.md` — the template-hook surface, `aimx-hook` shared-uid sandbox, and the per-hook stdin opt-out have been retired in favor of the per-mailbox owner model with an unconditional pipe. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
 
 ## Storage layout
 
@@ -247,7 +248,6 @@ cmd = ["/bin/sh", "-c", 'echo "$AIMX_DATE | $AIMX_FROM | $AIMX_SUBJECT" >> /var/
 name = "support_agent"
 event = "on_receive"
 cmd = ["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"]
-stdin = "email"
 
 # ----------------------------
 # Another mailbox

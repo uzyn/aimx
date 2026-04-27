@@ -144,13 +144,12 @@ Automatically sets `In-Reply-To` and `References` headers from the original emai
 
 #### `email_mark_read`
 
-Mark an email as read.
+Mark an inbox email as read. Sent-mail mark has no agent use case and is not supported.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name. Must be owned by the caller. |
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
-| `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 Updates `read = true` in the email's frontmatter. The MCP server is non-root so it routes the write through `aimx serve` over the local UDS (`/run/aimx/aimx.sock`) rather than touching the root-owned mailbox file directly. If `aimx serve` is not running the tool returns an error hint to start the daemon.
 
@@ -158,13 +157,12 @@ Updates `read = true` in the email's frontmatter. The MCP server is non-root so 
 
 #### `email_mark_unread`
 
-Mark an email as unread.
+Mark an inbox email as unread. Sent-mail mark has no agent use case and is not supported.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name. Must be owned by the caller. |
 | `id` | string | yes | Email ID (filename stem, e.g. `2025-01-15-103000-meeting`) |
-| `folder` | string | no | `"inbox"` (default) or `"sent"` |
 
 Updates `read = false` in the email's frontmatter. Same daemon-mediated write path as `email_mark_read`. Requires a running `aimx serve`.
 
@@ -184,9 +182,10 @@ Create a new hook on a mailbox you own. The daemon validates the caller's uid ag
 | `event` | string | yes | `"on_receive"` or `"after_send"` |
 | `cmd` | array of strings | yes | Argv exec'd directly when the hook fires. `cmd[0]` must be an absolute path. |
 | `name` | string | no | Explicit hook name. When omitted, a stable 12-hex-char name is derived from `sha256(event + joined_argv + fire_on_untrusted)`. |
-| `stdin` | string | no | `"email"` (default) pipes the raw `.md` to the hook's stdin; `"none"` closes stdin immediately. |
 | `timeout_secs` | int | no | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. |
 | `fire_on_untrusted` | bool | no | `on_receive` only: fire even when `trusted != "true"`. Default `false`. Rejected on `after_send`. |
+
+The raw `.md` (frontmatter + body) is always piped to the hook's stdin and the same path is exposed as `$AIMX_FILEPATH`. If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
 
 **Returns:** `{effective_name}` — the hook name the daemon wrote.
 
@@ -197,7 +196,6 @@ Example (Claude Code self-wiring):
   "mailbox": "accounts",
   "event": "on_receive",
   "cmd": ["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"],
-  "stdin": "email",
   "name": "accounts_claude"
 }}
 ```
@@ -220,11 +218,11 @@ List hooks on mailboxes you own.
 |-----------|------|----------|-------------|
 | `mailbox` | string | no | Filter to one mailbox (must be owned by the caller); omit to list every owned mailbox |
 
-**Returns:** JSON array. Each entry has `name`, `mailbox`, `event`, `cmd`, `stdin`, `timeout_secs`, and `fire_on_untrusted`.
+**Returns:** JSON array. Each entry has `name`, `mailbox`, `event`, `cmd`, `timeout_secs`, and `fire_on_untrusted`.
 
 ```json
 [
-  {"name": "accounts_claude", "mailbox": "accounts", "event": "on_receive", "cmd": ["/usr/local/bin/claude", "-p", "...", "--dangerously-skip-permissions"], "stdin": "email", "timeout_secs": 60, "fire_on_untrusted": false}
+  {"name": "accounts_claude", "mailbox": "accounts", "event": "on_receive", "cmd": ["/usr/local/bin/claude", "-p", "...", "--dangerously-skip-permissions"], "timeout_secs": 60, "fire_on_untrusted": false}
 ]
 ```
 

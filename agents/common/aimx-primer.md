@@ -100,23 +100,26 @@ does not expose `mailbox_create` or `mailbox_delete`.
   own.
 - `email_reply(mailbox, id, body)`: reply to an existing email. aimx sets
   `In-Reply-To`, `References`, and `Re:` subject automatically.
-- `email_mark_read(mailbox, id, folder?)`: mark a single email as read.
-- `email_mark_unread(mailbox, id, folder?)`: mark a single email as unread.
+- `email_mark_read(mailbox, id)`: mark a single inbox email as read.
+- `email_mark_unread(mailbox, id)`: mark a single inbox email as unread.
 
 ### Hook tools
 
 Hooks are commands the daemon fires on mail events (`on_receive`,
 `after_send`). You create a hook on a mailbox you own; the hook always
-executes as the mailbox's owning Linux user, with the email piped on
-stdin (or accessible via `$AIMX_FILEPATH` when stdin is closed). There
-is no template indirection — your `cmd` is the literal argv that runs.
+executes as the mailbox's owning Linux user, with the raw `.md`
+(frontmatter + body) piped on stdin and the same path also exposed as
+`$AIMX_FILEPATH`. There is no template indirection — your `cmd` is the
+literal argv that runs.
 
-- `hook_create(mailbox, event, cmd, name?, stdin?, timeout_secs?, fire_on_untrusted?)`:
+If your hook only needs the subject or sender, read `$AIMX_SUBJECT` /
+`$AIMX_FROM` and ignore stdin — the daemon writes the full email but
+does not require the child to consume it.
+
+- `hook_create(mailbox, event, cmd, name?, timeout_secs?, fire_on_untrusted?)`:
   attach a hook. `cmd` is an argv array (e.g. `["claude", "-p", "...",
-  "--dangerously-skip-permissions"]`). `stdin` is `"email"` (default —
-  pipes the raw `.md` to the child) or `"none"` (closes stdin; the
-  child reads `$AIMX_FILEPATH` instead). `fire_on_untrusted` defaults
-  to `false`; set `true` only on `on_receive` hooks where you want the
+  "--dangerously-skip-permissions"]`). `fire_on_untrusted` defaults to
+  `false`; set `true` only on `on_receive` hooks where you want the
   hook to fire even on `trusted = "false"` mail.
 - `hook_list(mailbox?)`: list hooks on mailboxes you own.
 - `hook_delete(name)`: delete a hook on a mailbox you own.

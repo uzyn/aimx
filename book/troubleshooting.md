@@ -221,7 +221,7 @@ sudo chmod -R u+rwX,go-rwx /var/lib/aimx/inbox/<mailbox> /var/lib/aimx/sent/<mai
 
 Symptom: editing `config.toml` and `sudo systemctl reload aimx` reports success but the new hook never fires. journalctl shows a `config reloaded with error` warn line.
 
-Fix: the new `config.toml` failed validation. Common culprits: legacy `template`, `params`, `run_as`, `origin`, or `dangerously_support_untrusted` fields on a hook (all rejected at config load with a pointer to `book/hooks.md`); duplicate hook name across mailboxes; `cmd[0]` not an absolute path; `fire_on_untrusted = true` on an `after_send` hook. Check the log:
+Fix: the new `config.toml` failed validation. Common culprits: a `stdin` line on a hook (the field was removed; `Config::load` now refuses any value with `hook '<name>' carries removed field 'stdin' — remove this line and restart aimx serve; the email is always piped to hooks`); legacy `template`, `params`, `run_as`, `origin`, or `dangerously_support_untrusted` fields on a hook (all rejected at config load with a pointer to `book/hooks.md`); duplicate hook name across mailboxes; `cmd[0]` not an absolute path; `fire_on_untrusted = true` on an `after_send` hook. Check the log:
 
 ```bash
 journalctl -u aimx --since="5 minutes ago" | grep -i reload
@@ -237,7 +237,7 @@ Fix: the absolute path written into the hook's `cmd[0]` does not exist on the ho
 
 ```bash
 aimx hooks delete <name> --yes
-aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/agent", "..."]' --stdin email --name <name>
+aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/agent", "..."]' --name <name>
 ```
 
 ## Spam prevention

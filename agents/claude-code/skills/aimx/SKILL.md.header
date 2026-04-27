@@ -15,8 +15,7 @@ exact recipe:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/claude", "-p", "<instruction-string>", "--dangerously-skip-permissions"],
-  stdin: "email"
+  cmd: ["/usr/local/bin/claude", "-p", "<instruction-string>", "--dangerously-skip-permissions"]
 )
 ```
 
@@ -33,10 +32,11 @@ email on stdin and reply via the aimx MCP server."`). Notes:
   it the headless session will block on the permission prompt and
   never call MCP. This is the documented Claude Code flag for
   unattended runs.
-- `stdin: "email"` makes the daemon pipe the raw `.md` (TOML
-  frontmatter + body) to the child process. Your `-p` prompt only
-  needs to tell the agent what to do; the email content arrives on
-  stdin.
+- The daemon always pipes the raw `.md` (TOML frontmatter + body) to
+  the child's stdin and sets `AIMX_FILEPATH` to the same path. Your
+  `-p` prompt only needs to tell the agent what to do; the email
+  content arrives on stdin. If your hook only needs the subject or
+  sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin.
 - Optional knobs: pass `--mcp-config <path>` together with
   `--strict-mcp-config` to pin which MCP servers the headless run
   loads, or `--model sonnet` to select a model explicitly.

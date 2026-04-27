@@ -14,8 +14,7 @@ hook that re-launches `gemini` with the email piped on stdin:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/gemini", "-p", "<instruction-string>", "--yolo"],
-  stdin: "email"
+  cmd: ["/usr/local/bin/gemini", "-p", "<instruction-string>", "--yolo"]
 )
 ```
 
@@ -33,7 +32,8 @@ arrives on stdin. Reply via the aimx MCP server."`). Notes:
 - The `cat file | gemini -p "..."` pipe-from-stdin pattern is the
   official non-interactive contract — Gemini reads the piped content
   as additional context alongside the `-p` prompt. The aimx daemon
-  performs the same pipe automatically when `stdin: "email"` is set.
+  always pipes the raw `.md` to the child's stdin so this happens
+  automatically.
 - Optional: pass `-m gemini-2.5-flash` (or another model) to pin the
   model explicitly.
 

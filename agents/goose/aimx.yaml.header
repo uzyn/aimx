@@ -31,8 +31,7 @@ prompt: |
   hook_create(
     mailbox: "support",
     event: "on_receive",
-    cmd: ["/usr/local/bin/goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"],
-    stdin: "email"
+    cmd: ["/usr/local/bin/goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"]
   )
   ```
 
@@ -65,15 +64,14 @@ prompt: |
   hook_create(
     mailbox: "support",
     event: "on_receive",
-    cmd: ["/usr/local/bin/goose", "run", "--instructions", "-", "--quiet"],
-    stdin: "email"
+    cmd: ["/usr/local/bin/goose", "run", "--instructions", "-", "--quiet"]
   )
   ```
 
-  `--instructions -` reads the prompt from stdin; the daemon pipes the
-  raw email `.md` into that channel when `stdin: "email"` is set.
-  `--quiet` keeps the run free of progress chatter that would otherwise
-  pollute the structured log.
+  `--instructions -` reads the prompt from stdin; the daemon always
+  pipes the raw email `.md` into that channel. `--quiet` keeps the run
+  free of progress chatter that would otherwise pollute the structured
+  log.
 
   Note: the user the hook runs as (the mailbox's owner) must have the
   aimx skill installed too — re-run `aimx agents setup goose` as that
