@@ -753,28 +753,128 @@ fn mcp_list_tools() {
     client.shutdown();
 }
 
+#[cfg(unix)]
 #[test]
 fn mcp_mailbox_list_returns_caller_owned() {
-    // After the CLI/MCP rework `mailbox_create` / `mailbox_delete` are
-    // gone from the MCP surface (moved to root-only CLI). What remains
-    // is `mailbox_list`, which returns mailboxes the caller owns. The
-    // shared fixture sets every mailbox to the test runner's own
-    // username so the listing is non-empty under non-root `cargo test`.
+    // `mailbox_list` is now a thin UDS client: it ships
+    // `AIMX/1 MAILBOX-LIST`, the daemon resolves the caller via
+    // `SO_PEERCRED`, and the response is a JSON array of mailboxes
+    // the caller owns. The shared fixture sets every mailbox owner
+    // to the test runner's username so a non-root `cargo test`
+    // sees both alice and catchall through the daemon.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    let mut client = McpClient::spawn(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    let runtime = tmp.path().join("run");
+    let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx mcp");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut client = McpClient {
+        child,
+        stdin,
+        reader: BufReader::new(stdout),
+        id: 0,
+    };
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    let rows: serde_json::Value =
+        serde_json::from_str(&text).unwrap_or_else(|e| panic!("response not JSON: {text}: {e}"));
+    let arr = rows.as_array().expect("expected JSON array");
+    let names: Vec<&str> = arr
+        .iter()
+        .filter_map(|row| row.get("name").and_then(|v| v.as_str()))
+        .collect();
+    assert!(names.contains(&"alice"), "expected alice in {names:?}");
+    assert!(
+        names.contains(&"catchall"),
+        "expected catchall in {names:?}"
+    );
+
+    let alice = arr
+        .iter()
+        .find(|row| row.get("name").and_then(|v| v.as_str()) == Some("alice"))
+        .unwrap();
+    assert!(
+        alice
+            .get("inbox_path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| p.ends_with("/inbox/alice")),
+        "alice row missing inbox_path: {alice}"
+    );
+    assert!(
+        alice
+            .get("sent_path")
+            .and_then(|v| v.as_str())
+            .is_some_and(|p| p.ends_with("/sent/alice")),
+        "alice row missing sent_path: {alice}"
+    );
+    assert_eq!(
+        alice.get("registered"),
+        Some(&serde_json::Value::Bool(true))
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// Without a running daemon, `mailbox_list` surfaces the canonical
+/// "aimx daemon not running" message that `email_send` and
+/// `hook_create` already use.
+#[cfg(unix)]
+#[test]
+fn mcp_mailbox_list_without_daemon_reports_missing_socket() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
+
+    let mut child = StdCommand::new(aimx_binary_path())
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("Failed to spawn aimx mcp");
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let mut client = McpClient {
+        child,
+        stdin,
+        reader: BufReader::new(stdout),
+        id: 0,
+    };
     client.initialize();
 
     let resp = client.call_tool("mailbox_list", serde_json::json!({}));
     let text = get_tool_text(&resp);
     assert!(
-        text.contains("alice"),
-        "expected alice in list, got: {text}"
-    );
-    assert!(
-        text.contains("catchall"),
-        "expected catchall in list, got: {text}"
+        text.contains("aimx daemon not running"),
+        "expected canonical missing-daemon message, got: {text}"
     );
 
     client.shutdown();

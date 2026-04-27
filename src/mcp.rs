@@ -215,34 +215,13 @@ impl AimxMcpServer {
                        Mailboxes the caller does not own are absent — root sees all."
     )]
     fn mailbox_list(&self) -> Result<String, String> {
-        let config = self.load_config()?;
-        let mailboxes = list_mailboxes_with_unread(&config);
-
-        // Filter to caller-owned mailboxes for non-root callers.
-        // Mailboxes the caller doesn't own are simply absent from the
-        // output rather than returned with a "denied" tag. Root sees
-        // the full set.
-        let filtered: Vec<_> = if self.caller_uid == 0 {
-            mailboxes
-        } else {
-            mailboxes
-                .into_iter()
-                .filter(|(name, _, _, _, _)| mailbox::caller_owns(&config, name, self.caller_uid))
-                .collect()
-        };
-
-        if filtered.is_empty() {
-            return Ok("No mailboxes configured.".to_string());
-        }
-
-        let result: Vec<String> = filtered
-            .iter()
-            .map(|(name, total, unread, sent_count, registered)| {
-                let suffix = if *registered { "" } else { " (unregistered)" };
-                format!("{name}: {total} messages ({unread} unread), {sent_count} sent{suffix}")
-            })
-            .collect();
-        Ok(result.join("\n"))
+        // The daemon is the single source of truth: it resolves the
+        // caller via `SO_PEERCRED` and returns a JSON array of
+        // mailboxes the uid owns. The MCP process never reads
+        // root-owned `config.toml` and never runs its own authz
+        // pre-flight — there are no mailboxes to authorize against
+        // until the daemon answers.
+        submit_mailbox_list_via_daemon()
     }
 
     #[tool(
@@ -1111,26 +1090,122 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
     Ok(())
 }
 
-/// Return `(name, total, unread, sent_count, registered)` for every mailbox
-/// the daemon knows about: both registered ones in `config.mailboxes` and
-/// stray `inbox/<name>/` directories left by backup restores or
-/// out-of-band tooling. Sorted by name.
-fn list_mailboxes_with_unread(config: &Config) -> Vec<(String, usize, usize, usize, bool)> {
-    let mut result: Vec<(String, usize, usize, usize, bool)> =
-        mailbox::discover_mailbox_names(config)
-            .into_iter()
-            .map(|name| {
-                let dir = config.inbox_dir(&name);
-                let emails = list_emails(&dir).unwrap_or_default();
-                let total = emails.len();
-                let unread = emails.iter().filter(|e| !e.read).count();
-                let sent_count = mailbox::count_messages(&config.sent_dir(&name));
-                let registered = mailbox::is_registered(config, &name);
-                (name, total, unread, sent_count, registered)
-            })
-            .collect();
-    result.sort_by(|a, b| a.0.cmp(&b.0));
-    result
+/// Submit an `AIMX/1 MAILBOX-LIST` to the daemon and return the JSON
+/// body verbatim. The schema-mandated string output for the tool is
+/// the JSON itself; no re-formatting happens here.
+fn submit_mailbox_list_via_daemon() -> Result<String, String> {
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(submit_mailbox_list_request(&socket)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+            rt.block_on(submit_mailbox_list_request(&socket))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+        } else {
+            format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            )
+        }
+    })?;
+
+    decode_mailbox_list_response(&raw)
+}
+
+/// Open the UDS, ship `AIMX/1 MAILBOX-LIST`, and return the raw
+/// daemon response bytes. Parsing happens in
+/// [`decode_mailbox_list_response`] so the I/O and codec layers stay
+/// independently testable.
+async fn submit_mailbox_list_request(
+    socket_path: &std::path::Path,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_mailbox_list_request(&mut writer).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Decode the daemon's `MAILBOX-LIST` response. On `OK` returns the
+/// raw JSON body string; on `ERR` formats the wire reason verbatim
+/// the way every other MCP tool surfaces daemon-side errors.
+fn decode_mailbox_list_response(buf: &[u8]) -> Result<String, String> {
+    let text = std::str::from_utf8(buf).map_err(|_| "response is not UTF-8".to_string())?;
+    let header_end = text
+        .find("\n\n")
+        .or_else(|| text.find("\r\n\r\n"))
+        .ok_or_else(|| format!("malformed response (no header terminator): {text:?}"))?;
+    // Locate body start (covers both `\n\n` and `\r\n\r\n`).
+    let body_start = if text[header_end..].starts_with("\r\n\r\n") {
+        header_end + 4
+    } else {
+        header_end + 2
+    };
+    let header_block = &text[..header_end];
+
+    let mut lines = header_block.lines();
+    let status_line = lines
+        .next()
+        .ok_or_else(|| "empty response from daemon".to_string())?
+        .trim_end_matches('\r');
+    let rest = status_line
+        .strip_prefix("AIMX/1 ")
+        .ok_or_else(|| format!("unexpected response: {status_line:?}"))?;
+
+    if rest == "OK" {
+        // OK frame must carry a Content-Length header and a body.
+        let mut content_length: Option<usize> = None;
+        for line in lines {
+            let line = line.trim_end_matches('\r');
+            if let Some(v) = line.strip_prefix("Content-Length:") {
+                content_length = v
+                    .trim()
+                    .parse::<usize>()
+                    .map(Some)
+                    .map_err(|_| format!("invalid Content-Length: {line:?}"))?;
+            }
+        }
+        let n =
+            content_length.ok_or_else(|| "missing Content-Length on OK response".to_string())?;
+        let body_bytes = &buf[body_start..];
+        if body_bytes.len() < n {
+            return Err(format!(
+                "truncated body: expected {n} bytes, got {}",
+                body_bytes.len()
+            ));
+        }
+        return std::str::from_utf8(&body_bytes[..n])
+            .map(|s| s.to_string())
+            .map_err(|_| "JSON body is not UTF-8".to_string());
+    }
+
+    if let Some(err_body) = rest.strip_prefix("ERR ") {
+        let (code_str, reason) = err_body.split_once(' ').unwrap_or((err_body, ""));
+        let code = ErrCode::from_str(code_str)
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|| code_str.to_string());
+        return Err(format!("[{code}] {}", reason.trim()));
+    }
+
+    Err(format!("unexpected response: {status_line:?}"))
 }
 
 /// List the emails in a single folder. Handles both flat `<stem>.md`
