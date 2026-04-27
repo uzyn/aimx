@@ -256,7 +256,7 @@ Emails are marked `read = false` on ingest. Use MCP tools or update the frontmat
 - **MCP:** `email_mark_read` and `email_mark_unread` (see [MCP Server](mcp.md#email-tools))
 - **CLI/filesystem:** Edit the `read` field in the `.md` file's frontmatter
 
-The `email_list` MCP tool supports an `unread` filter to list only unread emails.
+The `email_list` MCP tool returns the `read` flag on every inbox row. Agents page through the listing and filter client-side to `read == false`; aimx itself does not scan on the agent's behalf.
 
 ## Sending email
 

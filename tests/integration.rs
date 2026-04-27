@@ -953,17 +953,24 @@ fn mcp_email_list_and_read() {
 
     let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "alice"}));
     let text = get_tool_text(&resp);
-    assert!(text.contains("2025-06-01-001"));
-    assert!(text.contains("2025-06-01-002"));
-    assert!(text.contains("sender@example.com"));
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("email_list returns JSON");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    // Descending by filename — newest first.
+    assert_eq!(rows[0]["id"], "2025-06-01-002");
+    assert_eq!(rows[1]["id"], "2025-06-01-001");
+    assert_eq!(rows[1]["from"], "sender@example.com");
+    assert_eq!(rows[1]["read"], false);
+    assert_eq!(rows[0]["read"], true);
 
-    let resp = client.call_tool(
-        "email_list",
-        serde_json::json!({"mailbox": "alice", "unread": true}),
-    );
-    let text = get_tool_text(&resp);
-    assert!(text.contains("2025-06-01-001"));
-    assert!(!text.contains("2025-06-01-002"));
+    // Client-side filter — the old `unread: true` server-side filter is
+    // gone; agents now page and filter on `read == false` themselves.
+    let unread: Vec<&serde_json::Value> = rows
+        .iter()
+        .filter(|r| r["read"].as_bool() == Some(false))
+        .collect();
+    assert_eq!(unread.len(), 1);
+    assert_eq!(unread[0]["id"], "2025-06-01-001");
 
     let resp = client.call_tool(
         "email_read",
@@ -971,6 +978,52 @@ fn mcp_email_list_and_read() {
     );
     let text = get_tool_text(&resp);
     assert!(text.contains("Body of 2025-06-01-001"));
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_list_pagination() {
+    // The new `limit`/`offset` shape returns a JSON page sorted
+    // descending by filename. 5 messages with `limit=2, offset=1`
+    // returns rows 4 and 3 in that order.
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let alice_dir = inbox(tmp.path(), "alice");
+    for i in 1..=5 {
+        let id = format!("2025-06-0{i}-001");
+        create_email_file(&alice_dir, &id, "s@example.com", "S", false);
+    }
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_list",
+        serde_json::json!({"mailbox": "alice", "limit": 2, "offset": 1}),
+    );
+    let text = get_tool_text(&resp);
+    let rows: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+    let rows = rows.as_array().expect("array");
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0]["id"], "2025-06-04-001");
+    assert_eq!(rows[1]["id"], "2025-06-03-001");
+
+    client.shutdown();
+}
+
+#[test]
+fn mcp_email_list_empty_mailbox_returns_empty_json_array() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "alice"}));
+    let text = get_tool_text(&resp);
+    assert_eq!(text, "[]");
 
     client.shutdown();
 }

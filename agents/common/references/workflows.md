@@ -5,19 +5,35 @@ MCP tool calls in order with example parameters.
 
 ## 1. Triage inbox
 
-Process all unread mail, categorize by sender, and mark as read:
+Process all unread mail, categorize by sender, and mark as read.
+
+We no longer ask aimx to filter; we list a page and the agent decides.
+`email_list` returns a JSON array of metadata (including the `read`
+flag), and the agent client-side filters to `read == false` rows.
 
 ```
-# Get all unread
-email_list(mailbox: "agent", unread: true)
+# List the newest page of inbox metadata as JSON.
+email_list(mailbox: "agent")
+# → [{"id":"...","from":"...","to":"...","subject":"...","date":"...","read":false}, ...]
 
-# For each email in results:
+# Parse and filter to unread rows on your side:
+rows = JSON.parse(result)
+unread = rows.filter(r => r.read === false)
+
+# For each unread row, read the .md directly (cheaper than email_read)
+# using the inbox_path you got from mailbox_list:
+#   Read /var/lib/aimx/inbox/agent/<id>.md
+# Or call email_read if you prefer the daemon-mediated path:
 email_read(mailbox: "agent", id: "<id>")
 # Parse frontmatter: check `from`, `subject`, `trusted`, `auto_submitted`
 # Take appropriate action (reply, forward info, log, ignore)
 
 email_mark_read(mailbox: "agent", id: "<id>")
 ```
+
+If a page (default 50 rows, max 200) does not cover all unread mail,
+pass `offset: 50` and keep paging until the page returns no new
+unread rows or you reach the end of the mailbox.
 
 Triage tip: check `auto_submitted` first. If it is `auto-generated` or
 `auto-replied`, skip replying to avoid infinite loops. Check `trusted` to
@@ -169,13 +185,15 @@ email_mark_read(mailbox: "agent", id: "<bounce-id>")
 Mark every unread email in a mailbox as read:
 
 ```
-email_list(mailbox: "agent", unread: true)
-
-# For each email ID in the results:
+# Page through descending-by-filename, filtering client-side.
+rows = JSON.parse(email_list(mailbox: "agent"))
+unread = rows.filter(r => r.read === false)
+# For each id in unread:
 email_mark_read(mailbox: "agent", id: "<id>")
 ```
 
-There is no bulk mark-read tool. Iterate through each message.
+There is no bulk mark-read tool. Iterate through each message. If 50
+rows is not enough, pass `offset: 50` and keep paging.
 
 ## 9. Check sent mail status
 
@@ -218,19 +236,25 @@ email_list(mailbox: "notifications", folder: "sent")
 
 ## 11. Process mail from a specific sender since a date
 
-Filter and process a targeted subset of mail:
+aimx no longer filters server-side. List a page and filter client-side
+on the JSON output:
 
 ```
-email_list(
-  mailbox: "agent",
-  from: "alice@company.com",
-  since: "2026-04-01T00:00:00Z"
+# Page through, filter to alice@company.com since 2026-04-01.
+rows = JSON.parse(email_list(mailbox: "agent"))
+matched = rows.filter(r =>
+  r.from.includes("alice@company.com") &&
+  r.date >= "2026-04-01T00:00:00Z"
 )
+# Date strings are RFC 3339, lex-sortable; the `>=` comparison Just Works.
 
 # Read and process each matching email
-email_read(mailbox: "agent", id: "<id>")
-email_mark_read(mailbox: "agent", id: "<id>")
+email_read(mailbox: "agent", id: matched[i].id)
+email_mark_read(mailbox: "agent", id: matched[i].id)
 ```
+
+For deeper history, page with `offset: 50, 100, ...` until rows fall
+below the cutoff date.
 
 ## 12. Direct filesystem read (bulk processing)
 
