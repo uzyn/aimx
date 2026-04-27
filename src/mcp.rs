@@ -71,16 +71,16 @@ pub struct EmailSendParams {
     pub to: String,
     #[schemars(description = "Email subject")]
     pub subject: String,
-    #[schemars(description = "Email body text")]
-    pub body: String,
-    #[schemars(description = "File paths to attach")]
-    pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Message-ID of the email being replied to (sets In-Reply-To header for threading). \
                        Required to enable threading: without reply_to, the references field is silently ignored and no threading headers are emitted. \
                        When set, References is built automatically unless overridden by the references field."
     )]
     pub reply_to: Option<String>,
+    #[schemars(description = "Email body text")]
+    pub body: String,
+    #[schemars(description = "File paths to attach")]
+    pub attachments: Option<Vec<String>>,
     #[schemars(
         description = "Full References header chain (space-separated Message-IDs) for threading. \
                        Only applied when reply_to is also set. Supplied alone, it is silently ignored."
@@ -2034,5 +2034,99 @@ mod email_list_tests {
             serde_json::from_value(json).expect("canonical mark params must parse");
         assert_eq!(params.mailbox, "alice");
         assert_eq!(params.id, "2025-06-15-120000-hello");
+    }
+}
+
+#[cfg(test)]
+mod schema_order_tests {
+    //! Snapshot tests pinning the JSON-schema property order for every
+    //! tool's `*Params` struct. `schemars` emits `properties` in struct
+    //! declaration order, so reordering struct fields reorders the
+    //! schema. Each test here asserts the exact key order an agent sees
+    //! in the tool list — wire compatibility is unaffected (JSON params
+    //! are name-keyed) but agents read these schemas top-to-bottom.
+
+    use super::*;
+    use schemars::schema_for;
+    use serde_json::Value;
+
+    fn property_keys<T: schemars::JsonSchema>() -> Vec<String> {
+        let schema = schema_for!(T);
+        let value: Value = serde_json::to_value(schema).expect("schema serializes to JSON");
+        let props = value
+            .get("properties")
+            .and_then(|p| p.as_object())
+            .expect("schema has a properties object");
+        props.keys().cloned().collect()
+    }
+
+    #[test]
+    fn email_list_params_property_order() {
+        assert_eq!(
+            property_keys::<EmailListParams>(),
+            vec!["mailbox", "folder", "limit", "offset"],
+        );
+    }
+
+    #[test]
+    fn email_read_params_property_order() {
+        assert_eq!(
+            property_keys::<EmailReadParams>(),
+            vec!["mailbox", "id", "folder"],
+        );
+    }
+
+    #[test]
+    fn email_send_params_property_order() {
+        assert_eq!(
+            property_keys::<EmailSendParams>(),
+            vec![
+                "from_mailbox",
+                "to",
+                "subject",
+                "reply_to",
+                "body",
+                "attachments",
+                "references",
+            ],
+        );
+    }
+
+    #[test]
+    fn email_reply_params_property_order() {
+        assert_eq!(
+            property_keys::<EmailReplyParams>(),
+            vec!["mailbox", "id", "body"],
+        );
+    }
+
+    #[test]
+    fn email_mark_params_property_order() {
+        assert_eq!(property_keys::<EmailMarkParams>(), vec!["mailbox", "id"]);
+    }
+
+    #[test]
+    fn hook_create_params_property_order() {
+        assert_eq!(
+            property_keys::<HookCreateParams>(),
+            vec![
+                "mailbox",
+                "event",
+                "cmd",
+                "name",
+                "timeout_secs",
+                "fire_on_untrusted",
+            ],
+        );
+    }
+
+    #[test]
+    fn hook_list_params_property_order() {
+        assert_eq!(property_keys::<HookListParams>(), vec!["mailbox"]);
+    }
+
+    #[test]
+    fn hook_delete_params_property_order() {
+        assert_eq!(property_keys::<HookDeleteParams>(), vec!["name"]);
     }
 }

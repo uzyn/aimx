@@ -39,7 +39,7 @@ tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-pemfile = "2"
 serde_json = "1.0.149"
-schemars = "1.2.1"
+schemars = { version = "1.2.1", features = ["preserve_order"] }
 glob-match = "0.2"
 libc = "0.2"
 nix = { version = "0.31", default-features = false, features = ["fs", "user"] }

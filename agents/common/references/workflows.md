@@ -130,8 +130,8 @@ email_send(
   from_mailbox: "agent",
   to: "<original-from>, <original-to>, <original-cc>",
   subject: "Re: <original-subject>",
-  body: "<reply-body>",
   reply_to: "<original-message-id>",
+  body: "<reply-body>",
   references: "<original-references> <original-message-id>"
 )
 ```
