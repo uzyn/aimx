@@ -32,7 +32,7 @@ use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox_locks::MailboxLocks;
 use crate::mcp::resolve_email_path_strict;
 use crate::ownership::chown_as_owner;
-use crate::send_protocol::{AckResponse, ErrCode, MarkFolder, MarkRequest};
+use crate::send_protocol::{AckResponse, ErrCode, MarkRequest};
 use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
 
 /// Per-connection shared state for the MARK verbs (and the MAILBOX-CRUD
@@ -109,12 +109,8 @@ fn validate_id(id: &str) -> Result<(), AckResponse> {
     Ok(())
 }
 
-fn folder_dir(data_dir: &Path, mailbox: &str, folder: MarkFolder) -> PathBuf {
-    let sub = match folder {
-        MarkFolder::Inbox => "inbox",
-        MarkFolder::Sent => "sent",
-    };
-    data_dir.join(sub).join(mailbox)
+fn inbox_dir(data_dir: &Path, mailbox: &str) -> PathBuf {
+    data_dir.join("inbox").join(mailbox)
 }
 
 /// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the shared
@@ -159,7 +155,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     let lock = ctx.lock_for(&req.mailbox);
     let _guard = lock.lock().await;
 
-    let mailbox_dir = folder_dir(&ctx.data_dir, &req.mailbox, req.folder);
+    let mailbox_dir = inbox_dir(&ctx.data_dir, &req.mailbox);
     let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {
         Some(p) => p,
         None => {
@@ -176,17 +172,11 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
                 reason = "symlink_or_escape",
                 mailbox = %req.mailbox,
                 id = %req.id,
-                folder = req.folder.as_str(),
                 "MARK rejected: email not resolvable under mailbox dir"
             );
             return AckResponse::Err {
                 code: ErrCode::NotFound,
-                reason: format!(
-                    "email '{}' not found in {}/{}",
-                    req.id,
-                    req.folder.as_str(),
-                    req.mailbox
-                ),
+                reason: format!("email '{}' not found in inbox/{}", req.id, req.mailbox),
             };
         }
     };
@@ -388,7 +378,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -415,7 +404,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: false,
         };
         assert!(matches!(
@@ -436,7 +424,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "ghost".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -458,7 +445,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2099-01-01-missing".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -474,7 +460,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "../../etc/passwd".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -484,37 +469,6 @@ mod tests {
             }
             other => panic!("expected Err, got {other:?}"),
         }
-    }
-
-    #[tokio::test]
-    async fn mark_read_in_sent_folder() {
-        let tmp = TempDir::new().unwrap();
-        let meta = sample_meta("2025-06-02-001", false);
-        let sent = tmp.path().join("sent").join("alice");
-        write_email(&sent, "2025-06-02-001", &meta);
-
-        let sctx = ctx(tmp.path());
-        let req = MarkRequest {
-            mailbox: "alice".to_string(),
-            id: "2025-06-02-001".to_string(),
-            folder: MarkFolder::Sent,
-            read: true,
-        };
-        assert!(matches!(
-            handle_mark(&sctx, &req, &Caller::internal_root()).await,
-            AckResponse::Ok
-        ));
-
-        let fm: InboundFrontmatter = toml::from_str(
-            std::fs::read_to_string(sent.join("2025-06-02-001.md"))
-                .unwrap()
-                .split("+++")
-                .nth(1)
-                .unwrap()
-                .trim(),
-        )
-        .unwrap();
-        assert!(fm.read);
     }
 
     #[tokio::test]
@@ -533,7 +487,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-03-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         assert!(matches!(
@@ -566,7 +519,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-002".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -592,7 +544,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         let before = chrono::Utc::now();
@@ -625,7 +576,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: false,
         };
         assert!(matches!(
@@ -658,7 +608,6 @@ mod tests {
         let req_read = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         let req_unread = MarkRequest {
@@ -766,7 +715,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         assert!(matches!(
@@ -859,7 +807,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-001".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         // chown will fail (EPERM) but the handler must still return Ok.
@@ -972,7 +919,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-777".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -1051,7 +997,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: id.to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {
@@ -1083,7 +1028,6 @@ mod tests {
         let req = MarkRequest {
             mailbox: "alice".to_string(),
             id: "2025-06-01-003".to_string(),
-            folder: MarkFolder::Inbox,
             read: true,
         };
         match handle_mark(&sctx, &req, &Caller::internal_root()).await {

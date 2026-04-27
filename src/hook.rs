@@ -4,11 +4,13 @@
 //! One `Hook` entry in `config.toml` carries an `event`
 //! (`on_receive` | `after_send`), a `cmd` argv array, an opt-in
 //! `fire_on_untrusted` flag that lets `on_receive` hooks fire on
-//! non-trusted email, an optional `name`, and per-hook `stdin`
-//! (`email` default; `none` closes stdin) and `timeout_secs` (60s
-//! default; 1..=600 range, validated at config load) overrides. Hooks
-//! fire on every event of their configured type; the only gate is the
-//! `on_receive` trust check.
+//! non-trusted email, an optional `name`, and a per-hook `timeout_secs`
+//! (60s default; 1..=600 range, validated at config load) override.
+//! Hooks fire on every event of their configured type; the only gate
+//! is the `on_receive` trust check. The raw `.md` (frontmatter + body)
+//! is always piped to the child's stdin — there is no opt-out. Hooks
+//! that only need select fields can read `$AIMX_FROM` /
+//! `$AIMX_SUBJECT` / `$AIMX_FILEPATH` and ignore stdin.
 //!
 //! `name` is optional. When omitted, the effective name is derived
 //! deterministically from
@@ -55,38 +57,6 @@ pub const MAX_HOOK_TIMEOUT_SECS: u32 = 600;
 pub enum HookEvent {
     OnReceive,
     AfterSend,
-}
-
-/// Stdin delivery mode for a hook. `Email` (default) pipes the raw `.md`
-/// (frontmatter + body) into the child's stdin. `None` closes stdin
-/// immediately so the hook only sees env vars.
-///
-/// Legacy `email_json` is rejected pre-parse (see `reject_legacy_schema`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum HookStdin {
-    #[default]
-    Email,
-    None,
-}
-
-impl HookStdin {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            HookStdin::Email => "email",
-            HookStdin::None => "none",
-        }
-    }
-
-    pub fn parse(s: &str) -> Result<Self, String> {
-        match s {
-            "email" => Ok(HookStdin::Email),
-            "none" => Ok(HookStdin::None),
-            other => Err(format!(
-                "invalid stdin mode '{other}': expected 'email' or 'none'"
-            )),
-        }
-    }
 }
 
 impl HookEvent {
@@ -140,12 +110,6 @@ pub struct Hook {
     /// `trusted` value is not `"true"`.
     #[serde(default, skip_serializing_if = "is_false")]
     pub fire_on_untrusted: bool,
-
-    /// Stdin delivery mode. `email` (default) pipes the raw `.md` body
-    /// to the child's stdin; `none` closes stdin immediately. Validated
-    /// at config load: legacy `"email_json"` is rejected pre-parse.
-    #[serde(default, skip_serializing_if = "is_default_stdin")]
-    pub stdin: HookStdin,
 
     /// Hard subprocess timeout in seconds. Default 60, max 600.
     /// Validated at config load (`Config::load`) so out-of-range values
@@ -208,10 +172,6 @@ fn default_hook_timeout_secs() -> u32 {
 
 fn is_false(b: &bool) -> bool {
     !*b
-}
-
-fn is_default_stdin(s: &HookStdin) -> bool {
-    matches!(s, HookStdin::Email)
 }
 
 fn is_default_hook_timeout_secs(t: &u32) -> bool {
@@ -511,15 +471,16 @@ fn run_and_log(
         }
     };
 
-    // --- Resolve owner / timeout / stdin mode ------------------------------
-    // With the legacy schema gone, hooks always run as the mailbox's
-    // owner. The auth predicate will gate this in a later pass; for
-    // now this is the simple single-line rule.
+    // --- Resolve owner / timeout / stdin -----------------------------------
+    // Hooks always run as the mailbox's owner. The raw `.md` (frontmatter
+    // + body) is always piped on stdin — hooks that only need select
+    // fields read `$AIMX_FROM` / `$AIMX_SUBJECT` / `$AIMX_FILEPATH` and
+    // ignore stdin.
     let owner: String = mailbox_config.owner.clone();
 
     let timeout = Duration::from_secs(hook.timeout_secs as u64);
 
-    let stdin_payload = build_stdin(hook.stdin, stdin_source);
+    let stdin_payload = SandboxStdin::Email(read_stdin_source(stdin_source));
 
     tracing::info!(
         target: "aimx::hook",
@@ -623,19 +584,10 @@ fn run_and_log(
     }
 }
 
-/// Build the stdin payload for a hook fire. When `mode == Email`, the
-/// raw `.md` file is piped into the hook's child process. If the file
-/// doesn't exist (e.g. TEMP failures on `after_send` where persistence
-/// was skipped) we pipe an empty payload rather than failing the hook.
-/// A real read error (EACCES etc.) is logged at WARN. When `mode == None`,
-/// stdin is closed immediately and `source` is not read.
-fn build_stdin(mode: HookStdin, source: Option<&Path>) -> SandboxStdin {
-    match mode {
-        HookStdin::Email => SandboxStdin::Email(read_stdin_source(source)),
-        HookStdin::None => SandboxStdin::None,
-    }
-}
-
+/// Read the raw `.md` payload that gets piped to a hook's stdin. If the
+/// file doesn't exist (e.g. TEMP failures on `after_send` where
+/// persistence was skipped) we pipe an empty payload rather than failing
+/// the hook. A real read error (EACCES etc.) is logged at WARN.
 fn read_stdin_source(source: Option<&Path>) -> Vec<u8> {
     let Some(p) = source else {
         return Vec::new();
@@ -767,7 +719,6 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: vec!["/bin/true".to_string()],
             fire_on_untrusted: false,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         }
     }
@@ -994,34 +945,6 @@ mod tests {
     }
 
     #[test]
-    fn execute_on_receive_with_stdin_none_pipes_empty_stdin() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let out = tmp.path().join("stdin.out");
-        let mut hook = basic_hook("h_stdin_none");
-        hook.fire_on_untrusted = true;
-        hook.stdin = HookStdin::None;
-        // The script writes whatever it reads from stdin to a file.
-        // With stdin = "none" the file must be empty.
-        hook.cmd = shell_argv(format!("cat > {}", out.display()));
-        let mailbox = regular_mailbox(vec![hook]);
-        let mut meta = sample_metadata();
-        meta.trusted = "true".to_string();
-        let filepath = tmp.path().join("source.md");
-        std::fs::write(&filepath, b"original markdown body\n").ok();
-        let ctx = OnReceiveContext {
-            filepath: &filepath,
-            metadata: &meta,
-        };
-        execute_on_receive(&sample_config(), &mailbox, &ctx);
-        let content = std::fs::read(&out).unwrap();
-        assert!(
-            content.is_empty(),
-            "stdin = none must close stdin immediately; got {} bytes",
-            content.len()
-        );
-    }
-
-    #[test]
     fn execute_on_receive_with_short_timeout_kills_long_running_hook() {
         let tmp = tempfile::TempDir::new().unwrap();
         let marker = tmp.path().join("after_sleep");
@@ -1066,7 +989,6 @@ mod tests {
                 out.display()
             )),
             fire_on_untrusted: true,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         };
         let derived = derive_hook_name(HookEvent::OnReceive, &hook.cmd, true);
@@ -1149,7 +1071,6 @@ mod tests {
                 out.display()
             )),
             fire_on_untrusted: false,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         };
         let mailbox = alice_mailbox(vec![hook]);
@@ -1190,7 +1111,6 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: vec!["/bin/false".to_string()],
             fire_on_untrusted: false,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         };
         let mailbox = alice_mailbox(vec![hook]);
@@ -1214,7 +1134,6 @@ mod tests {
             r#type: "cmd".to_string(),
             cmd: argv(&["/bin/echo", "hi"]),
             fire_on_untrusted: false,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         };
         let s = toml::to_string(&hook).unwrap();
@@ -1239,29 +1158,22 @@ cmd = ["/bin/echo", "hi"]
         assert_eq!(hook.event, HookEvent::OnReceive);
         assert_eq!(hook.cmd, vec!["/bin/echo", "hi"]);
         assert!(!hook.fire_on_untrusted);
-        assert_eq!(hook.stdin, HookStdin::Email);
         assert_eq!(hook.timeout_secs, DEFAULT_HOOK_TIMEOUT_SECS);
     }
 
+    /// `stdin` is no longer a recognized field; `deny_unknown_fields`
+    /// rejects it at parse time. The load-time check in `Config::load`
+    /// produces a more actionable error (see config.rs tests); this
+    /// pins the lower-level shape.
     #[test]
-    fn hook_stdin_parses_email_and_none() {
-        assert_eq!(HookStdin::parse("email").unwrap(), HookStdin::Email);
-        assert_eq!(HookStdin::parse("none").unwrap(), HookStdin::None);
-        assert!(HookStdin::parse("email_json").is_err());
-        assert!(HookStdin::parse("anything").is_err());
-    }
-
-    #[test]
-    fn hook_toml_with_explicit_stdin_and_timeout_loads() {
+    fn hook_toml_with_stdin_field_is_rejected() {
         let src = r#"
 event = "on_receive"
 cmd = ["/bin/echo", "hi"]
 stdin = "none"
-timeout_secs = 5
 "#;
-        let hook: Hook = toml::from_str(src).unwrap();
-        assert_eq!(hook.stdin, HookStdin::None);
-        assert_eq!(hook.timeout_secs, 5);
+        let err = toml::from_str::<Hook>(src).unwrap_err().to_string();
+        assert!(err.contains("stdin"), "{err}");
     }
 
     #[test]
@@ -1413,7 +1325,6 @@ timeout_secs = 5
             r#type: "cmd".to_string(),
             cmd: vec!["/bin/touch".to_string(), marker.display().to_string()],
             fire_on_untrusted: false,
-            stdin: HookStdin::Email,
             timeout_secs: DEFAULT_HOOK_TIMEOUT_SECS,
         };
         let mailbox = MailboxConfig {

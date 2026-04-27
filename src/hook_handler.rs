@@ -21,7 +21,7 @@ use serde::Deserialize;
 
 use crate::config::{Config, validate_hooks, validate_single_hook};
 use crate::hook::{
-    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, HookStdin, effective_hook_name, is_valid_hook_name,
+    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, effective_hook_name, is_valid_hook_name,
 };
 use crate::mailbox_handler::{CONFIG_WRITE_LOCK, MailboxContext, write_config_atomic};
 use crate::send_protocol::{AckResponse, ErrCode, HookCreateRequest, HookDeleteRequest};
@@ -30,10 +30,10 @@ use crate::uds_authz::{Caller, enforce_mailbox_owner_or_root};
 
 /// Wire-shape of the `HOOK-CREATE` JSON body. Mirrors the trimmed
 /// `Hook` schema in `src/hook.rs` minus the `event` and `name` fields,
-/// which travel as request headers. `deny_unknown_fields` causes a
-/// legacy `template` / `params` / `run_as` / `origin` /
-/// `dangerously_support_untrusted` to reject at body-parse time, before
-/// the handler ever touches `config.toml`.
+/// which travel as request headers. `deny_unknown_fields` causes
+/// any removed field (`stdin`, legacy `template` / `params` / `run_as`
+/// / `origin` / `dangerously_support_untrusted`) to reject at
+/// body-parse time, before the handler ever touches `config.toml`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HookCreateBody {
@@ -42,11 +42,6 @@ struct HookCreateBody {
     fire_on_untrusted: bool,
     #[serde(default = "default_hook_type")]
     r#type: String,
-    /// Optional stdin mode override. Defaults to `email`. The legacy
-    /// `email_json` value is rejected by `Config::load`'s pre-parse hook
-    /// for `[[hooks]]` blocks; the wire-level rejection runs here too.
-    #[serde(default)]
-    stdin: Option<String>,
     /// Optional subprocess timeout override. Defaults to 60s. Range
     /// [1, 600] is enforced by `validate_single_hook`.
     #[serde(default)]
@@ -144,26 +139,12 @@ pub async fn handle_hook_create(
         }
     };
 
-    let stdin_mode = match body.stdin.as_deref() {
-        None => HookStdin::Email,
-        Some(s) => match HookStdin::parse(s) {
-            Ok(v) => v,
-            Err(reason) => {
-                return AckResponse::Err {
-                    code: ErrCode::Validation,
-                    reason,
-                };
-            }
-        },
-    };
-
     let hook = Hook {
         name: req.name.clone(),
         event,
         r#type: body.r#type,
         cmd: body.cmd,
         fire_on_untrusted: body.fire_on_untrusted,
-        stdin: stdin_mode,
         timeout_secs: body.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS),
     };
 
@@ -357,10 +338,12 @@ fn reject_legacy_body_fields(body: &[u8]) -> Result<(), String> {
                 .to_string(),
         );
     }
-    if let Some(stdin) = obj.get("stdin").and_then(|v| v.as_str())
-        && stdin == "email_json"
-    {
-        return Err("email_json stdin mode was removed; use stdin = \"email\"".to_string());
+    if obj.contains_key("stdin") {
+        return Err(
+            "hook sets removed field 'stdin' — the email is always piped to hooks; \
+             remove this key from the request"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -915,31 +898,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_accepts_stdin_none() {
-        let _r = install_tester_resolver();
-        let tmp = TempDir::new().unwrap();
-        let (state_ctx, mb_ctx) = contexts(&tmp);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "cmd": ["/bin/true"],
-            "stdin": "none",
-        }))
-        .unwrap();
-        let req = HookCreateRequest {
-            mailbox: "alice".into(),
-            event: "on_receive".into(),
-            name: Some("stdinhook".into()),
-            body,
-        };
-        let resp = handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await;
-        assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
-        let cfg = mb_ctx.config_handle.load();
-        assert_eq!(
-            cfg.mailboxes["alice"].hooks[0].stdin,
-            crate::hook::HookStdin::None
-        );
-    }
-
-    #[tokio::test]
     async fn create_accepts_explicit_timeout_secs() {
         let _r = install_tester_resolver();
         let tmp = TempDir::new().unwrap();
@@ -961,53 +919,35 @@ mod tests {
         assert_eq!(cfg.mailboxes["alice"].hooks[0].timeout_secs, 5);
     }
 
+    /// `stdin` is a removed field. Any value (including the legacy
+    /// `"email_json"`, the previously valid `"email"` / `"none"`, or
+    /// gibberish) reject at the legacy-field pre-screen with the
+    /// "always piped" hint.
     #[tokio::test]
-    async fn create_rejects_invalid_stdin_value() {
+    async fn create_rejects_stdin_field() {
         let _r = install_tester_resolver();
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "cmd": ["/bin/true"],
-            "stdin": "bogus",
-        }))
-        .unwrap();
-        let req = HookCreateRequest {
-            mailbox: "alice".into(),
-            event: "on_receive".into(),
-            name: None,
-            body,
-        };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
-            AckResponse::Err { code, reason } => {
-                assert_eq!(code, ErrCode::Validation);
-                assert!(reason.contains("stdin"), "{reason}");
+        for value in ["none", "email", "email_json", "bogus"] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "cmd": ["/bin/true"],
+                "stdin": value,
+            }))
+            .unwrap();
+            let req = HookCreateRequest {
+                mailbox: "alice".into(),
+                event: "on_receive".into(),
+                name: None,
+                body,
+            };
+            match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
+                AckResponse::Err { code, reason } => {
+                    assert_eq!(code, ErrCode::Protocol, "value={value}: {reason}");
+                    assert!(reason.contains("stdin"), "value={value}: {reason}");
+                    assert!(reason.contains("always piped"), "value={value}: {reason}");
+                }
+                other => panic!("value={value}: expected PROTOCOL, got {other:?}"),
             }
-            other => panic!("expected VALIDATION, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
-    async fn create_rejects_legacy_email_json_stdin() {
-        let _r = install_tester_resolver();
-        let tmp = TempDir::new().unwrap();
-        let (state_ctx, mb_ctx) = contexts(&tmp);
-        let body = serde_json::to_vec(&serde_json::json!({
-            "cmd": ["/bin/true"],
-            "stdin": "email_json",
-        }))
-        .unwrap();
-        let req = HookCreateRequest {
-            mailbox: "alice".into(),
-            event: "on_receive".into(),
-            name: None,
-            body,
-        };
-        match handle_hook_create(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
-            AckResponse::Err { code, reason } => {
-                assert_eq!(code, ErrCode::Protocol);
-                assert!(reason.contains("email_json"), "{reason}");
-            }
-            other => panic!("expected PROTOCOL, got {other:?}"),
         }
     }
 

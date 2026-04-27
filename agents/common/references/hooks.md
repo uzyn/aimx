@@ -20,7 +20,7 @@ inbox, run her own MCP server — and no more.
 
 ## The three MCP hook tools
 
-### `hook_create(mailbox, event, cmd, name?, stdin?, timeout_secs?, fire_on_untrusted?)`
+### `hook_create(mailbox, event, cmd, name?, timeout_secs?, fire_on_untrusted?)`
 
 Attach a hook to a mailbox you own.
 
@@ -32,9 +32,14 @@ Attach a hook to a mailbox you own.
 | `event`             | string            | yes      | `"on_receive"` or `"after_send"` |
 | `cmd`               | string[]          | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
 | `name`              | string            | no       | Explicit hook name. Omitted → daemon derives a 12-hex-char name from `(event, cmd, fire_on_untrusted)` |
-| `stdin`             | string            | no       | `"email"` (default; pipes the raw `.md` to the child) or `"none"` (closes stdin; child reads `$AIMX_FILEPATH` instead) |
 | `timeout_secs`      | u32               | no       | Per-fire timeout in seconds. Default 60, max 600. SIGTERM at expiry, SIGKILL +5s |
 | `fire_on_untrusted` | bool              | no       | Default `false`. Legal only on `on_receive`. When `true`, the hook fires on any inbound mail regardless of `trusted` |
+
+The raw `.md` (frontmatter + body) is always piped on stdin and the
+same path is also exposed as `$AIMX_FILEPATH`. If your hook only needs
+the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore
+stdin — the daemon writes the full email but does not require the
+child to consume it.
 
 **Returns:** confirmation containing the effective name and the argv
 that will run.
@@ -72,7 +77,6 @@ List hooks on mailboxes you own.
   "mailbox": "support",
   "event": "on_receive",
   "cmd": ["/usr/local/bin/claude", "-p", "You are the support agent...", "--dangerously-skip-permissions"],
-  "stdin": "email",
   "timeout_secs": 60,
   "fire_on_untrusted": false
 }
@@ -127,9 +131,10 @@ below).
 - `AIMX_FROM`: sender address (header `From:`).
 - `AIMX_SUBJECT`: subject line.
 
-When `stdin = "email"` (the default) the same `.md` file is also
-piped to the child's stdin. When `stdin = "none"` stdin is closed
-and the child must use `$AIMX_FILEPATH` to read the email.
+The raw `.md` (frontmatter + body) is always piped to the child's
+stdin. The same path is exposed as `$AIMX_FILEPATH` so a hook that
+only needs select fields (or that uses an agent which does not read
+stdin in headless mode) can ignore stdin and act on env vars only.
 
 ### Per-agent recipes
 
@@ -139,15 +144,15 @@ flags depend on the agent's own headless-run contract. Look for the
 "Wiring yourself up as a mailbox hook" section in your agent's
 `SKILL.md`. As of Apr 2026 the supported set is:
 
-| Agent        | stdin       | Notes |
-|--------------|-------------|-------|
-| Claude Code  | `"email"`   | `claude -p <instruction> --dangerously-skip-permissions` |
-| Codex CLI    | `"email"`   | `codex exec --skip-git-repo-check --full-auto -` (trailing `-` reads stdin as the prompt) |
-| Gemini CLI   | `"email"`   | `gemini -p <instruction> --yolo` |
-| Goose        | `"email"`   | `goose run --recipe <path>` (preferred) or `goose run --instructions - --quiet` |
-| OpenCode     | `"none"`    | `opencode run --dangerously-skip-permissions <inline-prompt>` (reads `$AIMX_FILEPATH`) |
-| Hermes       | `"none"`    | `hermes chat -q <inline-prompt> --yolo` (reads `$AIMX_FILEPATH`; switch to `"email"` if a current install confirms `-q` accepts piped stdin) |
-| OpenClaw     | n/a         | No documented headless CLI as of Apr 2026 — see the OpenClaw skill |
+| Agent        | Notes |
+|--------------|-------|
+| Claude Code  | `claude -p <instruction> --dangerously-skip-permissions` (reads piped email on stdin) |
+| Codex CLI    | `codex exec --skip-git-repo-check --full-auto -` (trailing `-` reads stdin as the prompt) |
+| Gemini CLI   | `gemini -p <instruction> --yolo` (reads piped email on stdin) |
+| Goose        | `goose run --recipe <path>` (preferred) or `goose run --instructions - --quiet` |
+| OpenCode     | `opencode run --dangerously-skip-permissions <inline-prompt>` (reads `$AIMX_FILEPATH`; ignores stdin) |
+| Hermes       | `hermes chat -q <inline-prompt> --yolo` (reads `$AIMX_FILEPATH`; ignores stdin) |
+| OpenClaw     | No documented headless CLI as of Apr 2026 — see the OpenClaw skill |
 
 ## Example: "file + reply" hook on an accounts mailbox
 

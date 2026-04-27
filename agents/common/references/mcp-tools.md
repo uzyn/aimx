@@ -270,14 +270,15 @@ email_reply(
 
 ### `email_mark_read`
 
-Mark a single email as read (sets `read = true` in frontmatter).
+Mark a single inbox email as read (sets `read = true` in
+frontmatter). Sent-mail mark has no agent use case and is not
+supported.
 
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
 | `mailbox` | string | yes      | Mailbox name (must be owned by you) |
 | `id`      | string | yes      | Email ID |
-| `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
 **Returns:** Confirmation string.
 
@@ -291,14 +292,15 @@ email_mark_read(mailbox: "agent", id: "2026-04-15-143022-meeting-notes")
 
 ### `email_mark_unread`
 
-Mark a single email as unread (sets `read = false` in frontmatter).
+Mark a single inbox email as unread (sets `read = false` in
+frontmatter). Sent-mail mark has no agent use case and is not
+supported.
 
 **Parameters:**
 | Name      | Type   | Required | Description |
 |-----------|--------|----------|-------------|
 | `mailbox` | string | yes      | Mailbox name (must be owned by you) |
 | `id`      | string | yes      | Email ID |
-| `folder`  | string | no       | `"inbox"` (default) or `"sent"` |
 
 **Returns:** Confirmation string.
 
@@ -311,9 +313,12 @@ email_mark_unread(mailbox: "agent", id: "2026-04-15-143022-meeting-notes")
 ## Hook tools
 
 Hooks fire commands on mail events. You create hooks on mailboxes you
-own; the hook always executes as the mailbox's owning Linux user, with
-the email piped on stdin (or accessible via `$AIMX_FILEPATH` when
-stdin is closed). There is no template indirection — your `cmd` is
+own; the hook always executes as the mailbox's owning Linux user. The
+raw `.md` (frontmatter + body) is always piped on stdin and the same
+path is exposed as `$AIMX_FILEPATH`. If your hook only needs the
+subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore
+stdin — the daemon writes the full email but does not require the
+child to consume it. There is no template indirection — your `cmd` is
 the literal argv that runs. See `references/hooks.md` for the full
 model, worked examples, and troubleshooting.
 
@@ -328,7 +333,6 @@ Attach a hook to a mailbox you own.
 | `event`             | string   | yes      | `"on_receive"` or `"after_send"` |
 | `cmd`               | string[] | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
 | `name`              | string   | no       | Optional explicit name; derived from `(event, cmd, fire_on_untrusted)` when omitted |
-| `stdin`             | string   | no       | `"email"` (default; pipes raw `.md`) or `"none"` (closes stdin; child reads `$AIMX_FILEPATH` instead) |
 | `timeout_secs`      | u32      | no       | Per-fire timeout in seconds. Default 60, max 600 |
 | `fire_on_untrusted` | bool     | no       | Default `false`. Legal only on `on_receive`; when `true`, fires regardless of `trusted` |
 
@@ -340,8 +344,7 @@ that will run.
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/claude", "-p", "You are the support agent.", "--dangerously-skip-permissions"],
-  stdin: "email"
+  cmd: ["/usr/local/bin/claude", "-p", "You are the support agent.", "--dangerously-skip-permissions"]
 )
 → "Hook 'support-replier' created on mailbox 'support'. argv=['/usr/local/bin/claude', '-p', 'You are the support agent.', '--dangerously-skip-permissions']"
 ```
@@ -372,7 +375,7 @@ List hooks on mailboxes you own (or one when `mailbox` is set).
 hook_list()
 → [{"name":"support-replier","mailbox":"support","event":"on_receive",
     "cmd":["/usr/local/bin/claude","-p","...","--dangerously-skip-permissions"],
-    "stdin":"email","timeout_secs":60,"fire_on_untrusted":false}]
+    "timeout_secs":60,"fire_on_untrusted":false}]
 ```
 
 ---

@@ -25,7 +25,7 @@ use crate::auth::{Action, AuthError, authorize};
 use crate::cli::{HookCommand, HookCreateArgs};
 use crate::config::{Config, validate_hooks};
 use crate::hook::{
-    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, HookStdin, effective_hook_name, is_valid_hook_name,
+    DEFAULT_HOOK_TIMEOUT_SECS, Hook, HookEvent, effective_hook_name, is_valid_hook_name,
 };
 use crate::mcp::{HookCrudFallback, submit_hook_create_via_daemon, submit_hook_delete_via_daemon};
 use crate::platform::{current_euid, is_root};
@@ -69,21 +69,19 @@ fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std
     }
 
     println!(
-        "{} {} {} {} {} {}",
+        "{} {} {} {} {}",
         term::header("NAME                        "),
         term::header("MAILBOX             "),
         term::header("EVENT       "),
-        term::header("STDIN  "),
         term::header("TIMEOUT"),
         term::header("CMD"),
     );
     for row in rows {
         println!(
-            "{:<28.28} {:<20.20} {:<11} {:<6} {:>7} {}",
+            "{:<28.28} {:<20.20} {:<11} {:>7} {}",
             term::highlight(&row.name).to_string(),
             row.mailbox,
             row.event,
-            row.stdin.as_str(),
             row.timeout_secs,
             truncate_with_ellipsis(&row.cmd, 60),
         );
@@ -96,7 +94,6 @@ struct HookRow {
     mailbox: String,
     event: &'static str,
     cmd: String,
-    stdin: HookStdin,
     timeout_secs: u32,
 }
 
@@ -122,7 +119,6 @@ fn gather_rows(config: &Config, filter_mailbox: Option<&str>) -> Vec<HookRow> {
                 mailbox: mailbox_name.clone(),
                 event: hook.event.as_str(),
                 cmd: format_argv_for_display(&hook.cmd),
-                stdin: hook.stdin,
                 timeout_secs: hook.timeout_secs,
             });
         }
@@ -179,10 +175,6 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     }
     let cmd = parse_cmd_argv(&args.cmd)?;
 
-    let stdin_mode = match args.stdin.as_deref() {
-        None => HookStdin::Email,
-        Some(s) => HookStdin::parse(s)?,
-    };
     let timeout_secs = args.timeout_secs.unwrap_or(DEFAULT_HOOK_TIMEOUT_SECS);
 
     let hook = Hook {
@@ -191,7 +183,6 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         r#type: "cmd".to_string(),
         cmd: cmd.clone(),
         fire_on_untrusted: args.fire_on_untrusted,
-        stdin: stdin_mode,
         timeout_secs,
     };
     let effective = effective_hook_name(&hook);
@@ -199,7 +190,7 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     // Try the UDS path first. The daemon authorizes via SO_PEERCRED +
     // auth::authorize so the same gate runs whether the caller used CLI
     // or MCP, and the running Config hot-swaps without a restart.
-    let body = build_hook_create_body(&cmd, args.fire_on_untrusted, stdin_mode, timeout_secs)?;
+    let body = build_hook_create_body(&cmd, args.fire_on_untrusted, timeout_secs)?;
     match submit_hook_create_via_daemon(&args.mailbox, &args.event, args.name.as_deref(), body) {
         Ok(()) => {
             println!(
@@ -244,13 +235,12 @@ fn format_hook_auth_error(err: &AuthError, verb: &str) -> String {
 
 /// Build the JSON body the daemon's `HookCreateBody` deserializer
 /// expects: `{"cmd": [...], "fire_on_untrusted": <bool>, "type": "cmd"}`.
-/// `stdin` and `timeout_secs` are emitted only when they differ from the
-/// schema defaults so existing callers (and round-tripped configs) round
+/// `timeout_secs` is emitted only when it differs from the schema
+/// default so existing callers (and round-tripped configs) round
 /// through unchanged.
 fn build_hook_create_body(
     cmd: &[String],
     fire_on_untrusted: bool,
-    stdin: HookStdin,
     timeout_secs: u32,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let mut body = serde_json::json!({
@@ -258,9 +248,6 @@ fn build_hook_create_body(
         "fire_on_untrusted": fire_on_untrusted,
         "type": "cmd",
     });
-    if !matches!(stdin, HookStdin::Email) {
-        body["stdin"] = serde_json::Value::String(stdin.as_str().to_string());
-    }
     if timeout_secs != DEFAULT_HOOK_TIMEOUT_SECS {
         body["timeout_secs"] = serde_json::Value::Number(timeout_secs.into());
     }
@@ -278,7 +265,6 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         println!("  {}   {}", term::header("name:   "), term::highlight(name));
         println!("  {}   {}", term::header("mailbox:"), mailbox);
         println!("  {}   {}", term::header("event:  "), hook.event);
-        println!("  {}   {}", term::header("stdin:  "), hook.stdin.as_str());
         println!("  {}   {}", term::header("timeout:"), hook.timeout_secs);
         println!(
             "  {}   {}",
@@ -434,7 +420,6 @@ mod tests {
         let body = build_hook_create_body(
             &["/bin/echo".to_string(), "hi".to_string()],
             true,
-            HookStdin::Email,
             DEFAULT_HOOK_TIMEOUT_SECS,
         )
         .unwrap();
@@ -444,31 +429,27 @@ mod tests {
         assert_eq!(parsed["fire_on_untrusted"], true);
         assert_eq!(parsed["type"], "cmd");
         // Defaults are not serialized so the wire stays stable across
-        // operators that don't touch stdin/timeout_secs.
+        // operators that don't touch timeout_secs. `stdin` is no
+        // longer a recognized field.
         assert!(parsed.get("stdin").is_none(), "{parsed}");
         assert!(parsed.get("timeout_secs").is_none(), "{parsed}");
     }
 
     #[test]
     fn build_hook_create_body_default_fire_on_untrusted_is_false() {
-        let body = build_hook_create_body(
-            &["/bin/true".to_string()],
-            false,
-            HookStdin::Email,
-            DEFAULT_HOOK_TIMEOUT_SECS,
-        )
-        .unwrap();
+        let body =
+            build_hook_create_body(&["/bin/true".to_string()], false, DEFAULT_HOOK_TIMEOUT_SECS)
+                .unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(parsed["fire_on_untrusted"], false);
     }
 
     #[test]
-    fn build_hook_create_body_emits_stdin_and_timeout_when_non_default() {
-        let body =
-            build_hook_create_body(&["/bin/true".to_string()], false, HookStdin::None, 5).unwrap();
+    fn build_hook_create_body_emits_timeout_when_non_default() {
+        let body = build_hook_create_body(&["/bin/true".to_string()], false, 5).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(parsed["stdin"], "none");
         assert_eq!(parsed["timeout_secs"], 5);
+        assert!(parsed.get("stdin").is_none(), "{parsed}");
     }
 
     #[test]

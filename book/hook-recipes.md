@@ -12,18 +12,20 @@ A hook recipe is a `[[mailboxes.<name>.hooks]]` block (or the equivalent `aimx h
 
 1. Email lands in the mailbox, aimx writes the `.md` file to disk.
 2. aimx evaluates the trust gate. A hook fires iff `trusted == "true"` on the email OR the hook sets `fire_on_untrusted = true`.
-3. aimx exec's the argv directly as the mailbox's owner. There is no `/bin/sh` between aimx and the agent. The piped email body (`stdin = "email"`) or the `$AIMX_FILEPATH` env var (`stdin = "none"`) hands the agent the email content.
-4. The agent reads the email and takes action: replying, filing a ticket, updating a calendar, whatever.
+3. aimx exec's the argv directly as the mailbox's owner. There is no `/bin/sh` between aimx and the agent. The raw `.md` is always piped to the child's stdin and the same path is exposed as `$AIMX_FILEPATH`.
+4. The agent reads the email — either off stdin or by opening `$AIMX_FILEPATH` — and takes action: replying, filing a ticket, updating a calendar, whatever.
 5. Exit code is logged (one structured line per fire) but does not block delivery.
 
 > **Why argv and not shell?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into a shell command, even with shell-escape quoting, is fragile. Delivering them as env vars and `exec`'ing argv directly avoids the shell parser entirely. When you do need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly so it's visible at the call site.
 
-## Two stdin shapes
+## Two consumption shapes
 
-Recipes split into two camps depending on whether the agent reads stdin in headless mode:
+The daemon always pipes the raw `.md` to a hook's stdin, but recipes still split into two camps depending on whether the agent reads stdin in headless mode:
 
-- **Native-stdin** (Claude Code, Codex, Gemini, Goose, webhook): hook sets `stdin = "email"`, the daemon pipes the raw `.md` to the agent's stdin, and the prompt only tells the agent what to do with it. Smallest argv, cleanest pipeline.
-- **Inline-only** (OpenCode, Hermes): hook sets `stdin = "none"`; the `cmd` carries a fixed prompt that instructs the agent to read `$AIMX_FILEPATH` (env var set by the daemon) using its filesystem tool. argv is not shell-expanded — the literal `$AIMX_FILEPATH` token reaches the agent, which expands it via Bash/Read tooling at run time.
+- **Native-stdin** (Claude Code, Codex, Gemini, Goose, webhook): the agent reads the piped email straight off its stdin; the prompt only tells it what to do with the content.
+- **Filepath-only** (OpenCode, Hermes): the agent does not read stdin in headless mode, so the `cmd` carries a fixed prompt that instructs it to read `$AIMX_FILEPATH` (env var set by the daemon) using its filesystem tool. argv is not shell-expanded — the literal `$AIMX_FILEPATH` token reaches the agent, which expands it via Bash/Read tooling at run time.
+
+If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
 
 ## Absolute paths
 
@@ -49,7 +51,6 @@ aimx hooks create \
   --mailbox accounts \
   --event on_receive \
   --cmd '["/usr/local/bin/claude", "-p", "Read the piped email and act on it via the aimx MCP server.", "--dangerously-skip-permissions"]' \
-  --stdin email \
   --name accounts_claude
 ```
 
@@ -67,7 +68,6 @@ aimx hooks create \
   --mailbox triage \
   --event on_receive \
   --cmd '["/usr/local/bin/codex", "exec", "--skip-git-repo-check", "--full-auto", "-"]' \
-  --stdin email \
   --name triage_codex
 ```
 
@@ -82,7 +82,6 @@ aimx hooks create \
   --mailbox research \
   --event on_receive \
   --cmd '["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g. email_reply)."]' \
-  --stdin none \
   --name research_opencode
 ```
 
@@ -99,7 +98,6 @@ aimx hooks create \
   --mailbox notes \
   --event on_receive \
   --cmd '["/usr/local/bin/gemini", "-p", "Read the piped email and file it into my notes via the aimx MCP server.", "--yolo"]' \
-  --stdin email \
   --name notes_gemini
 ```
 
@@ -118,7 +116,6 @@ aimx hooks create \
   --mailbox ops \
   --event on_receive \
   --cmd '["/usr/local/bin/goose", "run", "--instructions", "-", "--quiet"]' \
-  --stdin email \
   --name ops_goose
 ```
 
@@ -129,7 +126,6 @@ aimx hooks create \
   --mailbox ops \
   --event on_receive \
   --cmd '["/usr/local/bin/goose", "run", "--recipe", "/etc/aimx/goose-aimx-hook.yaml"]' \
-  --stdin email \
   --name ops_goose_recipe
 ```
 
@@ -146,7 +142,6 @@ aimx hooks create \
   --mailbox openclaw \
   --event on_receive \
   --cmd '["/bin/sh", "-c", "ntfy pub openclaw-mail \"New email: $AIMX_SUBJECT from $AIMX_FROM\""]' \
-  --stdin none \
   --fire-on-untrusted \
   --name openclaw_notify
 ```
@@ -164,11 +159,10 @@ aimx hooks create \
   --mailbox hermes \
   --event on_receive \
   --cmd '["/usr/local/bin/hermes", "chat", "-q", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server.", "--yolo"]' \
-  --stdin none \
   --name hermes_chat
 ```
 
-If a future Hermes release confirms that `chat -q` accepts piped stdin, switch to `--stdin email` and shorten the inline prompt to "Read the piped email and act on it via the aimx MCP server."
+If a future Hermes release confirms that `chat -q` accepts piped stdin, shorten the inline prompt to "Read the piped email and act on it via the aimx MCP server." — the daemon already pipes the email regardless.
 
 ## Webhook (POST to URL)
 
@@ -179,11 +173,10 @@ aimx hooks create \
   --mailbox alerts \
   --event on_receive \
   --cmd '["/usr/bin/curl", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "https://hooks.example.com/aimx"]' \
-  --stdin email \
   --name alerts_webhook
 ```
 
-`--data-binary @-` tells curl to POST whatever lands on its stdin verbatim. Combined with `stdin = "email"`, the receiver gets the raw `.md` (TOML frontmatter + body) as the request body. Use `Content-Type: text/markdown` instead if your receiver expects that explicitly.
+`--data-binary @-` tells curl to POST whatever lands on its stdin verbatim. Since the daemon always pipes the email to the hook, the receiver gets the raw `.md` (TOML frontmatter + body) as the request body. Use `Content-Type: text/markdown` instead if your receiver expects that explicitly.
 
 ## `after_send` recipes
 
@@ -196,7 +189,6 @@ aimx hooks create \
   --mailbox alice \
   --event after_send \
   --cmd '["/bin/sh", "-c", "printf \"%s %s %s %s\\n\" \"$AIMX_SEND_STATUS\" \"$AIMX_TO\" \"$AIMX_SUBJECT\" \"$AIMX_HOOK_NAME\" >> /var/log/aimx/alice-sent.log"]' \
-  --stdin none \
   --name alice_audit
 ```
 
@@ -207,7 +199,6 @@ aimx hooks create \
   --mailbox alerts \
   --event after_send \
   --cmd '["/bin/sh", "-c", "if [ \"$AIMX_SEND_STATUS\" != \"delivered\" ]; then ntfy pub on-call \"aimx send to $AIMX_TO $AIMX_SEND_STATUS: $AIMX_SUBJECT\"; fi"]' \
-  --stdin none \
   --name alerts_failed_page
 ```
 
@@ -220,7 +211,6 @@ aimx hooks create \
   --mailbox marketing \
   --event after_send \
   --cmd '["/bin/sh", "-c", "case \"$AIMX_TO\" in *@customer-co.com) curl -fsS -X POST https://hooks.internal/marketing-sent -d \"to=$AIMX_TO&status=$AIMX_SEND_STATUS\" ;; esac"]' \
-  --stdin none \
   --name marketing_customer_notify
 ```
 
@@ -251,7 +241,6 @@ aimx hooks create \
   --mailbox bugs \
   --event on_receive \
   --cmd '["/usr/bin/flock", "/tmp/myapp.lock", "/usr/local/bin/claude", "-p", "Reproduce the reported bug.", "--dangerously-skip-permissions"]' \
-  --stdin email \
   --name bugs_serialised
 ```
 

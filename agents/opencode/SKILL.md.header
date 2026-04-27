@@ -15,8 +15,7 @@ that tells the agent to fetch the email itself:
 hook_create(
   mailbox: "support",
   event: "on_receive",
-  cmd: ["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g., email_reply)."],
-  stdin: "none"
+  cmd: ["/usr/local/bin/opencode", "run", "--dangerously-skip-permissions", "Read the aimx email at the path in env var AIMX_FILEPATH and act on it via the aimx MCP server (e.g., email_reply)."]
 )
 ```
 
@@ -28,13 +27,14 @@ Notes:
   host if the binary lives elsewhere (e.g. `/usr/bin/opencode`). The
   inline-prompt argv element is ~200 chars; well under
   `MAX_ARG_STRLEN` (128 KiB on Linux).
-- `opencode run` does not read stdin in headless mode, so we use
-  `stdin: "none"` and embed the entire instruction as the final argv
-  element. The daemon sets the `AIMX_FILEPATH` environment variable
-  to the absolute path of the inbound email's `.md` file before
-  spawning the hook; OpenCode's filesystem/Bash tools expand it at
-  run time. argv itself is not shell-expanded — the literal token
-  `AIMX_FILEPATH` reaches the agent verbatim.
+- The daemon always pipes the raw `.md` to the child's stdin and sets
+  `AIMX_FILEPATH` to the same path. `opencode run` does not read
+  stdin in headless mode, so this recipe instructs it to read
+  `$AIMX_FILEPATH` instead. OpenCode's filesystem/Bash tools expand
+  the env var at run time. argv itself is not shell-expanded — the
+  literal token `AIMX_FILEPATH` reaches the agent verbatim. If your
+  hook only needs select fields, the daemon also exposes
+  `AIMX_SUBJECT`, `AIMX_FROM`, etc.
 - `--dangerously-skip-permissions` is required for unattended tool
   calls. Without it the headless run blocks on permission prompts.
 - Optional: pass `--format json` to get machine-readable output (the

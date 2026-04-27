@@ -20,7 +20,6 @@
 //!   AIMX/1 MARK-READ\n
 //!   Mailbox: <name>\n
 //!   Id: <id>\n
-//!   Folder: inbox|sent\n
 //!   Content-Length: 0\n
 //!   \n
 //!
@@ -100,36 +99,13 @@ pub struct SendRequest {
     pub body: Vec<u8>,
 }
 
-/// Which on-disk folder a MARK request targets.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MarkFolder {
-    Inbox,
-    Sent,
-}
-
-impl MarkFolder {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            MarkFolder::Inbox => "inbox",
-            MarkFolder::Sent => "sent",
-        }
-    }
-
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "inbox" => Some(MarkFolder::Inbox),
-            "sent" => Some(MarkFolder::Sent),
-            _ => None,
-        }
-    }
-}
-
-/// Decoded `AIMX/1 MARK-READ` or `AIMX/1 MARK-UNREAD` request.
+/// Decoded `AIMX/1 MARK-READ` or `AIMX/1 MARK-UNREAD` request. Targets
+/// the inbox folder unconditionally — sent-mail mark has no agent use
+/// case and was removed from the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MarkRequest {
     pub mailbox: String,
     pub id: String,
-    pub folder: MarkFolder,
     pub read: bool,
 }
 
@@ -513,7 +489,6 @@ where
 {
     let mut mailbox: Option<String> = None;
     let mut id: Option<String> = None;
-    let mut folder: Option<MarkFolder> = None;
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -557,15 +532,15 @@ where
                 id = Some(value);
             }
             "folder" => {
-                if folder.is_some() {
-                    return Err(ParseError::Malformed("duplicate Folder header".into()));
-                }
-                let parsed = MarkFolder::parse(&value).ok_or_else(|| {
-                    ParseError::Malformed(format!(
-                        "invalid Folder '{value}', expected 'inbox' or 'sent'"
-                    ))
-                })?;
-                folder = Some(parsed);
+                // The `Folder:` header was removed; MARK targets the
+                // inbox unconditionally. Reject rather than silently
+                // dropping so a stale client cannot believe it
+                // selected the sent folder.
+                return Err(ParseError::Malformed(
+                    "Folder header is not allowed on MARK verbs (sent-mail \
+                     mark removed; inbox is the only target)"
+                        .into(),
+                ));
             }
             "content-length" => {
                 if content_length.is_some() {
@@ -592,19 +567,12 @@ where
     let mailbox =
         mailbox.ok_or_else(|| ParseError::Malformed("missing required header: Mailbox".into()))?;
     let id = id.ok_or_else(|| ParseError::Malformed("missing required header: Id".into()))?;
-    let folder =
-        folder.ok_or_else(|| ParseError::Malformed("missing required header: Folder".into()))?;
     // Content-Length is optional for MARK verbs but if present must be 0.
     // The `!= 0` branch above already rejects otherwise. Accept the missing
     // case as "implicitly 0" to keep clients terse.
     let _ = content_length;
 
-    Ok(MarkRequest {
-        mailbox,
-        id,
-        folder,
-        read,
-    })
+    Ok(MarkRequest { mailbox, id, read })
 }
 
 async fn parse_mailbox_crud_headers<R>(
@@ -1068,10 +1036,9 @@ where
         "MARK-UNREAD"
     };
     let header = format!(
-        "AIMX/1 {verb}\nMailbox: {}\nId: {}\nFolder: {}\nContent-Length: 0\n\n",
+        "AIMX/1 {verb}\nMailbox: {}\nId: {}\nContent-Length: 0\n\n",
         sanitize_inline(&request.mailbox),
         sanitize_inline(&request.id),
-        request.folder.as_str(),
     );
     writer.write_all(header.as_bytes()).await?;
     writer.flush().await?;
@@ -1232,6 +1199,42 @@ mod mailbox_list_codec_tests {
             "{header}"
         );
         assert_eq!(&buf[header_end + 2..], &body[..]);
+    }
+
+    /// Round-trip a `MARK-READ` frame: writer emits the verb plus the
+    /// mailbox / id headers, parser decodes back to a `MarkRequest`.
+    /// `Folder:` is no longer emitted or accepted.
+    #[tokio::test]
+    async fn round_trip_mark_request_omits_folder() {
+        let req = MarkRequest {
+            mailbox: "alice".into(),
+            id: "2025-06-01-001".into(),
+            read: true,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_mark_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.starts_with("AIMX/1 MARK-READ\n"), "{text}");
+        assert!(!text.to_ascii_lowercase().contains("folder:"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::Mark(req));
+    }
+
+    /// A `Folder:` header on MARK is a hard parse error — silently
+    /// dropping it would let a stale client believe it had selected the
+    /// sent folder.
+    #[tokio::test]
+    async fn mark_rejects_folder_header() {
+        let frame = b"AIMX/1 MARK-READ\nMailbox: alice\nId: 2025-06-01-001\nFolder: sent\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Folder"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
     }
 
     /// Error variant of the JSON ack writer mirrors the bodyless ack

@@ -42,7 +42,6 @@ cmd = ["/bin/sh", "-c", 'echo "New mail from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/
 | `event` | string | yes | `"on_receive"` or `"after_send"`. |
 | `type` | string | no | Trigger kind (default `"cmd"`). Only `cmd` is supported today. |
 | `cmd` | array of strings | yes | Argv exec'd directly. Must be non-empty; `cmd[0]` must be an absolute path. No shell wrapping — wrap in `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |
-| `stdin` | string | no | `"email"` (default) pipes the raw `.md` (frontmatter + body) to the hook's stdin; `"none"` closes stdin immediately so the hook only sees env vars. |
 | `timeout_secs` | int | no | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `fire_on_untrusted` | bool | no | `on_receive` only: when `true`, fire even if `trusted != "true"`. Default `false`. Rejected on `after_send` hooks at config load. |
 
@@ -81,7 +80,6 @@ When `aimx mcp` runs under the mailbox owner's uid, the agent can create hooks p
   "mailbox": "accounts",
   "event": "on_receive",
   "cmd": ["/usr/local/bin/claude", "-p", "Read this email and act on it.", "--dangerously-skip-permissions"],
-  "stdin": "email",
   "fire_on_untrusted": false
 }}
 ```
@@ -124,14 +122,11 @@ Always expand env vars inside double quotes (`"$AIMX_SUBJECT"`). Values from sen
 
 ### Stdin
 
-Each hook declares one of two `stdin` modes:
+The raw `.md` (frontmatter + body) is always piped to the hook's stdin. The same path is also exposed as `$AIMX_FILEPATH`.
 
-| Mode | Payload | Notes |
-|------|---------|-------|
-| `"email"` | The raw `.md` (frontmatter + body) | Default. Useful when piping into a CLI that takes stdin directly. |
-| `"none"` | Closed immediately | For hooks that only need env vars. Required for agent CLIs that don't read stdin in headless mode (OpenCode, Hermes). |
+If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it. Agent CLIs that don't read stdin in headless mode (OpenCode, Hermes) use `$AIMX_FILEPATH` to open the file directly.
 
-Override per-hook with `stdin = "none"` in `config.toml`, `--stdin none` from `aimx hooks create`, or `"stdin": "none"` in the MCP `hook_create` payload. The `email_json` mode that earlier drafts shipped has been removed — `Config::load` rejects it with a clear error.
+The earlier per-hook `stdin = "email" | "none"` knob has been removed; `Config::load` rejects any `stdin` line in `[[mailboxes.<name>.hooks]]` with an error that names the offending hook.
 
 ## UDS authorization (`SO_PEERCRED`)
 
@@ -242,7 +237,6 @@ trusted_senders = ["*@yourcompany.com"]
 name = "schedule_claude"
 event = "on_receive"
 cmd = ["/usr/local/bin/claude", "-p", "Handle this scheduling request.", "--dangerously-skip-permissions"]
-stdin = "email"
 ```
 
 The hook fires only when the email's `trusted == "true"`. Claude runs as `alice` (matching the mailbox owner), reads the piped `.md` from stdin, and uses its own MCP tooling to reply.
@@ -282,10 +276,9 @@ cmd = ["/bin/sh", "-c", 'echo "$AIMX_SEND_STATUS $AIMX_TO $AIMX_SUBJECT" >> /var
 name = "alerts_webhook"
 event = "on_receive"
 cmd = ["/usr/bin/curl", "-sS", "-X", "POST", "-H", "Content-Type: application/json", "--data-binary", "@-", "https://hooks.example.com/aimx"]
-stdin = "email"
 ```
 
-`--data-binary @-` posts whatever lands on curl's stdin verbatim, which is the raw `.md` (frontmatter + body) when `stdin = "email"`.
+`--data-binary @-` posts whatever lands on curl's stdin verbatim, which is the raw `.md` (frontmatter + body) — the daemon always pipes the email to a hook's stdin.
 
 ---
 

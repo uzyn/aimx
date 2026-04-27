@@ -3974,11 +3974,12 @@ fn hooks_create_and_list_roundtrip_direct_edit() {
     );
 }
 
-/// `aimx hooks create --stdin none --timeout-secs 5` round-trips
-/// through the direct-edit fallback into `config.toml` and shows up in
-/// `aimx hooks list`.
+/// `aimx hooks create --timeout-secs 5` round-trips through the
+/// direct-edit fallback into `config.toml` and shows up in
+/// `aimx hooks list`. The `--stdin` flag is gone; the email is always
+/// piped to hooks.
 #[test]
-fn hooks_create_with_stdin_and_timeout_flags_persists_to_config() {
+fn hooks_create_with_timeout_flag_persists_to_config() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -3995,9 +3996,7 @@ fn hooks_create_with_stdin_and_timeout_flags_persists_to_config() {
             "--cmd",
             r#"["/bin/echo", "noinput"]"#,
             "--name",
-            "stdinhook",
-            "--stdin",
-            "none",
+            "timeouthook",
             "--timeout-secs",
             "5",
         ])
@@ -4008,8 +4007,8 @@ fn hooks_create_with_stdin_and_timeout_flags_persists_to_config() {
 
     let toml_contents = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        toml_contents.contains("stdin = \"none\""),
-        "stdin override missing from config.toml: {toml_contents}"
+        !toml_contents.contains("stdin"),
+        "stdin field must not appear in config.toml: {toml_contents}"
     );
     assert!(
         toml_contents.contains("timeout_secs = 5"),
@@ -4023,8 +4022,7 @@ fn hooks_create_with_stdin_and_timeout_flags_persists_to_config() {
         .assert()
         .success();
     let list_out = String::from_utf8_lossy(&list.get_output().stdout).to_string();
-    assert!(list_out.contains("stdinhook"), "{list_out}");
-    assert!(list_out.contains("none"), "{list_out}");
+    assert!(list_out.contains("timeouthook"), "{list_out}");
     assert!(list_out.contains("5"), "{list_out}");
 }
 
