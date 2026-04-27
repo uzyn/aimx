@@ -30,6 +30,10 @@
 //!   Content-Length: 0\n
 //!   \n
 //!
+//! Client → Server (MAILBOX-LIST):
+//!   AIMX/1 MAILBOX-LIST\n
+//!   \n
+//!
 //! Client → Server (HOOK-CREATE):
 //!   AIMX/1 HOOK-CREATE\n
 //!   Mailbox: <mailbox-name>\n
@@ -175,6 +179,10 @@ pub enum Request {
     Send(SendRequest),
     Mark(MarkRequest),
     MailboxCrud(MailboxCrudRequest),
+    /// `AIMX/1 MAILBOX-LIST` carries no payload. The daemon resolves
+    /// the caller via `SO_PEERCRED` and returns the mailboxes the uid
+    /// owns; root sees every mailbox.
+    MailboxList,
     HookCreate(HookCreateRequest),
     HookDelete(HookDeleteRequest),
 }
@@ -288,6 +296,27 @@ pub enum AckResponse {
     Err { code: ErrCode, reason: String },
 }
 
+/// Response emitted by the daemon after processing a `MAILBOX-LIST`
+/// request. The `Ok` variant carries the JSON body the daemon
+/// renders from its `Arc<Config>` snapshot plus the on-disk inbox /
+/// sent counts.
+///
+/// Wire format on success:
+/// ```text
+/// AIMX/1 OK\n
+/// Content-Length: <n>\n
+/// \n
+/// <n bytes of JSON>
+/// ```
+///
+/// The error form mirrors the other ack responses
+/// (`AIMX/1 ERR <code> <reason>\nCode: <code>\n\n`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JsonAckResponse {
+    Ok { body: Vec<u8> },
+    Err { code: ErrCode, reason: String },
+}
+
 /// Codec error. Kept separate from `std::error::Error` so the daemon's
 /// handler can map `ParseError` values into wire-level `ErrCode::Malformed`
 /// responses without rebuilding the information.
@@ -370,6 +399,9 @@ where
         "MAILBOX-DELETE" => parse_mailbox_crud_headers(reader, false)
             .await
             .map(Request::MailboxCrud),
+        "MAILBOX-LIST" => parse_mailbox_list_headers(reader)
+            .await
+            .map(|()| Request::MailboxList),
         "HOOK-CREATE" => parse_hook_create_headers_and_body(reader, max_body)
             .await
             .map(Request::HookCreate),
@@ -396,7 +428,7 @@ where
         Request::Mark(_) => Err(ParseError::Malformed(
             "expected SEND verb, got MARK-*".to_string(),
         )),
-        Request::MailboxCrud(_) => Err(ParseError::Malformed(
+        Request::MailboxCrud(_) | Request::MailboxList => Err(ParseError::Malformed(
             "expected SEND verb, got MAILBOX-*".to_string(),
         )),
         Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
@@ -675,6 +707,27 @@ where
         create,
         owner,
     })
+}
+
+/// Parse the empty body of an `AIMX/1 MAILBOX-LIST` request. The verb
+/// carries no headers — the parser reads exactly one blank line and
+/// rejects any header line (including `Content-Length:`) so a future
+/// rev cannot silently smuggle a forged owner header past the
+/// `SO_PEERCRED` filter.
+async fn parse_mailbox_list_headers<R>(reader: &mut R) -> Result<(), ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let line = read_line(reader)
+        .await?
+        .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+    let line = line.trim_end_matches('\r');
+    if !line.is_empty() {
+        return Err(ParseError::Malformed(format!(
+            "MAILBOX-LIST takes no headers, got {line:?}"
+        )));
+    }
+    Ok(())
 }
 
 async fn parse_hook_create_headers_and_body<R>(
@@ -956,6 +1009,36 @@ where
     Ok(())
 }
 
+/// Write a `JsonAckResponse` frame. Used by the daemon-side
+/// `MAILBOX-LIST` handler so non-root callers receive a JSON body
+/// listing the mailboxes they own. On error the wire shape matches
+/// [`write_ack_response`].
+pub async fn write_json_ack_response<W>(
+    writer: &mut W,
+    response: &JsonAckResponse,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    match response {
+        JsonAckResponse::Ok { body } => {
+            let header = format!("AIMX/1 OK\nContent-Length: {}\n\n", body.len());
+            writer.write_all(header.as_bytes()).await?;
+            writer.write_all(body).await?;
+        }
+        JsonAckResponse::Err { code, reason } => {
+            let r = sanitize_inline(reason);
+            let payload = format!(
+                "AIMX/1 ERR {code} {r}\nCode: {code}\n\n",
+                code = code.as_str()
+            );
+            writer.write_all(payload.as_bytes()).await?;
+        }
+    }
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Write an `AIMX/1 SEND` request frame to `writer`. Used by the client
 /// (`aimx send`) and by tests that exercise `parse_request` over a paired
 /// AsyncRead/AsyncWrite harness.
@@ -1021,6 +1104,17 @@ where
     Ok(())
 }
 
+/// Write an `AIMX/1 MAILBOX-LIST` request frame. Bare verb line plus
+/// a single blank separator — no headers, no body.
+pub async fn write_mailbox_list_request<W>(writer: &mut W) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(b"AIMX/1 MAILBOX-LIST\n\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Write an `AIMX/1 HOOK-CREATE` request frame. The codec does not
 /// parse the body, it simply ships the bytes the caller supplies.
 #[allow(dead_code)]
@@ -1068,4 +1162,103 @@ where
 /// LF inside a reason or message-ID or the framer ambiguates the next line.
 fn sanitize_inline(s: &str) -> String {
     s.chars().filter(|c| *c != '\n' && *c != '\r').collect()
+}
+
+#[cfg(test)]
+mod mailbox_list_codec_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    /// Round-trip a `MAILBOX-LIST` frame: writer emits the bare verb +
+    /// blank separator, parser decodes it as `Request::MailboxList`.
+    #[tokio::test]
+    async fn round_trip_mailbox_list_request() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_mailbox_list_request(&mut buf).await.unwrap();
+        assert_eq!(buf, b"AIMX/1 MAILBOX-LIST\n\n");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let req = parse_request(&mut reader).await.unwrap();
+        assert_eq!(req, Request::MailboxList);
+    }
+
+    /// Any header on a `MAILBOX-LIST` frame is rejected. The verb
+    /// resolves the caller via `SO_PEERCRED`; client-supplied owner
+    /// hints would defeat that and must be a hard parse error.
+    #[tokio::test]
+    async fn mailbox_list_rejects_owner_header() {
+        let frame = b"AIMX/1 MAILBOX-LIST\nOwner: alice\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("MAILBOX-LIST"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// `Content-Length:` headers are also rejected — `MAILBOX-LIST`
+    /// has no body, and silently ignoring the header would invite a
+    /// future caller to send one and have it skipped.
+    #[tokio::test]
+    async fn mailbox_list_rejects_content_length_header() {
+        let frame = b"AIMX/1 MAILBOX-LIST\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(_)) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// The JSON ack response writer round-trips: the frame carries
+    /// `AIMX/1 OK`, a `Content-Length:` header, and the JSON body.
+    #[tokio::test]
+    async fn json_ack_response_writer_emits_content_length_and_body() {
+        let body = br#"[{"name":"alice","total":1,"unread":0}]"#;
+        let mut buf: Vec<u8> = Vec::new();
+        write_json_ack_response(
+            &mut buf,
+            &JsonAckResponse::Ok {
+                body: body.to_vec(),
+            },
+        )
+        .await
+        .unwrap();
+        let header_end = buf.windows(2).position(|w| w == b"\n\n").unwrap();
+        let header = std::str::from_utf8(&buf[..header_end]).unwrap();
+        assert!(header.starts_with("AIMX/1 OK\n"));
+        assert!(
+            header.contains(&format!("Content-Length: {}", body.len())),
+            "{header}"
+        );
+        assert_eq!(&buf[header_end + 2..], &body[..]);
+    }
+
+    /// Error variant of the JSON ack writer mirrors the bodyless ack
+    /// shape exactly so clients can share one parser.
+    #[tokio::test]
+    async fn json_ack_response_writer_error_form_matches_bodyless_ack() {
+        let mut json_buf: Vec<u8> = Vec::new();
+        write_json_ack_response(
+            &mut json_buf,
+            &JsonAckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: "denied".into(),
+            },
+        )
+        .await
+        .unwrap();
+        let mut bare_buf: Vec<u8> = Vec::new();
+        write_ack_response(
+            &mut bare_buf,
+            &AckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: "denied".into(),
+            },
+        )
+        .await
+        .unwrap();
+        bare_buf.flush().await.unwrap();
+        assert_eq!(json_buf, bare_buf);
+    }
 }

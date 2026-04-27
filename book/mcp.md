@@ -54,7 +54,19 @@ List mailboxes you own.
 
 **Parameters:** none
 
-**Returns:** List of mailboxes with addresses, total count, and unread count. Filtered to caller-owned mailboxes for non-root; root sees everything.
+**Returns:** JSON array. One row per visible mailbox with these fields:
+
+| Field         | Type   | Description                                                                  |
+|---------------|--------|------------------------------------------------------------------------------|
+| `name`        | string | Mailbox name (the local part).                                               |
+| `inbox_path`  | string | Absolute path to the inbox directory (`/var/lib/aimx/inbox/<name>`).         |
+| `sent_path`   | string | Absolute path to the sent directory (`/var/lib/aimx/sent/<name>`).           |
+| `total`       | number | Total emails in the inbox.                                                   |
+| `unread`      | number | Inbox emails with `read = false`.                                            |
+| `sent_count`  | number | Total emails in the sent folder.                                             |
+| `registered`  | bool   | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
+
+The empty case returns `[]`. Filtered to caller-owned mailboxes for non-root callers; root sees everything. The MCP process resolves the listing through the daemon over `/run/aimx/aimx.sock`, so it works without read access to root-owned `config.toml`.
 
 ---
 

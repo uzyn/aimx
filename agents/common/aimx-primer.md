@@ -19,15 +19,23 @@ startup.
 
 ## Two access surfaces
 
+Mail is stored as `.md` files for a reason — when you do not need a
+mutation, read mailbox files directly with your filesystem tools
+(`Read` / `Glob` / `Grep` / equivalent). MCP is the surface for
+*changes*: send, reply, mark, hook CRUD.
+
 aimx gives you two complementary ways to interact with email:
 
-1. **MCP tools** for all mutations (send, reply, mark read/unread, create
-   hooks). The `aimx` MCP server runs over stdio and is launched
-   on-demand by your MCP client.
-2. **Direct filesystem reads** for reading `.md` email files, scanning
-   directories, or bulk-processing. Mailbox directories are mode `0700`
-   and owned by the mailbox's Linux owner, so you see only the mailboxes
-   owned by the user running your MCP process.
+1. **Direct filesystem reads** for inspecting `.md` email files,
+   scanning directories, or bulk-processing. Mailbox directories are
+   mode `0700` and owned by the mailbox's Linux owner, so you see
+   only the mailboxes owned by the user running your MCP process.
+   `mailbox_list` returns absolute `inbox_path` / `sent_path` values
+   precisely so you can hand them to your filesystem tools without
+   another round-trip.
+2. **MCP tools** for all mutations (send, reply, mark read/unread,
+   create hooks). The `aimx` MCP server runs over stdio and is
+   launched on-demand by your MCP client.
 
 Writes always go through MCP. Never create, modify, or delete `.md` files
 directly. The daemon owns those paths.

@@ -36,23 +36,50 @@ are invisible. On a multi-user box they give real isolation.
 
 ### `mailbox_list`
 
-List mailboxes you own with total and unread message counts.
+List mailboxes you own with absolute filesystem paths and message
+counts.
 
 **Parameters:** None.
 
-**Returns:** Formatted list of mailboxes with counts.
+**Returns:** JSON array. One row per visible mailbox with these
+fields:
+
+| Field         | Type   | Description                                                                  |
+|---------------|--------|------------------------------------------------------------------------------|
+| `name`        | string | Mailbox name (the local part).                                               |
+| `inbox_path`  | string | Absolute path to the inbox directory (`/var/lib/aimx/inbox/<name>`).         |
+| `sent_path`   | string | Absolute path to the sent directory (`/var/lib/aimx/sent/<name>`).           |
+| `total`       | number | Total emails in the inbox.                                                   |
+| `unread`      | number | Number of inbox emails with `read = false` in the frontmatter.               |
+| `sent_count`  | number | Total emails in the sent folder.                                             |
+| `registered`  | bool   | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
+
+The empty case returns `[]` (a JSON empty array), never a "no
+mailboxes" string. Mailboxes you do not own are simply absent from
+the array. To create or delete mailboxes, ask the operator to run
+`sudo aimx mailboxes create <name> --owner <user>` or
+`sudo aimx mailboxes delete <name>` on the host.
 
 **Example:**
 ```
 mailbox_list()
-→ "agent (inbox: 12 total, 3 unread; sent: 5 total)
-   reports (inbox: 0 total, 0 unread; sent: 0 total)"
+→ [
+    {
+      "name": "agent",
+      "inbox_path": "/var/lib/aimx/inbox/agent",
+      "sent_path": "/var/lib/aimx/sent/agent",
+      "total": 12,
+      "unread": 3,
+      "sent_count": 5,
+      "registered": true
+    }
+  ]
 ```
 
-Mailboxes you do not own do not appear. To create or delete
-mailboxes, ask the operator to run
-`sudo aimx mailboxes create <name> --owner <user>` or
-`sudo aimx mailboxes delete <name>` on the host.
+**Next step:** read messages directly from disk. Take an `id` from
+`email_list(mailbox: "agent")` (or list the inbox dir) and `Read`
+`<inbox_path>/<id>.md` — no need for `email_read` unless you need
+the daemon to enforce path canonicalisation for you.
 
 ---
 
