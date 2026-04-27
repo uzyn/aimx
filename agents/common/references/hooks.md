@@ -167,8 +167,7 @@ hook_create(
     "/usr/local/bin/claude", "-p",
     "You are the accounts agent. Read the email on stdin. If it is from the bank, mark it read via email_mark_read and reply via email_reply with the current balance from the local ledger. Otherwise mark it read and do nothing.",
     "--dangerously-skip-permissions"
-  ],
-  stdin: "email"
+  ]
 )
 ```
 
@@ -190,15 +189,15 @@ hook_create(
     "-H", "Content-Type: text/markdown",
     "--data-binary", "@-",
     "https://ops.example.com/log"
-  ],
-  stdin: "email"
+  ]
 )
 ```
 
 The remote endpoint receives the raw `.md` (frontmatter + body) on
 the request body. If the user needs JSON specifically, ask them to
-pre-process the file from a small wrapper script — the daemon ships
-no JSON-mode `stdin` variant; only `"email"` (raw) and `"none"`.
+pre-process the file from a small wrapper script — the daemon always
+pipes the raw email to the hook's stdin and there is no JSON-mode
+variant.
 
 ## Trust gate
 

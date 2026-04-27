@@ -2,6 +2,59 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
+## Unreleased — MCP surface cleanup
+
+Three hard breaks tighten the MCP tool surface around aimx's "no index, no scan" design. Canonical tool docs live in [MCP Server](mcp.md); the new hook model lives in [Hooks & Trust](hooks.md).
+
+### Removed `email_list` filters
+
+- **What was removed:** the `unread`, `from`, `since`, and `subject` parameters on `email_list`.
+- **Rationale:** aimx ships no index. Server-side filters silently forced an O(N) scan of every frontmatter block in the mailbox — the opposite of the design intent. The new shape lists a page of metadata (cheap, bounded by `limit`) and the agent filters client-side.
+- **New call shape:**
+
+  ```
+  email_list(mailbox="alice", limit=50)   # then filter rows where read == false
+  ```
+
+`email_list` now returns a JSON array (one row per email) with `id`, `from`, `to`, `subject`, `date`, plus `read` on inbox rows or `delivery_status` on sent rows. Pass `offset` to page past already-seen rows.
+
+### Removed `email_mark_*` `folder` parameter
+
+- **What was removed:** the `folder` parameter on `email_mark_read` and `email_mark_unread` (and its `Folder:` header on the underlying UDS verb).
+- **Rationale:** there is no agent workflow that benefits from marking sent copies read or unread. Inbox is the only meaningful target; the `"sent"` value was dead weight. The `MarkFolder::Sent` variant has also been deleted from the codebase.
+- **New call shape:**
+
+  ```
+  email_mark_read(mailbox="alice", id="2025-06-15-120000-hello")
+  ```
+
+The MCP schema rejects a stale `folder` argument with an `unknown field` parse error rather than silently mutating inbox.
+
+### Removed `hook_create` / `config.toml` `stdin`
+
+- **What was removed:** the `stdin` parameter on the `hook_create` MCP tool, and the `stdin` field on `[[mailbox.<name>.hook]]` blocks in `config.toml`. The daemon now always pipes the raw `.md` source to every hook command.
+- **Rationale:** closing stdin to a hook gave no real benefit — `$AIMX_FROM`, `$AIMX_SUBJECT`, and `$AIMX_FILEPATH` already cover the "metadata only" case, and the child process is free to ignore stdin.
+- **Upgrade-time validation error.** `aimx serve` will refuse to start if any hook block in `config.toml` still carries a `stdin` line. The error names the offending hook so you can grep your logs against it:
+
+  ```
+  hook 'X' carries removed field 'stdin' — remove this line and restart aimx serve; the email is always piped to hooks
+  ```
+
+  Remediation: open `/etc/aimx/config.toml`, delete every `stdin = "…"` line under your `[[mailbox.*.hook]]` blocks, then `sudo systemctl restart aimx`.
+- **New call shape:**
+
+  ```
+  hook_create(mailbox="alice", event="on_receive", cmd=["/usr/local/bin/notify"])
+  ```
+
+  Selectivity guidance: if your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email to stdin but does not require the child to consume it.
+
+### Soft change — `mailbox_list` and `email_list` now return JSON
+
+`mailbox_list` and `email_list` now return JSON arrays instead of plain-text listings. Existing agents using the bundled skills are already updated. Any custom MCP client that parsed the old plain-text output must switch to a JSON parser; nothing fails at startup, but the next call will surface the shape change.
+
+`mailbox_list` rows: `{ name, inbox_path, sent_path, total, unread, sent_count, registered }`. `email_list` rows on inbox: `{ id, from, to, subject, date, read }`; on sent: `{ id, from, to, subject, date, delivery_status }`.
+
 ## 0.1.0 — first public release
 
 aimx ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (canonical Rust target triples; tarball filenames drop the `-unknown-` vendor field, e.g. `aimx-0.1.0-x86_64-linux-gnu.tar.gz`). One-line install:

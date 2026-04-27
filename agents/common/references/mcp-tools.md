@@ -181,9 +181,9 @@ directly to the recipient's MX server.
 | `from_mailbox` | string   | yes      | Mailbox name to send from (local part only); must be owned by you |
 | `to`           | string   | yes      | Recipient email address |
 | `subject`      | string   | yes      | Email subject |
+| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`. When `references` is omitted, `References` is built automatically from this value. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
 | `body`         | string   | yes      | Email body text |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
-| `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`. When `references` is omitted, `References` is built automatically from this value. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
 | `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
 For simple replies to a single sender, prefer `email_reply`. It reads the
@@ -228,8 +228,8 @@ email_send(
   from_mailbox: "agent",
   to: "alice@example.com, bob@example.com, carol@example.com",
   subject: "Re: Status Update",
-  body: "Looping everyone in.",
   reply_to: "<abc@example.com>",
+  body: "Looping everyone in.",
   references: "<prev@example.com> <abc@example.com>"
 )
 ```

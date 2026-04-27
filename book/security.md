@@ -174,7 +174,7 @@ So the socket is the signing oracle. What it can do is deliberately narrow. The 
 - `SEND` — submit an unsigned RFC 5322 message for DKIM signing and MX delivery.
 - `MARK-READ` / `MARK-UNREAD` — rewrite the `read` field in an email's frontmatter under a per-mailbox lock.
 - `MAILBOX-CREATE` / `MAILBOX-DELETE` — add or remove a configured mailbox, hot-swapping the in-memory `Arc<Config>`.
-- `HOOK-CREATE` — create a **template-bound** hook. The handler rejects any body that carries `cmd`, `run_as`, `timeout_secs`, `stdin`, or `dangerously_support_untrusted`. These fields are *template* properties — they live on `[[hook_template]]` entries the operator installs — and are unreachable through the socket. Tests (`hook_create_rejects_body_with_cmd`, `…_run_as`, `…_dangerously_support_untrusted`) assert the rejection explicitly.
+- `HOOK-CREATE` — create a **template-bound** hook. The handler rejects any body that carries `cmd`, `run_as`, `timeout_secs`, or `dangerously_support_untrusted` — these are *template* properties, living on `[[hook_template]]` entries the operator installs, and are unreachable through the socket. The handler also rejects a stale `stdin` field with the canonical "always piped" hint so an upgraded agent client still sees a clear error. Tests (`hook_create_rejects_body_with_cmd`, `…_run_as`, `…_dangerously_support_untrusted`, `create_rejects_stdin_field`) assert each rejection explicitly.
 - `HOOK-DELETE` — remove an existing hook, subject to origin protection (see below).
 
 The explicit non-list matters as much as the list. There is no verb over the socket that:
