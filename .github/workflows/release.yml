@@ -74,8 +74,6 @@ jobs:
           cp LICENSE "${stage}/LICENSE"
           cp README.md "${stage}/README.md"
           cp -R book "${stage}/book"
-          mkdir -p "${stage}/hook-templates"
-          cp hook-templates/defaults.toml "${stage}/hook-templates/defaults.toml"
           echo "stage=${stage}" >> "$GITHUB_ENV"
           echo "artifact_target=${artifact_target}" >> "$GITHUB_ENV"
 
