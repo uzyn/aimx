@@ -61,7 +61,7 @@ See [Setup: End-to-end verification](setup.md#end-to-end-verification).
 
 Print server health: configuration path, mailbox counts and unread counts, a per-mailbox table (Mailbox, Address, Total, Unread, Trust, Senders, Hooks), an Ownership section listing each mailbox's `owner` and whether the owner uid resolves on the host, DKIM key presence, SMTP service state, DNS record verification, and a pointer to `aimx logs` for recent service logs. Exits non-zero when any mailbox has an unresolvable owner so monitoring can detect orphans.
 
-The Service section includes `Client version:` (the CLI binary you just invoked) and `Server version:` (probed from the running daemon over the UDS socket). When the two differ, the Server line carries an inline warn-coloured `drift` suffix suggesting `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC) — the operator upgraded the binary on disk but the running daemon is still on the old build. Drift is informational only; it does not change the doctor exit code.
+The Service section includes `Client version:` (the CLI binary you just invoked) and `Server version:` (probed from the running daemon over the UDS socket). Compare them at a glance to see whether the running daemon is still on an older build than the binary on disk — when they differ, restart the service (`systemctl restart aimx` or `rc-service aimx restart` on OpenRC) so the daemon picks up the new binary. The version lines are informational only and do not change the doctor exit code.
 
 No flags.
 

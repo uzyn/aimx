@@ -112,12 +112,12 @@ aimx logs --follow
 
 ```
 Client version:   v1.2.4 (a1b2c3d4)
-Server version:   v1.2.3 (9e8f7d6c)  drift - run `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC) to pick up the new binary
+Server version:   v1.2.3 (9e8f7d6c)
 ```
 
 The Client line reports the build of the `aimx` binary you just invoked. The Server line reports what the running `aimx serve` daemon advertises over the UDS `VERSION` verb. They drift apart when an upgrade replaces the on-disk binary but does not restart the long-running daemon — typically a `curl | sh` re-install on a host where systemd is present-but-inactive, or a manually-launched `aimx serve` outside the service manager.
 
-Drift is informational only — `aimx doctor` does not flag a finding and does not change its exit code. To resolve it, run the suggested restart command:
+The lines are informational only — `aimx doctor` does not flag a finding and does not change its exit code. To resolve drift, restart the service so the daemon picks up the new binary:
 
 ```bash
 sudo systemctl restart aimx

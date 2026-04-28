@@ -19,7 +19,7 @@ Client version:   v1.2.4 (a1b2c3d4)
 Server version:   v1.2.4 (a1b2c3d4)
 ```
 
-When the tags differ, the Server line carries an inline warn-coloured `drift` suffix suggesting `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC). Drift is informational only — no `DoctorFinding`, no exit-code change. If the daemon is offline the Server line renders `(daemon not running)`; if the probe fails within its 500 ms budget it renders the failure reason in dim text. See [Troubleshooting: Version drift](troubleshooting.md#version-drift-between-client-and-daemon).
+When the tags differ, restart the service (`systemctl restart aimx`, or `rc-service aimx restart` on OpenRC) so the daemon picks up the new binary. The lines are informational only — no `DoctorFinding`, no exit-code change. If the daemon is offline the Server line renders `(daemon not running)`; if the probe fails within its 500 ms budget it renders the failure reason in dim text. See [Troubleshooting: Version drift](troubleshooting.md#version-drift-between-client-and-daemon).
 
 ### `install.sh` upgrade path is louder and self-healing
 

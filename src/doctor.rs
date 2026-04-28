@@ -494,8 +494,9 @@ pub fn has_orphan_owner(mailboxes: &[MailboxStatus]) -> bool {
 
 /// Render the `Client version:` / `Server version:` lines that sit
 /// under `SMTP server:` in the Service section. Pulled out so the
-/// drift / unreachable / matching cases can be unit-tested without
-/// rebuilding a full `StatusInfo`.
+/// reachable / unreachable / not-running cases can be unit-tested
+/// without rebuilding a full `StatusInfo`. Tag comparison is left to
+/// the operator — `aimx doctor` shows both lines plain.
 fn format_version_lines(info: &StatusInfo) -> String {
     let mut out = String::new();
     let client_display = format!(
@@ -507,16 +508,7 @@ fn format_version_lines(info: &StatusInfo) -> String {
     match &info.server_version {
         Some(Ok(server)) => {
             let server_display = format!("{} ({})", server.tag, server.git_hash);
-            if server.tag == info.client_version.tag {
-                out.push_str(&format!("Server version:   {server_display}\n"));
-            } else {
-                out.push_str(&format!(
-                    "Server version:   {server_display}  {}\n",
-                    term::warn(
-                        "drift - run `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC) to pick up the new binary",
-                    ),
-                ));
-            }
+            out.push_str(&format!("Server version:   {server_display}\n"));
         }
         Some(Err(reason)) => {
             out.push_str(&format!(
@@ -1250,10 +1242,9 @@ mod version_render_tests {
         out
     }
 
-    /// When client and server tags match, no drift suffix is rendered
-    /// and the line is plain.
+    /// When client and server tags match, both lines render plain.
     #[test]
-    fn matching_tags_omit_drift_suffix() {
+    fn matching_tags_render_plain() {
         let info = base_status(
             ClientVersion {
                 tag: "v1.2.3".into(),
@@ -1267,16 +1258,13 @@ mod version_render_tests {
         let out = strip_ansi(&format_version_lines(&info));
         assert!(out.contains("Client version:   v1.2.3 (abcdef12)"), "{out}");
         assert!(out.contains("Server version:   v1.2.3 (abcdef12)"), "{out}");
-        assert!(
-            !out.contains("drift"),
-            "drift suffix must be absent on match: {out}"
-        );
     }
 
-    /// When tags differ, the Server line carries an inline drift hint
-    /// pointing at the service-manager restart command.
+    /// When client and server tags differ, both lines still render
+    /// plain — `aimx doctor` shows the two values and leaves the
+    /// comparison to the operator.
     #[test]
-    fn mismatched_tags_render_drift_suffix() {
+    fn mismatched_tags_render_plain() {
         let info = base_status(
             ClientVersion {
                 tag: "v1.2.4".into(),
@@ -1290,19 +1278,14 @@ mod version_render_tests {
         let out = strip_ansi(&format_version_lines(&info));
         assert!(out.contains("Client version:   v1.2.4 (newbuild)"), "{out}");
         assert!(out.contains("Server version:   v1.2.3 (oldbuild)"), "{out}");
-        assert!(out.contains("drift"), "drift suffix expected: {out}");
         assert!(
-            out.contains("systemctl restart aimx"),
-            "systemd restart hint expected: {out}",
-        );
-        assert!(
-            out.contains("rc-service aimx restart"),
-            "openrc restart hint expected: {out}",
+            !out.contains("drift"),
+            "no drift suffix should render: {out}",
         );
     }
 
     /// When the probe failed (`Some(Err)`), the Server line renders a
-    /// dim "(reason)" placeholder rather than a drift indicator.
+    /// dim "(reason)" placeholder.
     #[test]
     fn unreachable_daemon_renders_dim_placeholder() {
         let info = base_status(
@@ -1320,42 +1303,21 @@ mod version_render_tests {
             out.contains("(daemon not reachable on /run/aimx/aimx.sock)"),
             "{out}",
         );
-        assert!(
-            !out.contains("drift"),
-            "drift must not render on probe failure: {out}",
-        );
     }
 
-    /// Drift between client and server tags must not produce a
-    /// `DoctorFinding` and must not change the exit code. `run_checks`
-    /// does not consume `StatusInfo`, so drift is structurally
-    /// informational. This test pins that contract: callers may render
-    /// the inline drift hint, but `format_checks` and the doctor
-    /// fail-gate stay untouched.
+    /// Mismatched tags must not produce a `DoctorFinding` and must not
+    /// change the exit code. `run_checks` does not consume
+    /// `StatusInfo`, so version mismatch is structurally informational.
     #[test]
-    fn drift_does_not_surface_a_doctor_finding() {
-        let info = base_status(
-            ClientVersion {
-                tag: "v1.2.4".into(),
-                git_hash: "newbuild".into(),
-            },
-            Some(Ok(ServerVersion {
-                tag: "v1.2.3".into(),
-                git_hash: "oldbuild".into(),
-            })),
-        );
-
-        // The rendered status carries the drift suffix.
-        let rendered = strip_ansi(&format_status(&info));
-        assert!(rendered.contains("drift"), "{rendered}");
-
-        // But the rendered checks block (with no findings) reports
-        // "All checks passed" — drift never makes it into findings.
+    fn mismatched_tags_do_not_surface_a_doctor_finding() {
+        // The rendered checks block (with no findings) reports
+        // "All checks passed" — version mismatch never makes it into
+        // findings, regardless of whether the Service section shows it.
         let empty: Vec<DoctorFinding> = Vec::new();
         let checks = strip_ansi(&format_checks(&empty));
         assert!(
             checks.contains("All checks passed"),
-            "drift must not raise a finding: {checks}",
+            "mismatch must not raise a finding: {checks}",
         );
     }
 
@@ -1373,6 +1335,5 @@ mod version_render_tests {
         );
         let out = strip_ansi(&format_version_lines(&info));
         assert!(out.contains("(daemon not running)"), "{out}");
-        assert!(!out.contains("drift"), "{out}");
     }
 }
