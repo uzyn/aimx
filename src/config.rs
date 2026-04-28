@@ -563,7 +563,7 @@ fn reject_legacy_schema(toml_text: &str) -> Result<(), Box<dyn std::error::Error
 ///
 /// The error names the hook by its explicit `name` if set, otherwise by
 /// the derived sha256-based effective name (matches `effective_hook_name`).
-fn reject_removed_stdin_field(parsed: &toml::Value) -> Result<(), String> {
+fn reject_removed_stdin_field(parsed: &toml::Value) -> Result<(), Box<dyn std::error::Error>> {
     let Some(mailboxes) = parsed.get("mailboxes").and_then(|v| v.as_table()) else {
         return Ok(());
     };
@@ -591,7 +591,8 @@ fn reject_removed_stdin_field(parsed: &toml::Value) -> Result<(), String> {
             return Err(format!(
                 "hook '{name}' carries removed field 'stdin' — remove this line and \
                  restart aimx serve; the email is always piped to hooks"
-            ));
+            )
+            .into());
         }
     }
     Ok(())
@@ -911,8 +912,7 @@ impl Config {
         // reject the removed `stdin` field with a hook-named error
         // before the structural deserializer trips on its absence.
         let raw_value: toml::Value = toml::from_str(&content)?;
-        reject_removed_stdin_field(&raw_value)
-            .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+        reject_removed_stdin_field(&raw_value)?;
         let config: Config = raw_value.try_into()?;
         for (name, mb) in &config.mailboxes {
             if mb.owner.trim().is_empty() {

@@ -639,7 +639,7 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
     };
 
     let outcome = outcome.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if is_socket_missing(&e) {
             "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
         } else {
             format!(
@@ -689,7 +689,7 @@ fn submit_mark_via_daemon(mailbox: &str, id: &str, read: bool) -> Result<(), Str
     };
 
     let outcome = outcome.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+        if is_socket_missing(&e) {
             "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
         } else {
             format!(
@@ -1211,8 +1211,6 @@ struct SentListRow {
 #[derive(Deserialize)]
 struct EmailListFm {
     #[serde(default)]
-    id: String,
-    #[serde(default)]
     from: String,
     #[serde(default)]
     to: String,
@@ -1303,7 +1301,7 @@ fn list_email_page_json(
                     continue;
                 };
                 rows.push(InboxListRow {
-                    id: choose_id(id, &fm.id),
+                    id: id.clone(),
                     from: fm.from,
                     to: fm.to,
                     subject: fm.subject,
@@ -1320,7 +1318,7 @@ fn list_email_page_json(
                     continue;
                 };
                 rows.push(SentListRow {
-                    id: choose_id(id, &fm.id),
+                    id: id.clone(),
                     from: fm.from,
                     to: fm.to,
                     subject: fm.subject,
@@ -1330,18 +1328,6 @@ fn list_email_page_json(
             }
             Ok(serde_json::to_string(&rows)?)
         }
-    }
-}
-
-/// Prefer the on-disk filename stem as the canonical id (it is the
-/// value the agent passes to `email_read` / `email_mark_*`). Fall back
-/// to the frontmatter `id` only when the filename could not be decoded
-/// — protects the response shape against unicode-broken filenames.
-fn choose_id(filename_stem: &str, fm_id: &str) -> String {
-    if !filename_stem.is_empty() {
-        filename_stem.to_string()
-    } else {
-        fm_id.to_string()
     }
 }
 
@@ -2128,5 +2114,39 @@ mod schema_order_tests {
     #[test]
     fn hook_delete_params_property_order() {
         assert_eq!(property_keys::<HookDeleteParams>(), vec!["name"]);
+    }
+}
+
+#[cfg(test)]
+mod socket_missing_tests {
+    use super::is_socket_missing;
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn flags_not_found_connection_refused_and_permission_denied() {
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(
+                is_socket_missing(&Error::from(kind)),
+                "expected {kind:?} to count as socket-missing"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_other_io_errors() {
+        for kind in [
+            ErrorKind::TimedOut,
+            ErrorKind::ConnectionReset,
+            ErrorKind::Other,
+        ] {
+            assert!(
+                !is_socket_missing(&Error::from(kind)),
+                "expected {kind:?} to NOT count as socket-missing"
+            );
+        }
     }
 }
