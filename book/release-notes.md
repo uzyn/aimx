@@ -2,6 +2,42 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
+## Unreleased — upgrade visibility
+
+Closes the visibility gap on the upgrade path: operators can now confirm whether the running `aimx serve` daemon was actually restarted on the new binary, and detect drift between the on-disk `aimx` and the still-running daemon.
+
+### `AIMX/1 VERSION` UDS verb
+
+A new read-only verb on `/run/aimx/aimx.sock` returns the daemon's `{tag, git_hash, target, build_date}`. Same authorization posture as `MAILBOX-LIST` — no `SO_PEERCRED` filter, the payload is build metadata only. There is no separate `aimx version --remote` subcommand; consumers go through `aimx doctor`.
+
+### `aimx doctor` renders client + server versions
+
+The Service section now includes two new lines:
+
+```
+Client version:   v1.2.4 (a1b2c3d4)
+Server version:   v1.2.4 (a1b2c3d4)
+```
+
+When the tags differ, the Server line carries an inline warn-coloured `drift` suffix suggesting `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC). Drift is informational only — no `DoctorFinding`, no exit-code change. If the daemon is offline the Server line renders `(daemon not running)`; if the probe fails within its 500 ms budget it renders the failure reason in dim text. See [Troubleshooting: Version drift](troubleshooting.md#version-drift-between-client-and-daemon).
+
+### `install.sh` upgrade path is louder and self-healing
+
+- The stop and start banners are now promoted from `dbg` to `say`, so the operator running `curl | sh` sees the service control happening.
+- The `systemctl is-enabled = true && is-active = false` path now still calls `start_service` after the binary swap. Previously the daemon was never restarted on that path.
+- A new `pgrep`-based detector warns (never signals) when a manually-launched `aimx serve` is running outside systemd / OpenRC.
+- A single post-start `systemctl is-active` check confirms the daemon came up, with a `journalctl -u aimx -n 20` hint on failure.
+
+### `aimx upgrade` confirms the restart
+
+After `wait_for_service_ready` returns true, `aimx upgrade` prints one extra line:
+
+```
+✓ aimx serve restarted on v1.2.4
+```
+
+The line is suppressed on the rollback path so a failed upgrade never claims success.
+
 ## Unreleased — MCP surface cleanup
 
 Three hard breaks tighten the MCP tool surface around aimx's "no index, no scan" design. Canonical tool docs live in [MCP Server](mcp.md); the new hook model lives in [Hooks & Trust](hooks.md).

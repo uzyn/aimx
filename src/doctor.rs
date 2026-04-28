@@ -512,7 +512,9 @@ fn format_version_lines(info: &StatusInfo) -> String {
             } else {
                 out.push_str(&format!(
                     "Server version:   {server_display}  {}\n",
-                    term::warn("drift - restart `aimx serve` to pick up the new binary"),
+                    term::warn(
+                        "drift - run `systemctl restart aimx` (or `rc-service aimx restart` on OpenRC) to pick up the new binary",
+                    ),
                 ));
             }
         }
@@ -1272,7 +1274,7 @@ mod version_render_tests {
     }
 
     /// When tags differ, the Server line carries an inline drift hint
-    /// pointing at `aimx serve`.
+    /// pointing at the service-manager restart command.
     #[test]
     fn mismatched_tags_render_drift_suffix() {
         let info = base_status(
@@ -1290,8 +1292,12 @@ mod version_render_tests {
         assert!(out.contains("Server version:   v1.2.3 (oldbuild)"), "{out}");
         assert!(out.contains("drift"), "drift suffix expected: {out}");
         assert!(
-            out.contains("restart `aimx serve`"),
-            "restart hint expected: {out}",
+            out.contains("systemctl restart aimx"),
+            "systemd restart hint expected: {out}",
+        );
+        assert!(
+            out.contains("rc-service aimx restart"),
+            "openrc restart hint expected: {out}",
         );
     }
 
