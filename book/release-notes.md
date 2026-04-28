@@ -8,7 +8,7 @@ Closes the visibility gap on the upgrade path: operators can now confirm whether
 
 ### `AIMX/1 VERSION` UDS verb
 
-A new read-only verb on `/run/aimx/aimx.sock` returns the daemon's `{tag, git_hash, target, build_date}`. Same authorization posture as `MAILBOX-LIST` — no `SO_PEERCRED` filter, the payload is build metadata only. There is no separate `aimx version --remote` subcommand; consumers go through `aimx doctor`.
+A new read-only verb on `/run/aimx/aimx.sock` returns the daemon's `{tag, git_hash, target, build_date}`. Same authorization posture as `MAILBOX-LIST` — no `SO_PEERCRED` filter, the payload is build metadata only. There is no separate remote-version subcommand; consumers go through `aimx doctor`.
 
 ### `aimx doctor` renders client + server versions
 
