@@ -149,6 +149,19 @@ pub struct HookDeleteRequest {
     pub name: String,
 }
 
+/// JSON payload of an `AIMX/1 VERSION` response. Mirrors the four
+/// `crate::version` build-metadata helpers so a client can render the
+/// same `aimx <tag> (<sha>) <target> built <date>` banner without
+/// invoking the daemon's binary directly. Used by `aimx doctor` to show
+/// the running daemon's version next to the invoking binary's.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct VersionResponse {
+    pub tag: String,
+    pub git_hash: String,
+    pub target: String,
+    pub build_date: String,
+}
+
 /// One decoded `AIMX/1` request, tagged by verb.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Request {
@@ -161,6 +174,11 @@ pub enum Request {
     MailboxList,
     HookCreate(HookCreateRequest),
     HookDelete(HookDeleteRequest),
+    /// `AIMX/1 VERSION` carries no payload. Returns the daemon's build
+    /// metadata so operators can detect drift between an upgraded
+    /// binary on disk and a still-running pre-upgrade daemon. Open to
+    /// every UDS caller — version data is not sensitive.
+    Version,
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -384,6 +402,9 @@ where
         "HOOK-DELETE" => parse_hook_delete_headers(reader)
             .await
             .map(Request::HookDelete),
+        "VERSION" => parse_version_headers(reader)
+            .await
+            .map(|()| Request::Version),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -409,6 +430,9 @@ where
         )),
         Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
             "expected SEND verb, got HOOK-*".to_string(),
+        )),
+        Request::Version => Err(ParseError::Malformed(
+            "expected SEND verb, got VERSION".to_string(),
         )),
     }
 }
@@ -693,6 +717,26 @@ where
     if !line.is_empty() {
         return Err(ParseError::Malformed(format!(
             "MAILBOX-LIST takes no headers, got {line:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Parse the empty header block of an `AIMX/1 VERSION` request. Like
+/// `MAILBOX-LIST`, the verb carries no payload and no client headers
+/// influence the response, so any header line — including
+/// `Content-Length:` — is rejected as malformed.
+async fn parse_version_headers<R>(reader: &mut R) -> Result<(), ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let line = read_line(reader)
+        .await?
+        .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+    let line = line.trim_end_matches('\r');
+    if !line.is_empty() {
+        return Err(ParseError::Malformed(format!(
+            "VERSION takes no headers, got {line:?}"
         )));
     }
     Ok(())
@@ -1082,6 +1126,98 @@ where
     Ok(())
 }
 
+/// Write an `AIMX/1 VERSION` request frame. Bare verb line plus a single
+/// blank separator — no headers, no body. Used by the doctor's daemon
+/// version probe.
+pub async fn write_version_request<W>(writer: &mut W) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(b"AIMX/1 VERSION\n\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write the `VERSION` response frame.
+///
+/// Wire format:
+/// ```text
+/// AIMX/1 OK\n
+/// Content-Length: <n>\n
+/// \n
+/// <n bytes of JSON {"tag":"...","git_hash":"...","target":"...","build_date":"..."}>
+/// ```
+///
+/// Mirrors [`write_json_ack_response`] but takes the typed
+/// [`VersionResponse`] directly rather than a pre-serialised body so
+/// callers cannot accidentally ship a malformed JSON shape.
+pub async fn write_version_response<W>(
+    writer: &mut W,
+    response: &VersionResponse,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let body = serde_json::to_vec(response).map_err(std::io::Error::other)?;
+    let header = format!("AIMX/1 OK\nContent-Length: {}\n\n", body.len());
+    writer.write_all(header.as_bytes()).await?;
+    writer.write_all(&body).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Read a `VERSION` response frame off `reader`. Used by the doctor
+/// probe; callers that want richer error semantics should layer their
+/// own timeout on top.
+pub async fn read_version_response<R>(reader: &mut R) -> Result<VersionResponse, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let status = read_line(reader)
+        .await?
+        .ok_or_else(|| ParseError::Malformed("unexpected EOF on response status".into()))?;
+    let status = status.trim_end_matches('\r');
+    if !status.starts_with("AIMX/1 OK") {
+        return Err(ParseError::Malformed(format!(
+            "expected 'AIMX/1 OK', got {status:?}"
+        )));
+    }
+
+    let mut content_length: Option<usize> = None;
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+        if n.trim().eq_ignore_ascii_case("content-length") {
+            let val: usize = v.trim().parse().map_err(|_| {
+                ParseError::Malformed(format!("non-integer Content-Length: {:?}", v.trim()))
+            })?;
+            content_length = Some(val);
+        }
+    }
+    let n = content_length.ok_or_else(|| {
+        ParseError::Malformed("missing Content-Length on VERSION response".into())
+    })?;
+    let mut body = vec![0u8; n];
+    reader.read_exact(&mut body).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            ParseError::Malformed(format!("body truncated: expected {n} bytes"))
+        } else {
+            ParseError::Io(e.to_string())
+        }
+    })?;
+    let parsed: VersionResponse = serde_json::from_slice(&body)
+        .map_err(|e| ParseError::Malformed(format!("invalid VERSION JSON: {e}")))?;
+    Ok(parsed)
+}
+
 /// Write an `AIMX/1 HOOK-CREATE` request frame. The codec does not
 /// parse the body, it simply ships the bytes the caller supplies.
 #[allow(dead_code)]
@@ -1235,6 +1371,57 @@ mod mailbox_list_codec_tests {
             }
             other => panic!("expected Malformed, got {other:?}"),
         }
+    }
+
+    /// Round-trip a `VERSION` request: writer emits a bare verb line
+    /// plus a blank separator, parser decodes it as `Request::Version`.
+    #[tokio::test]
+    async fn round_trip_version_request() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_version_request(&mut buf).await.unwrap();
+        assert_eq!(buf, b"AIMX/1 VERSION\n\n");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let req = parse_request(&mut reader).await.unwrap();
+        assert_eq!(req, Request::Version);
+    }
+
+    /// Any header on a `VERSION` request — including `Content-Length:`
+    /// — is rejected. The verb is bodyless and silently ignoring a
+    /// header would invite a future client to ship one and have it
+    /// dropped on the floor.
+    #[tokio::test]
+    async fn version_rejects_content_length_header() {
+        let frame = b"AIMX/1 VERSION\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("VERSION"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a `VERSION` response through the writer + reader so
+    /// every field reaches the client unmodified.
+    #[tokio::test]
+    async fn round_trip_version_response() {
+        let resp = VersionResponse {
+            tag: "v1.2.3".to_string(),
+            git_hash: "abcdef12".to_string(),
+            target: "x86_64-unknown-linux-gnu".to_string(),
+            build_date: "2026-04-28".to_string(),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_version_response(&mut buf, &resp).await.unwrap();
+        let header_end = buf.windows(2).position(|w| w == b"\n\n").unwrap();
+        let header = std::str::from_utf8(&buf[..header_end]).unwrap();
+        assert!(header.starts_with("AIMX/1 OK\n"), "{header}");
+        assert!(header.contains("Content-Length: "), "{header}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = read_version_response(&mut reader).await.unwrap();
+        assert_eq!(parsed, resp);
     }
 
     /// Error variant of the JSON ack writer mirrors the bodyless ack

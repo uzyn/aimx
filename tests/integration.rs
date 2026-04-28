@@ -4820,3 +4820,84 @@ fn aimx_agent_singular_form_errors() {
         .stderr(predicate::str::contains("unrecognized subcommand"))
         .stderr(predicate::str::contains("agent"));
 }
+
+/// End-to-end: a booted `aimx serve` answers the `AIMX/1 VERSION` verb
+/// over the UDS with a JSON body that matches the binary's compile-time
+/// `aimx --version` output. This is the contract `aimx doctor` relies
+/// on for drift detection.
+#[cfg(unix)]
+#[test]
+fn uds_version_verb_returns_running_daemon_metadata() {
+    use std::io::{Read as _, Write as _};
+    use std::os::unix::net::UnixStream;
+
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let child = start_serve(tmp.path(), port);
+
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS send socket never appeared"
+    );
+
+    let mut stream = UnixStream::connect(&sock).expect("connect to aimx.sock");
+    stream
+        .write_all(b"AIMX/1 VERSION\n\n")
+        .expect("write VERSION request");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("half-close write side");
+
+    let mut buf = Vec::with_capacity(512);
+    stream.read_to_end(&mut buf).expect("read response");
+
+    let text = std::str::from_utf8(&buf).expect("response is utf8");
+    assert!(
+        text.starts_with("AIMX/1 OK\n"),
+        "unexpected status line: {text}",
+    );
+    let header_end = buf
+        .windows(2)
+        .position(|w| w == b"\n\n")
+        .expect("response has header/body separator");
+    let body = &buf[header_end + 2..];
+    let body_str = std::str::from_utf8(body).expect("body is utf8");
+
+    // The JSON body must carry every field of `VersionResponse`. We
+    // do not pull in serde_json here just to parse — pattern-matching
+    // on substrings is enough to lock the wire shape.
+    for needle in [
+        "\"tag\":",
+        "\"git_hash\":",
+        "\"target\":",
+        "\"build_date\":",
+    ] {
+        assert!(
+            body_str.contains(needle),
+            "response missing field {needle:?}: {body_str}",
+        );
+    }
+
+    // The reported tag must match what the test binary itself prints
+    // for `aimx --version` — in test builds this is whatever
+    // `crate::version::release_tag()` resolves to. Cross-check by
+    // running the bin and parsing the first space-delimited token
+    // after `aimx`.
+    let v_out = std::process::Command::new(aimx_binary_path())
+        .arg("--version")
+        .output()
+        .expect("aimx --version");
+    let v_stdout = String::from_utf8(v_out.stdout).unwrap();
+    let local_tag = v_stdout
+        .split_whitespace()
+        .nth(1)
+        .expect("aimx --version emits a tag");
+    assert!(
+        body_str.contains(local_tag),
+        "daemon tag missing local {local_tag:?} in {body_str}",
+    );
+
+    stop_serve(child);
+}

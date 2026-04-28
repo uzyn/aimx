@@ -20,6 +20,17 @@ pub struct StatusInfo {
     pub dkim_selector: String,
     pub dkim_key_present: bool,
     pub smtp_running: bool,
+    /// Build tag of the binary running `aimx doctor` itself (the
+    /// invoking process). Always populated.
+    pub client_version: ClientVersion,
+    /// Build tag reported by the running daemon over the
+    /// `AIMX/1 VERSION` UDS verb.
+    ///
+    /// `None` means the probe was skipped (socket absent and the
+    /// daemon is not running per `smtp_running`). `Some(Ok(_))` is
+    /// the daemon's metadata. `Some(Err(_))` is a probe failure
+    /// reason — rendered as a dim "(daemon not reachable …)" line.
+    pub server_version: Option<Result<ServerVersion, String>>,
     /// True when the old `send.sock` path still exists in the runtime dir
     /// and the new `aimx.sock` is absent. Surfaced as a warn line in the
     /// Service section so operators upgrading from pre-launch builds see
@@ -38,6 +49,26 @@ pub struct StatusInfo {
 pub struct DnsSection {
     pub results: Vec<(String, DnsVerifyResult)>,
     pub records: Vec<DnsRecord>,
+}
+
+/// Build-version metadata for the invoking `aimx` binary. Currently
+/// just the release tag and the short git hash — same shape the
+/// daemon reports over the `VERSION` verb, just sourced locally
+/// from [`crate::version`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientVersion {
+    pub tag: String,
+    pub git_hash: String,
+}
+
+/// Build-version metadata returned by the running daemon over the
+/// `AIMX/1 VERSION` UDS verb. Slim view of
+/// [`crate::send_protocol::VersionResponse`] focused on what doctor
+/// renders (drift comparison + short-hash display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerVersion {
+    pub tag: String,
+    pub git_hash: String,
 }
 
 pub struct MailboxStatus {
@@ -86,6 +117,36 @@ pub fn gather_status_with_ops<S: SystemOps>(
     let stale_send_sock_present =
         runtime_dir.join("send.sock").exists() && !runtime_dir.join("aimx.sock").exists();
 
+    let client_version = ClientVersion {
+        tag: crate::version::release_tag().to_string(),
+        git_hash: crate::version::git_hash().to_string(),
+    };
+
+    // Probe the daemon only when there is a plausible chance a daemon
+    // is up. A freshly-installed host with neither the socket nor a
+    // running service should render as "(daemon not running)" and
+    // skip the probe rather than emit a confusing "(daemon not
+    // reachable …)" line.
+    let server_version = {
+        let socket = crate::serve::aimx_socket_path();
+        if socket.exists() || smtp_running {
+            match crate::version_handler::probe_daemon_version(&socket) {
+                Ok(resp) => Some(Ok(ServerVersion {
+                    tag: resp.tag,
+                    git_hash: resp.git_hash,
+                })),
+                Err(crate::version_handler::ProbeError::SocketMissing) => Some(Err(
+                    "daemon not reachable on /run/aimx/aimx.sock".to_string(),
+                )),
+                Err(crate::version_handler::ProbeError::Io(reason)) => {
+                    Some(Err(format!("daemon probe failed: {reason}")))
+                }
+            }
+        } else {
+            None
+        }
+    };
+
     let mut mailboxes: Vec<MailboxStatus> = config
         .mailboxes
         .iter()
@@ -124,6 +185,8 @@ pub fn gather_status_with_ops<S: SystemOps>(
         dkim_selector: config.dkim_selector.clone(),
         dkim_key_present,
         smtp_running,
+        client_version,
+        server_version,
         stale_send_sock_present,
         default_trust: config.trust.clone(),
         default_trusted_senders: config.trusted_senders.clone(),
@@ -429,6 +492,48 @@ pub fn has_orphan_owner(mailboxes: &[MailboxStatus]) -> bool {
         .any(|m| !m.is_catchall && m.owner_uid.is_none())
 }
 
+/// Render the `Client version:` / `Server version:` lines that sit
+/// under `SMTP server:` in the Service section. Pulled out so the
+/// drift / unreachable / matching cases can be unit-tested without
+/// rebuilding a full `StatusInfo`.
+fn format_version_lines(info: &StatusInfo) -> String {
+    let mut out = String::new();
+    let client_display = format!(
+        "{} ({})",
+        info.client_version.tag, info.client_version.git_hash
+    );
+    out.push_str(&format!("Client version:   {client_display}\n"));
+
+    match &info.server_version {
+        Some(Ok(server)) => {
+            let server_display = format!("{} ({})", server.tag, server.git_hash);
+            if server.tag == info.client_version.tag {
+                out.push_str(&format!("Server version:   {server_display}\n"));
+            } else {
+                out.push_str(&format!(
+                    "Server version:   {server_display}  {}\n",
+                    term::warn("drift - restart `aimx serve` to pick up the new binary"),
+                ));
+            }
+        }
+        Some(Err(reason)) => {
+            out.push_str(&format!(
+                "Server version:   {}\n",
+                term::dim(&format!("({reason})")),
+            ));
+        }
+        None => {
+            // Daemon not running and socket absent: render a calm
+            // dim hint rather than a probe-failure line.
+            out.push_str(&format!(
+                "Server version:   {}\n",
+                term::dim("(daemon not running)"),
+            ));
+        }
+    }
+    out
+}
+
 pub fn format_status(info: &StatusInfo) -> String {
     let mut out = String::new();
 
@@ -465,6 +570,7 @@ pub fn format_status(info: &StatusInfo) -> String {
             term::warn("not running")
         }
     ));
+    out.push_str(&format_version_lines(info));
     if info.stale_send_sock_present {
         out.push_str(&format!(
             "UDS socket:       {} - the runtime socket was renamed to `aimx.sock`; restart `aimx serve` to replace the stale `send.sock`\n",
@@ -1093,5 +1199,174 @@ mod ownership_tests {
             assert_eq!(f.check, "LEGACY-AIMX-HOOK-USER");
             assert_eq!(f.severity, FindingSeverity::Info);
         }
+    }
+}
+
+#[cfg(test)]
+mod version_render_tests {
+    use super::*;
+
+    fn base_status(
+        client: ClientVersion,
+        server: Option<Result<ServerVersion, String>>,
+    ) -> StatusInfo {
+        StatusInfo {
+            domain: "example.com".to_string(),
+            data_dir: "/tmp/aimx".to_string(),
+            config_path: "/etc/aimx/config.toml".to_string(),
+            dkim_selector: "aimx".to_string(),
+            dkim_key_present: true,
+            smtp_running: true,
+            client_version: client,
+            server_version: server,
+            stale_send_sock_present: false,
+            default_trust: "none".to_string(),
+            default_trusted_senders: vec![],
+            mailboxes: vec![],
+            dns: None,
+        }
+    }
+
+    fn strip_ansi(s: &str) -> String {
+        let mut out = String::with_capacity(s.len());
+        let bytes = s.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+                i += 2;
+                while i < bytes.len() && bytes[i] != b'm' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            } else {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// When client and server tags match, no drift suffix is rendered
+    /// and the line is plain.
+    #[test]
+    fn matching_tags_omit_drift_suffix() {
+        let info = base_status(
+            ClientVersion {
+                tag: "v1.2.3".into(),
+                git_hash: "abcdef12".into(),
+            },
+            Some(Ok(ServerVersion {
+                tag: "v1.2.3".into(),
+                git_hash: "abcdef12".into(),
+            })),
+        );
+        let out = strip_ansi(&format_version_lines(&info));
+        assert!(out.contains("Client version:   v1.2.3 (abcdef12)"), "{out}");
+        assert!(out.contains("Server version:   v1.2.3 (abcdef12)"), "{out}");
+        assert!(
+            !out.contains("drift"),
+            "drift suffix must be absent on match: {out}"
+        );
+    }
+
+    /// When tags differ, the Server line carries an inline drift hint
+    /// pointing at `aimx serve`.
+    #[test]
+    fn mismatched_tags_render_drift_suffix() {
+        let info = base_status(
+            ClientVersion {
+                tag: "v1.2.4".into(),
+                git_hash: "newbuild".into(),
+            },
+            Some(Ok(ServerVersion {
+                tag: "v1.2.3".into(),
+                git_hash: "oldbuild".into(),
+            })),
+        );
+        let out = strip_ansi(&format_version_lines(&info));
+        assert!(out.contains("Client version:   v1.2.4 (newbuild)"), "{out}");
+        assert!(out.contains("Server version:   v1.2.3 (oldbuild)"), "{out}");
+        assert!(out.contains("drift"), "drift suffix expected: {out}");
+        assert!(
+            out.contains("restart `aimx serve`"),
+            "restart hint expected: {out}",
+        );
+    }
+
+    /// When the probe failed (`Some(Err)`), the Server line renders a
+    /// dim "(reason)" placeholder rather than a drift indicator.
+    #[test]
+    fn unreachable_daemon_renders_dim_placeholder() {
+        let info = base_status(
+            ClientVersion {
+                tag: "v1.2.4".into(),
+                git_hash: "abcdef12".into(),
+            },
+            Some(Err(
+                "daemon not reachable on /run/aimx/aimx.sock".to_string()
+            )),
+        );
+        let out = strip_ansi(&format_version_lines(&info));
+        assert!(out.contains("Client version:   v1.2.4 (abcdef12)"), "{out}");
+        assert!(
+            out.contains("(daemon not reachable on /run/aimx/aimx.sock)"),
+            "{out}",
+        );
+        assert!(
+            !out.contains("drift"),
+            "drift must not render on probe failure: {out}",
+        );
+    }
+
+    /// Drift between client and server tags must not produce a
+    /// `DoctorFinding` and must not change the exit code. `run_checks`
+    /// does not consume `StatusInfo`, so drift is structurally
+    /// informational. This test pins that contract: callers may render
+    /// the inline drift hint, but `format_checks` and the doctor
+    /// fail-gate stay untouched.
+    #[test]
+    fn drift_does_not_surface_a_doctor_finding() {
+        let info = base_status(
+            ClientVersion {
+                tag: "v1.2.4".into(),
+                git_hash: "newbuild".into(),
+            },
+            Some(Ok(ServerVersion {
+                tag: "v1.2.3".into(),
+                git_hash: "oldbuild".into(),
+            })),
+        );
+
+        // The rendered status carries the drift suffix.
+        let rendered = strip_ansi(&format_status(&info));
+        assert!(rendered.contains("drift"), "{rendered}");
+
+        // But the rendered checks block (with no findings) reports
+        // "All checks passed" — drift never makes it into findings.
+        let empty: Vec<DoctorFinding> = Vec::new();
+        let checks = strip_ansi(&format_checks(&empty));
+        assert!(
+            checks.contains("All checks passed"),
+            "drift must not raise a finding: {checks}",
+        );
+    }
+
+    /// `None` means the probe was skipped because no daemon was
+    /// running. The Server line should render a calm "(daemon not
+    /// running)" placeholder.
+    #[test]
+    fn skipped_probe_renders_not_running_placeholder() {
+        let info = base_status(
+            ClientVersion {
+                tag: "v1.2.4".into(),
+                git_hash: "abcdef12".into(),
+            },
+            None,
+        );
+        let out = strip_ansi(&format_version_lines(&info));
+        assert!(out.contains("(daemon not running)"), "{out}");
+        assert!(!out.contains("drift"), "{out}");
     }
 }
