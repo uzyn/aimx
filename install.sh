@@ -472,15 +472,20 @@ compare_tags() {
 stop_service() {
     if command -v systemctl >/dev/null 2>&1; then
         if systemctl is-active --quiet aimx 2>/dev/null; then
-            verbose "systemctl stop aimx"
+            say "stopping aimx.service (systemd)"
             ${SUDO} systemctl stop aimx || err "systemctl stop aimx failed"
             printf 'systemd'
             return 0
         fi
+        # systemd is present but the unit is inactive (manual
+        # `systemctl stop`, fresh install, etc.). Still emit the
+        # `systemd` tag so `start_service` is invoked after the swap
+        # — without it the daemon never restarts on the new binary.
+        printf 'systemd'
         return 0
     fi
     if command -v rc-service >/dev/null 2>&1; then
-        verbose "rc-service aimx stop"
+        say "stopping aimx.service (openrc)"
         ${SUDO} rc-service aimx stop 2>/dev/null || true
         printf 'openrc'
         return 0
@@ -493,17 +498,48 @@ start_service() {
     _init="$1"
     case "${_init}" in
         systemd)
-            verbose "systemctl start aimx"
+            say "starting aimx.service (systemd)"
             ${SUDO} systemctl start aimx
             ;;
         openrc)
-            verbose "rc-service aimx start"
+            say "starting aimx.service (openrc)"
             ${SUDO} rc-service aimx start
             ;;
         unknown)
             say "warning: unrecognized init system; not starting aimx.service"
             ;;
     esac
+}
+
+# Detect a manually-launched `aimx serve` process running outside
+# systemd / OpenRC. Used on the upgrade path: when no init system
+# manages the unit but a stray `aimx serve` is still bound to the
+# binary on disk, the operator's swap will leave the OLD process
+# running on the new path. We never signal the process — just warn,
+# name the PID, and ask the operator to restart it manually.
+detect_manual_aimx_serve() {
+    _binary_path="$1"
+    if ! command -v pgrep >/dev/null 2>&1; then
+        return 0
+    fi
+    _pids="$(pgrep -f "${_binary_path} serve" 2>/dev/null || true)"
+    if [ -z "${_pids}" ]; then
+        return 0
+    fi
+    # If systemd or OpenRC manages the unit we trust their lifecycle
+    # hooks; only warn when neither claims the daemon.
+    if command -v systemctl >/dev/null 2>&1 \
+        && systemctl status aimx >/dev/null 2>&1; then
+        return 0
+    fi
+    if command -v rc-service >/dev/null 2>&1 \
+        && rc-service aimx status >/dev/null 2>&1; then
+        return 0
+    fi
+    for _pid in ${_pids}; do
+        say "warning: detected manually-launched 'aimx serve' (pid ${_pid}) outside systemd/OpenRC"
+    done
+    say "  the upgrade swaps the binary on disk but cannot restart this process — restart it manually."
 }
 
 # ---------------------------------------------------------------------------
@@ -719,6 +755,7 @@ main() {
     if [ "${_is_upgrade}" -eq 1 ]; then
         # Upgrade path: non-interactive by design. Previous setup is
         # preserved; just swap the binary and restart the service.
+        detect_manual_aimx_serve "${_install_path}"
         _init="$(stop_service || echo unknown)"
 
         _prev="${_install_path}.prev"
@@ -747,6 +784,19 @@ main() {
                 start_service "${_init}" || true
             fi
             err "upgrade failed at start step; service restored if possible"
+        fi
+
+        # Confirm the daemon actually came back up under systemd. On
+        # OpenRC `rc-service aimx start` already exits non-zero when
+        # the start fails, so the post-start check would just repeat
+        # work — keep the check systemd-only.
+        if [ "${_init}" = "systemd" ] && command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-active --quiet aimx 2>/dev/null; then
+                say "aimx.service is active"
+            else
+                say "warning: aimx.service did not reach active state"
+                say "  inspect with: journalctl -u aimx -n 20"
+            fi
         fi
 
         if [ -n "${_installed_tag}" ]; then

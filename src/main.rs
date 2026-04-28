@@ -45,6 +45,7 @@ mod uninstall;
 mod upgrade;
 mod user_resolver;
 mod version;
+mod version_handler;
 
 use clap::Parser;
 use cli::{AgentsCommand, Cli, Command};

@@ -355,8 +355,26 @@ pub fn run_upgrade(
     }
     report.record(UpgradeStep::WaitForReady);
 
+    // Confirmation banner: the daemon is back up on the new tag. The
+    // matching `install.sh` upgrade path prints `aimx.service is
+    // active`; this line is its `aimx upgrade` analogue.
+    println!("{}", restart_confirmation_line(&manifest.tag));
+
     report.outcome = Some(Outcome::Upgraded);
     Ok(report)
+}
+
+/// Format the one-line restart confirmation printed after the daemon
+/// passes [`SystemOps::wait_for_service_ready`]. Pulled out so unit
+/// tests can pin the message format without capturing stdout, and so
+/// the rollback path can simply not call it (asserted in the
+/// rollback-on-start-failure test).
+pub(crate) fn restart_confirmation_line(tag: &str) -> String {
+    format!(
+        "{} aimx serve restarted on {}",
+        term::success_mark(),
+        term::highlight(tag),
+    )
 }
 
 /// Derive the upgrade target path from `/proc/self/exe`. `AIMX_PREFIX`
@@ -687,6 +705,56 @@ mod tests {
 
     fn seed_install_path(sys: &mut MockSystemOps, install_path: PathBuf) {
         sys.override_aimx_binary_path = Some(install_path);
+    }
+
+    /// The restart-confirmation helper carries the new tag verbatim
+    /// and the `aimx serve restarted on` prefix. The Doctor /
+    /// install.sh story leans on the verb being "restarted" so
+    /// operators can grep for it in journalctl.
+    #[test]
+    fn restart_confirmation_line_carries_tag() {
+        let line = super::restart_confirmation_line("v1.2.3");
+        assert!(line.contains("aimx serve restarted on"), "{line}");
+        assert!(line.contains("v1.2.3"), "{line}");
+    }
+
+    /// The rollback-on-start-failure path must NOT pretend the daemon
+    /// restarted: `WaitForReady` was never recorded, so the
+    /// post-`WaitForReady` confirmation print is unreachable. Pin the
+    /// invariant by asserting the rollback report stops at
+    /// `StartService` rather than progressing through `WaitForReady`.
+    #[test]
+    fn rollback_path_does_not_record_wait_for_ready() {
+        let mut sys = MockSystemOps::default();
+        sys.start_service_fails = true;
+        let tmp = TempDir::new().unwrap();
+        let install = write_fake_binary(tmp.path());
+        seed_install_path(&mut sys, install);
+
+        let tag = "v9.9.9-norestart";
+        let target = current_target();
+        let asset = tarball_filename(tag, target);
+        let bytes = make_tarball(tag, target, b"new but service wont start");
+        let release = MockReleaseOps::default();
+        release.push_latest(Ok(make_manifest(tag, &[&asset])));
+        release.push_asset(Ok(bytes));
+
+        let err = run_upgrade(&args_default(), &release, &sys).unwrap_err();
+        // RolledBack OR RollbackFailed both hit the rollback branch
+        // before `WaitForReady`; either is acceptable here.
+        assert!(
+            matches!(
+                err,
+                UpgradeError::RolledBack {
+                    failed_step: UpgradeStep::StartService,
+                    ..
+                } | UpgradeError::RollbackFailed {
+                    original_step: UpgradeStep::StartService,
+                    ..
+                }
+            ),
+            "expected rollback at StartService, got {err:?}"
+        );
     }
 
     #[test]

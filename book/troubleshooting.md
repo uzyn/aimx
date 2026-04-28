@@ -106,6 +106,27 @@ aimx logs --follow
 
 `aimx doctor` prints a `Logs` pointer section at the bottom of its output that reminds you to run `aimx logs` (or `aimx logs --follow`) rather than dumping log lines itself.
 
+### Version drift between client and daemon
+
+`aimx doctor` renders two version lines under the Service section:
+
+```
+Client version:   v1.2.4 (a1b2c3d4)
+Server version:   v1.2.3 (9e8f7d6c)
+```
+
+The Client line reports the build of the `aimx` binary you just invoked. The Server line reports what the running `aimx serve` daemon advertises over the UDS `VERSION` verb. They drift apart when an upgrade replaces the on-disk binary but does not restart the long-running daemon — typically a `curl | sh` re-install on a host where systemd is present-but-inactive, or a manually-launched `aimx serve` outside the service manager.
+
+The lines are informational only — `aimx doctor` does not flag a finding and does not change its exit code. To resolve drift, restart the service so the daemon picks up the new binary:
+
+```bash
+sudo systemctl restart aimx
+# or, on OpenRC:
+sudo rc-service aimx restart
+```
+
+If the Server line renders `(daemon not running)` the daemon is offline; start it with `sudo systemctl start aimx`. A `(<reason>)` placeholder means the socket exists but the probe failed within the 500 ms budget — check `aimx logs` for the daemon-side error.
+
 **systemd (Ubuntu, Fedora, Debian, etc.)**
 
 The systemd unit declares `StandardOutput=journal` and `StandardError=journal`, so all daemon output is routed to journald. `aimx logs` shells out to `journalctl -u aimx -n <N>` (and `journalctl -f -u aimx` with `--follow`). You can also call journalctl directly:

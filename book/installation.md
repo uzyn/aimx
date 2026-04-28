@@ -144,9 +144,9 @@ sudo aimx upgrade
 3. Stops `aimx.service` (or the OpenRC equivalent).
 4. Renames the current `/usr/local/bin/aimx` to `/usr/local/bin/aimx.prev` and moves the new binary into place — atomic `rename(2)` so a crash cannot leave a half-written binary.
 5. Restarts the service.
-6. Prints `aimx v<old> → v<new>. Service restarted.`
+6. Waits for the daemon to come back up, then prints a `✓ aimx serve restarted on <tag>` confirmation line followed by `aimx v<old> → v<new>. Service restarted.`
 
-If any step after the stop fails, the rollback path restores `aimx.prev` and restarts the service. A `✗` line names the failed step.
+If any step after the stop fails, the rollback path restores `aimx.prev` and restarts the service. A `✗` line names the failed step. The restart-confirmation line is suppressed on the rollback path.
 
 Flags:
 

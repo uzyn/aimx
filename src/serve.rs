@@ -831,13 +831,16 @@ async fn handle_uds_connection_with_timeout(
     caller: crate::uds_authz::Caller,
     timeout: std::time::Duration,
 ) {
-    use send_protocol::{AckResponse, ErrCode, JsonAckResponse, ParseError, Request, SendResponse};
+    use send_protocol::{
+        AckResponse, ErrCode, JsonAckResponse, ParseError, Request, SendResponse, VersionResponse,
+    };
 
     #[allow(clippy::large_enum_variant)]
     enum Reply {
         Send(SendResponse),
         Ack(AckResponse),
         Json(JsonAckResponse),
+        Version(VersionResponse),
     }
 
     let (mut reader, mut writer) = stream.into_split();
@@ -876,6 +879,10 @@ async fn handle_uds_connection_with_timeout(
                     crate::hook_handler::handle_hook_delete(&state_ctx, &mb_ctx, &req, &caller)
                         .await,
                 ),
+                false,
+            ),
+            Ok(Ok(Request::Version)) => (
+                Reply::Version(crate::version_handler::current_version_response()),
                 false,
             ),
             Ok(Err(ParseError::ClosedBeforeRequest)) => {
@@ -932,6 +939,7 @@ async fn handle_uds_connection_with_timeout(
         Reply::Send(r) => send_protocol::write_response(&mut writer, &r).await,
         Reply::Ack(r) => send_protocol::write_ack_response(&mut writer, &r).await,
         Reply::Json(r) => send_protocol::write_json_ack_response(&mut writer, &r).await,
+        Reply::Version(r) => send_protocol::write_version_response(&mut writer, &r).await,
     };
     if let Err(e) = write_result {
         eprintln!("[send] failed to write response: {e}");
