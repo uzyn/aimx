@@ -22,6 +22,16 @@ AIMX requires direct SMTP access on port 25. Not all cloud providers allow this.
 
 Providers that **block** port 25 permanently (not compatible): DigitalOcean, AWS EC2, Azure VMs, GCP.
 
+## Pre-install: check port 25
+
+Not sure your VPS allows SMTP traffic on port 25? Run the connectivity check before committing to install:
+
+```bash
+curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only
+```
+
+This runs the same outbound + inbound port-25 checks as `aimx portcheck`, then exits without installing anything. Run it as `sudo` for the inbound check (otherwise inbound is reported as `[skip]` and only outbound is verified). Exits `0` on pass-or-skip, `1` on fail, `2` if a required tool (curl, python3/nc/bash) is missing. Use `--verify-host <URL>` (or `AIMX_VERIFY_HOST`) to point at a self-hosted verifier instead of the default `https://check.aimx.email`.
+
 ## Install
 
 ```bash

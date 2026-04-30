@@ -297,6 +297,14 @@ sudo chmod 600 /etc/aimx/dkim/private.key
 
 If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx serve` configuration rather than firewall/port access. Run `sudo systemctl status aimx` to check.
 
+Before installing AIMX, you can run the same connectivity probe from the install script (no install side effects):
+
+```bash
+curl -fsSL https://aimx.email/install.sh | sudo sh -s -- --port-check-only
+```
+
+See [Getting Started: Pre-install check](getting-started.md#pre-install-check-port-25).
+
 ## Useful commands reference
 
 | Command | Purpose |

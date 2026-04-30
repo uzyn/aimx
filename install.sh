@@ -734,7 +734,10 @@ while time.time() < deadline:
     try:
         c, _ = s.accept()
     except socket.timeout:
-        break
+        # Idle window expired but the deadline still bounds the loop.
+        # Continue so a second probe attempt within the deadline still
+        # gets served (mirrors src/portcheck.rs:73-82).
+        continue
     except Exception:
         break
     try:
@@ -805,8 +808,11 @@ port_check_inbound() {
     _listener_pid=""
 
     if [ "${_occ}" = "occupied" ]; then
-        # Existing daemon will reply to /probe.
-        :
+        # Existing daemon will reply to /probe. Warn the operator —
+        # /probe can't tell aimx apart from Postfix/Sendmail/Exim, so a
+        # green [ok] here is only meaningful if the holder is aimx.
+        # Mirrors `aimx portcheck`'s Port25Status::OtherProcess handling.
+        ui_warn "port 25 is held by another process; verify it's aimx before running setup"
     else
         # Free or unknown: spawn a temp Python listener if available.
         if ! port_check_have_python3; then
@@ -817,6 +823,17 @@ port_check_inbound() {
         _listener_pid="$(port_check_listener_start)"
         # Give the listener a moment to bind before /probe fires.
         sleep 1
+        # Liveness probe: if the python child died (bind() failed —
+        # race / EACCES / port stolen), surface that as a distinct
+        # error rather than letting /probe report a generic
+        # "unreachable". Mirrors the synchronous bind+error in
+        # src/portcheck.rs:44-53.
+        if ! kill -0 "${_listener_pid}" 2>/dev/null; then
+            _PORT_CHECK_INBOUND_STATE="fail"
+            _PORT_CHECK_INBOUND_MSG="failed to spawn temp listener on :25 (bind failed; another binder won the race?)"
+            _listener_pid=""
+            return 0
+        fi
     fi
 
     _body="$(port_check_probe)"
@@ -842,7 +859,13 @@ port_check_inbound() {
 port_check_main() {
     print_port_check_banner
 
-    need curl
+    # Required tool: curl. Exit 2 (missing required tool) per the
+    # documented contract — `need` exits 1, which is wrong here.
+    if ! command -v curl >/dev/null 2>&1; then
+        ui_error "required command not found: curl"
+        ui_info "  install curl and re-run"
+        return 2
+    fi
 
     _host="$(derive_smtp_host "${VERIFY_HOST}")"
     if [ -z "${_host}" ]; then
@@ -1026,15 +1049,15 @@ main() {
         PREFIX="${DEFAULT_PREFIX}"
     fi
 
-    # Resolve + validate verify-host (used by --port-check-only). Done
-    # before the short-circuit so a bad value rejects fast either way.
-    resolve_verify_host
-    validate_verify_host
-
     # --port-check-only short-circuit. Branches here, BEFORE any
     # privileged or networked install code (no ensure_sudo, no GitHub
-    # API call, no filesystem writes).
+    # API call, no filesystem writes). The verify-host env var is
+    # specific to the port-check path; gate resolve+validate behind the
+    # flag so a stray AIMX_VERIFY_HOST in the operator's shell doesn't
+    # block a regular install.
     if [ "${PORT_CHECK_ONLY}" = "1" ]; then
+        resolve_verify_host
+        validate_verify_host
         port_check_main
         exit $?
     fi
