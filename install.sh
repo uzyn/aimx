@@ -118,6 +118,15 @@ print_install_banner() {
     printf '\n' >&2
 }
 
+# Port-check banner. Replaces the install banner when --port-check-only
+# is set, so it is visually obvious nothing is installing.
+print_port_check_banner() {
+    printf '\n' >&2
+    printf '%s\n' "$(_ui_paint '1;35' 'aimx port 25 connectivity check')" >&2
+    printf '%s\n' "$(_ui_paint 2 '  no install will be performed')" >&2
+    printf '\n' >&2
+}
+
 # download <url> <path>
 #   Prefers curl; falls back to wget. Refuses non-HTTPS URLs. Honors
 #   GITHUB_TOKEN for api.github.com calls so rate-limited CI runs succeed.
@@ -177,12 +186,19 @@ FLAGS:
         --to <DIR>           Install binary into DIR (default /usr/local/bin);
                              overrides AIMX_PREFIX env var
         --force              Re-install even if target version already present
+        --port-check-only    Run port-25 outbound + inbound connectivity checks
+                             then exit; no install is performed
+        --verify-host <URL>  Verifier base URL for the inbound /probe call
+                             (default https://check.aimx.email); overrides
+                             AIMX_VERIFY_HOST env var
 
 ENVIRONMENT:
     AIMX_VERSION             Release tag to install (e.g. 1.2.3)
     AIMX_PREFIX              Install directory (default /usr/local/bin)
     AIMX_DRY_RUN=1           Print every step without downloading or installing
     AIMX_VERBOSE=1           Trace HTTP requests and filesystem actions
+    AIMX_VERIFY_HOST         Verifier base URL for --port-check-only (default
+                             https://check.aimx.email)
     GITHUB_TOKEN             Token for rate-limited GitHub API calls
 
 EXAMPLES:
@@ -194,6 +210,9 @@ EXAMPLES:
 
     # Dry-run: see what would happen without installing
     curl -fsSL https://aimx.email/install.sh | AIMX_DRY_RUN=1 sh
+
+    # Port-25 connectivity check only (no install)
+    curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only
 
 Trust anchor is HTTPS on the GitHub Releases domain. No signature or
 checksum verification in this script; skeptical operators can verify
@@ -543,6 +562,352 @@ detect_manual_aimx_serve() {
 }
 
 # ---------------------------------------------------------------------------
+# Port-25 connectivity check (--port-check-only)
+# ---------------------------------------------------------------------------
+#
+# Mirrors `aimx portcheck` semantics for evaluators who want to verify a VPS
+# can reach SMTP before installing. Outbound: TCP-connect to <host>:25,
+# expect 220 banner, send EHLO, accept on 250 SP, send QUIT. Inbound: GET
+# ${VERIFY_HOST}/probe; loose substring match for "reachable":true.
+
+# Strip scheme + path/port from a verify-host URL → bare hostname.
+derive_smtp_host() {
+    _vh="$1"
+    case "${_vh}" in
+        https://*) _vh="${_vh#https://}" ;;
+        http://*) _vh="${_vh#http://}" ;;
+    esac
+    # Drop trailing path.
+    _vh="${_vh%%/*}"
+    # Drop trailing :port (IPv6 in brackets is out of scope per plan).
+    _vh="${_vh%%:*}"
+    printf '%s' "${_vh}"
+}
+
+port_check_have_python3() {
+    command -v python3 >/dev/null 2>&1
+}
+
+port_check_have_nc() {
+    command -v nc >/dev/null 2>&1
+}
+
+port_check_have_bash() {
+    command -v bash >/dev/null 2>&1
+}
+
+# Outbound EHLO via python3. Returns 0 on success, 1 on protocol fail.
+port_check_outbound_python() {
+    _h="$1"
+    _p="$2"
+    python3 - "${_h}" "${_p}" <<'PYEOF'
+import socket, sys
+host, port = sys.argv[1], int(sys.argv[2])
+try:
+    s = socket.create_connection((host, port), timeout=10)
+except Exception:
+    sys.exit(1)
+s.settimeout(5)
+try:
+    f = s.makefile('rwb', buffering=0)
+    banner = f.readline().decode('latin-1', 'replace')
+    if not banner.startswith('220'):
+        sys.exit(1)
+    f.write(b'EHLO aimx\r\n'); f.flush()
+    while True:
+        line = f.readline().decode('latin-1', 'replace')
+        if not line:
+            sys.exit(1)
+        if line.startswith('250 '):
+            break
+        if not line.startswith('250-'):
+            sys.exit(1)
+    try:
+        f.write(b'QUIT\r\n'); f.flush()
+    except Exception:
+        pass
+finally:
+    try: s.close()
+    except Exception: pass
+sys.exit(0)
+PYEOF
+}
+
+# Outbound EHLO via nc. Stream-based; tolerates BSD/GNU/ncat quirks by
+# avoiding -q / -N / -c entirely.
+port_check_outbound_nc() {
+    _h="$1"
+    _p="$2"
+    { printf 'EHLO aimx\r\n'; sleep 1; printf 'QUIT\r\n'; sleep 1; } \
+        | nc -w 5 "${_h}" "${_p}" 2>/dev/null \
+        | awk 'BEGIN{seen=0; ok=0}
+               /^220 /{seen=1}
+               /^220-/{seen=1}
+               /^250 /{if(seen)ok=1}
+               END{exit ok?0:1}'
+}
+
+# Outbound EHLO via bash /dev/tcp. Last resort; uses bash -c so the rest of
+# the script stays POSIX sh.
+port_check_outbound_bash() {
+    _h="$1"
+    _p="$2"
+    bash -c '
+exec 3<>"/dev/tcp/$1/$2" || exit 1
+read -r -t 5 banner <&3 || exit 1
+case "$banner" in 220*) ;; *) exit 1 ;; esac
+printf "EHLO aimx\r\n" >&3
+ok=0
+while read -r -t 5 line <&3; do
+  case "$line" in
+    250\ *) ok=1; break ;;
+    250-*) ;;
+    *) exit 1 ;;
+  esac
+done
+[ "$ok" = "1" ] || exit 1
+printf "QUIT\r\n" >&3 2>/dev/null || true
+exit 0
+' _ "${_h}" "${_p}"
+}
+
+# Run outbound check via the first available tool. Sets _PORT_CHECK_NO_TOOL=1
+# when no usable tool is on PATH (caller maps that to exit 2).
+_PORT_CHECK_NO_TOOL=0
+port_check_outbound() {
+    _h="$1"
+    _p="${2:-25}"
+    _PORT_CHECK_NO_TOOL=0
+    if port_check_have_python3; then
+        port_check_outbound_python "${_h}" "${_p}"
+        return $?
+    fi
+    if port_check_have_nc; then
+        port_check_outbound_nc "${_h}" "${_p}"
+        return $?
+    fi
+    if port_check_have_bash; then
+        port_check_outbound_bash "${_h}" "${_p}"
+        return $?
+    fi
+    _PORT_CHECK_NO_TOOL=1
+    return 1
+}
+
+# Detect whether port 25 is already bound on this host.
+# Echoes "free" | "occupied" | "unknown".
+port_check_detect_occupancy() {
+    if command -v ss >/dev/null 2>&1; then
+        if ss -tln 2>/dev/null | awk '{print $4}' | grep -E ':25$' >/dev/null 2>&1; then
+            printf 'occupied'
+        else
+            printf 'free'
+        fi
+        return 0
+    fi
+    if command -v netstat >/dev/null 2>&1; then
+        if netstat -tln 2>/dev/null | awk '{print $4}' | grep -E ':25$' >/dev/null 2>&1; then
+            printf 'occupied'
+        else
+            printf 'free'
+        fi
+        return 0
+    fi
+    printf 'unknown'
+}
+
+# Spawn a temp Python SMTP listener on :25. Echoes the PID on stdout so the
+# caller can kill it after /probe returns. Mirrors src/portcheck.rs:69-129.
+port_check_listener_start() {
+    python3 - <<'PYEOF' &
+import socket, sys, time
+s = socket.socket()
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+try:
+    s.bind(('0.0.0.0', 25))
+except Exception:
+    sys.exit(1)
+s.listen(8)
+deadline = time.time() + 30
+while time.time() < deadline:
+    s.settimeout(max(0.5, deadline - time.time()))
+    try:
+        c, _ = s.accept()
+    except socket.timeout:
+        break
+    except Exception:
+        break
+    try:
+        c.settimeout(10)
+        c.sendall(b'220 chkport25 ESMTP\r\n')
+        while True:
+            data = c.recv(1024)
+            if not data:
+                break
+            up = data.upper()
+            if up.startswith(b'EHLO') or up.startswith(b'HELO'):
+                c.sendall(b'250 chkport25\r\n')
+            elif up.startswith(b'QUIT'):
+                c.sendall(b'221 Bye\r\n'); break
+            else:
+                c.sendall(b'502 Not implemented\r\n')
+    except Exception:
+        pass
+    finally:
+        try: c.close()
+        except Exception: pass
+PYEOF
+    printf '%s' "$!"
+}
+
+port_check_listener_stop() {
+    _pid="$1"
+    if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
+        kill "${_pid}" 2>/dev/null || true
+        wait "${_pid}" 2>/dev/null || true
+    fi
+}
+
+# Run the inbound /probe call against ${VERIFY_HOST}. Honors http:// for
+# self-hosted dev verifiers (matches validate_verify_host in src/setup.rs).
+# Echoes the response body on stdout; caller parses it.
+port_check_probe() {
+    _url="${VERIFY_HOST}/probe"
+    case "${VERIFY_HOST}" in
+        https://*)
+            curl --proto '=https' --tlsv1.2 -fsS -m 60 "${_url}" 2>/dev/null || true
+            ;;
+        *)
+            curl -fsS -m 60 "${_url}" 2>/dev/null || true
+            ;;
+    esac
+}
+
+# Orchestrate the inbound check. Sets _PORT_CHECK_INBOUND_STATE to one of:
+#   pass | fail | skip
+# When pass, _PORT_CHECK_INBOUND_IP holds the verifier-detected IP if any.
+_PORT_CHECK_INBOUND_STATE=""
+_PORT_CHECK_INBOUND_IP=""
+_PORT_CHECK_INBOUND_MSG=""
+port_check_inbound() {
+    _PORT_CHECK_INBOUND_STATE=""
+    _PORT_CHECK_INBOUND_IP=""
+    _PORT_CHECK_INBOUND_MSG=""
+
+    _euid="$(id -u 2>/dev/null || echo 0)"
+    if [ "${_euid}" -ne 0 ]; then
+        _PORT_CHECK_INBOUND_STATE="skip"
+        _PORT_CHECK_INBOUND_MSG="inbound check requires root (re-run with sudo)"
+        return 0
+    fi
+
+    _occ="$(port_check_detect_occupancy)"
+    _listener_pid=""
+
+    if [ "${_occ}" = "occupied" ]; then
+        # Existing daemon will reply to /probe.
+        :
+    else
+        # Free or unknown: spawn a temp Python listener if available.
+        if ! port_check_have_python3; then
+            _PORT_CHECK_INBOUND_STATE="skip"
+            _PORT_CHECK_INBOUND_MSG="install python3 or run 'aimx portcheck' after install"
+            return 0
+        fi
+        _listener_pid="$(port_check_listener_start)"
+        # Give the listener a moment to bind before /probe fires.
+        sleep 1
+    fi
+
+    _body="$(port_check_probe)"
+
+    if [ -n "${_listener_pid}" ]; then
+        port_check_listener_stop "${_listener_pid}"
+    fi
+
+    case "${_body}" in
+        *'"reachable":true'* | *'"reachable": true'*)
+            _PORT_CHECK_INBOUND_STATE="pass"
+            _PORT_CHECK_INBOUND_IP="$(printf '%s' "${_body}" \
+                | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+            ;;
+        *)
+            _PORT_CHECK_INBOUND_STATE="fail"
+            _PORT_CHECK_INBOUND_MSG="verifier reported port 25 unreachable from the public internet"
+            ;;
+    esac
+}
+
+# Main entry for --port-check-only. Returns the right exit code.
+port_check_main() {
+    print_port_check_banner
+
+    need curl
+
+    _host="$(derive_smtp_host "${VERIFY_HOST}")"
+    if [ -z "${_host}" ]; then
+        ui_error "could not derive SMTP host from verify-host: ${VERIFY_HOST}"
+        return 2
+    fi
+
+    # Outbound.
+    printf '  Outbound port 25 ... ' >&2
+    _ob_rc=0
+    port_check_outbound "${_host}" 25 || _ob_rc=$?
+    if [ "${_PORT_CHECK_NO_TOOL}" = "1" ]; then
+        printf '%s\n' "$(_ui_paint 31 '[fail]')" >&2
+        ui_error "no usable outbound tool (need python3, nc, or bash)"
+        ui_info "  install python3 or nc and re-run"
+        return 2
+    fi
+    if [ "${_ob_rc}" -eq 0 ]; then
+        printf '%s\n' "$(_ui_paint 32 '[ok]')" >&2
+        _outbound_ok=1
+    else
+        printf '%s\n' "$(_ui_paint 31 '[fail]')" >&2
+        printf '    %s\n' "could not complete EHLO handshake to ${_host}:25" >&2
+        _outbound_ok=0
+    fi
+
+    # Inbound.
+    printf '  Inbound port 25 .... ' >&2
+    port_check_inbound
+    case "${_PORT_CHECK_INBOUND_STATE}" in
+        pass)
+            if [ -n "${_PORT_CHECK_INBOUND_IP}" ]; then
+                printf '%s   detected ip: %s\n' "$(_ui_paint 32 '[ok]')" "${_PORT_CHECK_INBOUND_IP}" >&2
+            else
+                printf '%s\n' "$(_ui_paint 32 '[ok]')" >&2
+            fi
+            _inbound_ok=1
+            ;;
+        skip)
+            printf '%s   %s\n' "$(_ui_paint 33 '[skip]')" "${_PORT_CHECK_INBOUND_MSG}" >&2
+            _inbound_ok=skip
+            ;;
+        *)
+            printf '%s\n' "$(_ui_paint 31 '[fail]')" >&2
+            if [ -n "${_PORT_CHECK_INBOUND_MSG}" ]; then
+                printf '    %s\n' "${_PORT_CHECK_INBOUND_MSG}" >&2
+            fi
+            _inbound_ok=0
+            ;;
+    esac
+
+    printf '\n' >&2
+    if [ "${_outbound_ok}" -eq 1 ] && [ "${_inbound_ok}" = "1" ]; then
+        ui_success "Port 25 reachable. Run 'curl -fsSL https://aimx.email/install.sh | sh' to install."
+        return 0
+    fi
+    if [ "${_outbound_ok}" -eq 1 ] && [ "${_inbound_ok}" = "skip" ]; then
+        ui_info "Outbound OK; inbound check skipped."
+        return 0
+    fi
+    ui_error "Port 25 connectivity check failed."
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Install / upgrade
 # ---------------------------------------------------------------------------
 
@@ -551,6 +916,13 @@ TARGET=""
 PREFIX=""
 FORCE=0
 DRY_RUN="${AIMX_DRY_RUN:-0}"
+
+# Port-check mode: when set, run the same outbound + inbound port-25 checks
+# as `aimx portcheck` then exit. No install side effects. Resolved against
+# AIMX_VERIFY_HOST and DEFAULT_VERIFY_HOST in main() / resolve_verify_host.
+PORT_CHECK_ONLY=0
+VERIFY_HOST=""
+DEFAULT_VERIFY_HOST="https://check.aimx.email"
 
 parse_args() {
     while [ "$#" -gt 0 ]; do
@@ -590,11 +962,46 @@ parse_args() {
                 FORCE=1
                 shift
                 ;;
+            --port-check-only)
+                PORT_CHECK_ONLY=1
+                shift
+                ;;
+            --verify-host)
+                [ "$#" -ge 2 ] || err "--verify-host requires a value"
+                VERIFY_HOST="$2"
+                shift 2
+                ;;
+            --verify-host=*)
+                VERIFY_HOST="${1#--verify-host=}"
+                shift
+                ;;
             *)
                 err "unknown argument: $1 (try --help)"
                 ;;
         esac
     done
+}
+
+# resolve_verify_host — apply env-var → default fallback for VERIFY_HOST.
+# Flag (set by parse_args) wins, AIMX_VERIFY_HOST next, DEFAULT_VERIFY_HOST last.
+resolve_verify_host() {
+    if [ -z "${VERIFY_HOST}" ] && [ -n "${AIMX_VERIFY_HOST:-}" ]; then
+        VERIFY_HOST="${AIMX_VERIFY_HOST}"
+    fi
+    if [ -z "${VERIFY_HOST}" ]; then
+        VERIFY_HOST="${DEFAULT_VERIFY_HOST}"
+    fi
+}
+
+# validate_verify_host — reject empty / non-http(s) URLs.
+validate_verify_host() {
+    if [ -z "${VERIFY_HOST}" ]; then
+        err "verify-host cannot be empty"
+    fi
+    case "${VERIFY_HOST}" in
+        https://* | http://*) : ;;
+        *) err "verify-host must start with http:// or https:// (got: ${VERIFY_HOST})" ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -617,6 +1024,19 @@ main() {
     fi
     if [ -z "${PREFIX}" ]; then
         PREFIX="${DEFAULT_PREFIX}"
+    fi
+
+    # Resolve + validate verify-host (used by --port-check-only). Done
+    # before the short-circuit so a bad value rejects fast either way.
+    resolve_verify_host
+    validate_verify_host
+
+    # --port-check-only short-circuit. Branches here, BEFORE any
+    # privileged or networked install code (no ensure_sudo, no GitHub
+    # API call, no filesystem writes).
+    if [ "${PORT_CHECK_ONLY}" = "1" ]; then
+        port_check_main
+        exit $?
     fi
 
     # Thin install banner. Full six-step wizard checklist is the binary's job.
