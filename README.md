@@ -1,7 +1,7 @@
 # AIMX — AI Mail Exchange
 
 > [!CAUTION]
-> **Under heavy development.** This is a pre-v1 alpha release. Expect breaking changes and unstable operations in v0 releases.
+> **Under heavy development.** This is a prerelease software. Expect breaking changes and unstable operations.
 
 <p align="center">
     <picture>
