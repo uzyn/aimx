@@ -1,7 +1,7 @@
-DIST     := dist
-PIGEON   := ../etc/aimx-pigeon.svg
-INSTALL  := ../install.sh
-PRTCHECK := ../prtcheck.sh
+DIST      := dist
+PIGEON    := ../etc/aimx-pigeon.svg
+INSTALL   := ../install.sh
+PORTCHECK := ../portcheck.sh
 
 .PHONY: build serve clean
 
@@ -18,7 +18,7 @@ build:
 	cp $(INSTALL) $(DIST)/install.sh
 	# Shorter alias for `install.sh --port-check-only` — same trust
 	# anchor, fetches install.sh from the same origin and execs it.
-	cp $(PRTCHECK) $(DIST)/prtcheck.sh
+	cp $(PORTCHECK) $(DIST)/portcheck.sh
 
 serve: build
 	@echo ""

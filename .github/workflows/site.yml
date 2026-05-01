@@ -8,7 +8,7 @@ on:
       - 'book/**'
       - 'etc/aimx-pigeon.svg'
       - 'install.sh'
-      - 'prtcheck.sh'
+      - 'portcheck.sh'
       - '.github/workflows/site.yml'
   pull_request:
     paths:
@@ -16,7 +16,7 @@ on:
       - 'book/**'
       - 'etc/aimx-pigeon.svg'
       - 'install.sh'
-      - 'prtcheck.sh'
+      - 'portcheck.sh'
       - '.github/workflows/site.yml'
   workflow_dispatch:
 
@@ -48,14 +48,14 @@ jobs:
           test -f website/dist/book/security.html
           test -f website/dist/assets/aimx-pigeon.svg
           test -f website/dist/install.sh
-          test -f website/dist/prtcheck.sh
-          # Verify install.sh and prtcheck.sh are syntactically valid
+          test -f website/dist/portcheck.sh
+          # Verify install.sh and portcheck.sh are syntactically valid
           # POSIX sh before publishing to aimx.email — site build is
           # the last gate.
           sh -n website/dist/install.sh
-          sh -n website/dist/prtcheck.sh
+          sh -n website/dist/portcheck.sh
           head -1 website/dist/install.sh | grep -q '^#!/bin/sh'
-          head -1 website/dist/prtcheck.sh | grep -q '^#!/bin/sh'
+          head -1 website/dist/portcheck.sh | grep -q '^#!/bin/sh'
 
       - name: Add CNAME for custom domain
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

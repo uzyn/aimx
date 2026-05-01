@@ -37,10 +37,10 @@ sudo aimx portcheck
 If you haven't installed AIMX yet, the same check is available pre-install:
 
 ```bash
-curl -fsSL https://aimx.email/prtcheck.sh | sudo sh
+curl -fsSL https://aimx.email/portcheck.sh | sudo sh
 ```
 
-`prtcheck.sh` is a thin alias for `install.sh --port-check-only`; the longer form (`curl -fsSL https://aimx.email/install.sh | sudo sh -s -- --port-check-only`) works too. Either exits without installing. See [Getting Started: Pre-install](getting-started.md#pre-install-check-port-25).
+`portcheck.sh` is a thin alias for `install.sh --port-check-only`; the longer form (`curl -fsSL https://aimx.email/install.sh | sudo sh -s -- --port-check-only`) works too. Either exits without installing. See [Getting Started: Pre-install](getting-started.md#pre-install-check-port-25).
 
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
