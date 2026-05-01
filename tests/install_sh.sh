@@ -843,6 +843,166 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# 7f-bis. Listener spawn must NOT block on $() capture pipe
+# ---------------------------------------------------------------------------
+#
+# `$(port_check_listener_start)` invokes the function in a subshell whose
+# stdout is a capture pipe. The backgrounded python child inherits that
+# pipe; if python's stdout isn't redirected, python keeps the pipe write
+# end open for its full ~30s lifetime, the parent's read on $() blocks,
+# and the kill -0 liveness check ALWAYS reports "dead". The fix is to
+# redirect python's stdout to /dev/null in the listener-start helper.
+# This is purely a source-grep — runtime behavior was verified manually.
+
+echo "# listener stdout redirect"
+
+# Find port_check_listener_start body.
+_pl_start_body="$(awk '
+    $0 ~ /^port_check_listener_start\(\)/ {inside=1}
+    inside {print}
+    inside && /^}/ {inside=0; exit}
+' "${INSTALL_SH}")"
+
+case "${_pl_start_body}" in
+    *'python3 - >/dev/null 2>'*)
+        PASS=$((PASS + 1))
+        printf '  ok  listener python3 stdout redirected to /dev/null (avoids $() capture-pipe block)\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} listener-stdout-redirect"
+        printf '  FAIL listener python3 spawn missing >/dev/null redirect; $() will block on capture pipe\n' >&2
+        ;;
+esac
+
+case "${_pl_start_body}" in
+    *'_PORT_CHECK_LISTENER_STDERR'*)
+        PASS=$((PASS + 1))
+        printf '  ok  listener python3 stderr captured for diagnostics\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} listener-stderr-capture"
+        printf '  FAIL listener python3 spawn does not capture stderr; bind errors are silent\n' >&2
+        ;;
+esac
+
+# Bind error message in port_check_inbound must include the captured
+# stderr (head -n 1 of _PORT_CHECK_LISTENER_STDERR) so operators see
+# the actual cause (e.g. "Address already in use") instead of a
+# generic "another binder won the race?".
+_pi_body="$(awk '
+    $0 ~ /^port_check_inbound\(\)/ {inside=1}
+    inside {print}
+    inside && /^}/ {inside=0; exit}
+' "${INSTALL_SH}")"
+
+case "${_pi_body}" in
+    *'head -n 1 "${_PORT_CHECK_LISTENER_STDERR}"'*)
+        PASS=$((PASS + 1))
+        printf '  ok  bind-failed message surfaces python stderr\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} bind-error-surfacing"
+        printf '  FAIL bind-failed message does not surface python stderr (operators see misleading "another binder won the race?")\n' >&2
+        ;;
+esac
+
+# Liveness check + cleanup kill must use ${_PORT_CHECK_SUDO} so a non-root
+# caller can signal a root-owned (sudo-spawned) python child.
+case "${_pi_body}" in
+    *'${_PORT_CHECK_SUDO} kill -0'*)
+        PASS=$((PASS + 1))
+        printf '  ok  kill -0 liveness check uses ${_PORT_CHECK_SUDO} prefix\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} kill0-sudo-prefix"
+        printf '  FAIL kill -0 liveness check missing ${_PORT_CHECK_SUDO} prefix; non-root cannot signal root-owned listener\n' >&2
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 7f-ter. Inbound privilege escalation via sudo
+# ---------------------------------------------------------------------------
+#
+# Non-root operators running `curl ... | sh` should still be able to run
+# the inbound check when sudo is available. port_check_ensure_inbound_privilege
+# mirrors install.sh's `ensure_sudo` flow: tries `sudo -v`, re-points stdin
+# to /dev/tty when stdin is the curl pipe, and sets _PORT_CHECK_SUDO="sudo"
+# so the listener spawn / kill / kill-0 carry the prefix. Returns non-zero
+# (soft skip) when sudo is unavailable or refused — never `exit`s.
+
+echo "# inbound privilege helper"
+
+# The function exists.
+if grep -q '^port_check_ensure_inbound_privilege()' "${INSTALL_SH}"; then
+    PASS=$((PASS + 1))
+    printf '  ok  port_check_ensure_inbound_privilege defined\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} sudo-helper-missing"
+    printf '  FAIL port_check_ensure_inbound_privilege missing\n' >&2
+fi
+
+_pe_body="$(awk '
+    $0 ~ /^port_check_ensure_inbound_privilege\(\)/ {inside=1}
+    inside {print}
+    inside && /^}/ {inside=0; exit}
+' "${INSTALL_SH}")"
+
+case "${_pe_body}" in
+    *'sudo -v'*)
+        PASS=$((PASS + 1))
+        printf '  ok  inbound privilege helper uses `sudo -v` to validate creds\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} sudo-helper-no-validate"
+        printf '  FAIL inbound privilege helper missing `sudo -v` cred validation\n' >&2
+        ;;
+esac
+
+case "${_pe_body}" in
+    *'/dev/tty'*)
+        PASS=$((PASS + 1))
+        printf '  ok  inbound privilege helper handles `curl | sh` (stdin-is-pipe)\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} sudo-helper-no-tty"
+        printf '  FAIL inbound privilege helper missing /dev/tty fallback for curl-pipe scenarios\n' >&2
+        ;;
+esac
+
+# Helper must NEVER call exit — port-check failure is a soft skip.
+case "${_pe_body}" in
+    *'exit '*)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} sudo-helper-no-exit"
+        printf '  FAIL inbound privilege helper calls exit; should `return` so the outbound result is preserved\n' >&2
+        ;;
+    *)
+        PASS=$((PASS + 1))
+        printf '  ok  inbound privilege helper never calls exit (soft skip on failure)\n'
+        ;;
+esac
+
+# Inbound orchestrator must use the helper instead of the bare euid check.
+case "${_pi_body}" in
+    *'port_check_ensure_inbound_privilege'*)
+        PASS=$((PASS + 1))
+        printf '  ok  port_check_inbound delegates privilege check to the helper\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} inbound-uses-helper"
+        printf '  FAIL port_check_inbound still hard-skips on euid != 0; should call port_check_ensure_inbound_privilege\n' >&2
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # 7g. Occupancy warning (review #4)
 # ---------------------------------------------------------------------------
 #

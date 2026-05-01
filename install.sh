@@ -716,16 +716,82 @@ port_check_detect_occupancy() {
     printf 'unknown'
 }
 
+# File where port_check_listener_start writes the python child's stderr.
+# Set lazily on first use so non-port-check codepaths don't allocate it.
+_PORT_CHECK_LISTENER_STDERR=""
+
+# Privilege prefix the listener spawn / kill / kill-0 use. Set by
+# port_check_ensure_inbound_privilege:
+#   - already root (euid 0)              → ""    (run directly)
+#   - non-root + sudo + creds OK         → "sudo"
+#   - non-root + no sudo / creds refused → still "" (caller skips inbound)
+_PORT_CHECK_SUDO=""
+
+# Validate that the inbound check has the privilege it needs to bind :25.
+# Returns 0 when we can proceed (root, or sudo creds are cached/granted),
+# 1 when we cannot (non-root + no sudo, or sudo prompt failed). Mirrors
+# install.sh's `ensure_sudo` flow but never `exit`s — port-check failure
+# is a soft skip, not a fatal install error.
+port_check_ensure_inbound_privilege() {
+    _PORT_CHECK_SUDO=""
+    _euid="$(id -u 2>/dev/null || echo 0)"
+    if [ "${_euid}" -eq 0 ]; then
+        return 0
+    fi
+    if ! command -v sudo >/dev/null 2>&1; then
+        return 1
+    fi
+    if ! sudo -n true >/dev/null 2>&1; then
+        ui_info "Inbound check needs root to bind port 25; enter your password"
+        _sudo_rc=0
+        # Same TTY logic as ensure_sudo: only re-point stdin at /dev/tty
+        # when the script's stdin is NOT already a terminal. This matters
+        # for `curl ... | sh` where stdin is the curl pipe.
+        if [ -t 0 ]; then
+            sudo -v || _sudo_rc=$?
+        elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+            (sudo -v </dev/tty) || _sudo_rc=$?
+        else
+            sudo -v || _sudo_rc=$?
+        fi
+        if [ "${_sudo_rc}" -ne 0 ]; then
+            return 1
+        fi
+    fi
+    _PORT_CHECK_SUDO="sudo"
+    return 0
+}
+
 # Spawn a temp Python SMTP listener on :25. Echoes the PID on stdout so the
 # caller can kill it after /probe returns. Mirrors src/portcheck.rs:69-129.
+#
+# Two non-obvious things matter here:
+#
+#   1. Python's stdout MUST be redirected to /dev/null (not the default
+#      inherited stdout). When the function is called via `$(...)` the
+#      subshell's stdout is a capture pipe; the backgrounded python
+#      child inherits it and holds the write end open for its full
+#      ~30s lifetime, so the parent's read on `$()` blocks until python
+#      exits. The result before this redirect: kill -0 ALWAYS reported
+#      "dead" because $() didn't return until python had already exited.
+#
+#   2. Python's stderr is captured to a tmpfile so port_check_inbound can
+#      surface the actual bind error (e.g. "Address already in use") on
+#      failure instead of a generic "another binder won the race?".
 port_check_listener_start() {
-    python3 - <<'PYEOF' &
+    if [ -z "${_PORT_CHECK_LISTENER_STDERR}" ]; then
+        _PORT_CHECK_LISTENER_STDERR="$(mktemp -t aimx-portcheck-listener.XXXXXX 2>/dev/null \
+            || echo "/tmp/aimx-portcheck-listener.$$")"
+    fi
+    : > "${_PORT_CHECK_LISTENER_STDERR}" 2>/dev/null || true
+    ${_PORT_CHECK_SUDO} python3 - >/dev/null 2>"${_PORT_CHECK_LISTENER_STDERR}" <<'PYEOF' &
 import socket, sys, time
 s = socket.socket()
 s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 try:
     s.bind(('0.0.0.0', 25))
-except Exception:
+except Exception as e:
+    print("listener bind error:", e, file=sys.stderr)
     sys.exit(1)
 s.listen(8)
 deadline = time.time() + 30
@@ -763,11 +829,20 @@ PYEOF
     printf '%s' "$!"
 }
 
+# kill-0 + kill use ${_PORT_CHECK_SUDO} so the non-root caller can signal
+# the root-owned python child.
 port_check_listener_stop() {
     _pid="$1"
-    if [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; then
-        kill "${_pid}" 2>/dev/null || true
+    if [ -z "${_pid}" ]; then
+        return 0
+    fi
+    if ${_PORT_CHECK_SUDO} kill -0 "${_pid}" 2>/dev/null; then
+        ${_PORT_CHECK_SUDO} kill "${_pid}" 2>/dev/null || true
         wait "${_pid}" 2>/dev/null || true
+    fi
+    if [ -n "${_PORT_CHECK_LISTENER_STDERR}" ] \
+        && [ -f "${_PORT_CHECK_LISTENER_STDERR}" ]; then
+        rm -f "${_PORT_CHECK_LISTENER_STDERR}" 2>/dev/null || true
     fi
 }
 
@@ -797,10 +872,11 @@ port_check_inbound() {
     _PORT_CHECK_INBOUND_IP=""
     _PORT_CHECK_INBOUND_MSG=""
 
-    _euid="$(id -u 2>/dev/null || echo 0)"
-    if [ "${_euid}" -ne 0 ]; then
+    # Need root (or sudo) to bind :25. Tries sudo cred refresh when
+    # non-root + sudo is available; falls back to skip when not.
+    if ! port_check_ensure_inbound_privilege; then
         _PORT_CHECK_INBOUND_STATE="skip"
-        _PORT_CHECK_INBOUND_MSG="inbound check requires root (re-run with sudo)"
+        _PORT_CHECK_INBOUND_MSG="inbound check requires root and sudo is unavailable; re-run as root"
         return 0
     fi
 
@@ -824,13 +900,18 @@ port_check_inbound() {
         # Give the listener a moment to bind before /probe fires.
         sleep 1
         # Liveness probe: if the python child died (bind() failed —
-        # race / EACCES / port stolen), surface that as a distinct
-        # error rather than letting /probe report a generic
-        # "unreachable". Mirrors the synchronous bind+error in
-        # src/portcheck.rs:44-53.
-        if ! kill -0 "${_listener_pid}" 2>/dev/null; then
+        # race / EACCES / port stolen), surface the actual python
+        # stderr rather than a generic "unreachable". Mirrors the
+        # synchronous bind+error in src/portcheck.rs:44-53.
+        if ! ${_PORT_CHECK_SUDO} kill -0 "${_listener_pid}" 2>/dev/null; then
             _PORT_CHECK_INBOUND_STATE="fail"
-            _PORT_CHECK_INBOUND_MSG="failed to spawn temp listener on :25 (bind failed; another binder won the race?)"
+            _err=""
+            if [ -n "${_PORT_CHECK_LISTENER_STDERR}" ] \
+                && [ -s "${_PORT_CHECK_LISTENER_STDERR}" ]; then
+                _err=" ($(head -n 1 "${_PORT_CHECK_LISTENER_STDERR}" 2>/dev/null))"
+                rm -f "${_PORT_CHECK_LISTENER_STDERR}" 2>/dev/null || true
+            fi
+            _PORT_CHECK_INBOUND_MSG="failed to spawn temp listener on :25${_err}"
             _listener_pid=""
             return 0
         fi
