@@ -1856,49 +1856,90 @@ fn read_yn_line(
     Ok(parse_yn(&buf))
 }
 
-/// Interactively prompt for the `trusted_senders` allowlist.
-///
-/// Production entry point. Reads the senders line via `dialoguer::Input`
-/// so the operator gets the standard line-editor key set (Left/Right
-/// arrows, Home/End, Ctrl-A/E, Ctrl-U/W, Backspace, Delete) — `read_line`
-/// alone runs in canonical mode and turns Left into a literal `^[[D`
-/// byte sequence, which then trips the sender validator. The Y/n
-/// confirmations that follow (empty-warning re-prompt and
-/// `prompt_confirm_list`) still go through the existing `BufRead`-based
-/// helpers — single-char input doesn't benefit from line editing.
-///
-/// Returns `(policy, senders)`:
-/// - Non-empty list → `("verified", senders)`; echoed back and confirmed
-///   via `[Y/n]` before returning. Operator can decline to re-enter.
-/// - Empty input  → `("none", vec![])`; a loud warning block is printed
-///   and the operator must explicitly confirm leaving hooks disabled
-///   (declining re-prompts for senders).
-///
-/// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
-/// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
-///
-/// Tests drive the validation / re-prompt / confirm / max-attempts
-/// branches via [`prompt_trusted_senders_with_reader`] (a `BufRead`-based
-/// twin) — dialoguer requires a real TTY and cannot be exercised from
-/// `cargo test`.
-pub fn prompt_trusted_senders() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+/// I/O seam for [`prompt_trusted_senders_inner`]: abstracts how the
+/// senders line is read (dialoguer in production vs. canonical
+/// `read_line` in tests) and exposes a `BufRead` for the follow-on Y/n
+/// confirmations. Production holds a long-lived `StdinLock` for the
+/// Y/n reader (dialoguer reads from its own term, so the lock doesn't
+/// conflict); tests use a single `Cursor<&[u8]>` for both.
+trait TrustedSendersIo {
+    /// Read one senders line (the equivalent of pressing Enter at the
+    /// `> ` cursor). Returned string may include a trailing newline —
+    /// `parse_trusted_senders_line` handles trimming.
+    fn read_senders_line(&mut self) -> Result<String, Box<dyn std::error::Error>>;
+
+    /// Re-borrow the Y/n reader for the helpers that follow
+    /// (`read_yn_line`, `prompt_confirm_list`). Returning a fresh
+    /// `&mut dyn BufRead` per call keeps the borrow scoped per-helper
+    /// invocation.
+    fn yn_reader(&mut self) -> &mut dyn BufRead;
+}
+
+/// Production `TrustedSendersIo`: dialoguer for the senders line,
+/// `StdinLock` for the Y/n confirmations.
+struct DialoguerTrustedSendersIo<'a> {
+    yn_lock: io::StdinLock<'a>,
+}
+
+impl TrustedSendersIo for DialoguerTrustedSendersIo<'_> {
+    fn read_senders_line(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        let line: String = dialoguer::Input::with_theme(&PlainPromptTheme)
+            .with_prompt("> ")
+            .allow_empty(true)
+            .interact_text()?;
+        Ok(line)
+    }
+
+    fn yn_reader(&mut self) -> &mut dyn BufRead {
+        &mut self.yn_lock
+    }
+}
+
+/// Test-only `TrustedSendersIo`: scripted `BufRead` drives both the
+/// senders line and the Y/n confirmations. The senders read mimics the
+/// pre-dialoguer canonical-mode behavior (`> ` cursor + `read_line`),
+/// so the existing branch tests exercise the same outer loop body that
+/// ships in release.
+#[cfg(test)]
+struct ReaderTrustedSendersIo<'a> {
+    reader: &'a mut dyn BufRead,
+}
+
+#[cfg(test)]
+impl TrustedSendersIo for ReaderTrustedSendersIo<'_> {
+    fn read_senders_line(&mut self) -> Result<String, Box<dyn std::error::Error>> {
+        print!("> ");
+        io::stdout().flush()?;
+        let mut line = String::new();
+        self.reader.read_line(&mut line)?;
+        Ok(line)
+    }
+
+    fn yn_reader(&mut self) -> &mut dyn BufRead {
+        self.reader
+    }
+}
+
+/// Shared outer state machine for the trusted-senders prompt. Both
+/// [`prompt_trusted_senders`] (dialoguer) and
+/// [`prompt_trusted_senders_with_reader`] (scripted `BufRead`) call
+/// through here so the validation / re-prompt / empty-warning /
+/// confirm / max-attempts contract has exactly one definition. The
+/// only thing the entry points differ on is *how* the senders line is
+/// read — captured by the [`TrustedSendersIo`] trait.
+fn prompt_trusted_senders_inner(
+    io: &mut dyn TrustedSendersIo,
+) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
     let mut attempt = 0usize;
     loop {
         attempt += 1;
         println!("{TRUSTED_SENDERS_PROMPT}");
-        let line: String = dialoguer::Input::with_theme(&PlainPromptTheme)
-            .with_prompt("> ")
-            .allow_empty(true)
-            .interact_text()?;
-        // The Y/n helpers still take a `BufRead`; lock stdin freshly
-        // for each call. Single-char input doesn't need line editing.
-        let stdin = io::stdin();
-        let mut yn_reader = stdin.lock();
+        let line = io.read_senders_line()?;
         match parse_trusted_senders_line(&line) {
             Ok(senders) if senders.is_empty() => {
                 print_empty_trusted_senders_warning();
-                if read_yn_line(&mut yn_reader, "Leave hooks disabled?")? {
+                if read_yn_line(io.yn_reader(), "Leave hooks disabled?")? {
                     return Ok(("none".to_string(), vec![]));
                 }
                 // Operator wants to re-enter senders — fall through to
@@ -1908,7 +1949,7 @@ pub fn prompt_trusted_senders() -> Result<(String, Vec<String>), Box<dyn std::er
                 continue;
             }
             Ok(senders) => {
-                if prompt_confirm_list(&mut yn_reader, "Trusted senders", &senders)? {
+                if prompt_confirm_list(io.yn_reader(), "Trusted senders", &senders)? {
                     return Ok(("verified".to_string(), senders));
                 }
                 // No → re-prompt. Reset the attempt budget so the
@@ -1930,59 +1971,51 @@ pub fn prompt_trusted_senders() -> Result<(String, Vec<String>), Box<dyn std::er
     }
 }
 
+/// Interactively prompt for the `trusted_senders` allowlist.
+///
+/// Production entry point. Reads the senders line via `dialoguer::Input`
+/// so the operator gets the standard line-editor key set (Left/Right
+/// arrows, Home/End, Ctrl-A/E, Ctrl-U/W, Backspace, Delete) — `read_line`
+/// alone runs in canonical mode and turns Left into a literal `^[[D`
+/// byte sequence, which then trips the sender validator. The Y/n
+/// confirmations that follow (empty-warning re-prompt and
+/// `prompt_confirm_list`) still go through the existing `BufRead`-based
+/// helpers — single-char input doesn't benefit from line editing.
+///
+/// Returns `(policy, senders)`:
+/// - Non-empty list → `("verified", senders)`; echoed back and confirmed
+///   via `[Y/n]` before returning. Operator can decline to re-enter.
+/// - Empty input  → `("none", vec![])`; a loud warning block is printed
+///   and the operator must explicitly confirm leaving hooks disabled
+///   (declining re-prompts for senders).
+///
+/// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
+/// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
+///
+/// Mirrors the [`prompt_mailbox_owner`] two-entry-point pattern: this
+/// thin wrapper builds the dialoguer/stdin I/O seam and delegates the
+/// shared loop to [`prompt_trusted_senders_inner`]. Tests reach the
+/// same body via [`prompt_trusted_senders_with_reader`].
+pub fn prompt_trusted_senders() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    let stdin = io::stdin();
+    let yn_lock = stdin.lock();
+    let mut io_seam = DialoguerTrustedSendersIo { yn_lock };
+    prompt_trusted_senders_inner(&mut io_seam)
+}
+
 /// Inner trusted-senders helper that reads from an injectable `BufRead`.
 /// Production callers go through [`prompt_trusted_senders`] (which uses
 /// `dialoguer::Input` for the senders line); tests drive the
 /// validation / re-prompt / max-attempts / empty-warning / confirm
-/// branches with scripted `Cursor<&[u8]>` input. Body is identical to
-/// the pre-dialoguer implementation. Test-only — production builds get
-/// the dialoguer-backed entry point.
+/// branches with scripted `Cursor<&[u8]>` input. Both entry points
+/// share [`prompt_trusted_senders_inner`], so this seam tests the
+/// same loop body that ships in release.
 #[cfg(test)]
 pub(crate) fn prompt_trusted_senders_with_reader(
     reader: &mut dyn BufRead,
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
-    println!();
-    let mut attempt = 0usize;
-    loop {
-        attempt += 1;
-        println!("{TRUSTED_SENDERS_PROMPT}");
-        print!("> ");
-        io::stdout().flush()?;
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        match parse_trusted_senders_line(&line) {
-            Ok(senders) if senders.is_empty() => {
-                print_empty_trusted_senders_warning();
-                if read_yn_line(reader, "Leave hooks disabled?")? {
-                    return Ok(("none".to_string(), vec![]));
-                }
-                // Operator wants to re-enter senders — fall through to
-                // the next loop iteration. Reset the attempt counter
-                // so a "no, let me try again" doesn't burn the budget.
-                attempt = 0;
-                continue;
-            }
-            Ok(senders) => {
-                if prompt_confirm_list(reader, "Trusted senders", &senders)? {
-                    return Ok(("verified".to_string(), senders));
-                }
-                // No → re-prompt. Reset the attempt budget so the
-                // operator can iterate freely.
-                attempt = 0;
-                continue;
-            }
-            Err((entry, reason)) => {
-                println!("{} invalid sender '{entry}': {reason}", term::fail_mark());
-                if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
-                    return Err(format!(
-                        "trusted-senders prompt aborted after {MAX_TRUSTED_SENDERS_ATTEMPTS} \
-                         attempts; last error: invalid sender '{entry}': {reason}"
-                    )
-                    .into());
-                }
-            }
-        }
-    }
+    let mut io_seam = ReaderTrustedSendersIo { reader };
+    prompt_trusted_senders_inner(&mut io_seam)
 }
 
 /// Custom dialoguer theme that writes input prompts verbatim — no
@@ -2011,7 +2044,9 @@ impl dialoguer::theme::Theme for PlainPromptTheme {
 }
 
 /// Print the loud warning block for an empty trusted-senders list.
-/// Extracted so [`prompt_trusted_senders`] and the non-interactive
+/// Extracted so [`prompt_trusted_senders_inner`] (the shared loop body
+/// reached by both [`prompt_trusted_senders`] and
+/// [`prompt_trusted_senders_with_reader`]) and the non-interactive
 /// branch in [`run_setup`] can share the exact wording.
 fn print_empty_trusted_senders_warning() {
     println!();
@@ -4831,17 +4866,13 @@ owner = "aimx-catchall"
         );
     }
 
-    #[test]
-    fn prompt_trusted_senders_no_arg_signature_compiles() {
-        // Compile-time check that the production no-arg entry point
-        // exists with the expected signature — we cannot drive
-        // `dialoguer::Input` from a unit test because `interact_text()`
-        // refuses to run without a real TTY. Coercion to a function
-        // pointer of the documented type is the cheapest assertion we
-        // can make without invoking the dialoguer reader.
-        let _: fn() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> =
-            super::prompt_trusted_senders;
-    }
+    // Note: a separate `prompt_trusted_senders` signature-check test
+    // used to live here. After the refactor that pushed the outer
+    // state machine into the shared `prompt_trusted_senders_inner`,
+    // every existing `_with_reader` test transitively exercises the
+    // same loop body that ships in release — the symbol-existence
+    // assertion was redundant and tripped `clippy::type_complexity`
+    // on the fn-pointer coercion.
 
     #[test]
     fn empty_trusted_senders_warning_text_is_stable() {
