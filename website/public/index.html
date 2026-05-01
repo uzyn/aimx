@@ -454,7 +454,11 @@ footer a:hover {
 <pre class="code">curl -fsSL https://aimx.email/install.sh | sh
 sudo aimx setup</pre>
       <p class="prose" style="margin-top: 1.1em;">
-        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Want to see the script before running it? <a href="/install.sh">Read <code>install.sh</code></a>.
+        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Not sure your VPS allows port 25? Check first, no install:
+      </p>
+<pre class="code">curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only</pre>
+      <p class="prose" style="margin-top: 1.1em;">
+        Want to see the script before running it? <a href="/install.sh">Read <code>install.sh</code></a>.
       </p>
     </section>
 

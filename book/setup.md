@@ -34,6 +34,14 @@ sudo aimx portcheck
 
 `aimx portcheck` requires root. When `aimx serve` is running, it performs an outbound EHLO handshake plus an inbound EHLO handshake probe. When nothing is on port 25 (fresh VPS), it spawns a temporary listener and runs checks. If port 25 is occupied by another process, portcheck tells you to stop it before setup.
 
+If you haven't installed AIMX yet, the same check is available from the install script with `--port-check-only`:
+
+```bash
+curl -fsSL https://aimx.email/install.sh | sudo sh -s -- --port-check-only
+```
+
+It exits without installing. See [Getting Started: Pre-install](getting-started.md#pre-install-check-port-25).
+
 | Check | What it does | Fix if it fails |
 |-------|-------------|-----------------|
 | Outbound port 25 | Performs EHLO handshake to `check.aimx.email` on port 25 | Ask VPS provider to unblock outbound SMTP |

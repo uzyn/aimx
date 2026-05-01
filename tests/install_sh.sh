@@ -560,6 +560,379 @@ assert_contains "parse_args --to=VAL"  "${_out}" "PREFIX=/tmp/x"
 assert_contains "parse_args --target=VAL" "${_out}" "TARGET=x86_64-unknown-linux-gnu"
 
 # ---------------------------------------------------------------------------
+# 7b. parse_args --port-check-only / --verify-host
+# ---------------------------------------------------------------------------
+
+echo "# parse_args (port-check)"
+
+# --port-check-only sets PORT_CHECK_ONLY=1 and leaves other flags untouched.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --port-check-only
+        printf "PORT_CHECK_ONLY=%s TAG=[%s] PREFIX=[%s] FORCE=%s VERIFY_HOST=[%s]" \
+            "${PORT_CHECK_ONLY}" "${TAG}" "${PREFIX}" "${FORCE}" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "parse_args --port-check-only sets PORT_CHECK_ONLY=1" "${_out}" "PORT_CHECK_ONLY=1"
+assert_contains "parse_args --port-check-only leaves TAG empty" "${_out}" "TAG=[]"
+assert_contains "parse_args --port-check-only leaves PREFIX empty" "${_out}" "PREFIX=[]"
+assert_contains "parse_args --port-check-only leaves FORCE=0" "${_out}" "FORCE=0"
+assert_contains "parse_args --port-check-only leaves VERIFY_HOST empty" "${_out}" "VERIFY_HOST=[]"
+
+# Negative case: unrelated flag combos must NOT set PORT_CHECK_ONLY=1.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --tag 1.2.3 --to /tmp/x
+        printf "PORT_CHECK_ONLY=%s" "${PORT_CHECK_ONLY}"
+    '
+)"
+assert_contains "negative: --tag/--to does NOT set PORT_CHECK_ONLY" "${_out}" "PORT_CHECK_ONLY=0"
+
+# --verify-host space form.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --verify-host https://x.example
+        printf "VERIFY_HOST=%s" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "parse_args --verify-host VAL" "${_out}" "VERIFY_HOST=https://x.example"
+
+# --verify-host=VAL equals form.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --verify-host=https://x.example
+        printf "VERIFY_HOST=%s" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "parse_args --verify-host=VAL" "${_out}" "VERIFY_HOST=https://x.example"
+
+# --verify-host with no value → err (non-zero exit).
+_rc=0
+INSTALL_SH_TEST=1 sh -c '
+    . "'"${INSTALL_SH}"'"
+    parse_args --verify-host
+' >/dev/null 2>&1 || _rc=$?
+if [ "${_rc}" -ne 0 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  parse_args --verify-host (no value) errors out\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} verify-host-missing-value"
+    printf '  FAIL parse_args --verify-host (no value) should have errored\n' >&2
+fi
+
+# validate_verify_host rejects non-http(s) schemes (call helper directly).
+_rc=0
+INSTALL_SH_TEST=1 sh -c '
+    . "'"${INSTALL_SH}"'"
+    parse_args --verify-host ftp://x
+    validate_verify_host
+' >/dev/null 2>&1 || _rc=$?
+if [ "${_rc}" -ne 0 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  validate_verify_host rejects ftp://\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} verify-host-bad-scheme"
+    printf '  FAIL validate_verify_host should reject ftp://\n' >&2
+fi
+
+# Default DEFAULT_VERIFY_HOST.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        printf "DEFAULT_VERIFY_HOST=%s" "${DEFAULT_VERIFY_HOST}"
+    '
+)"
+assert_contains "default verify-host is check.aimx.email" "${_out}" "DEFAULT_VERIFY_HOST=https://check.aimx.email"
+
+# resolve_verify_host: flag wins over env var.
+_out="$(
+    INSTALL_SH_TEST=1 AIMX_VERIFY_HOST=https://env.example sh -c '
+        . "'"${INSTALL_SH}"'"
+        parse_args --verify-host https://flag.example
+        resolve_verify_host
+        printf "VERIFY_HOST=%s" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "flag wins over env var" "${_out}" "VERIFY_HOST=https://flag.example"
+
+# resolve_verify_host: env var wins over default.
+_out="$(
+    INSTALL_SH_TEST=1 AIMX_VERIFY_HOST=https://env.example sh -c '
+        . "'"${INSTALL_SH}"'"
+        resolve_verify_host
+        printf "VERIFY_HOST=%s" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "env var wins over default" "${_out}" "VERIFY_HOST=https://env.example"
+
+# resolve_verify_host: neither flag nor env → default.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        unset AIMX_VERIFY_HOST
+        . "'"${INSTALL_SH}"'"
+        resolve_verify_host
+        printf "VERIFY_HOST=%s" "${VERIFY_HOST}"
+    '
+)"
+assert_contains "default applies when nothing set" "${_out}" "VERIFY_HOST=https://check.aimx.email"
+
+# --help text must mention the new flag and env var.
+_helpout="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        help
+    '
+)"
+assert_contains "help mentions --port-check-only" "${_helpout}" "--port-check-only"
+assert_contains "help mentions --verify-host" "${_helpout}" "--verify-host"
+assert_contains "help mentions AIMX_VERIFY_HOST" "${_helpout}" "AIMX_VERIFY_HOST"
+
+# `install.sh --port-check-only --help` exits 0 and prints help.
+_rc=0
+_out="$(
+    sh "${INSTALL_SH}" --port-check-only --help 2>&1
+)" || _rc=$?
+assert_zero "--port-check-only --help exits 0" "${_rc}"
+assert_contains "--port-check-only --help prints help" "${_out}" "aimx install script"
+
+# `install.sh --help` mentions port-check-only.
+_rc=0
+sh "${INSTALL_SH}" --help 2>&1 | grep -q port-check-only || _rc=$?
+assert_zero "install.sh --help | grep -q port-check-only" "${_rc}"
+
+# derive_smtp_host extracts host[:port]-stripped host from a verify-host URL.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        derive_smtp_host https://check.aimx.email/probe
+    '
+)"
+assert_eq "derive_smtp_host strips scheme + path" "check.aimx.email" "${_out}"
+
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        derive_smtp_host https://check.aimx.email:3025
+    '
+)"
+assert_eq "derive_smtp_host strips :port" "check.aimx.email" "${_out}"
+
+# print_port_check_banner exists and prints the connectivity-check title.
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        print_port_check_banner
+    ' 2>&1
+)"
+assert_contains "port-check banner shows connectivity title" "${_out}" "aimx port 25 connectivity check"
+assert_contains "port-check banner notes no install" "${_out}" "no install will be performed"
+
+# ---------------------------------------------------------------------------
+# 7d. AIMX_VERIFY_HOST gating — env var only validates on port-check path
+# ---------------------------------------------------------------------------
+#
+# Regression for review #6: `validate_verify_host` ran unconditionally in
+# main(), so a regular install with AIMX_VERIFY_HOST=garbage exported in
+# the operator's shell would fail before any install side effect even
+# though the env var only gates the port-check path.
+
+echo "# AIMX_VERIFY_HOST gating"
+
+# Regular install (dry-run) must NOT validate AIMX_VERIFY_HOST.
+_rc=0
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_VERIFY_HOST=garbage \
+    AIMX_PREFIX="${_tmp}/bin" \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)" || _rc=$?
+assert_zero "regular install ignores AIMX_VERIFY_HOST=garbage" "${_rc}"
+assert_not_contains "regular install does not run validate_verify_host" "${_out}" "verify-host must start with"
+
+# Port-check path WITH AIMX_VERIFY_HOST=garbage SHOULD fail validation.
+_rc=0
+_out="$(
+    AIMX_VERIFY_HOST=garbage \
+    sh "${INSTALL_SH}" --port-check-only 2>&1
+)" || _rc=$?
+if [ "${_rc}" -ne 0 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  --port-check-only validates AIMX_VERIFY_HOST (rc=%s)\n' "${_rc}"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} port-check-validates-env"
+    printf '  FAIL --port-check-only with AIMX_VERIFY_HOST=garbage should fail\n' >&2
+fi
+assert_contains "--port-check-only error names verify-host scheme" "${_out}" "verify-host must start with"
+
+# ---------------------------------------------------------------------------
+# 7e. Listener loop continue-on-timeout (review #2)
+# ---------------------------------------------------------------------------
+#
+# The Python listener heredoc must use `continue` (not `break`) on
+# socket.timeout so the deadline still bounds the loop while a second
+# probe attempt within the deadline is still served. Source-grep for the
+# guard rather than spawn a real listener.
+
+echo "# listener continue-on-timeout"
+
+# Pull lines after `except socket.timeout:` and look for `continue` (not `break`)
+# before the next `except` clause.
+_timeout_block="$(awk '
+    /except socket.timeout:/ {found=1; next}
+    found && /except / {found=0}
+    found {print}
+' "${INSTALL_SH}")"
+case "${_timeout_block}" in
+    *continue*)
+        PASS=$((PASS + 1))
+        printf '  ok  listener loop uses continue on socket.timeout\n'
+        ;;
+    *)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} listener-continue-on-timeout"
+        printf '  FAIL listener loop should `continue` on socket.timeout, not `break`\n' >&2
+        ;;
+esac
+case "${_timeout_block}" in
+    *break*)
+        FAIL=$((FAIL + 1))
+        FAILED_NAMES="${FAILED_NAMES} listener-no-break-on-timeout"
+        printf '  FAIL listener loop still has `break` in socket.timeout handler\n' >&2
+        ;;
+    *)
+        PASS=$((PASS + 1))
+        printf '  ok  listener loop has no `break` in socket.timeout handler\n'
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
+# 7f. Listener bind liveness probe (review #1)
+# ---------------------------------------------------------------------------
+#
+# When the temp listener fails to bind (bind() race / EACCES), python
+# exits 1 silently. The shell must `kill -0 ${_listener_pid}` after the
+# bind delay and surface a distinct error rather than letting /probe
+# report a generic "unreachable".
+
+echo "# listener bind liveness"
+
+if grep -q 'kill -0 "\${_listener_pid}"' "${INSTALL_SH}"; then
+    PASS=$((PASS + 1))
+    printf '  ok  port_check_inbound has kill -0 liveness probe on listener pid\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} listener-liveness-probe"
+    printf '  FAIL port_check_inbound missing kill -0 liveness probe on listener pid\n' >&2
+fi
+if grep -q 'failed to spawn temp listener on :25' "${INSTALL_SH}"; then
+    PASS=$((PASS + 1))
+    printf '  ok  liveness probe surfaces a distinct bind-failed message\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} listener-bind-msg"
+    printf '  FAIL bind-failed listener path missing distinct error message\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 7g. Occupancy warning (review #4)
+# ---------------------------------------------------------------------------
+#
+# When port 25 is held by another process (Postfix/Sendmail/Exim), /probe
+# will report success against THAT daemon's banner. The shell must warn
+# operators that the green [ok] is only meaningful if the holder is aimx.
+
+echo "# occupancy warning"
+
+if grep -q "port 25 is held by another process" "${INSTALL_SH}"; then
+    PASS=$((PASS + 1))
+    printf '  ok  port_check_inbound warns when port 25 is occupied\n'
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} occupancy-warning"
+    printf '  FAIL port_check_inbound missing occupancy warning\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 7h. Missing-curl exit code is 2 (review #5)
+# ---------------------------------------------------------------------------
+#
+# port_check_main MUST exit 2 when curl is missing (documented contract:
+# 0 pass-or-skip, 1 fail, 2 missing required tool). The previous
+# implementation used `need curl`, which exits 1 — wrong for this path.
+# Source-grep proves the explicit `return 2` is in place; the previous
+# `need curl` line must be gone from port_check_main.
+
+echo "# missing-curl exits 2"
+
+# Find port_check_main body (between its opening and closing brace).
+_pc_main_start="$(grep -n '^port_check_main()' "${INSTALL_SH}" | head -n1 | cut -d: -f1)"
+if [ -n "${_pc_main_start}" ]; then
+    # Everything from port_check_main() until the next top-level `}` line.
+    _pc_main_body="$(awk '
+        $0 ~ /^port_check_main\(\)/ {inside=1}
+        inside {print}
+        inside && /^}/ {inside=0}
+    ' "${INSTALL_SH}")"
+    case "${_pc_main_body}" in
+        *"required command not found: curl"*)
+            PASS=$((PASS + 1))
+            printf '  ok  port_check_main uses explicit curl check\n'
+            ;;
+        *)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} missing-curl-explicit-check"
+            printf '  FAIL port_check_main missing explicit curl check\n' >&2
+            ;;
+    esac
+    case "${_pc_main_body}" in
+        *"need curl"*)
+            FAIL=$((FAIL + 1))
+            FAILED_NAMES="${FAILED_NAMES} missing-curl-old-need"
+            printf '  FAIL port_check_main still calls `need curl` (exits 1, should exit 2)\n' >&2
+            ;;
+        *)
+            PASS=$((PASS + 1))
+            printf '  ok  port_check_main no longer calls `need curl`\n'
+            ;;
+    esac
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} port-check-main-missing"
+    printf '  FAIL could not locate port_check_main() in install.sh\n' >&2
+fi
+
+# Live test: with curl scrubbed from PATH, --port-check-only must exit 2.
+_isobin2="${_tmp}/iso-bin-no-curl"
+mkdir -p "${_isobin2}"
+for _t in uname tar mkdir rm install awk sed grep cat date mktemp sh head cut sort dirname basename id; do
+    for _d in /usr/bin /bin; do
+        if [ -x "${_d}/$_t" ]; then
+            ln -sf "${_d}/$_t" "${_isobin2}/$_t"
+            break
+        fi
+    done
+done
+
+_rc=0
+_out="$(
+    PATH="${_isobin2}" \
+        sh "${INSTALL_SH}" --port-check-only 2>&1
+)" || _rc=$?
+assert_eq "--port-check-only without curl exits 2" "2" "${_rc}"
+assert_contains "--port-check-only without curl names curl" "${_out}" "curl"
+
+rm -rf "${_isobin2}"
+
+# ---------------------------------------------------------------------------
 # 7c. SUDO prefix resolution — root-without-sudo path must succeed
 # ---------------------------------------------------------------------------
 
@@ -645,6 +1018,10 @@ assert_contains "dry-run notes no FS changes" "${_out}" "no filesystem changes"
 # are the binary's job. The thin banner is just two lines.
 assert_not_contains "shell does not print checklist" "${_out}" "Preflight checks on port 25"
 assert_not_contains "shell does not print step 6 title" "${_out}" "Set up MCP for agent"
+
+# Dry-run must NOT run a port check (no port-check banner emitted).
+assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "aimx port 25 connectivity check"
+assert_not_contains "dry-run does not show outbound check line" "${_out}" "Outbound port 25"
 
 # ---------------------------------------------------------------------------
 # Report
