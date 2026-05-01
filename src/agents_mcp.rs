@@ -24,9 +24,15 @@ pub enum McpRegistration {
     Registered,
     /// The agent's CLI is not on PATH (`io::ErrorKind::NotFound`).
     CliMissing,
-    /// `mcp add` ran but exited non-zero. `stderr` is captured so the
-    /// caller can surface diagnostics.
-    RegisterFailed { stderr: String },
+    /// `mcp add` ran but exited non-zero, or the spawn itself failed
+    /// for a reason other than a missing binary. `stderr` is captured
+    /// so the caller can surface diagnostics; `exit_code` is `Some(n)`
+    /// when the child exited with a real status code, and `None` when
+    /// the child was signal-killed or never spawned (`io::Error` path).
+    RegisterFailed {
+        stderr: String,
+        exit_code: Option<i32>,
+    },
 }
 
 /// Trait so tests can substitute a mock without spawning child
@@ -105,12 +111,17 @@ pub fn register_codex(cli: &dyn McpCli, data_dir: Option<&Path>) -> McpRegistrat
 fn classify(result: std::io::Result<Output>) -> McpRegistration {
     match result {
         Ok(out) if out.status.success() => McpRegistration::Registered,
-        Ok(out) => McpRegistration::RegisterFailed {
-            stderr: String::from_utf8_lossy(&out.stderr).trim_end().to_string(),
-        },
+        Ok(out) => {
+            let exit_code = out.status.code();
+            McpRegistration::RegisterFailed {
+                stderr: String::from_utf8_lossy(&out.stderr).trim_end().to_string(),
+                exit_code,
+            }
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => McpRegistration::CliMissing,
         Err(e) => McpRegistration::RegisterFailed {
             stderr: e.to_string(),
+            exit_code: None,
         },
     }
 }
@@ -254,8 +265,45 @@ mod tests {
         let result = register_claude(&cli, None);
 
         match result {
-            McpRegistration::RegisterFailed { stderr } => {
+            McpRegistration::RegisterFailed { stderr, exit_code } => {
                 assert_eq!(stderr, "server already exists");
+                assert_eq!(exit_code, Some(1));
+            }
+            other => panic!("expected RegisterFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_claude_register_failed_carries_exit_code_when_stderr_is_empty() {
+        // Future Claude Code release that exits non-zero with no stderr —
+        // the user still gets `(exit N)` for debugging.
+        let cli = MockCli::new(vec![ok(), err("")]);
+        let result = register_claude(&cli, None);
+
+        match result {
+            McpRegistration::RegisterFailed { stderr, exit_code } => {
+                assert!(stderr.is_empty());
+                assert_eq!(exit_code, Some(1));
+            }
+            other => panic!("expected RegisterFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_claude_register_failed_from_io_error_has_no_exit_code() {
+        // A spawn error other than NotFound (e.g. permission denied) is
+        // surfaced as RegisterFailed without an exit code — the child
+        // never ran.
+        let cli = MockCli::new(vec![
+            ok(),
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+        ]);
+        let result = register_claude(&cli, None);
+
+        match result {
+            McpRegistration::RegisterFailed { stderr, exit_code } => {
+                assert!(!stderr.is_empty(), "should surface the io::Error message");
+                assert_eq!(exit_code, None);
             }
             other => panic!("expected RegisterFailed, got {other:?}"),
         }

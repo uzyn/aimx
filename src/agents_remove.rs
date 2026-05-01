@@ -76,6 +76,15 @@ fn do_remove(
     let (target_desc, removal_target) = plugin_removal_target(spec, &dest_root);
     let pre_existed = removal_target.exists();
 
+    // Symmetry with `agents setup`: a user who installed under an older
+    // aimx (which wrote `~/.claude/plugins/aimx/`) and then runs `agents
+    // remove claude-code` on this aimx without first re-running setup
+    // would otherwise be left with the orphaned legacy tree, since
+    // `spec.dest_template` only points at `~/.claude/skills/aimx/`.
+    if spec.name == "claude-code" {
+        cleanup_legacy_claude_plugin(env, out)?;
+    }
+
     // Delegate to the existing cleanup core in `--full --yes` mode.
     let cleanup_opts = agents_cleanup::RunOpts {
         agent: spec.name.to_string(),
@@ -106,6 +115,45 @@ fn do_remove(
     writeln!(out, "{}", removal_hint(spec))?;
 
     Ok(outcome)
+}
+
+/// Mirrors `agents_setup::cleanup_legacy_claude_plugin`: removes the
+/// legacy `~/.claude/plugins/aimx/` tree on the remove-side too, so a
+/// user who installed under aimx <= 0.x and then runs `aimx agents
+/// remove claude-code` on this aimx isn't left with the orphaned plugin
+/// directory. The setup-side cleanup only fires on `agents setup`, so
+/// without this the only way to get rid of the legacy tree was to
+/// re-run `agents setup` first — which is the opposite of what someone
+/// running `agents remove` wants.
+fn cleanup_legacy_claude_plugin(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
+    let Some(home) = env.home_dir() else {
+        return Ok(());
+    };
+    let legacy = home.join(".claude").join("plugins").join("aimx");
+    if !legacy.exists() {
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(&legacy) {
+        Ok(()) => {
+            writeln!(
+                out,
+                "{} {} {}",
+                crate::term::info("Removed"),
+                crate::term::dim("legacy plugin install at"),
+                crate::term::highlight(&legacy.to_string_lossy())
+            )?;
+        }
+        Err(e) => {
+            writeln!(
+                out,
+                "{} could not remove legacy plugin install at {}: {}",
+                crate::term::warn_mark(),
+                legacy.display(),
+                e
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Per-agent cleanup hint. Emitted at the end of
@@ -248,6 +296,65 @@ mod tests {
             stdout.contains("claude mcp remove aimx"),
             "expected claude-code cleanup hint, got: {stdout}"
         );
+    }
+
+    #[test]
+    fn agents_remove_claude_code_removes_legacy_plugins_dir() {
+        // Mirrors `install_claude_code_removes_legacy_plugins_dir` in
+        // `agents_setup`: a user who installed under aimx <= 0.x (which
+        // wrote `~/.claude/plugins/aimx/`) and then runs `aimx agents
+        // remove claude-code` on this aimx must not be left with the
+        // orphaned legacy tree. The notice is printed; the directory is
+        // gone after remove completes.
+        let tmp = TempDir::new().unwrap();
+        let env = TestEnv::new(tmp.path().to_path_buf(), "alice");
+
+        let legacy = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(legacy.join("stale")).unwrap();
+        std::fs::write(legacy.join("stale").join("x.txt"), "old").unwrap();
+        assert!(legacy.exists());
+
+        let opts = RunOpts {
+            agent: "claude-code".to_string(),
+            dangerously_allow_root: false,
+        };
+        let mut out = Vec::new();
+        run_with_env(opts, &env, &mut out).expect("remove must succeed");
+
+        assert!(!legacy.exists(), "legacy plugin dir must be removed");
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("legacy plugin install"),
+            "stdout must mention legacy cleanup: {printed}"
+        );
+    }
+
+    #[test]
+    fn agents_remove_non_claude_code_does_not_touch_legacy_plugins_dir() {
+        // The legacy cleanup is `claude-code`-specific; running
+        // `agents remove codex` against a host that happens to have a
+        // dormant `~/.claude/plugins/aimx/` from another tool must not
+        // delete it.
+        let tmp = TempDir::new().unwrap();
+        let env = TestEnv::new(tmp.path().to_path_buf(), "alice");
+
+        let legacy = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("marker"), "still here").unwrap();
+
+        let opts = RunOpts {
+            agent: "codex".to_string(),
+            dangerously_allow_root: false,
+        };
+        let mut out = Vec::new();
+        run_with_env(opts, &env, &mut out).expect("remove must succeed");
+
+        assert!(
+            legacy.exists(),
+            "non-claude-code remove must leave the legacy dir alone"
+        );
+        assert!(legacy.join("marker").exists());
     }
 
     #[test]

@@ -924,13 +924,23 @@ fn install_to_writer(
                 // it.
                 writeln!(out, "{hint}")?;
             }
-            crate::agents_mcp::McpRegistration::RegisterFailed { stderr } => {
-                writeln!(
-                    out,
-                    "{} MCP auto-registration failed: {}",
-                    term::warn_mark(),
-                    stderr.lines().next().unwrap_or("(no error output)")
-                )?;
+            crate::agents_mcp::McpRegistration::RegisterFailed { stderr, exit_code } => {
+                let summary = stderr.lines().next().unwrap_or("(no error output)");
+                match exit_code {
+                    Some(code) => writeln!(
+                        out,
+                        "{} MCP auto-registration failed: {} (exit {})",
+                        term::warn_mark(),
+                        summary,
+                        code,
+                    )?,
+                    None => writeln!(
+                        out,
+                        "{} MCP auto-registration failed: {}",
+                        term::warn_mark(),
+                        summary,
+                    )?,
+                }
                 writeln!(out, "{hint}")?;
             }
         }
@@ -3681,5 +3691,173 @@ mod tests {
             }
         }
         out
+    }
+
+    // ---- end-to-end coverage of the Registered / RegisterFailed branches ----
+    //
+    // The default `MockEnv` returns `NoopMcpCli`, which always reports
+    // `CliMissing` (the safe default that prevents tests from spawning
+    // real CLIs against the developer's `~/.claude.json`). To exercise
+    // the other two branches end-to-end through `install_to_writer`, we
+    // wrap an existing env in `WithMcpEnv` and inject a programmable
+    // `MockMcpCli`.
+
+    use std::os::unix::process::ExitStatusExt;
+    use std::process::ExitStatus;
+    use std::process::Output;
+
+    struct MockMcpCli {
+        responses: RefCell<Vec<std::io::Result<Output>>>,
+    }
+
+    impl MockMcpCli {
+        fn new(responses: Vec<std::io::Result<Output>>) -> Self {
+            let mut reversed = responses;
+            reversed.reverse();
+            Self {
+                responses: RefCell::new(reversed),
+            }
+        }
+    }
+
+    impl McpCli for MockMcpCli {
+        fn run(&self, _program: &str, _args: &[&str]) -> std::io::Result<Output> {
+            self.responses
+                .borrow_mut()
+                .pop()
+                .unwrap_or_else(|| Err(std::io::Error::other("MockMcpCli exhausted")))
+        }
+    }
+
+    struct WithMcpEnv<'a> {
+        inner: &'a dyn AgentEnv,
+        cli: &'a dyn McpCli,
+    }
+
+    impl<'a> AgentEnv for WithMcpEnv<'a> {
+        fn home_dir(&self) -> Option<PathBuf> {
+            self.inner.home_dir()
+        }
+        fn xdg_config_home(&self) -> Option<PathBuf> {
+            self.inner.xdg_config_home()
+        }
+        fn is_root(&self) -> bool {
+            self.inner.is_root()
+        }
+        fn is_stdin_tty(&self) -> bool {
+            self.inner.is_stdin_tty()
+        }
+        fn read_line(&self) -> io::Result<String> {
+            self.inner.read_line()
+        }
+        fn caller_username(&self) -> Option<String> {
+            self.inner.caller_username()
+        }
+        fn mcp_cli(&self) -> &dyn McpCli {
+            self.cli
+        }
+    }
+
+    fn ok_output() -> std::io::Result<Output> {
+        Ok(Output {
+            status: ExitStatus::from_raw(0),
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        })
+    }
+
+    fn err_output(stderr: &str, raw_status: i32) -> std::io::Result<Output> {
+        Ok(Output {
+            status: ExitStatus::from_raw(raw_status),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        })
+    }
+
+    #[test]
+    fn install_claude_code_with_real_cli_prints_registered_line() {
+        // Both `mcp remove` and `mcp add` succeed → the install path
+        // emits the `MCP server registered with Claude Code.` confirmation
+        // and does NOT fall through to the manual fallback hint.
+        let tmp = TempDir::new().unwrap();
+        let inner = MockEnv::new(tmp.path().to_path_buf());
+        let cli = MockMcpCli::new(vec![ok_output(), ok_output()]);
+        let env = WithMcpEnv {
+            inner: &inner,
+            cli: &cli,
+        };
+
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(
+            Some("claude-code".into()),
+            false,
+            false,
+            false,
+            None,
+            &env,
+            &mut out,
+        )
+        .unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("MCP server registered with Claude Code."),
+            "expected Registered confirmation in output: {printed}"
+        );
+        // The manual `claude mcp add` hint is the fallback for CliMissing
+        // / RegisterFailed; the success path must NOT print it.
+        assert!(
+            !printed.contains("claude mcp add"),
+            "Registered branch must not print the manual fallback hint: {printed}"
+        );
+    }
+
+    #[test]
+    fn install_claude_code_with_failed_cli_prints_warning_and_fallback() {
+        // `mcp remove` succeeds but `mcp add` exits non-zero with stderr.
+        // The install path must surface (a) the warn-line including the
+        // first stderr line and the exit code, and (b) the manual
+        // fallback hint so the user can finish the registration by hand.
+        let tmp = TempDir::new().unwrap();
+        let inner = MockEnv::new(tmp.path().to_path_buf());
+        // raw status `1 << 8` lands `1` in the WEXITSTATUS slot — same
+        // pattern as `agents_mcp::tests::err`.
+        let cli = MockMcpCli::new(vec![
+            ok_output(),
+            err_output("server already exists\n", 1 << 8),
+        ]);
+        let env = WithMcpEnv {
+            inner: &inner,
+            cli: &cli,
+        };
+
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(
+            Some("claude-code".into()),
+            false,
+            false,
+            false,
+            None,
+            &env,
+            &mut out,
+        )
+        .unwrap();
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("MCP auto-registration failed: server already exists"),
+            "expected warn-line with stderr first line: {printed}"
+        );
+        assert!(
+            printed.contains("(exit 1)"),
+            "expected exit code in warn-line: {printed}"
+        );
+        // The fallback hint embeds the canonical `claude mcp add ...`
+        // command; it must appear after the warn-line so the user can
+        // run it by hand.
+        assert!(
+            printed.contains("claude mcp add"),
+            "expected manual fallback hint after RegisterFailed: {printed}"
+        );
     }
 }
