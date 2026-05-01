@@ -300,10 +300,10 @@ If portcheck fails with EHLO probe after setup, the issue is likely in the `aimx
 Before installing AIMX, you can run the same connectivity probe pre-install (no install side effects):
 
 ```bash
-curl -fsSL https://aimx.email/prtcheck.sh | sudo sh
+curl -fsSL https://aimx.email/portcheck.sh | sudo sh
 ```
 
-`prtcheck.sh` is a thin alias for `install.sh --port-check-only`; both URLs run the same checks. See [Getting Started: Pre-install check](getting-started.md#pre-install-check-port-25).
+`portcheck.sh` is a thin alias for `install.sh --port-check-only`; both URLs run the same checks. See [Getting Started: Pre-install check](getting-started.md#pre-install-check-port-25).
 
 ## Useful commands reference
 
