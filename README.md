@@ -52,8 +52,7 @@ aimx ships as a single prebuilt binary for Linux (x86_64 and aarch64, glibc and 
 ```bash
 
 # 1. Install the latest release into /usr/local/bin
-# !! DO NOT use installer script yet. Compile aimx in the mean time if you are installing !!
-# curl -fsSL https://aimx.email/install.sh | sh
+curl -fsSL https://aimx.email/install.sh | sh
 
 # or compile and install it from source
 git clone https://github.com/uzyn/aimx.git
