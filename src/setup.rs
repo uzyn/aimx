@@ -1858,6 +1858,15 @@ fn read_yn_line(
 
 /// Interactively prompt for the `trusted_senders` allowlist.
 ///
+/// Production entry point. Reads the senders line via `dialoguer::Input`
+/// so the operator gets the standard line-editor key set (Left/Right
+/// arrows, Home/End, Ctrl-A/E, Ctrl-U/W, Backspace, Delete) — `read_line`
+/// alone runs in canonical mode and turns Left into a literal `^[[D`
+/// byte sequence, which then trips the sender validator. The Y/n
+/// confirmations that follow (empty-warning re-prompt and
+/// `prompt_confirm_list`) still go through the existing `BufRead`-based
+/// helpers — single-char input doesn't benefit from line editing.
+///
 /// Returns `(policy, senders)`:
 /// - Non-empty list → `("verified", senders)`; echoed back and confirmed
 ///   via `[Y/n]` before returning. Operator can decline to re-enter.
@@ -1867,7 +1876,69 @@ fn read_yn_line(
 ///
 /// Invalid entries re-prompt with `✗ invalid sender '<entry>': <reason>`;
 /// after [`MAX_TRUSTED_SENDERS_ATTEMPTS`] rejections the wizard aborts.
-pub fn prompt_trusted_senders(
+///
+/// Tests drive the validation / re-prompt / confirm / max-attempts
+/// branches via [`prompt_trusted_senders_with_reader`] (a `BufRead`-based
+/// twin) — dialoguer requires a real TTY and cannot be exercised from
+/// `cargo test`.
+pub fn prompt_trusted_senders() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
+    println!();
+    let mut attempt = 0usize;
+    loop {
+        attempt += 1;
+        println!("{TRUSTED_SENDERS_PROMPT}");
+        let line: String = dialoguer::Input::with_theme(&PlainPromptTheme)
+            .with_prompt("> ")
+            .allow_empty(true)
+            .interact_text()?;
+        // The Y/n helpers still take a `BufRead`; lock stdin freshly
+        // for each call. Single-char input doesn't need line editing.
+        let stdin = io::stdin();
+        let mut yn_reader = stdin.lock();
+        match parse_trusted_senders_line(&line) {
+            Ok(senders) if senders.is_empty() => {
+                print_empty_trusted_senders_warning();
+                if read_yn_line(&mut yn_reader, "Leave hooks disabled?")? {
+                    return Ok(("none".to_string(), vec![]));
+                }
+                // Operator wants to re-enter senders — fall through to
+                // the next loop iteration. Reset the attempt counter
+                // so a "no, let me try again" doesn't burn the budget.
+                attempt = 0;
+                continue;
+            }
+            Ok(senders) => {
+                if prompt_confirm_list(&mut yn_reader, "Trusted senders", &senders)? {
+                    return Ok(("verified".to_string(), senders));
+                }
+                // No → re-prompt. Reset the attempt budget so the
+                // operator can iterate freely.
+                attempt = 0;
+                continue;
+            }
+            Err((entry, reason)) => {
+                println!("{} invalid sender '{entry}': {reason}", term::fail_mark());
+                if attempt == MAX_TRUSTED_SENDERS_ATTEMPTS {
+                    return Err(format!(
+                        "trusted-senders prompt aborted after {MAX_TRUSTED_SENDERS_ATTEMPTS} \
+                         attempts; last error: invalid sender '{entry}': {reason}"
+                    )
+                    .into());
+                }
+            }
+        }
+    }
+}
+
+/// Inner trusted-senders helper that reads from an injectable `BufRead`.
+/// Production callers go through [`prompt_trusted_senders`] (which uses
+/// `dialoguer::Input` for the senders line); tests drive the
+/// validation / re-prompt / max-attempts / empty-warning / confirm
+/// branches with scripted `Cursor<&[u8]>` input. Body is identical to
+/// the pre-dialoguer implementation. Test-only — production builds get
+/// the dialoguer-backed entry point.
+#[cfg(test)]
+pub(crate) fn prompt_trusted_senders_with_reader(
     reader: &mut dyn BufRead,
 ) -> Result<(String, Vec<String>), Box<dyn std::error::Error>> {
     println!();
@@ -1911,6 +1982,31 @@ pub fn prompt_trusted_senders(
                 }
             }
         }
+    }
+}
+
+/// Custom dialoguer theme that writes input prompts verbatim — no
+/// trailing colon, no decoration. Lets us reuse `dialoguer::Input`'s
+/// line-editor behavior while keeping the existing `> ` cursor visual.
+struct PlainPromptTheme;
+
+impl dialoguer::theme::Theme for PlainPromptTheme {
+    fn format_input_prompt(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        prompt: &str,
+        _default: Option<&str>,
+    ) -> std::fmt::Result {
+        write!(f, "{prompt}")
+    }
+
+    fn format_input_prompt_selection(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        prompt: &str,
+        sel: &str,
+    ) -> std::fmt::Result {
+        write!(f, "{prompt}{sel}")
     }
 }
 
@@ -2489,9 +2585,7 @@ pub fn run_setup(
         print_step_complete(4, &checklist);
         Some(defaults)
     } else {
-        let stdin = io::stdin();
-        let mut reader = stdin.lock();
-        let defaults = prompt_trusted_senders(&mut reader)?;
+        let defaults = prompt_trusted_senders()?;
         checklist.set(4, term::StepState::Done);
         print_step_complete(4, &checklist);
         Some(defaults)
@@ -4674,7 +4768,7 @@ owner = "aimx-catchall"
     fn prompt_trusted_senders_empty_input_returns_none_with_warning() {
         let input = b"\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "none");
         assert!(senders.is_empty());
     }
@@ -4683,7 +4777,7 @@ owner = "aimx-catchall"
     fn prompt_trusted_senders_single_address() {
         let input = b"alice@example.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(senders, vec!["alice@example.com".to_string()]);
     }
@@ -4692,7 +4786,7 @@ owner = "aimx-catchall"
     fn prompt_trusted_senders_comma_separated() {
         let input = b"alice@example.com, *@company.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(
             senders,
@@ -4704,7 +4798,7 @@ owner = "aimx-catchall"
     fn prompt_trusted_senders_whitespace_separated() {
         let input = b"alice@example.com   *@company.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(senders.len(), 2);
     }
@@ -4713,7 +4807,7 @@ owner = "aimx-catchall"
     fn prompt_trusted_senders_retries_invalid_then_accepts() {
         let input = b"not-an-address\nalice@example.com\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(senders, vec!["alice@example.com".to_string()]);
     }
@@ -4724,7 +4818,9 @@ owner = "aimx-catchall"
         // the wizard aborts on attempt 5 per the error-budget contract.
         let input = b"bad1\nbad2\nbad3\nbad4\nbad5\nalice@example.com\n";
         let mut reader = io::Cursor::new(input);
-        let err = prompt_trusted_senders(&mut reader).unwrap_err().to_string();
+        let err = prompt_trusted_senders_with_reader(&mut reader)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains(&MAX_TRUSTED_SENDERS_ATTEMPTS.to_string()),
             "error must name the attempt ceiling: {err}"
@@ -4733,6 +4829,18 @@ owner = "aimx-catchall"
             err.contains("bad5"),
             "error should name the last bad entry: {err}"
         );
+    }
+
+    #[test]
+    fn prompt_trusted_senders_no_arg_signature_compiles() {
+        // Compile-time check that the production no-arg entry point
+        // exists with the expected signature — we cannot drive
+        // `dialoguer::Input` from a unit test because `interact_text()`
+        // refuses to run without a real TTY. Coercion to a function
+        // pointer of the documented type is the cheapest assertion we
+        // can make without invoking the dialoguer reader.
+        let _: fn() -> Result<(String, Vec<String>), Box<dyn std::error::Error>> =
+            super::prompt_trusted_senders;
     }
 
     #[test]
@@ -5143,7 +5251,7 @@ owner = "aimx-catchall"
         // an empty line (= yes), wizard returns ("verified", senders).
         let input = b"alice@example.com, *@company.com\n\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(
             senders,
@@ -5158,7 +5266,7 @@ owner = "aimx-catchall"
         // accepts (`\n`).
         let input = b"oldlist@example.com\nn\nnewlist@example.com\n\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(senders, vec!["newlist@example.com".to_string()]);
     }
@@ -5169,7 +5277,7 @@ owner = "aimx-catchall"
         // confirm. `\n` (= yes default) returns ("none", []).
         let input = b"\n\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "none");
         assert!(senders.is_empty());
     }
@@ -5180,7 +5288,7 @@ owner = "aimx-catchall"
         // wizard re-prompts → operator types real list → confirm.
         let input = b"\nn\nalice@example.com\n\n";
         let mut reader = io::Cursor::new(input);
-        let (mode, senders) = prompt_trusted_senders(&mut reader).unwrap();
+        let (mode, senders) = prompt_trusted_senders_with_reader(&mut reader).unwrap();
         assert_eq!(mode, "verified");
         assert_eq!(senders, vec!["alice@example.com".to_string()]);
     }
