@@ -456,9 +456,9 @@ sudo aimx setup</pre>
       <p class="prose" style="margin-top: 1.1em;">
         You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Not sure your VPS allows port 25? Check first, no install:
       </p>
-<pre class="code">curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only</pre>
+<pre class="code">curl -fsSL https://aimx.email/prtcheck.sh | sh</pre>
       <p class="prose" style="margin-top: 1.1em;">
-        Want to see the script before running it? <a href="/install.sh">Read <code>install.sh</code></a>.
+        <code>prtcheck.sh</code> is a thin alias for <code>install.sh --port-check-only</code>; both URLs run the same checks. Want to see the scripts before running them? <a href="/install.sh">Read <code>install.sh</code></a> or <a href="/prtcheck.sh">Read <code>prtcheck.sh</code></a>.
       </p>
     </section>
 

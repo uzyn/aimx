@@ -27,6 +27,12 @@ Providers that **block** port 25 permanently (not compatible): DigitalOcean, AWS
 Not sure your VPS allows SMTP traffic on port 25? Run the connectivity check before committing to install:
 
 ```bash
+curl -fsSL https://aimx.email/prtcheck.sh | sh
+```
+
+`prtcheck.sh` is a thin alias for `install.sh --port-check-only` — same trust anchor, same checks, shorter URL. The longer form still works:
+
+```bash
 curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only
 ```
 

@@ -1,6 +1,7 @@
-DIST    := dist
-PIGEON  := ../etc/aimx-pigeon.svg
-INSTALL := ../install.sh
+DIST     := dist
+PIGEON   := ../etc/aimx-pigeon.svg
+INSTALL  := ../install.sh
+PRTCHECK := ../prtcheck.sh
 
 .PHONY: build serve clean
 
@@ -15,6 +16,9 @@ build:
 	# files under their on-disk extension; `.sh` resolves to
 	# `application/x-sh` by default, which is correct for `curl | sh`.
 	cp $(INSTALL) $(DIST)/install.sh
+	# Shorter alias for `install.sh --port-check-only` — same trust
+	# anchor, fetches install.sh from the same origin and execs it.
+	cp $(PRTCHECK) $(DIST)/prtcheck.sh
 
 serve: build
 	@echo ""
