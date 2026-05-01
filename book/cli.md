@@ -201,9 +201,11 @@ No flags. See [MCP Server](mcp.md).
 
 ### `aimx agents setup [agent]`
 
-Install the aimx plugin / skill for a supported agent into the current user's config directory. Refuses to run as root. Run with no arguments to launch the interactive checkbox TUI; pass `--list` (or call `aimx agents list`) to print the supported-agent registry and exit without installing.
+Install the aimx skill for a supported agent into the current user's config directory and (for Claude Code and Codex CLI) auto-register the aimx MCP server via `claude mcp add` / `codex mcp add`. Refuses to run as root. Run with no arguments to launch the interactive checkbox TUI; pass `--list` (or call `aimx agents list`) to print the supported-agent registry and exit without installing.
 
-The plugin bundle teaches the agent how to call aimx's MCP tools and includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with [`aimx hooks create`](#aimx-hooks-create).
+The skill bundle teaches the agent how to call aimx's MCP tools and includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with [`aimx hooks create`](#aimx-hooks-create).
+
+When installing for `claude-code`, the installer also removes any pre-existing `~/.claude/plugins/aimx/` from the older plugin layout so the new skills install isn't shadowed.
 
 | Flag | Description |
 |------|-------------|
@@ -212,7 +214,7 @@ The plugin bundle teaches the agent how to call aimx's MCP tools and includes a 
 | `--no-interactive` | Skip the TUI when no agent is named; print the same plain registry dump. Intended for scripting. |
 | `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
 | `--force` | Overwrite existing destination files without prompting. |
-| `--print` | Print the plugin contents to stdout instead of writing to disk. |
+| `--print` | Print the skill contents and activation hint to stdout instead of writing to disk or invoking any MCP CLI. |
 
 See [Agent Integration](agent-integration.md) for per-agent activation steps.
 
@@ -222,7 +224,7 @@ Print the supported-agent registry as a plain table (agent name, destination pat
 
 ### `aimx agents remove <agent>`
 
-Inverse of `aimx agents setup`. Removes the plugin files under `$HOME`. Refuses to run as root.
+Inverse of `aimx agents setup`. Removes the skill files under `$HOME` and prints an agent-specific cleanup hint pointing at any external command you still need to run (for example `claude mcp remove aimx`). Refuses to run as root.
 
 | Flag | Description |
 |------|-------------|

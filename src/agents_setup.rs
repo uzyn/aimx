@@ -4,6 +4,7 @@
 //! bundled into the binary via `include_dir!`, and installs them into the
 //! user's `$HOME`-based agent directory.
 
+use crate::agents_mcp::{McpCli, NoopMcpCli, RealMcpCli};
 use crate::term;
 use include_dir::{Dir, DirEntry, include_dir};
 use std::io::{self, BufRead, Write};
@@ -50,27 +51,29 @@ pub struct AgentSpec {
 /// the destination template determines the depth.
 ///
 /// Source-tree shapes:
-/// - Plugin-with-skill (`claude-code`): `plugin.json` at the package
-///   root with the skill nested under `skills/aimx/`, so the installed
-///   tree mirrors Claude Code's plugin-manifest convention. Claude Code
-///   auto-discovers plugins under `~/.claude/plugins/`.
-/// - Flat skill (`codex`, `opencode`, `gemini`, `openclaw`):
-///   `SKILL.md.header` at the source root; the destination template
-///   points directly at the skill directory. No plugin manifest is
-///   written. Codex CLI specifically does NOT scan a plugins directory
-///   for MCP servers. Its MCP wiring lives in `~/.codex/config.toml`
-///   (managed via `codex mcp add`), so the activation hint prints the
-///   canonical `codex mcp add aimx -- ...` command for the user.
+/// - Skill (`claude-code`, `codex`, `opencode`, `gemini`, `openclaw`):
+///   `SKILL.md.header` at `skills/aimx/` (or the package root for flat
+///   layouts); the destination template points at the skill directory.
+///   Claude Code auto-discovers user-scope skills at
+///   `~/.claude/skills/<name>/`. The remaining skill-shaped agents have
+///   their own per-agent skills directories. None of them require a
+///   plugin manifest.
 /// - Flat recipe (`goose`): `aimx.yaml.header` at the source root; the
 ///   installer concatenates `<name>.yaml.header` with the indented common
 ///   primer to produce a single `<name>.yaml` file under the Goose
 ///   recipes directory.
+///
+/// MCP wiring is per-agent. Claude Code and Codex expose CLIs (`claude
+/// mcp add`, `codex mcp add`) so the installer auto-registers there
+/// when the CLI is on PATH and falls back to the printed hint when it
+/// is not. The remaining agents take JSON/YAML snippets the user pastes
+/// into their config file.
 pub fn registry() -> &'static [AgentSpec] {
     &[
         AgentSpec {
             name: "claude-code",
             source_subdir: "claude-code",
-            dest_template: "$HOME/.claude/plugins/aimx",
+            dest_template: "$HOME/.claude/skills/aimx",
             agent_root_template: "$HOME/.claude",
             display_name: "Claude Code",
             activation_hint: claude_code_hint,
@@ -144,27 +147,29 @@ pub fn registry() -> &'static [AgentSpec] {
 }
 
 fn claude_code_hint(data_dir: Option<&Path>) -> String {
-    // Claude Code auto-discovers plugins under ~/.claude/plugins/, but the
-    // MCP server bundled with the plugin is NOT activated automatically.
-    // in particular `claude -p` (headless, used by channel-trigger recipes)
-    // needs an explicit `claude mcp add` to register the server in its
-    // MCP registry. Finding #7 from the 2026-04-17 manual test run
-    // surfaced this gap. Mirror Codex's hint structure (install-location
-    // line, blank line, command line, blank line, restart note) so the
-    // two agents read consistently.
+    // Claude Code auto-discovers user-scope skills under
+    // ~/.claude/skills/, but the MCP server is NOT activated
+    // automatically — in particular `claude -p` (headless, used by
+    // channel-trigger recipes) needs an explicit `claude mcp add`. The
+    // installer auto-runs the equivalent command when `claude` is on
+    // PATH; this hint is the fallback for the case where the CLI is
+    // missing or the auto-registration fails. The `--` separator is
+    // required by commander.js once `--data-dir` appears in the
+    // subprocess argv.
     let extra_args = match data_dir {
         Some(dd) => format!(" --data-dir {}", posix_single_quote(&dd.to_string_lossy())),
         None => String::new(),
     };
     format!(
-        "Plugin installed at ~/.claude/plugins/aimx/. Register the aimx MCP \
-         server with Claude Code by running this command once:\n\
+        "Skill installed at ~/.claude/skills/aimx/. If automatic MCP \
+         registration failed, register the aimx MCP server with Claude \
+         Code by running this command once:\n\
          \n\
-         \x20\x20claude mcp add --scope user aimx /usr/local/bin/aimx{extra_args} mcp\n\
+         \x20\x20claude mcp add --scope user aimx -- /usr/local/bin/aimx{extra_args} mcp\n\
          \n\
          Restart Claude Code after registration so the new server is \
-         loaded. (Claude Code auto-discovers the plugin under \
-         ~/.claude/plugins/, but the MCP server must be registered \
+         loaded. (Claude Code auto-discovers the skill under \
+         ~/.claude/skills/, but the MCP server must be registered \
          explicitly, especially for `claude -p` headless invocations.)"
     )
 }
@@ -173,15 +178,17 @@ fn codex_hint(data_dir: Option<&Path>) -> String {
     // Codex CLI's only MCP wiring path is `~/.codex/config.toml` under
     // `[mcp_servers.<name>]`, managed via `codex mcp add`. It does NOT
     // auto-discover plugins under `~/.codex/plugins/` (validated against
-    // Codex CLI 0.117.0). We install the skill file, then print the
-    // canonical `codex mcp add` command for the user to run once.
+    // Codex CLI 0.117.0). The installer auto-runs the equivalent
+    // command when `codex` is on PATH; this hint is the fallback for
+    // the case where the CLI is missing or auto-registration fails.
     let extra_args = match data_dir {
         Some(dd) => format!(" --data-dir {}", posix_single_quote(&dd.to_string_lossy())),
         None => String::new(),
     };
     format!(
-        "Skill installed at ~/.codex/skills/aimx/. Register the aimx MCP \
-         server with Codex CLI by running this command once:\n\
+        "Skill installed at ~/.codex/skills/aimx/. If automatic MCP \
+         registration failed, register the aimx MCP server with Codex \
+         CLI by running this command once:\n\
          \n\
          \x20\x20codex mcp add aimx -- /usr/local/bin/aimx{extra_args} mcp\n\
          \n\
@@ -384,6 +391,15 @@ pub trait AgentEnv {
     fn caller_username(&self) -> Option<String> {
         caller_username_from_euid()
     }
+    /// CLI driver used by the MCP auto-registration step in
+    /// `install_to_writer`. Defaults to a no-op so test mocks don't
+    /// accidentally spawn `claude mcp add` against the developer's
+    /// real `~/.claude.json`. `RealAgentEnv` overrides to return the
+    /// real subprocess runner.
+    fn mcp_cli(&self) -> &dyn McpCli {
+        static NOOP: NoopMcpCli = NoopMcpCli;
+        &NOOP
+    }
 }
 
 pub struct RealAgentEnv;
@@ -411,6 +427,11 @@ impl AgentEnv for RealAgentEnv {
         let mut s = String::new();
         io::stdin().lock().read_line(&mut s)?;
         Ok(s)
+    }
+
+    fn mcp_cli(&self) -> &dyn McpCli {
+        static REAL: RealMcpCli = RealMcpCli;
+        &REAL
     }
 }
 
@@ -458,6 +479,10 @@ impl<'a> AgentEnv for OverrideHomeEnv<'a> {
 
     fn caller_username(&self) -> Option<String> {
         self.inner.caller_username()
+    }
+
+    fn mcp_cli(&self) -> &dyn McpCli {
+        self.inner.mcp_cli()
     }
 }
 
@@ -567,11 +592,11 @@ pub enum InstallState {
 /// 1. Resolve `dest_template` under `home` / `xdg`.
 /// 2. **Directory destinations** (`claude-code`, `codex`, `opencode`,
 ///    `gemini`, `openclaw`, `hermes`): the destination is a directory aimx
-///    itself lays down (e.g. `~/.claude/plugins/aimx`). Consider it
+///    itself lays down (e.g. `~/.claude/skills/aimx`). Consider it
 ///    "wired" when the directory exists AND contains at least one file
 ///    whose bytes contain the substring `aimx`. This catches the case
-///    where the operator / cleanup left behind an empty `.claude/plugins/
-///    aimx/` directory but aimx's `SKILL.md` / `plugin.json` is gone.
+///    where the operator / cleanup left behind an empty
+///    `~/.claude/skills/aimx/` directory but aimx's `SKILL.md` is gone.
 ///    Since aimx's own installer fills the directory with files that
 ///    reference "aimx" in their content, any real install hits.
 /// 3. **File-bundle destinations** (`goose`): the destination is a
@@ -616,19 +641,12 @@ fn dest_contains_aimx_entry(spec: &AgentSpec, dest: &Path) -> bool {
         // for file presence alone is enough — if aimx wrote it, the
         // filename carries the wiring signal.
         "goose" => dest.join("aimx.yaml").is_file(),
-        // Claude Code's plugin layout puts everything under
-        // `.claude-plugin/` and `skills/` subdirectories — the top-level
-        // of `~/.claude/plugins/aimx/` has zero files in a real install.
-        // The canonical marker is the plugin manifest at
-        // `.claude-plugin/plugin.json`; aimx's installer always writes
-        // it, so filename presence is a strong wiring signal.
-        "claude-code" => dest.join(".claude-plugin").join("plugin.json").is_file(),
         // Directory-shaped destinations: walk the directory's top-level
         // entries and return true if any regular file contains the
         // substring "aimx" anywhere in its bytes. aimx's own SKILL.md /
-        // plugin.json / skill headers all reference "aimx" in their
-        // content, so a real install always hits. Limit the scan to the
-        // top level to keep cost bounded on big skill trees.
+        // skill headers all reference "aimx" in their content, so a
+        // real install always hits. Limit the scan to the top level to
+        // keep cost bounded on big skill trees.
         _ => match std::fs::read_dir(dest) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -876,6 +894,10 @@ fn install_to_writer(
         return Ok(());
     }
 
+    if spec.name == "claude-code" {
+        cleanup_legacy_claude_plugin(env, out)?;
+    }
+
     let dest_root = resolve_dest(spec.dest_template, env)?;
     write_files(&dest_root, &files, opts.force, env)?;
 
@@ -885,14 +907,95 @@ fn install_to_writer(
         term::success("Installed"),
         term::highlight(&dest_root.to_string_lossy())
     )?;
-    writeln!(out, "{hint}")?;
+
+    if let Some(registration) = try_auto_register_mcp(spec, env, opts.data_dir) {
+        match registration {
+            crate::agents_mcp::McpRegistration::Registered => {
+                writeln!(
+                    out,
+                    "{} MCP server registered with {}.",
+                    term::success_mark(),
+                    spec.display_name
+                )?;
+            }
+            crate::agents_mcp::McpRegistration::CliMissing => {
+                // Agent CLI not on PATH — fall through to the manual hint
+                // so the user can paste the command after they install
+                // it.
+                writeln!(out, "{hint}")?;
+            }
+            crate::agents_mcp::McpRegistration::RegisterFailed { stderr } => {
+                writeln!(
+                    out,
+                    "{} MCP auto-registration failed: {}",
+                    term::warn_mark(),
+                    stderr.lines().next().unwrap_or("(no error output)")
+                )?;
+                writeln!(out, "{hint}")?;
+            }
+        }
+    } else {
+        // Snippet-style agents (opencode, gemini, hermes, openclaw, goose)
+        // — print the hint as before; the user copy-pastes the snippet.
+        writeln!(out, "{hint}")?;
+    }
 
     Ok(())
 }
 
+/// Auto-register the aimx MCP server with agents that expose a
+/// registration CLI. Returns `None` for snippet-style agents (the
+/// caller falls back to printing the hint).
+fn try_auto_register_mcp(
+    spec: &AgentSpec,
+    env: &dyn AgentEnv,
+    data_dir: Option<&Path>,
+) -> Option<crate::agents_mcp::McpRegistration> {
+    match spec.name {
+        "claude-code" => Some(crate::agents_mcp::register_claude(env.mcp_cli(), data_dir)),
+        "codex" => Some(crate::agents_mcp::register_codex(env.mcp_cli(), data_dir)),
+        _ => None,
+    }
+}
+
+/// Remove `~/.claude/plugins/aimx/` if it exists. aimx <= 0.x installed
+/// the Claude Code bundle there as a "plugin"; once we move to the
+/// `~/.claude/skills/aimx/` layout, the old directory is dead weight
+/// that may confuse future debugging or shadow the new install in
+/// agents that scan both locations.
+fn cleanup_legacy_claude_plugin(env: &dyn AgentEnv, out: &mut dyn Write) -> io::Result<()> {
+    let Some(home) = env.home_dir() else {
+        return Ok(());
+    };
+    let legacy = home.join(".claude").join("plugins").join("aimx");
+    if !legacy.exists() {
+        return Ok(());
+    }
+    match std::fs::remove_dir_all(&legacy) {
+        Ok(()) => {
+            writeln!(
+                out,
+                "{} {} {}",
+                term::info("Removed"),
+                term::dim("legacy plugin install at"),
+                term::highlight(&legacy.to_string_lossy())
+            )?;
+        }
+        Err(e) => {
+            writeln!(
+                out,
+                "{} could not remove legacy plugin install at {}: {}",
+                term::warn_mark(),
+                legacy.display(),
+                e
+            )?;
+        }
+    }
+    Ok(())
+}
+
 /// Walk the embedded plugin source, transform known files (skill header +
-/// primer + optional footer, plugin.json), and return the full set of files
-/// to write.
+/// primer + optional footer), and return the full set of files to write.
 ///
 /// When `progressive_disclosure` is `true`, the `references/*.md` files from
 /// `agents/common/references/` are included alongside the assembled SKILL.md.
@@ -981,16 +1084,6 @@ pub fn assemble_plugin_files_with_disclosure(
             continue;
         }
 
-        if rel.file_name().is_some_and(|n| n == "plugin.json")
-            && let Some(dd) = data_dir
-        {
-            let text = std::str::from_utf8(&bytes)
-                .map_err(|e| format!("plugin.json not valid UTF-8: {e}"))?;
-            let rewritten = rewrite_plugin_args(text, dd)?;
-            transformed.push((rel, rewritten.into_bytes()));
-            continue;
-        }
-
         // Skip README.md at the top of the plugin source; it is developer-facing,
         // not an artifact to install.
         //
@@ -1068,40 +1161,6 @@ fn collect_entries(
         }
     }
     Ok(())
-}
-
-/// Rewrite `mcpServers.<server>.args` in a plugin.json-like JSON so that the
-/// command runs with `--data-dir <path>`. Preserves other fields.
-///
-/// Implementation parses the JSON into `serde_json::Value`, swaps the `args`
-/// array on each server entry, and re-serializes via `to_string_pretty`. The
-/// output is therefore serde-formatted, not byte-identical to the hand-authored
-/// file. Acceptable because `plugin.json` has no comments or meaningful
-/// whitespace to preserve.
-pub fn rewrite_plugin_args(json_text: &str, data_dir: &Path) -> Result<String, String> {
-    let value: serde_json::Value = serde_json::from_str(json_text)
-        .map_err(|e| format!("plugin.json is not valid JSON: {e}"))?;
-
-    let mut value = value;
-    let dd = data_dir.to_string_lossy().into_owned();
-
-    if let Some(servers) = value.get_mut("mcpServers").and_then(|v| v.as_object_mut()) {
-        for (_key, server) in servers.iter_mut() {
-            if let Some(obj) = server.as_object_mut() {
-                obj.insert(
-                    "args".to_string(),
-                    serde_json::json!(["--data-dir", dd, "mcp"]),
-                );
-            }
-        }
-    }
-
-    serde_json::to_string_pretty(&value)
-        .map(|mut s| {
-            s.push('\n');
-            s
-        })
-        .map_err(|e| format!("failed to serialize plugin.json: {e}"))
 }
 
 /// Prefix every line of `text` with `prefix`. Empty lines stay empty (no
@@ -1400,60 +1459,41 @@ mod tests {
 
     #[test]
     fn detect_install_state_installed_wired_when_dest_exists() {
-        // Destination must exist AND contain aimx's MCP entry.
-        // An empty plugin directory reports NotWired; the canonical
-        // Claude-Code wiring marker is `.claude-plugin/plugin.json`
-        // (plugin layout puts everything under that subdirectory and
-        // `skills/` — top level has zero files in a real install).
+        // Destination must exist AND contain aimx's signature ("aimx"
+        // string in any top-level file). An empty skills/aimx directory
+        // reports NotWired.
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&skill_dir).unwrap();
         let spec = find_agent("claude-code").unwrap();
         // Empty dir → NotWired (falls back to agent_root existence = InstalledNotWired).
         let state_empty = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_empty, InstallState::InstalledNotWired);
 
-        // Drop the canonical plugin manifest → Wired.
-        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
-        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
-        std::fs::write(
-            plugin_manifest_dir.join("plugin.json"),
-            r#"{"name":"aimx"}"#,
-        )
-        .unwrap();
+        // Drop a SKILL.md mentioning "aimx" → Wired.
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
         let state_wired = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state_wired, InstallState::InstalledWired);
     }
 
-    /// Regression for the bug where `dest_contains_aimx_entry` only scanned
-    /// top-level files. Claude Code's plugin layout has nothing at the top
-    /// level — everything lives under `.claude-plugin/` and `skills/`. A
-    /// fully-wired install always classified as `InstalledNotWired` before
-    /// the special-case fix.
+    /// Skill-layout sanity check: top-level `SKILL.md` under
+    /// `~/.claude/skills/aimx/` is enough to register the install as
+    /// wired. (The pre-skills layout had everything nested under
+    /// `.claude-plugin/` and required a special-case detector; the new
+    /// layout falls cleanly into the generic top-level scan.)
     #[test]
-    fn detect_install_state_installed_wired_for_claude_code_plugin_layout() {
+    fn detect_install_state_installed_wired_for_claude_code_skill_layout() {
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
-        let plugin_manifest_dir = plugin_dir.join(".claude-plugin");
-        let skills_dir = plugin_dir.join("skills").join("aimx");
-        std::fs::create_dir_all(&plugin_manifest_dir).unwrap();
-        std::fs::create_dir_all(&skills_dir).unwrap();
-        // Real installs lay down `.claude-plugin/plugin.json` and
-        // `skills/aimx/SKILL.md`; nothing at the top level of
-        // `~/.claude/plugins/aimx/`.
-        std::fs::write(
-            plugin_manifest_dir.join("plugin.json"),
-            r#"{"name":"aimx"}"#,
-        )
-        .unwrap();
-        std::fs::write(skills_dir.join("SKILL.md"), "# aimx skill\n").unwrap();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
 
         let spec = find_agent("claude-code").unwrap();
         let state = detect_install_state(spec, tmp.path(), None);
         assert_eq!(
             state,
             InstallState::InstalledWired,
-            "claude-code plugin layout (nothing at top level) must be detected as wired"
+            "claude-code skill layout (SKILL.md at top level) must be detected as wired"
         );
     }
 
@@ -1462,8 +1502,8 @@ mod tests {
         // Regression guard for the content check: an orphan empty
         // destination directory must not mis-report as wired.
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&skill_dir).unwrap();
         let spec = find_agent("claude-code").unwrap();
         let state = detect_install_state(spec, tmp.path(), None);
         // Empty dir is not Wired (agent_root exists → NotWired).
@@ -1475,9 +1515,9 @@ mod tests {
         // Another orphan case: dest dir with a file that doesn't mention
         // aimx. Must report NotWired rather than Wired.
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp.path().join(".claude").join("plugins").join("aimx");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(plugin_dir.join("stale.txt"), "nothing to see").unwrap();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("stale.txt"), "nothing to see").unwrap();
         let spec = find_agent("claude-code").unwrap();
         let state = detect_install_state(spec, tmp.path(), None);
         assert_eq!(state, InstallState::InstalledNotWired);
@@ -1690,14 +1730,16 @@ mod tests {
 
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        assert!(dest.join(".claude-plugin/plugin.json").exists());
-        assert!(dest.join("skills/aimx/SKILL.md").exists());
+        let dest = tmp.path().join(".claude/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        // No plugin manifest in the skills layout.
+        assert!(!dest.join(".claude-plugin").exists());
+        assert!(!dest.join("plugin.json").exists());
         // README.md is developer-facing and is NOT installed.
         assert!(!dest.join("README.md").exists());
 
         // SKILL.md should have been assembled from header + primer.
-        let skill = std::fs::read_to_string(dest.join("skills/aimx/SKILL.md")).unwrap();
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
         assert!(
             skill.starts_with("---\n"),
             "missing YAML frontmatter: {skill:.200}"
@@ -1707,15 +1749,7 @@ mod tests {
         assert!(skill.contains("mailbox_list()"));
         assert!(skill.contains("Trust model"));
         // The template sentinel should NOT appear on disk.
-        assert!(!dest.join("skills/aimx/SKILL.md.header").exists());
-
-        // plugin.json should have default args (no --data-dir).
-        let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
-        assert!(
-            plugin.contains("\"mcpServers\""),
-            "claude-code plugin.json must declare `mcpServers`: {plugin}"
-        );
-        assert!(!plugin.contains("--data-dir"));
+        assert!(!dest.join("SKILL.md.header").exists());
     }
 
     #[test]
@@ -1761,8 +1795,8 @@ mod tests {
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
         run_with_env(Some("claude-code".into()), false, true, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        assert!(dest.join(".claude-plugin/plugin.json").exists());
+        let dest = tmp.path().join(".claude/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
     }
 
     #[test]
@@ -1772,31 +1806,105 @@ mod tests {
 
         run_with_env(Some("claude-code".into()), false, false, true, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
+        let dest = tmp.path().join(".claude/skills/aimx");
         assert!(!dest.exists());
     }
 
     #[test]
-    fn install_with_custom_data_dir_rewrites_plugin_args() {
+    fn install_claude_code_removes_legacy_plugins_dir() {
+        // A pre-existing `~/.claude/plugins/aimx/` from an older aimx
+        // install should be wiped on the next setup so we don't leave
+        // dead trees behind. The notice is printed; the directory is
+        // gone after install completes.
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let legacy = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(legacy.join("stale")).unwrap();
+        std::fs::write(legacy.join("stale").join("x.txt"), "old").unwrap();
+        assert!(legacy.exists());
+
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(
+            Some("claude-code".into()),
+            false,
+            false,
+            false,
+            None,
+            &env,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(!legacy.exists(), "legacy plugin dir must be removed");
+        assert!(tmp.path().join(".claude/skills/aimx/SKILL.md").exists());
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("legacy plugin install"),
+            "stdout must mention legacy cleanup: {printed}"
+        );
+    }
+
+    #[test]
+    fn print_mode_skips_legacy_cleanup() {
+        // `--print` is a dry run; it must not touch the filesystem,
+        // including the legacy plugins directory.
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf());
+
+        let legacy = tmp.path().join(".claude").join("plugins").join("aimx");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("marker"), "still here").unwrap();
+
+        let mut out: Vec<u8> = Vec::new();
+        run_with_env_to_writer(
+            Some("claude-code".into()),
+            false,
+            false,
+            true, // --print
+            None,
+            &env,
+            &mut out,
+        )
+        .unwrap();
+
+        assert!(legacy.exists(), "--print must not touch the legacy dir");
+        assert!(legacy.join("marker").exists());
+    }
+
+    #[test]
+    fn install_with_custom_data_dir_threads_through_hint() {
+        // The `--data-dir` override now reaches the MCP registry via
+        // `claude mcp add ... -- /usr/local/bin/aimx --data-dir <p> mcp`
+        // (the test env's NoopMcpCli short-circuits the actual call,
+        // so we assert on the printed fallback hint instead). The
+        // previous coverage in `rewrite_plugin_args` is gone with the
+        // plugin.json layout.
         let tmp = TempDir::new().unwrap();
         let env = MockEnv::new(tmp.path().to_path_buf());
         let custom = PathBuf::from("/custom/aimx-data");
+        let mut out: Vec<u8> = Vec::new();
 
-        run_with_env(
+        run_with_env_to_writer(
             Some("claude-code".into()),
             false,
             false,
             false,
             Some(&custom),
             &env,
+            &mut out,
         )
         .unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        let plugin = std::fs::read_to_string(dest.join(".claude-plugin/plugin.json")).unwrap();
-        assert!(plugin.contains("--data-dir"));
-        assert!(plugin.contains("/custom/aimx-data"));
-        assert!(plugin.contains("\"mcpServers\""));
+        let dest = tmp.path().join(".claude/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+
+        let printed = String::from_utf8(out).unwrap();
+        assert!(
+            printed.contains("--data-dir '/custom/aimx-data'"),
+            "fallback hint should embed quoted data-dir: {printed}"
+        );
     }
 
     #[test]
@@ -1829,8 +1937,8 @@ mod tests {
         env.responses = RefCell::new(vec!["y\n".to_string()]);
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        assert!(dest.join(".claude-plugin/plugin.json").exists());
+        let dest = tmp.path().join(".claude/skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
     }
 
     #[test]
@@ -1856,11 +1964,11 @@ mod tests {
 
         let (_, skill_bytes) = files
             .iter()
-            .find(|(rel, _)| rel.to_string_lossy() == "skills/aimx/SKILL.md")
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
             .expect("assembled SKILL.md should be present");
 
         let header = AGENTS_DIR
-            .get_file("claude-code/skills/aimx/SKILL.md.header")
+            .get_file("claude-code/SKILL.md.header")
             .unwrap()
             .contents();
         let primer = AGENTS_DIR
@@ -1875,15 +1983,6 @@ mod tests {
         assert_eq!(
             skill_bytes, &expected,
             "SKILL.md must be exact concatenation of header followed by primer"
-        );
-    }
-
-    #[test]
-    fn rewrite_plugin_args_rejects_malformed_json() {
-        let err = rewrite_plugin_args("{ not json", Path::new("/tmp/x")).unwrap_err();
-        assert!(
-            err.contains("plugin.json is not valid JSON"),
-            "unexpected error: {err}"
         );
     }
 
@@ -2645,17 +2744,13 @@ mod tests {
 
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        let plugin = dest.join(".claude-plugin/plugin.json");
-        let mode = std::fs::metadata(&plugin).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o644, "plugin.json should be 0o644, got {mode:o}");
+        let dest = tmp.path().join(".claude/skills/aimx");
+        let skill = dest.join("SKILL.md");
+        let mode = std::fs::metadata(&skill).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o644, "SKILL.md should be 0o644, got {mode:o}");
 
-        let plugin_dir = dest.join(".claude-plugin");
-        let dmode = std::fs::metadata(&plugin_dir).unwrap().permissions().mode() & 0o777;
-        assert_eq!(
-            dmode, 0o755,
-            ".claude-plugin dir should be 0o755, got {dmode:o}"
-        );
+        let dmode = std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dmode, 0o755, "skill dir should be 0o755, got {dmode:o}");
     }
 
     #[test]
@@ -2706,8 +2801,8 @@ mod tests {
         // Claude Code has progressive_disclosure: true
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
 
-        let dest = tmp.path().join(".claude/plugins/aimx");
-        let refs = dest.join("skills/aimx/references");
+        let dest = tmp.path().join(".claude/skills/aimx");
+        let refs = dest.join("references");
         assert!(
             refs.join("mcp-tools.md").exists(),
             "progressive-disclosure agent should have references/mcp-tools.md"
@@ -2854,24 +2949,9 @@ mod tests {
     }
 
     #[test]
-    fn author_metadata_in_claude_code_plugin_json() {
-        let plugin_bytes = AGENTS_DIR
-            .get_file("claude-code/.claude-plugin/plugin.json")
-            .expect("plugin.json must exist")
-            .contents();
-        let text = std::str::from_utf8(plugin_bytes).unwrap();
-        assert!(
-            text.contains("U-Zyn Chua"),
-            "plugin.json must have standardized author"
-        );
-        assert!(
-            !text.contains("\"name\": \"AIMX\""),
-            "plugin.json must not have AIMX as author name"
-        );
-    }
-
-    #[test]
     fn author_metadata_in_all_skill_headers() {
+        // All skill-shaped agents now use the flat layout with
+        // SKILL.md.header at the bundle root.
         for agent in [
             "claude-code",
             "codex",
@@ -2880,12 +2960,9 @@ mod tests {
             "openclaw",
             "hermes",
         ] {
-            let header_path = match agent {
-                "claude-code" => "claude-code/skills/aimx/SKILL.md.header",
-                _ => &format!("{agent}/SKILL.md.header"),
-            };
+            let header_path = format!("{agent}/SKILL.md.header");
             let header = AGENTS_DIR
-                .get_file(header_path)
+                .get_file(&header_path)
                 .unwrap_or_else(|| panic!("missing header for {agent}"))
                 .contents();
             let text = std::str::from_utf8(header).unwrap();
@@ -3034,9 +3111,7 @@ mod tests {
 
         run_with_env(Some("claude-code".into()), false, false, false, None, &env).unwrap();
 
-        let refs = tmp
-            .path()
-            .join(".claude/plugins/aimx/skills/aimx/references");
+        let refs = tmp.path().join(".claude/skills/aimx/references");
         assert!(
             refs.join("hooks.md").exists(),
             "claude-code bundle must include references/hooks.md"

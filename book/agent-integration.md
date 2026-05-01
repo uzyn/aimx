@@ -15,14 +15,15 @@ aimx agents setup claude-code
 What this does, in order:
 
 1. **Refuse root.** `sudo aimx agents setup ...` is rejected. Run it as the user whose agent you are configuring.
-2. **Install plugin files.** The plugin tree embedded in the `aimx` binary is written under the agent's per-user destination (e.g. `~/.claude/plugins/aimx/`). File mode `0o644`, directory mode `0o755`.
-3. **Print activation hint.** The installer prints any external command the agent still needs (such as a `claude mcp add` command) so MCP discovery picks up the new server.
+2. **Install skill files.** The skill tree embedded in the `aimx` binary is written under the agent's per-user destination (e.g. `~/.claude/skills/aimx/`). File mode `0o644`, directory mode `0o755`.
+3. **Auto-register the MCP server (when supported).** For Claude Code and Codex CLI, the installer shells out to `claude mcp add` / `codex mcp add` so the server is wired with no extra step. If the agent CLI is not on PATH, the installer falls back to printing the equivalent command for you to run manually.
+4. **Print activation hint (snippet-style agents).** OpenCode, Gemini CLI, OpenClaw, and Hermes have JSON/YAML MCP configs the installer prints so you can paste the snippet into the agent's config file.
 
 Example output for alice running `aimx agents setup claude-code`:
 
 ```text
-Installed plugin files to /home/alice/.claude/plugins/aimx/
-Next: run `claude mcp add --scope user aimx /usr/local/bin/aimx mcp` and restart Claude Code.
+Installed /home/alice/.claude/skills/aimx
+✓ MCP server registered with Claude Code.
 ```
 
 After this, alice's agent can call aimx's MCP tools (including `hook_create` / `hook_list` / `hook_delete`) for any mailbox alice owns. The bundled plugin includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with `hook_create` — the agent reads its own skill at session start and writes its own `cmd` recipe at hook-creation time, no operator intervention required.
@@ -95,8 +96,8 @@ aimx agents remove claude-code
 
 | Agent | Install command | Destination | Activation | Progressive disclosure |
 |-------|-----------------|-------------|------------|------------------------|
-| Claude Code | `aimx agents setup claude-code` | `~/.claude/plugins/aimx/` | Run the printed `claude mcp add --scope user aimx …` command, then restart Claude Code. | Primer as skill + `references/` directory copied as siblings |
-| Codex CLI | `aimx agents setup codex` | `~/.codex/plugins/aimx/` | Restart Codex CLI; the plugin is auto-discovered from `~/.codex/plugins/`. | Primer as skill + `references/` directory copied as siblings |
+| Claude Code | `aimx agents setup claude-code` | `~/.claude/skills/aimx/` | Auto-registered via `claude mcp add` (fallback hint printed if `claude` is not on PATH). Restart Claude Code so the new server is loaded. | Primer as skill + `references/` directory copied as siblings |
+| Codex CLI | `aimx agents setup codex` | `~/.codex/skills/aimx/` | Auto-registered via `codex mcp add` (fallback hint printed if `codex` is not on PATH). Restart Codex CLI so the new server is loaded. | Primer as skill + `references/` directory copied as siblings |
 | OpenCode | `aimx agents setup opencode` | `~/.config/opencode/skills/aimx/` | Paste the printed JSONC block into `opencode.json`, then restart OpenCode. | Single skill file (primer body). References inlined |
 | Gemini CLI | `aimx agents setup gemini` | `~/.gemini/skills/aimx/` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart Gemini CLI. | Single skill file (primer body). References inlined |
 | Goose | `aimx agents setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar). References inlined |
@@ -115,19 +116,19 @@ See [MCP Server § Hook tools](mcp.md#hook-tools) for the full tool reference.
 
 ### Claude Code
 
-Claude Code discovers plugins by scanning `~/.claude/plugins/`, but the MCP
-server bundled inside a plugin is **not** auto-activated for every
-invocation. In particular `claude -p` (headless mode, used by hook
-recipes) needs an explicit `claude mcp add` so the server is registered in
-its MCP registry. The aimx plugin ships two pieces:
+Claude Code auto-discovers user-scope skills under `~/.claude/skills/`,
+but the MCP server is **not** auto-activated. In particular `claude -p`
+(headless mode, used by hook recipes) needs an explicit `claude mcp add`
+so the server is registered in its MCP registry. The aimx skill ships:
 
-- `.claude-plugin/plugin.json`: manifest declaring the plugin and the
-  `mcpServers.aimx` entry. The plugin itself auto-activates for interactive
-  `claude` sessions.
-- `skills/aimx/SKILL.md`: a skill Claude Code loads when the conversation
-  touches email, inboxes, or aimx. The skill body is the canonical aimx
-  primer: MCP tool names and parameters, the on-disk storage layout, the
-  frontmatter format, read/unread semantics, and the DKIM/SPF trust model.
+- `SKILL.md`: a skill Claude Code loads when the conversation touches
+  email, inboxes, or aimx. The skill body is the canonical aimx primer:
+  MCP tool names and parameters, the on-disk storage layout, the
+  frontmatter format, read/unread semantics, and the DKIM/SPF trust
+  model.
+- `references/`: detailed reference docs (MCP tool signatures,
+  frontmatter schema, workflows, troubleshooting, hooks) loaded on
+  demand via progressive disclosure.
 
 Install:
 
@@ -135,36 +136,32 @@ Install:
 aimx agents setup claude-code
 ```
 
-Then register the MCP server with Claude Code:
-
-```bash
-claude mcp add --scope user aimx /usr/local/bin/aimx mcp
-```
-
-This updates `~/.claude.json` (the user-scope MCP registry) so both the
-interactive REPL and `claude -p` headless invocations see the `aimx`
-server. Restart Claude Code after registration.
+The installer auto-runs `claude mcp add --scope user aimx --
+/usr/local/bin/aimx mcp`, which updates `~/.claude.json` (the
+user-scope MCP registry) so both the interactive REPL and `claude -p`
+headless invocations see the `aimx` server. If `claude` is not on
+PATH, the installer prints the equivalent command for you to run
+manually. Restart Claude Code after install so the new MCP server is
+loaded.
 
 Custom data directory:
 
 ```bash
 aimx --data-dir /custom/path agents setup claude-code
-claude mcp add --scope user aimx /usr/local/bin/aimx --data-dir /custom/path mcp
 ```
 
-The `aimx agents setup` installer rewrites `mcpServers.aimx.args` in the
-plugin's `plugin.json` and prints a `claude mcp add` command that includes
-the same `--data-dir` override.
+The installer threads `--data-dir /custom/path` into the auto-runned
+`claude mcp add` invocation (and into the fallback hint when the CLI
+is missing).
 
 ### Codex CLI
 
-Codex CLI discovers plugins by scanning `~/.codex/plugins/`. The aimx
-plugin ships two pieces:
-
-- `.codex-plugin/plugin.json`: manifest declaring the plugin and
-  registering `aimx mcp` as an MCP server.
-- `skills/aimx/SKILL.md`: the agent-facing skill (body = canonical aimx
-  primer).
+Codex CLI's MCP wiring lives in `~/.codex/config.toml` under
+`[mcp_servers.<name>]`, managed via `codex mcp add`. It does **not**
+auto-discover plugins under `~/.codex/plugins/` (validated against
+Codex CLI 0.117.0). The aimx skill ships at `~/.codex/skills/aimx/`
+with a `SKILL.md` body (canonical aimx primer) and a `references/`
+directory.
 
 Install:
 
@@ -172,20 +169,19 @@ Install:
 aimx agents setup codex
 ```
 
+The installer auto-runs `codex mcp add aimx -- /usr/local/bin/aimx
+mcp` so the MCP server is registered with no extra step. If `codex`
+is not on PATH, the installer prints the equivalent command for you
+to run manually.
+
 Custom data directory:
 
 ```bash
 aimx --data-dir /custom/path agents setup codex
 ```
 
-Like Claude Code, the installer rewrites `mcpServers.aimx.args` in
-`plugin.json` to include `--data-dir /custom/path`.
-
-Verify the plugin format and destination path against the current Codex
-CLI documentation before relying on this in production. Agent plugin
-formats drift between releases. See the per-agent
-[README](https://github.com/uzyn/aimx/tree/main/agents/codex) for the
-documentation link.
+The installer threads `--data-dir /custom/path` into both the
+auto-registration command and the fallback hint.
 
 ### OpenCode
 

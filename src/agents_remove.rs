@@ -217,13 +217,9 @@ mod tests {
     fn agents_remove_filesystem_cleanup() {
         // Pre-populate the dest dir; after running, dest must not exist.
         let tmp = TempDir::new().unwrap();
-        let dest = tmp.path().join(".claude").join("plugins").join("aimx");
-        std::fs::create_dir_all(dest.join(".claude-plugin")).unwrap();
-        std::fs::write(
-            dest.join(".claude-plugin").join("plugin.json"),
-            r#"{"name":"aimx"}"#,
-        )
-        .unwrap();
+        let dest = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
         assert!(dest.exists());
 
         let env = TestEnv::new(tmp.path().to_path_buf(), "alice");

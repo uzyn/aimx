@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn build_rows_defaults_selected_on_installed_not_wired() {
         // Create `~/.claude` (agent_root for claude-code) but not
-        // `~/.claude/plugins/aimx`. Claude Code row should default to
+        // `~/.claude/skills/aimx`. Claude Code row should default to
         // selected, others NotInstalled.
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
@@ -552,20 +552,15 @@ mod tests {
 
     #[test]
     fn build_rows_already_wired_is_unselected_but_selectable() {
-        // Create `~/.claude/plugins/aimx/.claude-plugin/plugin.json`
-        // (the canonical Claude-Code plugin manifest aimx writes) so
-        // detection reports InstalledWired. Row is selectable (operator
-        // can choose to re-wire / overwrite) but defaults to unselected
-        // to avoid unnecessary re-installs.
+        // Create `~/.claude/skills/aimx/SKILL.md` (the canonical
+        // Claude-Code wiring marker aimx writes) so detection reports
+        // InstalledWired. Row is selectable (operator can choose to
+        // re-wire / overwrite) but defaults to unselected to avoid
+        // unnecessary re-installs.
         let tmp = TempDir::new().unwrap();
-        let plugin_dir = tmp
-            .path()
-            .join(".claude")
-            .join("plugins")
-            .join("aimx")
-            .join(".claude-plugin");
-        std::fs::create_dir_all(&plugin_dir).unwrap();
-        std::fs::write(plugin_dir.join("plugin.json"), r#"{"name":"aimx"}"#).unwrap();
+        let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(skill_dir.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
         let env = FakeEnv::new(tmp.path().to_path_buf());
         let rows = build_rows(&env);
         let claude_row = rows
@@ -666,7 +661,7 @@ mod tests {
             (
                 "Claude Code".to_string(),
                 format!("{} ok", term::success_mark()),
-                Ok::<String, String>("/home/u/.claude/plugins/aimx".to_string()),
+                Ok::<String, String>("/home/u/.claude/skills/aimx".to_string()),
             ),
             (
                 "Codex CLI".to_string(),
