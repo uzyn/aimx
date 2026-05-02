@@ -257,7 +257,7 @@ pub async fn handle_mailbox_crud(
             },
             None,
         );
-        handle_delete(state_ctx, mb_ctx, &req.name)
+        handle_delete(state_ctx, mb_ctx, &req.name, req.force)
     }
 }
 
@@ -492,7 +492,12 @@ fn check_preexisting_dirs(inbox: &Path, sent: &Path, uid: u32, gid: u32) -> Opti
     None
 }
 
-fn handle_delete(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) -> AckResponse {
+fn handle_delete(
+    state_ctx: &StateContext,
+    mb_ctx: &MailboxContext,
+    name: &str,
+    force: bool,
+) -> AckResponse {
     if name == "catchall" {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
@@ -507,10 +512,25 @@ fn handle_delete(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
             reason: no_such_mailbox_reason(name),
         };
     }
+    drop(current);
 
     let data_dir = &state_ctx.data_dir;
     let inbox = data_dir.join("inbox").join(name);
     let sent = data_dir.join("sent").join(name);
+
+    // `force=true`: wipe inbox + sent contents under the same per-mailbox
+    // lock that already guards the stanza removal. This eliminates the
+    // data-destruction race window the client-side wipe used to leave
+    // open (daemon dies between wipe and DELETE submit → contents gone,
+    // config still references the mailbox). The wipe leaves the
+    // directories themselves in place; the post-wipe NONEMPTY check
+    // below sees zero files and lets the delete proceed.
+    if force && let Err(e) = wipe_mailbox_dirs(&inbox, &sent) {
+        return AckResponse::Err {
+            code: ErrCode::Io,
+            reason: format!("failed to wipe mailbox '{name}': {e}"),
+        };
+    }
 
     let inbox_files = count_files_if_exists(&inbox);
     let sent_files = count_files_if_exists(&sent);
@@ -526,6 +546,8 @@ fn handle_delete(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
             ),
         };
     }
+
+    let current = mb_ctx.config_handle.load();
 
     let mut new_config: Config = (*current).clone();
     new_config.mailboxes.remove(name);
@@ -553,6 +575,20 @@ fn count_files_if_exists(dir: &Path) -> usize {
         Ok(entries) => entries.filter_map(|e| e.ok()).count(),
         Err(_) => 0,
     }
+}
+
+/// Wipe both the inbox and sent directories of a mailbox, removing
+/// every entry but leaving the directories themselves in place. Called
+/// from the `MAILBOX-DELETE force=true` path so the wipe and the
+/// stanza removal happen atomically under the per-mailbox lock — no
+/// data-destruction race window if the daemon dies mid-flight.
+/// Reuses [`crate::mailbox::wipe_mailbox_contents`] so the CLI
+/// fallback path and the daemon path share the same wipe contract
+/// (dotfile preservation, symlink handling, missing-dir tolerance).
+fn wipe_mailbox_dirs(inbox: &Path, sent: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    crate::mailbox::wipe_mailbox_contents(inbox)?;
+    crate::mailbox::wipe_mailbox_contents(sent)?;
+    Ok(())
 }
 
 /// Atomically replace `path` with the TOML serialization of `config`.
@@ -710,6 +746,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
@@ -740,6 +777,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &seed, &Caller::internal_root()).await,
@@ -750,6 +788,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &dup, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -770,6 +809,7 @@ mod tests {
                 name: name.into(),
                 create: true,
                 owner: Some("testowner".into()),
+                force: false,
             };
             match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
                 AckResponse::Err { code, reason } => {
@@ -797,6 +837,7 @@ mod tests {
             name: "catchall".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &attacker).await {
             AckResponse::Err { code, reason } => {
@@ -816,6 +857,7 @@ mod tests {
             name: "".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Validation),
@@ -833,6 +875,7 @@ mod tests {
                 name: bad.into(),
                 create: true,
                 owner: Some("testowner".into()),
+                force: false,
             };
             match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
                 AckResponse::Err { code, .. } => {
@@ -854,6 +897,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
@@ -865,6 +909,7 @@ mod tests {
             name: "alice".into(),
             create: false,
             owner: None,
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
@@ -887,6 +932,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
@@ -902,6 +948,7 @@ mod tests {
             name: "alice".into(),
             create: false,
             owner: None,
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -933,6 +980,7 @@ mod tests {
             name: "catchall".into(),
             create: false,
             owner: None,
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -952,6 +1000,7 @@ mod tests {
             name: "ghost".into(),
             create: false,
             owner: None,
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -991,6 +1040,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &bad_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Io),
@@ -1105,6 +1155,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(matches!(
             handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await,
@@ -1194,6 +1245,7 @@ mod tests {
                     name: n,
                     create: true,
                     owner: Some("testowner".into()),
+                    force: false,
                 };
                 handle_mailbox_crud(&s, &m, &req, &Caller::internal_root()).await
             }));
@@ -1243,6 +1295,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: None,
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -1265,6 +1318,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("ghost".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -1311,6 +1365,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
+            force: false,
         };
         // Note: the test harness may actually be running as uid 65534 in
         // some exotic CI, in which case the conflict check flips to
@@ -1379,6 +1434,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, .. } => {
@@ -1457,6 +1513,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &Caller::internal_root()).await {
             AckResponse::Err { code, reason } => {
@@ -1504,6 +1561,7 @@ mod tests {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
+            force: false,
         };
         assert!(
             matches!(
@@ -1545,6 +1603,7 @@ mod tests {
             create: true,
             // The attacker tries to claim a root-owned mailbox.
             owner: Some("root".into()),
+            force: false,
         };
         let resp = handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller).await;
         assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
@@ -1616,6 +1675,7 @@ mod tests {
             name: "opsbox".into(),
             create: false,
             owner: None,
+            force: false,
         };
         let unowned_resp =
             handle_mailbox_crud(&state_ctx, &mb_ctx, &unowned_delete, &nonroot).await;
@@ -1627,6 +1687,7 @@ mod tests {
             name: "nope".into(),
             create: false,
             owner: None,
+            force: false,
         };
         let missing_resp =
             handle_mailbox_crud(&state_ctx, &mb_ctx, &missing_delete, &nonroot).await;
@@ -1691,6 +1752,7 @@ mod tests {
             create: true,
             // Owner is ignored for non-root; included to prove that.
             owner: Some("ignored-by-daemon".into()),
+            force: false,
         };
         let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller).await;
         assert!(matches!(r1, AckResponse::Ok), "first create: {r1:?}");
@@ -1731,11 +1793,13 @@ mod tests {
             name: "task42".into(),
             create: true,
             owner: None,
+            force: false,
         };
         let delete_req = MailboxCrudRequest {
             name: "task42".into(),
             create: false,
             owner: None,
+            force: false,
         };
 
         let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
@@ -1781,6 +1845,7 @@ mod tests {
             name: "orph".into(),
             create: true,
             owner: Some("anything".into()),
+            force: false,
         };
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &orphan).await {
             AckResponse::Err { code, reason } => {

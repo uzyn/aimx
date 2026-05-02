@@ -133,6 +133,20 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // `aimx logs` is a thin wrapper around journalctl; it does not
         // read config.toml.
         Command::Logs { lines, follow } => logs::run(lines, follow),
+        // `aimx mailboxes` is a thin UDS client (mirrors `aimx send`).
+        // It must NOT pre-load config here — `/etc/aimx/config.toml`
+        // is `0640 root:root` in production, so an eager
+        // `Config::load_resolved_with_data_dir(...)?` would surface
+        // `Permission denied (os error 13)` for non-root callers
+        // before `mailbox::run` ever sees the request, breaking the
+        // S2-1 acceptance criterion ("solo operator runs `aimx
+        // mailboxes create my-agent` as themselves and it works").
+        // `mailbox::run` loads the config itself when it can, and
+        // each subcommand decides whether the missing-config case is
+        // recoverable (CREATE/DELETE go through the daemon UDS;
+        // LIST falls back to `MAILBOX-LIST`; SHOW errors with an
+        // actionable hint).
+        Command::Mailboxes(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
         // `aimx upgrade` reads the release-manifest URL from Config
         // (optional `[upgrade] release_manifest_url`) but tolerates a
         // missing / unloadable config — a freshly-installed machine
@@ -178,7 +192,6 @@ fn dispatch_with_config(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
-        Command::Mailboxes(cmd) => mailbox::run(cmd, config),
         Command::Hooks(cmd) => hooks::run(cmd, config),
         Command::DkimKeygen { selector, force } => {
             dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
@@ -200,6 +213,7 @@ fn dispatch_with_config(
         | Command::Mcp
         | Command::Send(_)
         | Command::Logs { .. }
+        | Command::Mailboxes(_)
         | Command::Agents(_)
         | Command::Upgrade(_) => unreachable!("handled by dispatch"),
     }

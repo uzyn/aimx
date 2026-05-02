@@ -644,16 +644,20 @@ impl AimxMcpServer {
         // The `owner` argument on the wire is `None` so the daemon
         // synthesizes the owner from SO_PEERCRED rather than honoring
         // anything the agent could have planted.
-        match submit_mailbox_crud_via_daemon(&params.name, true, None) {
+        match submit_mailbox_crud_via_daemon(&params.name, true, None, false) {
             Ok(()) => {
-                let domain = self
-                    .load_config()
-                    .map(|c| c.domain)
-                    .unwrap_or_else(|_| String::new());
-                if domain.is_empty() {
+                // Resolve the new mailbox's address through the
+                // daemon's `MAILBOX-LIST` rather than reading
+                // root-owned `/etc/aimx/config.toml` from the
+                // non-root MCP process. The daemon's listing is
+                // SO_PEERCRED-filtered to the caller's uid, so the
+                // just-created mailbox is always visible to the
+                // calling agent.
+                let address = lookup_mailbox_address(&params.name).unwrap_or_default();
+                if address.is_empty() {
                     Ok(format!("Mailbox '{}' created.", params.name))
                 } else {
-                    Ok(format!("{}@{domain}", params.name))
+                    Ok(address)
                 }
             }
             Err(MailboxCrudFallback::SocketMissing) => {
@@ -680,38 +684,25 @@ impl AimxMcpServer {
     ) -> Result<String, String> {
         let force = params.force.unwrap_or(false);
 
-        if force {
-            // Catchall is structurally distinct (owned by
-            // `aimx-catchall`); the wipe path refuses it on the CLI
-            // and we mirror that here so the daemon never sees a
-            // wipe-then-delete attempt for the catchall mailbox.
-            if params.name == "catchall" {
-                return Err("Cannot delete the catchall mailbox".to_string());
-            }
-
-            // S2-2 ordering: ownership pre-flight via in-memory
-            // Config BEFORE the wipe. Wiping a mailbox we don't own
-            // would partially destroy data the daemon then refuses to
-            // delete. The daemon re-checks via SO_PEERCRED, so this
-            // pre-flight is defense-in-depth, not the security
-            // boundary.
-            let config = self.load_config()?;
-            self.authorize_mailbox(
-                crate::auth::Action::MailboxDelete {
-                    mailbox: params.name.clone(),
-                },
-                &config,
-            )?;
-
-            let inbox_dir = config.inbox_dir(&params.name);
-            let sent_dir = config.sent_dir(&params.name);
-            mailbox::wipe_mailbox_contents(&inbox_dir)
-                .map_err(|e| format!("Failed to wipe inbox/{}/: {e}", params.name))?;
-            mailbox::wipe_mailbox_contents(&sent_dir)
-                .map_err(|e| format!("Failed to wipe sent/{}/: {e}", params.name))?;
+        // Catchall is structurally distinct (owned by
+        // `aimx-catchall`) and the daemon refuses to delete it. Mirror
+        // that here so the wire surface still produces a friendly
+        // operator-facing error rather than the daemon's internal
+        // "cannot delete the catchall mailbox" verbatim — also
+        // matches the CLI's pre-flight refusal.
+        if force && params.name == "catchall" {
+            return Err("Cannot delete the catchall mailbox".to_string());
         }
 
-        match submit_mailbox_crud_via_daemon(&params.name, false, None) {
+        // The wipe is performed server-side by the daemon under the
+        // same per-mailbox lock that guards the stanza removal so the
+        // wipe and the rewrite are atomic together. This both
+        // eliminates the data-destruction race window the previous
+        // client-side wipe left open AND removes the MCP process's
+        // dependency on local read access to `/etc/aimx/config.toml`
+        // (which is `0640 root:root` in production, so the previous
+        // `self.load_config()` inevitably failed for non-root agents).
+        match submit_mailbox_crud_via_daemon(&params.name, false, None, force) {
             Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
             Err(MailboxCrudFallback::SocketMissing) => {
                 Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
@@ -855,16 +846,25 @@ pub(crate) enum MailboxCrudFallback {
 }
 
 /// Submit a `MAILBOX-CREATE` / `MAILBOX-DELETE` request over UDS.
-/// `owner` is required on CREATE; ignored on DELETE.
+/// `owner` is honored only for root callers on CREATE — non-root
+/// callers have any wire-supplied owner ignored by the daemon
+/// (synthesized from `peer_username(SO_PEERCRED)` instead). `force`
+/// is meaningful only on DELETE: when `true` the daemon wipes the
+/// inbox and sent directories under the per-mailbox lock that
+/// already guards the stanza removal, so the wipe and the rewrite
+/// are atomic together (no data-destruction race window between a
+/// client-side wipe and the daemon-side delete).
 pub(crate) fn submit_mailbox_crud_via_daemon(
     name: &str,
     create: bool,
     owner: Option<&str>,
+    force: bool,
 ) -> Result<(), MailboxCrudFallback> {
     let request = MailboxCrudRequest {
         name: name.to_string(),
         create,
         owner: owner.map(|s| s.to_string()),
+        force,
     };
     let socket = crate::serve::aimx_socket_path();
 
@@ -1176,7 +1176,41 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
 /// Submit an `AIMX/1 MAILBOX-LIST` to the daemon and return the JSON
 /// body verbatim. The schema-mandated string output for the tool is
 /// the JSON itself; no re-formatting happens here.
+/// Best-effort: ask the daemon for the caller's mailbox listing and
+/// return the address recorded for `name`. Returns `None` when the
+/// daemon is unreachable, the listing is malformed, the mailbox is
+/// absent (race), or the row is unregistered. The MCP
+/// `mailbox_create` success message swallows the `None` case
+/// gracefully — the create itself already succeeded; the address
+/// suffix is operator UX.
+fn lookup_mailbox_address(name: &str) -> Option<String> {
+    let json = submit_mailbox_list_raw().ok()?;
+    let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
+        serde_json::from_str(&json).ok()?;
+    rows.into_iter()
+        .find(|r| r.name == name)
+        .and_then(|r| r.address)
+}
+
 fn submit_mailbox_list_via_daemon() -> Result<String, String> {
+    submit_mailbox_list_raw().map_err(|e| match e {
+        MailboxCrudFallback::SocketMissing => {
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+        }
+        MailboxCrudFallback::Daemon(msg) => msg,
+    })
+}
+
+/// CLI-friendly variant of [`submit_mailbox_list_via_daemon`] that
+/// distinguishes socket-missing from a daemon-side error so the
+/// caller can decide whether to surface the canonical "daemon must
+/// be running" hint or render the daemon's reason verbatim. Mirrors
+/// the [`MailboxCrudFallback`] shape used by the CRUD path.
+pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxCrudFallback> {
+    submit_mailbox_list_raw()
+}
+
+fn submit_mailbox_list_raw() -> Result<String, MailboxCrudFallback> {
     let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
@@ -1188,23 +1222,25 @@ fn submit_mailbox_list_via_daemon() -> Result<String, String> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+                .map_err(|e| {
+                    MailboxCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
             rt.block_on(submit_mailbox_list_request(&socket))
         }
     };
 
     let raw = io_result.map_err(|e| {
         if is_socket_missing(&e) {
-            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+            MailboxCrudFallback::SocketMissing
         } else {
-            format!(
+            MailboxCrudFallback::Daemon(format!(
                 "Failed to connect to aimx daemon at {}: {e}",
                 socket.display()
-            )
+            ))
         }
     })?;
 
-    decode_mailbox_list_response(&raw)
+    decode_mailbox_list_response(&raw).map_err(MailboxCrudFallback::Daemon)
 }
 
 /// Open the UDS, ship `AIMX/1 MAILBOX-LIST`, and return the raw

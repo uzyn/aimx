@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::auth::AuthError;
 use crate::cli::MailboxCommand;
 use crate::config::{Config, MailboxConfig};
@@ -16,19 +17,132 @@ pub(crate) const EXIT_SOCKET_MISSING: i32 = 2;
 pub(crate) const SOCKET_MISSING_HINT: &str = "daemon must be running for non-root mailbox CRUD; start `aimx serve` \
      or run with sudo to fall back to direct config edit.";
 
-pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(cmd: MailboxCommand, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
     // S2-1: the entry-point root gate is gone. Both CREATE and DELETE
     // route through the daemon UDS regardless of caller uid; the daemon
     // (post-Sprint-1) does the authz, owner-binding, atomic config
     // write, and `Arc<Config>` hot-swap. The CLI is now a thin client.
     // Root callers retain the direct-on-disk fallback when the socket
     // is absent; non-root callers fail fast with a precise hint.
+    //
+    // Config loading happens here (not in `dispatch`) so a non-root
+    // caller — who cannot read `0640 root:root /etc/aimx/config.toml`
+    // in production — can still reach `create` / `delete` and route
+    // through the daemon UDS. Each subcommand decides for itself
+    // whether the missing-config case is recoverable.
+    let loaded = load_config_optional(data_dir);
+
     match cmd {
-        MailboxCommand::Create { name, owner } => create(&config, &name, owner.as_deref()),
-        MailboxCommand::List { all } => list(&config, all),
-        MailboxCommand::Show { name } => show(&config, &name),
-        MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
+        MailboxCommand::Create { name, owner } => create(loaded.as_ref(), &name, owner.as_deref()),
+        MailboxCommand::List { all } => list_dispatch(loaded.as_ref(), all),
+        MailboxCommand::Show { name } => show(&require_config(loaded)?, &name),
+        MailboxCommand::Delete { name, yes, force } => delete(loaded.as_ref(), &name, yes, force),
     }
+}
+
+/// Best-effort config load that distinguishes "config genuinely
+/// missing or unreadable for this caller" from "loaded fine, here
+/// you go". Returns `None` whenever the load failed for any reason
+/// (EACCES on the root-owned `/etc/aimx/config.toml`, ENOENT on a
+/// fresh install before `aimx setup` has run, parse error, …); the
+/// caller decides whether the missing-config case is recoverable.
+///
+/// The previous shape — `dispatch()` `?`-propagating
+/// `Config::load_resolved_with_data_dir(...)` — broke `aimx mailboxes
+/// {create,delete,list}` for non-root callers in production because
+/// the read EACCES surfaced as a bare `Permission denied (os error
+/// 13)` before `mailbox::run` ever saw the request. With config
+/// optional here, the create / delete paths run through the daemon
+/// UDS (where `SO_PEERCRED` is the authoritative identity) without
+/// ever needing to read the root-owned config from a non-root
+/// process.
+fn load_config_optional(data_dir: Option<&Path>) -> Option<Config> {
+    crate::config::Config::load_resolved_with_data_dir(data_dir)
+        .map(|(cfg, _warnings)| cfg)
+        .ok()
+}
+
+/// Subcommands that genuinely need the local config (today: `show`,
+/// which renders trust + hook details that aren't surfaced through
+/// any UDS verb). Returns a friendly actionable error rather than the
+/// raw `Permission denied (os error 13)`.
+fn require_config(loaded: Option<Config>) -> Result<Config, Box<dyn std::error::Error>> {
+    loaded.ok_or_else(|| -> Box<dyn std::error::Error> {
+        format!(
+            "this command needs to read {} (root-owned). \
+             Re-run with sudo, or use a UDS-backed alternative.",
+            crate::config::config_path().display()
+        )
+        .into()
+    })
+}
+
+/// `mailboxes list` dispatcher. Root with config readable falls
+/// through to the local `list()` implementation (which can show every
+/// mailbox + the `--all` switch). Non-root callers — and root callers
+/// without a readable config — route through the daemon's
+/// `MAILBOX-LIST` verb so the listing reflects the daemon's
+/// SO_PEERCRED-based view of what the caller owns.
+fn list_dispatch(loaded: Option<&Config>, all: bool) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(cfg) = loaded {
+        return list(cfg, all);
+    }
+    if all {
+        return Err("not authorized: --all requires root (run with sudo)".into());
+    }
+    list_via_daemon()
+}
+
+/// Render the daemon's `MAILBOX-LIST` JSON response in the same
+/// columnar format as `list()`. Used as the non-root fallback when
+/// `/etc/aimx/config.toml` is unreadable. Errors from the UDS layer
+/// (socket missing, daemon stopped) bubble up verbatim — same hint
+/// the `create` / `delete` paths produce.
+fn list_via_daemon() -> Result<(), Box<dyn std::error::Error>> {
+    let json = match crate::mcp::submit_mailbox_list_via_daemon_for_cli() {
+        Ok(s) => s,
+        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+            exit_socket_missing();
+        }
+        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => {
+            return Err(msg.into());
+        }
+    };
+
+    let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
+        serde_json::from_str(&json).map_err(|e| format!("malformed MAILBOX-LIST response: {e}"))?;
+
+    if rows.is_empty() {
+        println!("No mailboxes configured.");
+        return Ok(());
+    }
+
+    let header_pad = 20usize.saturating_sub("MAILBOX".len());
+    println!(
+        "{}{:pad$} INBOX    SENT",
+        term::header("MAILBOX"),
+        "",
+        pad = header_pad,
+    );
+    for row in rows {
+        let name_pad = 20usize.saturating_sub(row.name.chars().count());
+        let suffix = if row.registered {
+            String::new()
+        } else {
+            format!(" {}", term::warn("(unregistered)"))
+        };
+        println!(
+            "{}{:pad$} {:<8} {}{}",
+            term::highlight(&row.name),
+            "",
+            row.total,
+            row.sent_count,
+            suffix,
+            pad = name_pad,
+        );
+    }
+
+    Ok(())
 }
 
 /// Render an [`AuthError`] for the CLI. We keep the canonical "not
@@ -40,6 +154,15 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
 /// (S2-1) dropped the entry-point root gate. The arm is retained so a
 /// future caller that wires `format_auth_error` against a different
 /// surface still gets exhaustive coverage.
+///
+/// Currently only test-targeted: the production CLI now sources its
+/// authz errors verbatim from the daemon (per-mailbox lock + UDS
+/// reply), so this renderer is exercised only by the unit tests
+/// guarding the four-arm match shape. `Sprint 3` cleanup will fold
+/// it into the canonical renderer alongside `mcp::authorize_mailbox`
+/// and `hooks::format_auth_error` — see the deferred Non-blocker 7
+/// review note.
+#[cfg(test)]
 fn format_auth_error(err: &AuthError, verb: &str) -> String {
     match err {
         AuthError::NotOwner { mailbox } => {
@@ -313,18 +436,51 @@ pub fn count_messages(dir: &Path) -> usize {
 }
 
 fn create(
-    config: &Config,
+    config: Option<&Config>,
     name: &str,
     owner: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve the effective owner: explicit `--owner`, else fall back
-    // to the shared `prompt_mailbox_owner` seam. Under a TTY
-    // the operator sees a prompt defaulted to the local part; under
-    // `AIMX_NONINTERACTIVE=1` the helper accepts that default when it
-    // resolves or errors hard so scripted runs fail fast instead of
-    // blocking on stdin.
+    // Resolve the effective owner. Per the PRD's UX contract:
+    //
+    //   - Non-root callers: the daemon discards any wire-supplied
+    //     owner and synthesizes from `peer_username(SO_PEERCRED)`.
+    //     Prompting is therefore actively harmful (Non-blocker 5 from
+    //     the Cycle 1 review): under non-TTY stdin the prompt loops
+    //     5 times before erroring on a value the daemon would have
+    //     ignored anyway. Skip the prompt and use the caller's
+    //     own username so the local display string is honest.
+    //   - Root callers: the daemon honors `Owner:` so the existing
+    //     prompt-with-default UX from the setup wizard runs through
+    //     the shared `prompt_mailbox_owner` seam.
     let sys = crate::setup::RealSystemOps;
-    let owner = resolve_create_owner(config, name, owner, &sys)?;
+    let owner = if !is_root() {
+        match owner {
+            Some(o) if !o.is_empty() => o.to_string(),
+            Some(_) => return Err("--owner value cannot be empty".into()),
+            None => {
+                let caller = caller_username();
+                if caller.is_empty() {
+                    return Err("could not resolve caller's username via getpwuid; \
+                         pass --owner <user> explicitly"
+                        .into());
+                }
+                caller
+            }
+        }
+    } else {
+        // Root path: needs the domain for the prompt's display
+        // address; `prompt_mailbox_owner` errors gracefully when the
+        // operator's input doesn't resolve via getpwnam.
+        let cfg = config.ok_or_else(|| -> Box<dyn std::error::Error> {
+            format!(
+                "this command needs to read {} (root-owned). \
+                 The config could not be loaded.",
+                crate::config::config_path().display()
+            )
+            .into()
+        })?;
+        resolve_create_owner(cfg, name, owner, &sys)?
+    };
 
     // S2-1 soft-warning: a non-root caller who passed `--owner <other>`
     // gets a stderr line clarifying that the daemon will discard the
@@ -346,7 +502,7 @@ fn create(
     // falls back to direct on-disk edit + the restart-hint banner;
     // non-root cannot rename `/etc/aimx/config.toml` (perm `0640
     // root:root`), so we exit 2 with a precise actionable error.
-    match crate::mcp::submit_mailbox_crud_via_daemon(name, true, Some(&owner)) {
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, true, Some(&owner), false) {
         Ok(()) => {
             println!(
                 "{}",
@@ -358,7 +514,17 @@ fn create(
             if !is_root() {
                 exit_socket_missing();
             }
-            create_mailbox(config, name, &owner)?;
+            // Root fallback path: needs the local config to perform
+            // the direct on-disk write.
+            let cfg = config.ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!(
+                    "config could not be loaded from {}; \
+                     daemon is also unreachable",
+                    crate::config::config_path().display()
+                )
+                .into()
+            })?;
+            create_mailbox(cfg, name, &owner)?;
             println!(
                 "{}",
                 term::success(&format!("Mailbox '{name}' created (owner: {owner})."))
@@ -643,51 +809,48 @@ fn count_with_unread(dir: &Path) -> (usize, usize) {
 }
 
 fn delete(
-    config: &Config,
+    config: Option<&Config>,
     name: &str,
     yes: bool,
     force: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // `--force` wipes `inbox/<name>/` and `sent/<name>/` contents
-    // before invoking the normal delete path. The wipe is CLI-only
-    // (the MCP `mailbox_delete` tool does not gain a force variant)
-    // and refuses on the catchall.
+    // `--force` asks the daemon to wipe `inbox/<name>/` and
+    // `sent/<name>/` contents under the per-mailbox lock that guards
+    // the stanza removal — the wipe and the config rewrite are atomic
+    // together (no data-destruction race window if the daemon dies
+    // mid-flight). Refuse the catchall up front so the operator gets
+    // a friendly error before we even open the UDS.
+    if force && name == "catchall" {
+        return Err("Cannot delete the catchall mailbox".into());
+    }
+
     if force {
-        if name == "catchall" {
-            return Err("Cannot delete the catchall mailbox".into());
-        }
-
-        // S2-2 ordering: ownership pre-flight via in-memory Config
-        // BEFORE the wipe. If a non-root caller asked to `--force` a
-        // mailbox they don't own, we must refuse here — wiping first
-        // would partially destroy data the daemon then refuses to
-        // delete. Root callers bypass this check (the daemon also
-        // bypasses on the wire side); a non-root caller hitting an
-        // unknown mailbox surfaces NoSuchMailbox.
-        if !is_root()
-            && let Err(e) = crate::auth::authorize(
-                current_euid(),
-                crate::auth::Action::MailboxDelete {
-                    mailbox: name.to_string(),
-                },
-                config.mailboxes.get(name),
-            )
-        {
-            return Err(format_auth_error(&e, "delete").into());
-        }
-
-        let inbox_dir = config.inbox_dir(name);
-        let sent_dir = config.sent_dir(name);
-        let inbox_count = count_messages(&inbox_dir);
-        let sent_count = count_messages(&sent_dir);
+        // Show the pre-wipe counts so the operator knows exactly how
+        // much data is about to be destroyed. The counts are
+        // best-effort (taken before the daemon acquires its lock, so
+        // they may drift if mail lands in the meantime); the daemon
+        // is authoritative on what actually gets wiped. When config
+        // is unreadable (non-root, root-owned config.toml) the count
+        // line just shows `?`.
+        let (inbox_label, sent_label) = match config {
+            Some(cfg) => {
+                let inbox_dir = cfg.inbox_dir(name);
+                let sent_dir = cfg.sent_dir(name);
+                (
+                    pluralize_files(count_messages(&inbox_dir)),
+                    pluralize_files(count_messages(&sent_dir)),
+                )
+            }
+            None => ("? files".to_string(), "? files".to_string()),
+        };
 
         if !yes {
             println!(
                 "{} About to permanently delete mailbox '{name}':",
                 term::warn("DESTRUCTIVE:"),
             );
-            println!("  inbox/{name}/: {}", pluralize_files(inbox_count));
-            println!("  sent/{name}/:  {}", pluralize_files(sent_count));
+            println!("  inbox/{name}/: {inbox_label}");
+            println!("  sent/{name}/:  {sent_label}");
             print!("Continue? [y/N] ");
             io::stdout().flush()?;
             let mut input = String::new();
@@ -697,9 +860,6 @@ fn delete(
                 return Ok(());
             }
         }
-
-        wipe_mailbox_contents(&inbox_dir)?;
-        wipe_mailbox_contents(&sent_dir)?;
     } else if !yes {
         print!("Delete mailbox '{name}' and all its emails? [y/N] ");
         io::stdout().flush()?;
@@ -712,13 +872,13 @@ fn delete(
     }
 
     // Prefer the UDS path so the daemon hot-swaps Config. The daemon
-    // refuses to delete a non-empty mailbox (ERR NONEMPTY); we surface
-    // that error verbatim rather than falling back to the direct-edit
-    // path, because "daemon says no" is not a socket-missing condition.
-    // Fall back to direct edit only when the socket is absent. After a
-    // successful `--force` wipe the daemon sees empty directories and
-    // succeeds normally.
-    match crate::mcp::submit_mailbox_crud_via_daemon(name, false, None) {
+    // refuses to delete a non-empty mailbox (ERR NONEMPTY) unless
+    // `force=true` is set, in which case it wipes the directories
+    // server-side under the per-mailbox lock before unlinking the
+    // stanza. Fall back to direct edit only when the socket is absent
+    // and the caller is root (non-root cannot rename
+    // `/etc/aimx/config.toml`).
+    match crate::mcp::submit_mailbox_crud_via_daemon(name, false, None, force) {
         Ok(()) => {
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
             println!(
@@ -731,7 +891,24 @@ fn delete(
             if !is_root() {
                 exit_socket_missing();
             }
-            delete_mailbox(config, name)?;
+            // Root fallback: wipe locally then call delete_mailbox
+            // directly. This path runs only when the daemon is
+            // stopped — no concurrent access to worry about.
+            let cfg = config.ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!(
+                    "config could not be loaded from {}; \
+                     daemon is also unreachable",
+                    crate::config::config_path().display()
+                )
+                .into()
+            })?;
+            if force {
+                let inbox_dir = cfg.inbox_dir(name);
+                let sent_dir = cfg.sent_dir(name);
+                wipe_mailbox_contents(&inbox_dir)?;
+                wipe_mailbox_contents(&sent_dir)?;
+            }
+            delete_mailbox(cfg, name)?;
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
             print_restart_hint();
             Ok(())
