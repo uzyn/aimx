@@ -1753,10 +1753,23 @@ mod tests {
         // wire-text dependency this sprint introduces; pinning it
         // keeps the behavior visible to operators reading the
         // structured log.
-        const ORPHAN_UID: u32 = 4_294_967_294;
+        //
+        // Discover an unused high uid at runtime rather than hardcoding
+        // one — `0xFFFFFFFE` maps to `nobody` on some images (notably
+        // Alpine). We probe downward until `getpwuid` returns `None`,
+        // then use that uid; if the entire upper range is mapped on
+        // this host (vanishingly unlikely), the test is skipped with
+        // a diagnostic.
+        let Some(orphan_uid) = find_orphan_uid() else {
+            eprintln!(
+                "skipping nonroot_create_orphan_uid_returns_validation_with_exact_message: \
+                 no unmapped high uid available on this host"
+            );
+            return;
+        };
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
-        let orphan = Caller::new(ORPHAN_UID, ORPHAN_UID, None);
+        let orphan = Caller::new(orphan_uid, orphan_uid, None);
 
         let req = MailboxCrudRequest {
             name: "orph".into(),
@@ -1766,7 +1779,7 @@ mod tests {
         match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &orphan).await {
             AckResponse::Err { code, reason } => {
                 assert_eq!(code, ErrCode::Validation);
-                assert_eq!(reason, format!("uid {ORPHAN_UID} has no passwd entry"));
+                assert_eq!(reason, format!("uid {orphan_uid} has no passwd entry"));
             }
             other => panic!("expected Err(VALIDATION, orphan-uid), got {other:?}"),
         }
@@ -1775,5 +1788,20 @@ mod tests {
         assert!(!tmp.path().join("inbox").join("orph").exists());
         assert!(!tmp.path().join("sent").join("orph").exists());
         assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("orph"));
+    }
+
+    /// Walk down from `0xFFFFFFFE` until we find a uid `lookup_username`
+    /// reports as unmapped. The bounded probe depth keeps the test
+    /// fast even on hosts with many high-uid passwd entries.
+    fn find_orphan_uid() -> Option<u32> {
+        const PROBE_DEPTH: u32 = 64;
+        let start: u32 = 0xFFFF_FFFE;
+        for offset in 0..PROBE_DEPTH {
+            let candidate = start - offset;
+            if crate::uds_authz::lookup_username(candidate).is_none() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 }

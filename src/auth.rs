@@ -117,6 +117,14 @@ pub fn authorize(
                 // mismatch framing without inventing a fresh variant
                 // (and without leaking the requested owner uid into
                 // the response).
+                // TODO(S2-1): cleaner rendering. When `format_auth_error`
+                // starts surfacing this to humans in Sprint 2, the
+                // string `"caller does not own mailbox '<new>'"` will
+                // read like a bug. Either add a dedicated
+                // `OwnerMismatch { intended_owner_uid: u32 }` variant
+                // or pattern-match `"<new>"` in `format_auth_error`
+                // and switch to e.g. "not authorized: cannot create a
+                // mailbox owned by another user".
                 Err(AuthError::NotOwner {
                     mailbox: "<new>".to_string(),
                 })

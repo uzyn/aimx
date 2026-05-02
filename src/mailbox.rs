@@ -39,10 +39,12 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
         MailboxCommand::Show { name } => show(&config, &name),
         MailboxCommand::Delete { name, yes, force } => {
             // See note above on the create path: same Sprint 1
-            // behavior-preserving gate. The mailbox arg is `None` so
-            // non-root callers pre-Sprint-2 cleanly fall through to
-            // `NoSuchMailbox` when the daemon path doesn't catch it
-            // first; root keeps the bypass.
+            // behavior-preserving gate. The mailbox arg is
+            // `config.mailboxes.get(&name)` — `Some(...)` when the
+            // mailbox is in the on-disk config, `None` otherwise. The
+            // predicate then either passes (caller owns it), returns
+            // `NotOwner` (mailbox exists, owned by someone else), or
+            // `NoSuchMailbox` (mailbox missing). Root keeps the bypass.
             if !skip_root_check
                 && let Err(e) = authorize(
                     current_euid(),
