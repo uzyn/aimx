@@ -9,7 +9,8 @@ Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email a
 - **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No passwords, no database.
 - **Per-mailbox owner.** Every mailbox has an `owner` field in `config.toml` naming the Linux user who owns it. Storage is chowned `<owner>:<owner>` mode `0700` at create time and kept consistent through every write. One user can own many mailboxes; one mailbox has exactly one owner. Only the owner (and root) can read a mailbox's contents. The MCP server and UDS socket both enforce per-mailbox owner checks on every request — alice cannot list, read, or act on bob's mailboxes. See [Hooks § UDS authorization](hooks.md#uds-authorization-so_peercred) for the authz table.
 - **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only. No `sent/catchall/` directory is created. The catchall's owner is always the reserved `aimx-catchall` system user, created on demand by setup.
-- **No restart needed. The daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/aimx.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped (fresh install, teardown, local editing), the CLI falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC).
+- **No sudo needed for the mailboxes you own.** Both `aimx mailboxes create` and `aimx mailboxes delete` work as your regular Linux user. The daemon resolves your uid via `SO_PEERCRED`, treats it as the canonical owner identity, and writes the mailbox stanza atomically — no `sudo`, no shell context switch. Root may still create mailboxes owned by another uid (`--owner <user>`); non-root callers can only create mailboxes owned by themselves.
+- **No restart needed. The daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/aimx.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped, root falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC). Non-root callers cannot fall back — `/etc/aimx/config.toml` is `0640 root:root` and the rename would fail with a confusing perm error — so they get a precise error pointing at both remediations: start `aimx serve`, or re-run the command with `sudo`.
 - **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files. It returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
 - **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files, continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**. The MCP `mailbox_delete` tool deliberately does not gain a force variant. Destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
 
@@ -47,32 +48,88 @@ For example, with mailboxes `support` and `catchall` configured:
 ### Create a mailbox
 
 ```bash
+# As yourself: create a mailbox owned by your own uid.
 aimx mailboxes create support
-aimx mailboxes create support --owner alice
 ```
 
 This creates `support@agent.yourdomain.com` and both directories:
 `/var/lib/aimx/inbox/support/` (for incoming mail) and
-`/var/lib/aimx/sent/support/` (for outbound copies). Deletion removes
-both; `catchall` cannot be deleted.
+`/var/lib/aimx/sent/support/` (for outbound copies). Storage is chowned to
+your uid at mode `0700`. Deletion removes both; `catchall` cannot be
+deleted.
 
-The `--owner` flag names the Linux user who should own the mailbox. The daemon validates the user via `getpwnam`, atomically rewrites `config.toml` with `owner = "<user>"`, and chowns both storage directories to `<owner>:<owner>` mode `0700`. When `--owner` is omitted and the caller is on a TTY, `aimx mailboxes create` prompts interactively (default = the local part of the address if that user exists). On a non-TTY (pipe, script, `AIMX_NONINTERACTIVE=1`) it errors with a hint to `useradd` if the user is missing.
+**Owner-binding rule.** You can create and delete mailboxes you own. Root
+can create mailboxes owned by anyone. Concretely:
 
-**Worked example:** alice sets up a shared `support` mailbox on the family server:
+- A non-root caller always creates a mailbox owned by their own Linux
+  user — the daemon resolves the owner from `SO_PEERCRED` and ignores any
+  client-supplied owner.
+- A non-root caller can only delete mailboxes whose `owner` matches their
+  uid; deletes targeting another uid's mailbox are rejected with a
+  canonical not-authorized error.
+- Root passes both unconditionally and may use `--owner <user>` on create
+  to provision a mailbox owned by a different Linux user (e.g. a service
+  account).
+
+**`--owner` flag.** The flag is honored only when run as root. Non-root
+callers may pass `--owner <self>` (no-op, matches the synthesized owner)
+or omit it entirely. Passing `--owner <other>` from a non-root shell
+prints a soft warning to stderr — *"--owner ignored for non-root callers;
+mailbox will be owned by `<caller>`"* — and submits the request anyway;
+the daemon synthesizes the correct owner from `SO_PEERCRED` so the
+mailbox lands on disk owned by you, not the user you named.
+
+**Worked example (cross-uid create — root only):** the operator sets up
+a shared `support` mailbox owned by a dedicated service account:
 
 ```bash
-# create the Linux user first (operator does this)
+# create the Linux user first
 sudo useradd --system --shell /usr/sbin/nologin support-agent
 
-# alice (or the operator) creates the mailbox owned by that user
-aimx mailboxes create support --owner support-agent
+# operator creates the mailbox owned by that user (cross-uid → sudo)
+sudo aimx mailboxes create support --owner support-agent
 
 # verify ownership landed where expected
 ls -la /var/lib/aimx/inbox/support/    # drwx------  support-agent support-agent
 ls -la /var/lib/aimx/sent/support/     # drwx------  support-agent support-agent
 ```
 
-Any agent running under uid `support-agent` can now read `/var/lib/aimx/inbox/support/` and use the MCP tools against the `support` mailbox. alice's own uid cannot read it (unless she is also root) — isolation is filesystem-enforced.
+Any agent running under uid `support-agent` can now read
+`/var/lib/aimx/inbox/support/` and use the MCP tools against the
+`support` mailbox. Other users' uids cannot read it (unless they are
+also root) — isolation is filesystem-enforced.
+
+For the day-to-day case where you just want a fresh mailbox for your own
+agent, drop the `--owner` flag and skip `sudo`:
+
+```bash
+# As yourself, no sudo:
+aimx mailboxes create agent-1
+```
+
+The daemon writes `owner = "<your-username>"` to the config and chowns
+the storage to your uid:gid at mode `0700`. The daemon must be running
+for non-root mailbox CRUD; if it is stopped, you'll get a precise error
+naming both remediations (start `aimx serve`, or re-run with `sudo` to
+fall back to a direct `config.toml` edit).
+
+### Agents can self-serve via MCP
+
+Agents can call `mailbox_create` and `mailbox_delete` over MCP. These
+tools always operate on the agent process's own uid — there is no
+`owner` parameter on either, by construction. An agent calling
+`mailbox_create("task-42")` provisions a mailbox owned by whatever uid
+the MCP server is running under (typically the operator's own user when
+the agent is launched by `claude` / `codex` / `opencode` / etc.).
+`mailbox_delete` similarly only targets mailboxes owned by the agent's
+uid. See [MCP Server § Mailbox tools](mcp.md#mailbox-tools) for the
+full tool reference.
+
+This flow is the canonical "agent provisions an inbox for a transient
+task" pattern: the agent calls `mailbox_create("task-42")`, sends and
+receives mail on it, and either keeps it long-term or calls
+`mailbox_delete("task-42", force: true)` when the task is done. No
+operator intervention required.
 
 ### List mailboxes
 

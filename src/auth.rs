@@ -90,6 +90,90 @@ impl std::fmt::Display for AuthError {
 
 impl std::error::Error for AuthError {}
 
+/// Per-call rendering context for [`format_auth_error`].
+///
+/// Different surfaces want subtly different wording — `aimx mailboxes`
+/// likes the verb in the `NotRoot` arm, the MCP renderer wants the
+/// mailbox name in the `NoSuchMailbox` arm, and `aimx hooks` likes the
+/// `OwnerMismatch` arm to read "resource" rather than "mailbox" because
+/// hook CRUD never actually creates a mailbox. The context bundles those
+/// hints so a single renderer can serve every call site without each one
+/// duplicating the four-arm match.
+///
+/// All fields are optional to keep the simplest call ergonomic
+/// (`AuthErrorContext::default()` is a fine starting point).
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+pub struct AuthErrorContext<'a> {
+    /// Command surface, e.g. `"aimx mailboxes"` or `"aimx hooks"`.
+    /// Rendered into the `NotRoot` arm so the operator sees the verb in
+    /// context. Pass `None` for surfaces (like the MCP server) that
+    /// surface a generic "requires root" line.
+    pub surface: Option<&'a str>,
+    /// CRUD verb, e.g. `"create"` or `"delete"`. Used by `NotRoot` (paired
+    /// with `surface`) and by `OwnerMismatch` to render "cannot {verb}
+    /// a mailbox owned by another user". Defaults to `"perform"` so the
+    /// `OwnerMismatch` sentence still reads cleanly.
+    pub verb: Option<&'a str>,
+    /// Resource noun used by the `OwnerMismatch` arm — `"mailbox"` for
+    /// mailbox CRUD, `"resource"` for hook CRUD. Default: `"mailbox"`.
+    pub resource: Option<&'a str>,
+    /// Mailbox name to interpolate into the `NoSuchMailbox` arm. When
+    /// supplied, the renderer emits `"not authorized: mailbox '<name>'
+    /// not found"` to match the MCP surface; when `None`, it emits the
+    /// shorter `"not authorized: no such mailbox"` shape used by the
+    /// CLI surfaces.
+    pub mailbox_name: Option<&'a str>,
+}
+
+/// Canonical [`AuthError`] renderer for every CLI / MCP surface.
+///
+/// Replaces the per-module duplicates that used to live in `mailbox.rs`,
+/// `hooks.rs`, and `mcp.rs`. Sprint 1 added the `OwnerMismatch` /
+/// `NotOwner` variants; keeping the renderer in one place ensures all
+/// three call sites stay in sync as the variant set evolves.
+///
+/// The four arms of [`AuthError`] are rendered as:
+///
+/// - `NotRoot`: when `ctx.surface` and `ctx.verb` are both set, returns
+///   `"not authorized: <surface> <verb> requires root (run with sudo)"`;
+///   otherwise the generic `"not authorized: requires root"`.
+/// - `NotOwner { mailbox }`: always `"not authorized: caller does not
+///   own mailbox '<mailbox>'"`.
+/// - `OwnerMismatch { .. }`: `"not authorized: cannot <verb> a
+///   <resource> owned by another user"` (defaults `verb = "perform"`,
+///   `resource = "mailbox"` if unset).
+/// - `NoSuchMailbox`: when `ctx.mailbox_name` is set, returns `"not
+///   authorized: mailbox '<name>' not found"`; otherwise `"not
+///   authorized: no such mailbox"`.
+///
+/// The `intended_owner_uid` carried by `OwnerMismatch` is intentionally
+/// not interpolated into the rendered string (NFR2: no uid leak to
+/// non-root callers).
+#[allow(dead_code)]
+pub fn format_auth_error(err: &AuthError, ctx: &AuthErrorContext<'_>) -> String {
+    match err {
+        AuthError::NotRoot => match (ctx.surface, ctx.verb) {
+            (Some(surface), Some(verb)) => {
+                format!("not authorized: {surface} {verb} requires root (run with sudo)")
+            }
+            _ => "not authorized: requires root".to_string(),
+        },
+        AuthError::NotOwner { mailbox } => {
+            format!("not authorized: caller does not own mailbox '{mailbox}'")
+        }
+        AuthError::OwnerMismatch { .. } => {
+            let verb = ctx.verb.unwrap_or("perform");
+            let resource = ctx.resource.unwrap_or("mailbox");
+            format!("not authorized: cannot {verb} a {resource} owned by another user")
+        }
+        AuthError::NoSuchMailbox => match ctx.mailbox_name {
+            Some(name) => format!("not authorized: mailbox '{name}' not found"),
+            None => "not authorized: no such mailbox".to_string(),
+        },
+    }
+}
+
 /// The single authorization predicate.
 ///
 /// Root (`caller_uid == 0`) passes every action unconditionally.
@@ -424,6 +508,109 @@ mod tests {
             authorize(uid, Action::MailboxRead("hi".into()), Some(&mb)),
             Err(AuthError::NoSuchMailbox),
         );
+    }
+
+    #[test]
+    fn format_auth_error_not_root_renders_with_surface_and_verb() {
+        let msg = format_auth_error(
+            &AuthError::NotRoot,
+            &AuthErrorContext {
+                surface: Some("aimx mailboxes"),
+                verb: Some("create"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            msg,
+            "not authorized: aimx mailboxes create requires root (run with sudo)"
+        );
+    }
+
+    #[test]
+    fn format_auth_error_not_root_falls_back_to_generic() {
+        // MCP-style call site that does not pass surface/verb.
+        let msg = format_auth_error(&AuthError::NotRoot, &AuthErrorContext::default());
+        assert_eq!(msg, "not authorized: requires root");
+    }
+
+    #[test]
+    fn format_auth_error_not_owner_carries_mailbox() {
+        let msg = format_auth_error(
+            &AuthError::NotOwner {
+                mailbox: "alice".into(),
+            },
+            &AuthErrorContext::default(),
+        );
+        assert_eq!(msg, "not authorized: caller does not own mailbox 'alice'");
+    }
+
+    #[test]
+    fn format_auth_error_owner_mismatch_uses_verb_and_resource() {
+        let msg = format_auth_error(
+            &AuthError::OwnerMismatch {
+                intended_owner_uid: 0,
+            },
+            &AuthErrorContext {
+                verb: Some("create"),
+                resource: Some("mailbox"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            msg,
+            "not authorized: cannot create a mailbox owned by another user"
+        );
+        assert!(!msg.contains("0"), "uid must not appear in render");
+    }
+
+    #[test]
+    fn format_auth_error_owner_mismatch_defaults_to_perform_mailbox() {
+        let msg = format_auth_error(
+            &AuthError::OwnerMismatch {
+                intended_owner_uid: 1234,
+            },
+            &AuthErrorContext::default(),
+        );
+        assert_eq!(
+            msg,
+            "not authorized: cannot perform a mailbox owned by another user"
+        );
+    }
+
+    #[test]
+    fn format_auth_error_owner_mismatch_resource_swap_for_hooks() {
+        let msg = format_auth_error(
+            &AuthError::OwnerMismatch {
+                intended_owner_uid: 7,
+            },
+            &AuthErrorContext {
+                verb: Some("create"),
+                resource: Some("resource"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            msg,
+            "not authorized: cannot create a resource owned by another user"
+        );
+    }
+
+    #[test]
+    fn format_auth_error_no_such_mailbox_short_form() {
+        let msg = format_auth_error(&AuthError::NoSuchMailbox, &AuthErrorContext::default());
+        assert_eq!(msg, "not authorized: no such mailbox");
+    }
+
+    #[test]
+    fn format_auth_error_no_such_mailbox_with_name_for_mcp() {
+        let msg = format_auth_error(
+            &AuthError::NoSuchMailbox,
+            &AuthErrorContext {
+                mailbox_name: Some("bob"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(msg, "not authorized: mailbox 'bob' not found");
     }
 
     #[test]

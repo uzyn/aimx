@@ -2,6 +2,37 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
+## Unreleased — Mailbox create/delete no longer requires root
+
+Mailbox lifecycle is now **owner-gated** end-to-end. A non-root operator can create and delete the mailboxes they own without `sudo`, and agents can self-serve mailboxes over MCP. Existing sudo-based workflows continue to work unchanged — root passes every action.
+
+### What changed
+
+- **CLI.** `aimx mailboxes create <name>` and `aimx mailboxes delete <name>` (incl. `--force`) work as your regular Linux user when `aimx serve` is running. The daemon resolves your uid via `SO_PEERCRED`, treats it as the canonical owner identity, atomically rewrites `config.toml`, and hot-swaps its in-memory snapshot. The previous "requires root, exit code 2" gate has been removed from both the CLI entry-point and the UDS handler.
+- **UDS.** The `MAILBOX-CREATE` and `MAILBOX-DELETE` verbs no longer call `enforce_root`. `MAILBOX-CREATE` from a non-root caller synthesizes the owner from `SO_PEERCRED` and discards any client-supplied `Owner:` header; `MAILBOX-DELETE` checks that the caller's uid equals the resolved mailbox's `owner_uid` before doing any state work.
+- **MCP.** Two new tools — `mailbox_create` and `mailbox_delete` — let agents provision and tear down mailboxes owned by the MCP process's uid. Neither tool accepts an `owner` parameter, by construction. `mailbox_delete` accepts an optional `force: bool` that wipes `inbox/<name>/` and `sent/<name>/` daemon-side under per-mailbox lock + `CONFIG_WRITE_LOCK` (atomic with the config rewrite).
+
+### Privilege-escalation defense
+
+The daemon **never** trusts client-supplied owner data from a non-root caller. Every non-root `MAILBOX-CREATE` over the UDS resolves the owner identity from the kernel-validated `SO_PEERCRED` peer uid; the wire field is honored only when the caller is root (so cross-uid creates remain operator-only). There is no path — CLI, UDS, MCP, hand-crafted `socat` request — for a non-root caller to cause a mailbox to be created with an owner other than their own uid. Negative tests in `src/auth.rs`, `src/mailbox_handler.rs`, and `tests/uds_authz.rs` pin the contract.
+
+### What stays root-only
+
+A handful of operations remain root-gated because they cross a genuine privilege boundary, not just a policy line:
+
+- **`aimx setup`**, **`aimx serve`**, **`aimx uninstall`** — host-level service install / run / removal.
+- **`aimx dkim-keygen`** — writes the `0600 root:root` private signing key.
+- **`aimx portcheck`** — needs to bind / probe port 25.
+- **Cross-uid mailbox creates.** Only root may pass `--owner <other>` on `aimx mailboxes create`. Non-root callers passing `--owner <other>` get a soft warning and the daemon silently overrides with the synthesized owner (their own uid).
+- **The catchall.** Provisioned during `aimx setup` under the reserved `aimx-catchall` system user; not exposed through any non-root surface.
+- **Raw-shell hooks.** `aimx hooks create --cmd '...'` writes a literal `/bin/sh -c "..."` argv into `config.toml` — arbitrary code execution as the chosen `run_as` uid, distinct from mailbox lifecycle.
+
+### Upgrade compatibility
+
+No config-file migration. No daemon restart required by the change itself (though you do need a daemon binary that includes Sprint 1 + Sprint 2 of the user-mailbox track). Sudo-based scripts that already say `sudo aimx mailboxes create / delete` continue to work — the root path is unchanged. Operators can leave their automation alone and simply drop the `sudo` from new mailbox-create commands when they're ready.
+
+If you previously read [Troubleshooting](troubleshooting.md): the old `MAILBOX-CREATE / MAILBOX-DELETE rejected for non-root` entry has been replaced. The new failure mode for a non-root caller is *"daemon must be running for non-root mailbox CRUD; start `aimx serve` or run with sudo to fall back to direct config edit"* — fix it by starting the daemon, or by running the command under `sudo` to keep the existing direct-write fallback path.
+
 ## Unreleased — upgrade visibility
 
 Closes the visibility gap on the upgrade path: operators can now confirm whether the running `aimx serve` daemon was actually restarted on the new binary, and detect drift between the on-disk `aimx` and the still-running daemon.

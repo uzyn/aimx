@@ -13,7 +13,7 @@ AIMX/1 ERR <CODE> <reason>
 
 | Code       | Meaning | Common cause | Recovery |
 |-----------|---------|--------------|----------|
-| `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` or is not owned by you | Ask the operator to provision the mailbox via `sudo aimx mailboxes create <name> --owner <user>` |
+| `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` or is not owned by you | Provision a mailbox owned by your uid via `mailbox_create(name)` over MCP. Cross-uid creates remain operator-only — `sudo aimx mailboxes create <name> --owner <other>`. |
 | `EACCES`  | Not authorized | Caller uid does not own the target mailbox | Confirm via `mailbox_list` that you own the mailbox you are targeting |
 | `DOMAIN`  | Sender domain mismatch | The sender domain does not match the configured primary domain | Use the correct domain; check `/etc/aimx/config.toml` |
 | `SIGN`    | DKIM signing failed | DKIM private key missing or corrupted | Re-run `aimx setup` to regenerate keys |
@@ -66,15 +66,23 @@ exist or is not owned by you.
 **Cause:** Attempting to send from a mailbox that was not created, or
 one whose `owner` is a different Linux user.
 
-**Recovery:** Ask the operator to provision (or re-`--owner`) the
-mailbox on the host:
+**Recovery:** Provision the mailbox yourself over MCP — `mailbox_create`
+synthesizes the owner from your uid via `SO_PEERCRED`, so the new
+mailbox always lands owned by you with no operator intervention:
 
 ```
-sudo aimx mailboxes create your-mailbox --owner your-username
+mailbox_create(name: "your-mailbox")
 ```
 
-Mailbox CRUD is root-only — MCP does not expose `mailbox_create` or
-`mailbox_delete`.
+To create a mailbox owned by a **different** Linux user (e.g. a service
+account), the operator must run the host CLI under sudo:
+
+```
+sudo aimx mailboxes create their-mailbox --owner their-username
+```
+
+Cross-uid creates remain operator-only by design — agents can only CRUD
+mailboxes owned by the uid the MCP server runs under.
 
 ### DKIM signature failure
 

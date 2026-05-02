@@ -213,17 +213,26 @@ impl AimxMcpServer {
         } else {
             config.mailboxes.get(&mailbox_name)
         };
-        crate::auth::authorize(self.caller_uid, action, mb).map_err(|e| match e {
-            crate::auth::AuthError::NotRoot => "not authorized: requires root".to_string(),
-            crate::auth::AuthError::NotOwner { mailbox } => {
-                format!("not authorized: caller does not own mailbox '{mailbox}'")
-            }
-            crate::auth::AuthError::OwnerMismatch { .. } => {
-                "not authorized: cannot create a mailbox owned by another user".to_string()
-            }
-            crate::auth::AuthError::NoSuchMailbox => {
-                format!("not authorized: mailbox '{mailbox_name}' not found")
-            }
+        crate::auth::authorize(self.caller_uid, action, mb).map_err(|e| {
+            // Sprint 3 (S3-5): the MCP, CLI, and hooks surfaces all
+            // share `auth::format_auth_error` so the four-arm match
+            // can never drift between them. The MCP surface skips the
+            // `surface` / `verb` hints (the renderer falls back to the
+            // generic "requires root" line) but does pass the resolved
+            // mailbox name so `NoSuchMailbox` reads as
+            // "mailbox '<name>' not found" — the agent-friendly form.
+            crate::auth::format_auth_error(
+                &e,
+                &crate::auth::AuthErrorContext {
+                    mailbox_name: if mailbox_name.is_empty() {
+                        None
+                    } else {
+                        Some(&mailbox_name)
+                    },
+                    verb: Some("create"),
+                    ..Default::default()
+                },
+            )
         })
     }
 }

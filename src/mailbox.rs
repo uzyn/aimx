@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::auth::AuthError;
 use crate::cli::MailboxCommand;
 use crate::config::{Config, MailboxConfig};
 use crate::platform::{current_euid, is_root};
@@ -143,39 +141,6 @@ fn list_via_daemon() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
-}
-
-/// Render an [`AuthError`] for the CLI. We keep the canonical "not
-/// authorized" prefix so tooling can grep for it, and append the verb
-/// the operator was attempting so the error text makes sense without
-/// re-reading the command.
-///
-/// `NotRoot` is no longer reachable from the mailbox CLI — Sprint 2
-/// (S2-1) dropped the entry-point root gate. The arm is retained so a
-/// future caller that wires `format_auth_error` against a different
-/// surface still gets exhaustive coverage.
-///
-/// Currently only test-targeted: the production CLI now sources its
-/// authz errors verbatim from the daemon (per-mailbox lock + UDS
-/// reply), so this renderer is exercised only by the unit tests
-/// guarding the four-arm match shape. `Sprint 3` cleanup will fold
-/// it into the canonical renderer alongside `mcp::authorize_mailbox`
-/// and `hooks::format_auth_error` — see the deferred Non-blocker 7
-/// review note.
-#[cfg(test)]
-fn format_auth_error(err: &AuthError, verb: &str) -> String {
-    match err {
-        AuthError::NotOwner { mailbox } => {
-            format!("not authorized: caller does not own mailbox '{mailbox}'")
-        }
-        AuthError::OwnerMismatch { .. } => {
-            format!("not authorized: cannot {verb} a mailbox owned by another user")
-        }
-        AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
-        AuthError::NotRoot => {
-            format!("not authorized: aimx mailboxes {verb} requires root (run with sudo)")
-        }
-    }
 }
 
 /// Canonical mailbox-name validator. Rejects anything that would be
@@ -1016,7 +981,22 @@ fn print_restart_hint() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::AuthError;
+    use crate::auth::{AuthError, AuthErrorContext, format_auth_error};
+
+    /// Mailbox-CLI rendering context: mirrors what the production caller
+    /// would pass once the per-surface helpers are gone. Sprint 3 (S3-5)
+    /// folded the local `format_auth_error` definition into `auth.rs`;
+    /// these tests now exercise the canonical renderer with the
+    /// mailbox-CLI-shaped context, so any wording drift surfaces as a
+    /// test failure here rather than going silently.
+    fn mailbox_ctx<'a>(verb: &'a str) -> AuthErrorContext<'a> {
+        AuthErrorContext {
+            surface: Some("aimx mailboxes"),
+            verb: Some(verb),
+            resource: Some("mailbox"),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn format_auth_error_not_owner_carries_mailbox_name() {
@@ -1024,7 +1004,7 @@ mod tests {
             &AuthError::NotOwner {
                 mailbox: "alice".into(),
             },
-            "delete",
+            &mailbox_ctx("delete"),
         );
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("alice"), "{msg}");
@@ -1040,7 +1020,7 @@ mod tests {
             &AuthError::OwnerMismatch {
                 intended_owner_uid: 0,
             },
-            "create",
+            &mailbox_ctx("create"),
         );
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("cannot create"), "{msg}");
@@ -1053,7 +1033,7 @@ mod tests {
 
     #[test]
     fn format_auth_error_no_such_mailbox_does_not_leak_caller() {
-        let msg = format_auth_error(&AuthError::NoSuchMailbox, "create");
+        let msg = format_auth_error(&AuthError::NoSuchMailbox, &mailbox_ctx("create"));
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("no such mailbox"), "{msg}");
     }
@@ -1064,7 +1044,7 @@ mod tests {
         // longer reachable from the mailbox CLI dispatch — but the
         // match must stay exhaustive. The render itself stays
         // grep-able for any future caller.
-        let msg = format_auth_error(&AuthError::NotRoot, "create");
+        let msg = format_auth_error(&AuthError::NotRoot, &mailbox_ctx("create"));
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("requires root"), "{msg}");
     }

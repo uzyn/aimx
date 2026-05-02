@@ -136,7 +136,8 @@ The earlier per-hook `stdin = "email" | "none"` knob has been removed; `Config::
 |------|---------------|
 | `SEND` | Caller uid must own the mailbox resolved from the `From:` local part, OR be root. |
 | `MARK-READ` / `MARK-UNREAD` | Caller uid must own the target mailbox, OR be root. |
-| `MAILBOX-CREATE` / `MAILBOX-DELETE` | Root only. |
+| `MAILBOX-CREATE` | Caller uid synthesized as the owner from `SO_PEERCRED` for non-root callers (any client-supplied `Owner:` header is ignored); root may pass `Owner:` to create cross-uid. |
+| `MAILBOX-DELETE` | Caller uid must own the target mailbox, OR be root. |
 | `HOOK-CREATE` / `HOOK-DELETE` | Caller uid must own the target mailbox, OR be root. |
 
 Rejected requests return an `AIMX/1 ERR` response with `code = "EACCES"` and the canonical reason `not authorized` (no information leakage about whether the mailbox exists). Caller uid 0 (root) bypasses all mailbox-ownership checks and is logged at info level so `aimx logs` shows the escalation.

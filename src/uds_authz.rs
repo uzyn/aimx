@@ -635,14 +635,19 @@ mod tests {
     #[test]
     #[tracing_test::traced_test]
     fn enforce_root_logs_reject() {
+        // Generic test of the `enforce_root` helper's logging shape.
+        // Sprint 3 (S3-6) intentionally uses a placeholder verb label
+        // here. The user-mailbox spot-check verifies no production
+        // mailbox-lifecycle verb is wired to this helper — every
+        // mailbox CRUD UDS verb is now owner-gated, never root-gated.
         let c = Caller::new(1002, 1002, None);
         let _ = c.username_cache.set(Some("bob".to_string()));
-        let err = enforce_root("MAILBOX-CREATE", &c, Some("alice")).unwrap_err();
+        let err = enforce_root("DEMO-VERB", &c, Some("alice")).unwrap_err();
         assert_eq!(err.code, ErrCode::Eaccess);
         // Wire reason is opaque.
         assert_eq!(err.reason, "not authorized");
         assert!(logs_contain("decision=\"reject\""));
-        assert!(logs_contain("verb=\"MAILBOX-CREATE\""));
+        assert!(logs_contain("verb=\"DEMO-VERB\""));
         // Log keeps the rich diagnostic naming the caller.
         assert!(logs_contain("caller uid 1002"));
     }

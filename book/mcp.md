@@ -38,13 +38,11 @@ Filesystem enforcement backs this up: every mailbox directory is `0700 <owner>:<
 
 Root running the MCP server bypasses mailbox-ownership checks (and is logged at info level). Non-root callers see only their own world.
 
-> **Removed in this release.** `mailbox_create`, `mailbox_delete`, and `hook_list_templates` are no longer MCP tools. Mailbox CRUD moves to the root-only host CLI (`sudo aimx mailboxes create | delete`); template hooks have been retired in favor of the unified plain-`cmd` model. Agents that previously called these tools will get a "tool not found" error and should call `hook_create` directly with the `cmd` argv from their bundled plugin recipe.
-
 See [Hooks § UDS authorization (`SO_PEERCRED`)](hooks.md#uds-authorization-so_peercred) for the full per-verb authz table.
 
 ## MCP tools
 
-aimx exposes 10 MCP tools organized into mailbox listing, email operations, and hook management.
+aimx exposes 12 MCP tools organized into mailbox lifecycle, email operations, and hook management.
 
 ### Mailbox tools
 
@@ -67,6 +65,50 @@ List mailboxes you own.
 | `registered`  | bool   | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
 
 The empty case returns `[]`. Filtered to caller-owned mailboxes for non-root callers; root sees everything. The MCP process resolves the listing through the daemon over `/run/aimx/aimx.sock`, so it works without read access to root-owned `config.toml`.
+
+---
+
+#### `mailbox_create`
+
+Provision a new mailbox owned by the calling agent's uid.
+
+| Parameter | Type   | Required | Description |
+|-----------|--------|----------|-------------|
+| `name`    | string | yes      | Mailbox name (the local part of the resulting address). Must match `[a-z0-9._-]+`, must not be the reserved literals `catchall` / `aimx-catchall`. |
+
+There is no `owner` parameter, by construction. The daemon synthesizes the owner from the MCP process's uid via `SO_PEERCRED` — agents can only create mailboxes owned by themselves. To provision a mailbox owned by another uid (e.g. a service account), an operator must run `sudo aimx mailboxes create <name> --owner <user>` from the host CLI.
+
+**Returns:** the new mailbox's full address (`<name>@<domain>`) on success. Idempotent: re-running `mailbox_create("foo")` on a mailbox you already own returns the existing address with no side effects.
+
+**Errors:** surfaces the daemon's `ErrCode` + reason verbatim. Common cases:
+
+- `Validation: reserved` — `name` was `catchall` or `aimx-catchall`.
+- `Validation: ...` — name matched a structural rule violation (empty, contains `..`, leading/trailing `.`, invalid character, etc.).
+- `daemon must be running for non-root mailbox CRUD` — daemon is offline; agents cannot fall back to a direct config edit.
+
+---
+
+#### `mailbox_delete`
+
+Remove a mailbox the calling agent owns.
+
+| Parameter | Type    | Required | Description |
+|-----------|---------|----------|-------------|
+| `name`    | string  | yes      | Mailbox name to delete. Caller's uid must equal the mailbox's `owner_uid`. |
+| `force`   | bool    | no       | Default `false`. When `true`, the daemon wipes `inbox/<name>/` and `sent/<name>/` under per-mailbox lock + `CONFIG_WRITE_LOCK` before unregistering the mailbox. |
+
+Without `force`, the daemon refuses non-empty mailboxes with `ERR NONEMPTY` and the tool surfaces a hint pointing at the CLI's interactive `--force` prompt. The catchall mailbox is refused with or without `force`.
+
+**Errors:** surfaces the daemon's `ErrCode` + reason verbatim. Common cases:
+
+- `EACCES not authorized` — caller's uid does not own the target mailbox.
+- `NONEMPTY: inbox=N sent=M` — mailbox has files; pass `force: true` (or use the CLI's interactive `--force` prompt) to wipe them.
+- `daemon must be running for non-root mailbox CRUD` — daemon is offline.
+
+```json
+{"name": "mailbox_create", "arguments": {"name": "task-42"}}
+{"name": "mailbox_delete", "arguments": {"name": "task-42", "force": true}}
+```
 
 ---
 
