@@ -727,13 +727,17 @@ fn mcp_list_tools() {
 
     let resp = client.list_tools();
     let tools = resp["result"]["tools"].as_array().unwrap();
-    // Mailbox CRUD tools are gone (moved to root-only CLI). Hook
-    // tools are back under the new auth predicate. Surface: 7 mail
-    // tools + 3 hook tools = 10.
-    assert_eq!(tools.len(), 10);
+    // S2-3 / S2-4 reintroduced `mailbox_create` and `mailbox_delete` as
+    // owner-gated MCP tools (the daemon synthesizes the owner from
+    // SO_PEERCRED, so an agent can only operate on mailboxes owned by
+    // its own uid). Surface: 7 mail tools + 3 hook tools + 2 mailbox
+    // CRUD tools + `mailbox_list` = 12.
+    assert_eq!(tools.len(), 12);
 
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"mailbox_list"));
+    assert!(names.contains(&"mailbox_create"));
+    assert!(names.contains(&"mailbox_delete"));
     assert!(names.contains(&"email_list"));
     assert!(names.contains(&"email_read"));
     assert!(names.contains(&"email_mark_read"));
@@ -743,10 +747,6 @@ fn mcp_list_tools() {
     assert!(names.contains(&"hook_create"));
     assert!(names.contains(&"hook_list"));
     assert!(names.contains(&"hook_delete"));
-    // mailbox_create / mailbox_delete moved to root-only CLI; the
-    // MCP surface no longer exposes them.
-    assert!(!names.contains(&"mailbox_create"));
-    assert!(!names.contains(&"mailbox_delete"));
     // hook_list_templates was deleted alongside hook templates.
     assert!(!names.contains(&"hook_list_templates"));
 
@@ -881,10 +881,14 @@ fn mcp_mailbox_list_without_daemon_reports_missing_socket() {
 }
 
 #[test]
-fn mcp_mailbox_create_tool_no_longer_exposed() {
-    // `mailbox_create` was removed from the MCP surface (mailbox CRUD
-    // moved to root-only CLI). Calling the tool by name returns a
-    // tool-not-found error from the rmcp framework.
+fn mcp_mailbox_create_tool_is_exposed() {
+    // S2-3 re-added `mailbox_create` to the MCP surface. The tool
+    // is now declared and dispatchable; with no daemon listening it
+    // surfaces a "daemon not running" tool error rather than a
+    // framework-level "unknown tool" rejection. This test guards
+    // against the tool silently disappearing again — the previous
+    // shape (`tool_no_longer_exposed`) would have continued to pass
+    // even after re-add because both paths return `isError`.
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -892,18 +896,23 @@ fn mcp_mailbox_create_tool_no_longer_exposed() {
     client.initialize();
 
     let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "support"}));
-    // The framework's response shape is "tool not found" / unknown tool;
-    // the assertion is robust to small text drift.
+    let tool_text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        is_tool_error(&resp) || resp.get("error").is_some(),
-        "expected mailbox_create to be rejected, got: {resp}"
+        tool_text.contains("daemon not running") || tool_text.contains("daemon"),
+        "expected daemon-not-running text in tool error, got: {resp}"
+    );
+    // Framework-level "unknown tool" would land in `error.code` or
+    // `error.message`; assert it didn't take that path.
+    assert!(
+        resp.get("error").is_none(),
+        "framework error means the tool is missing from the surface: {resp}"
     );
 
     client.shutdown();
 }
 
 #[test]
-fn mcp_mailbox_delete_tool_no_longer_exposed() {
+fn mcp_mailbox_delete_tool_is_exposed() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
@@ -911,9 +920,14 @@ fn mcp_mailbox_delete_tool_no_longer_exposed() {
     client.initialize();
 
     let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "support"}));
+    let tool_text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
     assert!(
-        is_tool_error(&resp) || resp.get("error").is_some(),
-        "expected mailbox_delete to be rejected, got: {resp}"
+        tool_text.contains("daemon not running") || tool_text.contains("daemon"),
+        "expected daemon-not-running text in tool error, got: {resp}"
+    );
+    assert!(
+        resp.get("error").is_none(),
+        "framework error means the tool is missing from the surface: {resp}"
     );
 
     client.shutdown();
@@ -3025,23 +3039,29 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
     stop_serve(daemon);
 }
 
+/// Non-root + missing socket: per S2-1 the CLI must NOT silently fall
+/// back to the direct config.toml edit (which would fail with a
+/// confusing perm error). It exits with the dedicated socket-missing
+/// code (`EXIT_SOCKET_MISSING = 2`) and prints the actionable hint
+/// naming both remediations.
 #[cfg(unix)]
 #[test]
-fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
+fn mailbox_create_without_daemon_non_root_exits_with_socket_missing_hint() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping: this test exercises the non-root socket-missing branch; \
+             run as a non-root uid"
+        );
+        return;
+    }
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Point at an empty runtime dir; no socket present, so UDS fails with
-    // NotFound and the CLI falls back to direct on-disk edit.
     let runtime = tmp.path().join("run");
     std::fs::create_dir_all(&runtime).ok();
 
-    // Mailbox CRUD is root-only via the central auth predicate; tests
-    // bypass via `AIMX_TEST_SKIP_ROOT_CHECK` so the post-gate fallback
-    // path stays exercised under non-root `cargo test`.
     let assert = aimx_cmd(tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailbox")
@@ -3050,21 +3070,23 @@ fn mailbox_create_without_daemon_falls_back_and_prints_restart_hint() {
         .arg("--owner")
         .arg(current_username())
         .assert()
-        .success();
-    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+        .code(2);
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
     assert!(
-        stdout.contains("Mailbox 'eve' created"),
-        "expected success message, got: {stdout}"
+        stderr.contains("daemon must be running"),
+        "expected socket-missing hint on stderr, got: {stderr}"
     );
     assert!(
-        stdout.contains("Restart the daemon"),
-        "fallback path must print the restart hint: {stdout}"
+        stderr.contains("aimx serve") && stderr.contains("sudo"),
+        "hint must name both remediations (start daemon / use sudo): {stderr}"
     );
 
-    // Fallback wrote the stanza too.
+    // No fallback wrote the stanza.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(config_text.contains("[mailboxes.eve]"));
-    assert!(tmp.path().join("inbox").join("eve").is_dir());
+    assert!(
+        !config_text.contains("[mailboxes.eve]"),
+        "non-root socket-missing path must NOT fall back to a direct write: {config_text}"
+    );
 }
 
 #[cfg(unix)]
@@ -3302,16 +3324,22 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
     stop_serve(daemon);
 }
 
+/// `aimx mailboxes delete --force catchall` must refuse client-side
+/// (regardless of caller uid) before any wipe or daemon submission so
+/// the catchall slot is never accidentally torn down. S2-2 keeps the
+/// catchall refusal at the very top of the `--force` branch — it fires
+/// even if no daemon is running and even for a non-root caller.
 #[cfg(unix)]
 #[test]
 fn mailbox_delete_force_refuses_catchall() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Mailbox CRUD is root-only; bypass via the test env var so the
-    // catchall-refusal logic itself runs under non-root `cargo test`.
+    let runtime = tmp.path().join("run");
+    std::fs::create_dir_all(&runtime).ok();
+
     let assert = aimx_cmd(tmp.path())
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
         .arg(tmp.path())
         .arg("mailboxes")
@@ -3326,6 +3354,363 @@ fn mailbox_delete_force_refuses_catchall() {
         stderr.contains("catchall"),
         "catchall refusal must surface verbatim, got stderr: {stderr}"
     );
+}
+
+/// S2-6 / S2-2: end-to-end non-root mailbox CRUD via daemon UDS. Runs
+/// without `AIMX_INTEGRATION_SUDO=1` — this test is the canonical
+/// regression guard against re-introducing a root gate on the
+/// MAILBOX-CREATE / MAILBOX-DELETE path. With `aimx serve` running and
+/// the test runner's uid (which is also the configured mailbox owner
+/// in `setup_test_env`), creating `task-mb` and then force-deleting it
+/// must succeed without sudo. Skips automatically if the runner happens
+/// to be root (CI's root-only step exercises a different branch).
+#[cfg(unix)]
+#[test]
+fn mailbox_create_delete_force_e2e_as_non_root_user() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "skipping: this test pins the non-root happy path; \
+             root creates run via the dedicated sudo-lane test"
+        );
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared after `aimx serve` start"
+    );
+
+    // CREATE — non-root, no sudo, no AIMX_TEST_SKIP_ROOT_CHECK.
+    // Pass `--owner <runner>` so `prompt_mailbox_owner` is skipped
+    // entirely (it would otherwise loop 5 times under non-TTY stdin
+    // because the local part `task-mb` does not resolve via getpwnam).
+    // Owner == caller, so the soft-warning path also stays silent —
+    // exactly the agent-friendly happy path we want to pin.
+    let runner = current_username();
+    let create = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("task-mb")
+        .arg("--owner")
+        .arg(&runner)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Mailbox 'task-mb' created"),
+        "CREATE must succeed for non-root caller via daemon UDS, got: {stdout}"
+    );
+    assert!(
+        !stdout.contains("Restart the daemon"),
+        "UDS path must NOT print the restart-hint banner: {stdout}"
+    );
+
+    // config.toml on disk reflects the new mailbox stanza.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        config_text.contains("[mailboxes.task-mb]"),
+        "config.toml should contain the new stanza: {config_text}"
+    );
+    // The owner field must be the runner's username (synthesized by
+    // the daemon from SO_PEERCRED — never client-supplied).
+    assert!(
+        config_text.contains(&format!("owner = \"{runner}\"")),
+        "owner must be the runner's username: {config_text}"
+    );
+
+    // On-disk owner check: the inbox dir must be owned by the runner's
+    // uid (the daemon chowns to the resolved owner).
+    let inbox_dir = tmp.path().join("inbox").join("task-mb");
+    assert!(inbox_dir.is_dir(), "inbox/task-mb/ must exist on disk");
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::metadata(&inbox_dir).unwrap();
+    let runner_uid = unsafe { libc::geteuid() };
+    assert_eq!(
+        meta.uid(),
+        runner_uid,
+        "inbox/task-mb/ must be owned by the runner uid"
+    );
+
+    // DELETE --force --yes — should wipe and succeed via daemon UDS.
+    // Confirms S2-2: the `--force` flag works for the mailbox owner
+    // without sudo. Mailbox is empty on creation, but exercising the
+    // force path also covers the wipe-then-submit ordering.
+    let delete = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("delete")
+        .arg("--force")
+        .arg("--yes")
+        .arg("task-mb")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&delete.get_output().stdout).to_string();
+    assert!(
+        stdout.contains("Mailbox 'task-mb' deleted"),
+        "DELETE --force --yes must succeed for non-root owner, got: {stdout}"
+    );
+
+    // config.toml must no longer reference task-mb.
+    let config_text_after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        !config_text_after.contains("[mailboxes.task-mb]"),
+        "config.toml must no longer contain task-mb stanza: {config_text_after}"
+    );
+
+    stop_serve(daemon);
+}
+
+/// S2-1 soft-warning: a non-root caller passing `--owner <other>` gets
+/// a stderr line clarifying that the daemon will discard the value and
+/// bind ownership to the caller. The mailbox is still created (the
+/// daemon synthesizes the correct owner) — the warning is purely UX.
+#[cfg(unix)]
+#[test]
+fn mailbox_create_owner_flag_warns_for_non_root_callers() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: warning fires only for non-root callers");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    // Pick an owner string different from the runner. `nobody` is
+    // present on every Linux box and resolves via getpwnam, which
+    // satisfies the CLI's pre-flight `--owner` check before the
+    // daemon's SO_PEERCRED override kicks in.
+    let assert = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("warned-mb")
+        .arg("--owner")
+        .arg("nobody")
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).to_string();
+    let runner = current_username();
+    assert!(
+        stderr.contains("--owner ignored"),
+        "soft warning must fire when non-root passes --owner <other>, stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains(&runner),
+        "warning must name the actual caller (`{runner}`), stderr: {stderr}"
+    );
+
+    // The daemon ignored the owner flag — the resulting mailbox is
+    // owned by the runner, not `nobody`.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(
+        config_text.contains(&format!("owner = \"{runner}\"")),
+        "owner must be the runner, NOT the wire-supplied value: {config_text}"
+    );
+
+    stop_serve(daemon);
+}
+
+/// Cycle 2 regression guard for Blocker 1 / Blocker 3 of the Sprint 2
+/// review: the CLI must reach `mailbox::run` even when the caller
+/// cannot read `/etc/aimx/config.toml`.
+///
+/// In production the config is `0640 root:root`, so a non-root caller
+/// cannot read it. The previous shape — `dispatch()` `?`-propagating
+/// `Config::load_resolved_with_data_dir(...)` — surfaced the EACCES
+/// as a bare `Permission denied (os error 13)` before
+/// `mailbox::run` ever saw the request. This test simulates the
+/// production permission model by chmod-ing the config file to `0000`
+/// (no permissions for any user, including the test runner). Either
+/// the create succeeds via UDS (daemon-up branch) or it exits with
+/// the canonical socket-missing hint (daemon-down branch). The bare
+/// EACCES surface that broke Cycle 1 must NOT reappear.
+///
+/// Runs without sudo so it lives in the standard CI lane and catches
+/// the regression on every PR.
+#[cfg(unix)]
+#[test]
+fn mailbox_create_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    // Chmod the config to 0000. The daemon already loaded its
+    // `Arc<Config>` snapshot at startup, so it keeps serving from
+    // memory; the CLI subprocess inherits the test runner's uid and
+    // therefore cannot read the file.
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let runner = current_username();
+    let create = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("create")
+        .arg("perm-mb")
+        .arg("--owner")
+        .arg(&runner)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&create.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&create.get_output().stderr).to_string();
+    assert!(
+        stdout.contains("Mailbox 'perm-mb' created"),
+        "CREATE must succeed via daemon UDS without reading local config; \
+         stdout: {stdout}, stderr: {stderr}"
+    );
+    // The bare-EACCES surface that broke Cycle 1 must NOT reappear.
+    assert!(
+        !stderr.contains("Permission denied (os error 13)"),
+        "config-read EACCES must never surface to the operator; stderr: {stderr}"
+    );
+
+    // Restore perms so the test cleanup can read the file.
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Companion to the create-side regression test: `aimx mailboxes
+/// list` must also work without local config-read access. The
+/// non-root list path falls back to `MAILBOX-LIST` over UDS, which
+/// the daemon resolves via SO_PEERCRED — no config read on the
+/// client side at all.
+#[cfg(unix)]
+#[test]
+fn mailbox_list_with_unreadable_config_falls_back_to_uds() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let list = aimx_cmd(tmp.path())
+        .env("AIMX_RUNTIME_DIR", tmp.path().join("run"))
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("mailboxes")
+        .arg("list")
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&list.get_output().stdout).to_string();
+    let stderr = String::from_utf8_lossy(&list.get_output().stderr).to_string();
+    assert!(
+        stdout.contains("alice") || stdout.contains("MAILBOX"),
+        "LIST must succeed via daemon UDS; stdout: {stdout}, stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("Permission denied (os error 13)"),
+        "config-read EACCES must never surface to the operator; stderr: {stderr}"
+    );
+
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Cycle 2 regression guard for Blocker 2: the MCP `mailbox_create`
+/// tool must work end-to-end against a real daemon for a non-root
+/// caller. Cycle 1 shipped the tool but the wire-protocol parser
+/// rejected the `owner: None` request with `[MALFORMED] missing
+/// required header: Owner` — a regression that 1021 unit tests
+/// missed because none of them reached the wire layer for this code
+/// path. The fix relaxes the parser to make `Owner:` optional; this
+/// test pins the agent-friendly surface so a future re-tightening
+/// fails CI.
+#[cfg(unix)]
+#[test]
+fn mcp_mailbox_create_against_running_daemon_succeeds_for_non_root() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: this test pins the non-root MCP path");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "agent-mb"}));
+    let tool_text = resp["result"]["content"][0]["text"].as_str().unwrap_or("");
+    // The protocol-level rejection used to surface as
+    // `[MALFORMED] missing required header: Owner` — must NOT recur.
+    assert!(
+        !tool_text.contains("MALFORMED"),
+        "MAILBOX-CREATE without Owner must not be rejected by the parser; got: {tool_text}"
+    );
+    // Success path: the tool returns the new mailbox's full address.
+    assert!(
+        tool_text.contains("agent-mb@agent.example.com")
+            || tool_text.contains("Mailbox 'agent-mb' created"),
+        "expected success message, got: {tool_text}"
+    );
+
+    // Daemon hot-swapped the config. The on-disk stanza names the
+    // runner as the owner because the daemon synthesizes from
+    // SO_PEERCRED, not from any client-supplied value.
+    let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let runner = current_username();
+    assert!(
+        config_text.contains("[mailboxes.agent-mb]"),
+        "config.toml should carry the new stanza: {config_text}"
+    );
+    assert!(
+        config_text.contains(&format!("owner = \"{runner}\"")),
+        "owner must be the runner's username (SO_PEERCRED-bound): {config_text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
 }
 
 // ---------------------------------------------------------------------------

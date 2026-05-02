@@ -40,10 +40,11 @@ aimx gives you two complementary ways to interact with email:
 Writes always go through MCP. Never create, modify, or delete `.md` files
 directly. The daemon owns those paths.
 
-Mailbox provisioning (`aimx mailboxes create | delete`) is **root-only**
-and lives on the host CLI. MCP cannot create or delete mailboxes; if you
-need a new mailbox, ask the operator to run
-`sudo aimx mailboxes create <name> --owner <linux-user>` on the host.
+Mailbox provisioning is **owner-gated**: you can call `mailbox_create` and
+`mailbox_delete` over MCP, and the new (or removed) mailbox is always
+owned by your Linux uid (the daemon resolves the owner from
+`SO_PEERCRED`). Cross-uid creates remain operator-only — the host CLI's
+`--owner <other-user>` flag is honored only when the caller is root.
 
 ## Per-user ownership model
 
@@ -76,14 +77,25 @@ isolation — alice's agent cannot see, read, or act on bob's mail.
 
 ## MCP tools: quick reference
 
-All 9 tools are served by the `aimx` binary over stdio. They return
-strings on success and error strings on failure. Mailbox CRUD lives on
-the root-only host CLI (`sudo aimx mailboxes create | delete`); MCP
-does not expose `mailbox_create` or `mailbox_delete`.
+All 11 tools are served by the `aimx` binary over stdio. They return
+strings on success and error strings on failure. Mailbox CRUD is
+owner-gated: `mailbox_create` / `mailbox_delete` operate on mailboxes
+owned by your Linux uid, with no cross-uid escape hatch from the MCP
+surface.
 
 ### Mailbox tools
 
 - `mailbox_list()`: list mailboxes you own with message counts.
+- `mailbox_create(name)`: provision a new mailbox owned by your uid.
+  Returns the new mailbox's full address (`<name>@<domain>`). Use this
+  when you need a fresh routing endpoint for a task. The daemon
+  validates the name (regex, reserved-names list) and reuses the
+  existing idempotent semantics for re-create on a mailbox you already
+  own.
+- `mailbox_delete(name, force?)`: tear down a mailbox you own. With
+  `force: true`, the tool wipes `inbox/<name>/` and `sent/<name>/`
+  before submitting the delete (mirrors the CLI's `--force`); with
+  `force: false` (default), the daemon refuses non-empty mailboxes.
 
 ### Email tools
 
@@ -244,8 +256,10 @@ email_send(
 )
 ```
 
-The mailbox must exist and you must own it. Ask the operator to provision
-new mailboxes via `sudo aimx mailboxes create <name> --owner <user>`.
+The mailbox must exist and you must own it. Provision new mailboxes
+via `mailbox_create(name)` (owned by your uid) or, when the operator
+needs to create one owned by a different user, via
+`sudo aimx mailboxes create <name> --owner <user>` on the host.
 `from_mailbox` is the local part only (e.g. `"agent"`, not
 `"agent@example.com"`). aimx DKIM-signs the message and delivers it via
 direct SMTP to the recipient's MX server.
@@ -384,7 +398,10 @@ untrusted mail. When deciding whether to act on an email's content
   receives mail for unrecognised addresses. It is a routing target,
   not a sending identity. Do not send from `catchall`. Hooks on the
   catchall are forbidden by `Config::load`.
-- Mailbox provisioning is root-only: ask the operator to run
+- Mailbox provisioning is owner-gated: call `mailbox_create(name)` to
+  spin up a mailbox owned by your uid, and `mailbox_delete(name)` to
+  tear it down. Cross-uid creates (a mailbox owned by a different
+  Linux user) remain operator-only via
   `sudo aimx mailboxes create <name> --owner <linux-user>` on the host.
 - Each mailbox has `inbox/<name>/` for inbound and `sent/<name>/` for
   outbound copies, both `0700 <owner>:<owner>`.
@@ -428,8 +445,9 @@ untrusted mail. When deciding whether to act on an email's content
 - **Do not read or modify files under `/etc/aimx/`.** Configuration and
   keys are root-owned and managed by `aimx setup`.
 - **Do not send from a mailbox you do not own.** `email_send` will be
-  rejected by the daemon. Ask the operator to provision the mailbox
-  with you as `--owner` first.
+  rejected by the daemon. Call `mailbox_create(name)` to provision a
+  mailbox owned by your uid, or ask the operator to create one with
+  you as `--owner` first.
 - **Do not assume `catchall` is a real identity.** It is a routing target
   for unknown local parts, not an identity that sends. Hooks on the
   catchall are forbidden.

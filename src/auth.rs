@@ -60,6 +60,13 @@ pub enum AuthError {
     NotRoot,
     /// Caller is not the owner of the named mailbox.
     NotOwner { mailbox: String },
+    /// Caller asked to create a mailbox owned by a uid other than their
+    /// own. Distinct from `NotOwner` because no mailbox exists yet —
+    /// the predicate is comparing intended-owner against caller. Carries
+    /// `intended_owner_uid` for debug logging only; renderers must not
+    /// interpolate it into messages shown to non-root callers (no uid
+    /// leak per NFR2).
+    OwnerMismatch { intended_owner_uid: u32 },
     /// Action references a mailbox the caller could not resolve in the
     /// current config snapshot.
     NoSuchMailbox,
@@ -72,6 +79,10 @@ impl std::fmt::Display for AuthError {
             AuthError::NotOwner { mailbox } => {
                 write!(f, "not authorized: caller does not own mailbox '{mailbox}'")
             }
+            AuthError::OwnerMismatch { .. } => write!(
+                f,
+                "not authorized: cannot create a mailbox owned by another user"
+            ),
             AuthError::NoSuchMailbox => write!(f, "not authorized: no such mailbox"),
         }
     }
@@ -86,8 +97,9 @@ impl std::error::Error for AuthError {}
 /// For any other caller:
 /// - `SystemCommand` always rejects as `NotRoot`.
 /// - `MailboxCreate { owner_uid }` passes when `caller_uid == owner_uid`;
-///   otherwise `NotOwner { mailbox: "<new>" }` so the wire-format error
-///   stays consistent with the other owner-mismatch paths.
+///   otherwise `OwnerMismatch { intended_owner_uid }` so renderers can
+///   produce a "cannot create a mailbox owned by another user" message
+///   without inventing a sentinel mailbox name.
 /// - `MailboxDelete { mailbox }` and the other mailbox-bearing variants
 ///   require `mailbox` to be `Some`; `None` produces `NoSuchMailbox`.
 ///   When present, the mailbox's `owner_uid()` must equal `caller_uid`,
@@ -112,21 +124,17 @@ pub fn authorize(
             if caller_uid == owner_uid {
                 Ok(())
             } else {
-                // The mailbox does not exist yet. Use the sentinel
-                // `"<new>"` so the wire-shaped error keeps the owner-
-                // mismatch framing without inventing a fresh variant
-                // (and without leaking the requested owner uid into
-                // the response).
-                // TODO(S2-1): cleaner rendering. When `format_auth_error`
-                // starts surfacing this to humans in Sprint 2, the
-                // string `"caller does not own mailbox '<new>'"` will
-                // read like a bug. Either add a dedicated
-                // `OwnerMismatch { intended_owner_uid: u32 }` variant
-                // or pattern-match `"<new>"` in `format_auth_error`
-                // and switch to e.g. "not authorized: cannot create a
-                // mailbox owned by another user".
-                Err(AuthError::NotOwner {
-                    mailbox: "<new>".to_string(),
+                // No mailbox exists yet, so a `NotOwner { mailbox }`
+                // doesn't model the situation correctly. Surface a
+                // dedicated variant so `format_auth_error` (and any
+                // other renderer) can produce a sentence that reads
+                // naturally without the `"<new>"` sentinel hack the
+                // Sprint-1 placeholder used. The `intended_owner_uid`
+                // is carried for log/debug detail; the rendered string
+                // intentionally does not interpolate it (no uid leak
+                // to non-root callers, per NFR2).
+                Err(AuthError::OwnerMismatch {
+                    intended_owner_uid: owner_uid,
                 })
             }
         }
@@ -224,16 +232,34 @@ mod tests {
         // own uid. Belt-and-braces: the predicate refuses on its own.
         assert_eq!(
             authorize(1000, Action::MailboxCreate { owner_uid: 0 }, None),
-            Err(AuthError::NotOwner {
-                mailbox: "<new>".into()
+            Err(AuthError::OwnerMismatch {
+                intended_owner_uid: 0
             }),
         );
         assert_eq!(
             authorize(1000, Action::MailboxCreate { owner_uid: 1001 }, None),
-            Err(AuthError::NotOwner {
-                mailbox: "<new>".into()
+            Err(AuthError::OwnerMismatch {
+                intended_owner_uid: 1001
             }),
         );
+    }
+
+    #[test]
+    fn owner_mismatch_render_does_not_leak_uid() {
+        // The Display impl must NOT interpolate the intended uid (NFR2:
+        // no information leak about another uid's mailbox state). The
+        // error reads as a single user-friendly sentence.
+        let rendered = format!(
+            "{}",
+            AuthError::OwnerMismatch {
+                intended_owner_uid: 0
+            }
+        );
+        assert_eq!(
+            rendered,
+            "not authorized: cannot create a mailbox owned by another user"
+        );
+        assert!(!rendered.contains("0"), "uid must not appear in render");
     }
 
     #[test]

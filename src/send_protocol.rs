@@ -113,20 +113,39 @@ pub struct MarkRequest {
 ///
 /// Both verbs share the same shape; the enum selection is encoded in
 /// `create` so the codec stays a single flat struct rather than two
-/// near-identical types. `MAILBOX-CREATE` requires an `Owner:` header
-/// so the daemon knows which Linux user to chown the newly-created
-/// mailbox directories to. `MAILBOX-DELETE` ignores
-/// `owner` — the daemon only needs the name to remove the stanza.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// near-identical types. `Owner:` is OPTIONAL on the wire — the
+/// daemon-side handler decides what to do per PRD §6.5 R20 (root
+/// callers must supply `Owner:` so the daemon knows which Linux user
+/// to chown the newly-created mailbox directories to; non-root callers
+/// have any wire-supplied `Owner:` ignored and the owner synthesized
+/// from `peer_username(SO_PEERCRED)`). `MAILBOX-DELETE` ignores
+/// `owner` regardless of caller — the daemon only needs the name to
+/// remove the stanza. `MAILBOX-DELETE` also accepts an optional
+/// `force` flag (encoded on the wire as `Force: true`) which tells the
+/// daemon to wipe `inbox/<name>/` and `sent/<name>/` contents under
+/// the per-mailbox lock before unlinking the stanza, so the wipe and
+/// the config rewrite are atomic together (no data-destruction race
+/// window between client-side wipe and daemon-side delete).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MailboxCrudRequest {
     pub name: String,
     /// `true` for `MAILBOX-CREATE`, `false` for `MAILBOX-DELETE`.
     pub create: bool,
-    /// Linux user that owns the mailbox storage. Required on CREATE,
-    /// ignored on DELETE. The daemon validates the owner resolves via
-    /// `getpwnam` and chowns `inbox/<name>/` + `sent/<name>/` to
-    /// `<owner>:<owner>` mode `0700`.
+    /// Linux user that owns the mailbox storage. Optional on the wire.
+    /// On CREATE: required for root callers (no SO_PEERCRED-based
+    /// identity to fall back on); ignored for non-root callers (the
+    /// daemon synthesizes from `peer_username(SO_PEERCRED)` so privilege
+    /// escalation is structurally impossible). On DELETE: ignored
+    /// regardless of caller. When supplied and accepted, the daemon
+    /// validates the owner resolves via `getpwnam` and chowns
+    /// `inbox/<name>/` + `sent/<name>/` to `<owner>:<owner>` mode `0700`.
     pub owner: Option<String>,
+    /// `MAILBOX-DELETE`-only: when `true`, the daemon wipes the inbox
+    /// and sent directories under the same per-mailbox lock that
+    /// guards the stanza removal, eliminating the data-destruction
+    /// race window a client-side wipe would otherwise leave open.
+    /// Ignored on CREATE.
+    pub force: bool,
 }
 
 /// Decoded `AIMX/1 HOOK-CREATE` request. The verb wiring is reworked
@@ -608,6 +627,8 @@ where
 {
     let mut name: Option<String> = None;
     let mut owner: Option<String> = None;
+    let mut force: bool = false;
+    let mut force_seen: bool = false;
     let mut content_length: Option<usize> = None;
 
     loop {
@@ -660,6 +681,31 @@ where
                 }
                 owner = Some(value);
             }
+            "force" => {
+                // `Force:` is only meaningful on MAILBOX-DELETE. Reject
+                // on CREATE so the wire shape stays self-describing
+                // rather than silently dropping a header an operator
+                // explicitly set.
+                if create {
+                    return Err(ParseError::Malformed(
+                        "Force header is only valid on MAILBOX-DELETE".into(),
+                    ));
+                }
+                if force_seen {
+                    return Err(ParseError::Malformed("duplicate Force header".into()));
+                }
+                let v_lower = value.to_ascii_lowercase();
+                force = match v_lower.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(ParseError::Malformed(format!(
+                            "invalid Force value: {value:?} (expected 'true' or 'false')"
+                        )));
+                    }
+                };
+                force_seen = true;
+            }
             "content-length" => {
                 if content_length.is_some() {
                     return Err(ParseError::Malformed(
@@ -686,18 +732,27 @@ where
     // Content-Length is optional for MAILBOX-CRUD verbs; 0 is implicit.
     let _ = content_length;
 
-    // Owner is REQUIRED on CREATE. On DELETE the daemon
-    // only needs the name; Owner is ignored even if supplied.
-    if create && owner.is_none() {
-        return Err(ParseError::Malformed(
-            "missing required header: Owner".into(),
-        ));
-    }
+    // `Owner:` is OPTIONAL on the wire. The daemon-side handler
+    // (`mailbox_handler::handle_mailbox_crud`) decides what to do with
+    // the field per PRD §6.5 R20:
+    //
+    //   - non-root callers: the daemon ignores any wire-supplied owner
+    //     and synthesizes it from `peer_username(SO_PEERCRED)`. This is
+    //     the path the MCP `mailbox_create` tool uses (it deliberately
+    //     ships `owner: None` so an agent cannot plant a foreign owner).
+    //   - root callers: the daemon requires `owner: Some(_)` (it has no
+    //     SO_PEERCRED-based identity to fall back on) and rejects with
+    //     `ErrCode::Validation` if the field is missing.
+    //
+    // The parser therefore stays permissive — making it strict would
+    // re-introduce the protocol-level rejection that broke the MCP
+    // `mailbox_create` tool for non-root callers in production.
 
     Ok(MailboxCrudRequest {
         name,
         create,
         owner,
+        force,
     })
 }
 
@@ -1092,7 +1147,11 @@ where
 /// Write an `AIMX/1 MAILBOX-CREATE` or `AIMX/1 MAILBOX-DELETE` request
 /// frame. Verb chosen by `request.create` (`true` → MAILBOX-CREATE,
 /// `false` → MAILBOX-DELETE). `Owner:` is emitted when `request.owner`
-/// is `Some`; the parser requires it on CREATE.
+/// is `Some`; the daemon decides per-caller whether the field is
+/// honored or ignored. `Force: true` is emitted only on MAILBOX-DELETE
+/// when `request.force` is true so the daemon performs a server-side
+/// wipe of `inbox/<name>/` and `sent/<name>/` under the per-mailbox
+/// lock that already guards the stanza removal.
 pub async fn write_mailbox_crud_request<W>(
     writer: &mut W,
     request: &MailboxCrudRequest,
@@ -1108,6 +1167,9 @@ where
     let mut header = format!("AIMX/1 {verb}\nName: {}\n", sanitize_inline(&request.name),);
     if let Some(owner) = &request.owner {
         header.push_str(&format!("Owner: {}\n", sanitize_inline(owner)));
+    }
+    if !request.create && request.force {
+        header.push_str("Force: true\n");
     }
     header.push_str("Content-Length: 0\n\n");
     writer.write_all(header.as_bytes()).await?;

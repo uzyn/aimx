@@ -139,6 +139,29 @@ pub struct HookDeleteParams {
     pub name: String,
 }
 
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxCreateParams {
+    #[schemars(description = "Mailbox name (local part of the resulting address). \
+                       Must match `[a-z0-9._-]+` with no leading/trailing dot \
+                       and no `..`. Reserved names (`catchall`, `aimx-catchall`) \
+                       are rejected by the daemon.")]
+    pub name: String,
+}
+
+#[derive(Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MailboxDeleteParams {
+    #[schemars(description = "Mailbox name to delete. You must own it (the \
+                       daemon checks via SO_PEERCRED).")]
+    pub name: String,
+    #[schemars(description = "When true, wipe `inbox/<name>/` and `sent/<name>/` \
+                       contents before submitting the delete. When false (default), \
+                       the daemon refuses non-empty mailboxes with a \
+                       `[NONEMPTY]` error.")]
+    pub force: Option<bool>,
+}
+
 impl AimxMcpServer {
     pub fn new(data_dir_override: Option<PathBuf>) -> Self {
         Self::with_caller_uid(data_dir_override, crate::platform::current_euid())
@@ -194,6 +217,9 @@ impl AimxMcpServer {
             crate::auth::AuthError::NotRoot => "not authorized: requires root".to_string(),
             crate::auth::AuthError::NotOwner { mailbox } => {
                 format!("not authorized: caller does not own mailbox '{mailbox}'")
+            }
+            crate::auth::AuthError::OwnerMismatch { .. } => {
+                "not authorized: cannot create a mailbox owned by another user".to_string()
             }
             crate::auth::AuthError::NoSuchMailbox => {
                 format!("not authorized: mailbox '{mailbox_name}' not found")
@@ -596,6 +622,94 @@ impl AimxMcpServer {
             Err(HookCrudFallback::Daemon(msg)) => Err(msg),
         }
     }
+
+    #[tool(
+        name = "mailbox_create",
+        description = "Create a new mailbox owned by your uid. Submits the \
+                       request through the aimx daemon over UDS; the daemon \
+                       resolves the owner from SO_PEERCRED, so the new mailbox \
+                       is always owned by you (no `owner` parameter — by \
+                       construction agents cannot create mailboxes owned by \
+                       another user). Returns the new mailbox's full address \
+                       on success."
+    )]
+    fn mailbox_create(
+        &self,
+        Parameters(params): Parameters<MailboxCreateParams>,
+    ) -> Result<String, String> {
+        // No client-side validation: the daemon owns the regex, the
+        // reserved-name list, and the idempotent "exists with matching
+        // owner → success" semantics. Surfacing daemon errors verbatim
+        // matches the pattern used by `email_send` / `hook_create`.
+        // The `owner` argument on the wire is `None` so the daemon
+        // synthesizes the owner from SO_PEERCRED rather than honoring
+        // anything the agent could have planted.
+        match submit_mailbox_crud_via_daemon(&params.name, true, None, false) {
+            Ok(()) => {
+                // Resolve the new mailbox's address through the
+                // daemon's `MAILBOX-LIST` rather than reading
+                // root-owned `/etc/aimx/config.toml` from the
+                // non-root MCP process. The daemon's listing is
+                // SO_PEERCRED-filtered to the caller's uid, so the
+                // just-created mailbox is always visible to the
+                // calling agent.
+                let address = lookup_mailbox_address(&params.name).unwrap_or_default();
+                if address.is_empty() {
+                    Ok(format!("Mailbox '{}' created.", params.name))
+                } else {
+                    Ok(address)
+                }
+            }
+            Err(MailboxCrudFallback::SocketMissing) => {
+                Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
+            }
+            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+        }
+    }
+
+    #[tool(
+        name = "mailbox_delete",
+        description = "Delete a mailbox you own. The daemon enforces ownership \
+                       via SO_PEERCRED; an attempt to delete a mailbox owned \
+                       by another uid surfaces as a not-authorized error. \
+                       When `force` is true, the tool first wipes \
+                       `inbox/<name>/` and `sent/<name>/` contents (mirroring \
+                       the CLI's `--force` flag) before submitting the delete; \
+                       when false (default), the daemon refuses non-empty \
+                       mailboxes with a `[NONEMPTY]` error."
+    )]
+    fn mailbox_delete(
+        &self,
+        Parameters(params): Parameters<MailboxDeleteParams>,
+    ) -> Result<String, String> {
+        let force = params.force.unwrap_or(false);
+
+        // Catchall is structurally distinct (owned by
+        // `aimx-catchall`) and the daemon refuses to delete it. Mirror
+        // that here so the wire surface still produces a friendly
+        // operator-facing error rather than the daemon's internal
+        // "cannot delete the catchall mailbox" verbatim — also
+        // matches the CLI's pre-flight refusal.
+        if force && params.name == "catchall" {
+            return Err("Cannot delete the catchall mailbox".to_string());
+        }
+
+        // The wipe is performed server-side by the daemon under the
+        // same per-mailbox lock that guards the stanza removal so the
+        // wipe and the rewrite are atomic together. This both
+        // eliminates the data-destruction race window the previous
+        // client-side wipe left open AND removes the MCP process's
+        // dependency on local read access to `/etc/aimx/config.toml`
+        // (which is `0640 root:root` in production, so the previous
+        // `self.load_config()` inevitably failed for non-root agents).
+        match submit_mailbox_crud_via_daemon(&params.name, false, None, force) {
+            Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
+            Err(MailboxCrudFallback::SocketMissing) => {
+                Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
+            }
+            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+        }
+    }
 }
 
 /// Build `SendArgs` from `EmailSendParams` and the resolved sender
@@ -732,16 +846,25 @@ pub(crate) enum MailboxCrudFallback {
 }
 
 /// Submit a `MAILBOX-CREATE` / `MAILBOX-DELETE` request over UDS.
-/// `owner` is required on CREATE; ignored on DELETE.
+/// `owner` is honored only for root callers on CREATE — non-root
+/// callers have any wire-supplied owner ignored by the daemon
+/// (synthesized from `peer_username(SO_PEERCRED)` instead). `force`
+/// is meaningful only on DELETE: when `true` the daemon wipes the
+/// inbox and sent directories under the per-mailbox lock that
+/// already guards the stanza removal, so the wipe and the rewrite
+/// are atomic together (no data-destruction race window between a
+/// client-side wipe and the daemon-side delete).
 pub(crate) fn submit_mailbox_crud_via_daemon(
     name: &str,
     create: bool,
     owner: Option<&str>,
+    force: bool,
 ) -> Result<(), MailboxCrudFallback> {
     let request = MailboxCrudRequest {
         name: name.to_string(),
         create,
         owner: owner.map(|s| s.to_string()),
+        force,
     };
     let socket = crate::serve::aimx_socket_path();
 
@@ -1053,7 +1176,41 @@ pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::
 /// Submit an `AIMX/1 MAILBOX-LIST` to the daemon and return the JSON
 /// body verbatim. The schema-mandated string output for the tool is
 /// the JSON itself; no re-formatting happens here.
+/// Best-effort: ask the daemon for the caller's mailbox listing and
+/// return the address recorded for `name`. Returns `None` when the
+/// daemon is unreachable, the listing is malformed, the mailbox is
+/// absent (race), or the row is unregistered. The MCP
+/// `mailbox_create` success message swallows the `None` case
+/// gracefully — the create itself already succeeded; the address
+/// suffix is operator UX.
+fn lookup_mailbox_address(name: &str) -> Option<String> {
+    let json = submit_mailbox_list_raw().ok()?;
+    let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
+        serde_json::from_str(&json).ok()?;
+    rows.into_iter()
+        .find(|r| r.name == name)
+        .and_then(|r| r.address)
+}
+
 fn submit_mailbox_list_via_daemon() -> Result<String, String> {
+    submit_mailbox_list_raw().map_err(|e| match e {
+        MailboxCrudFallback::SocketMissing => {
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+        }
+        MailboxCrudFallback::Daemon(msg) => msg,
+    })
+}
+
+/// CLI-friendly variant of [`submit_mailbox_list_via_daemon`] that
+/// distinguishes socket-missing from a daemon-side error so the
+/// caller can decide whether to surface the canonical "daemon must
+/// be running" hint or render the daemon's reason verbatim. Mirrors
+/// the [`MailboxCrudFallback`] shape used by the CRUD path.
+pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxCrudFallback> {
+    submit_mailbox_list_raw()
+}
+
+fn submit_mailbox_list_raw() -> Result<String, MailboxCrudFallback> {
     let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
@@ -1065,23 +1222,25 @@ fn submit_mailbox_list_via_daemon() -> Result<String, String> {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-                .map_err(|e| format!("Failed to create tokio runtime: {e}"))?;
+                .map_err(|e| {
+                    MailboxCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
             rt.block_on(submit_mailbox_list_request(&socket))
         }
     };
 
     let raw = io_result.map_err(|e| {
         if is_socket_missing(&e) {
-            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+            MailboxCrudFallback::SocketMissing
         } else {
-            format!(
+            MailboxCrudFallback::Daemon(format!(
                 "Failed to connect to aimx daemon at {}: {e}",
                 socket.display()
-            )
+            ))
         }
     })?;
 
-    decode_mailbox_list_response(&raw)
+    decode_mailbox_list_response(&raw).map_err(MailboxCrudFallback::Daemon)
 }
 
 /// Open the UDS, ship `AIMX/1 MAILBOX-LIST`, and return the raw
@@ -2024,6 +2183,69 @@ mod email_list_tests {
         assert_eq!(params.mailbox, "alice");
         assert_eq!(params.id, "2025-06-15-120000-hello");
     }
+
+    #[test]
+    fn mailbox_create_params_rejects_owner_field() {
+        // S2-3 invariant: there is no `owner` parameter on
+        // `mailbox_create`. A stale `owner` field on the wire must
+        // surface as a parse error rather than be silently dropped —
+        // otherwise an agent could believe it created a mailbox owned
+        // by some other principal.
+        let json = serde_json::json!({
+            "name": "task-42",
+            "owner": "root",
+        });
+        let err = match serde_json::from_value::<MailboxCreateParams>(json) {
+            Ok(_) => panic!("expected unknown-field error, got Ok"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unknown field"),
+            "expected unknown-field error, got {err}"
+        );
+    }
+
+    #[test]
+    fn mailbox_create_params_accepts_name_only() {
+        let json = serde_json::json!({ "name": "task-42" });
+        let params: MailboxCreateParams =
+            serde_json::from_value(json).expect("name-only params must parse");
+        assert_eq!(params.name, "task-42");
+    }
+
+    #[test]
+    fn mailbox_delete_params_force_defaults_to_none() {
+        let json = serde_json::json!({ "name": "task-42" });
+        let params: MailboxDeleteParams =
+            serde_json::from_value(json).expect("name-only delete params must parse");
+        assert_eq!(params.name, "task-42");
+        assert!(params.force.is_none());
+    }
+
+    #[test]
+    fn mailbox_delete_params_accepts_force_true() {
+        let json = serde_json::json!({ "name": "task-42", "force": true });
+        let params: MailboxDeleteParams =
+            serde_json::from_value(json).expect("force=true must parse");
+        assert_eq!(params.force, Some(true));
+    }
+
+    #[test]
+    fn mailbox_delete_force_refuses_catchall_without_touching_disk() {
+        // The force-wipe path must reject the catchall mailbox
+        // client-side before any wipe attempt or daemon submission.
+        // Without this guard a force-wipe on `catchall` would clear
+        // the catchall storage even when the daemon would refuse the
+        // delete itself.
+        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+        let err = server
+            .mailbox_delete(Parameters(MailboxDeleteParams {
+                name: "catchall".to_string(),
+                force: Some(true),
+            }))
+            .unwrap_err();
+        assert!(err.contains("catchall"), "{err}");
+    }
 }
 
 #[cfg(test)]
@@ -2117,6 +2339,26 @@ mod schema_order_tests {
     #[test]
     fn hook_delete_params_property_order() {
         assert_eq!(property_keys::<HookDeleteParams>(), vec!["name"]);
+    }
+
+    #[test]
+    fn mailbox_create_params_property_order() {
+        // Per S2-3, the only parameter is `name`. There is no `owner`
+        // — by construction the daemon synthesizes the owner from
+        // SO_PEERCRED. A future field addition reorders the schema and
+        // surfaces here as a test failure so agent-facing behaviour is
+        // never silently changed.
+        assert_eq!(property_keys::<MailboxCreateParams>(), vec!["name"]);
+    }
+
+    #[test]
+    fn mailbox_delete_params_property_order() {
+        // Per S2-4, the parameters are `name` (required) and
+        // `force` (optional, default false).
+        assert_eq!(
+            property_keys::<MailboxDeleteParams>(),
+            vec!["name", "force"]
+        );
     }
 }
 

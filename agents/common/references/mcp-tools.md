@@ -24,10 +24,12 @@ Effectively:
   mailboxes the caller owns. Hooks always execute as the mailbox's
   owning Linux user — there is no per-hook `run_as` field.
 
-Mailbox provisioning (`mailbox_create` / `mailbox_delete`) is **not
-exposed via MCP**. It is root-only on the host CLI (`sudo aimx
-mailboxes create | delete`) so that the namespace of mailboxes can
-never be widened by an agent.
+Mailbox provisioning (`mailbox_create` / `mailbox_delete`) is
+**owner-gated**: the daemon synthesizes the new mailbox's owner from
+`SO_PEERCRED` (your uid), so an agent can only create or remove
+mailboxes owned by itself. Cross-uid creates (a mailbox owned by a
+different Linux user) remain operator-only via the host CLI's
+`sudo aimx mailboxes create <name> --owner <other-user>` flag.
 
 On a single-user box the caller always owns everything and the rules
 are invisible. On a multi-user box they give real isolation.
@@ -56,9 +58,10 @@ fields:
 
 The empty case returns `[]` (a JSON empty array), never a "no
 mailboxes" string. Mailboxes you do not own are simply absent from
-the array. To create or delete mailboxes, ask the operator to run
-`sudo aimx mailboxes create <name> --owner <user>` or
-`sudo aimx mailboxes delete <name>` on the host.
+the array. To create or delete mailboxes you own, use
+`mailbox_create` / `mailbox_delete` (below). To create a mailbox
+owned by a different Linux user, ask the operator to run
+`sudo aimx mailboxes create <name> --owner <user>` on the host.
 
 **Example:**
 ```
@@ -80,6 +83,79 @@ mailbox_list()
 `email_list(mailbox: "agent")` (or list the inbox dir) and `Read`
 `<inbox_path>/<id>.md` — no need for `email_read` unless you need
 the daemon to enforce path canonicalisation for you.
+
+---
+
+### `mailbox_create`
+
+Provision a new mailbox owned by your Linux uid. The daemon resolves
+the owner from `SO_PEERCRED` over the UDS socket — there is no `owner`
+parameter, so by construction an agent cannot create mailboxes owned
+by another user. Validation (regex, reserved-names list) and
+idempotent semantics live on the daemon side; the tool surfaces
+daemon errors verbatim.
+
+**Parameters:**
+| Name   | Type   | Required | Description |
+|--------|--------|----------|-------------|
+| `name` | string | yes      | Mailbox name (the local part). Must match `[a-z0-9._-]+` with no leading/trailing dot and no `..`. The reserved names `catchall` and `aimx-catchall` are rejected by the daemon. |
+
+**Returns:** the new mailbox's full address string (`<name>@<domain>`)
+on success; an error string on failure (e.g. `[VALIDATION] Mailbox
+name 'foo!' contains invalid character ...`).
+
+**Idempotency.** Re-running `mailbox_create` on a mailbox you already
+own succeeds without modification (matches the existing CLI behavior
+of `aimx mailboxes create`). A name collision with a mailbox owned by
+another user surfaces as a daemon-side validation error.
+
+**Example:**
+```
+mailbox_create(name: "task-42")
+→ "task-42@your.tld"
+```
+
+**Next step:** call `email_send(from_mailbox: "task-42", ...)` or
+attach a hook with `hook_create(mailbox: "task-42", ...)`. The
+mailbox is registered in `config.toml` and the daemon's in-memory
+routing table is hot-swapped — inbound mail to
+`task-42@your.tld` lands immediately.
+
+---
+
+### `mailbox_delete`
+
+Tear down a mailbox you own. The daemon enforces ownership via
+`SO_PEERCRED`; an attempt to delete a mailbox owned by another uid
+surfaces as a not-authorized error. With `force: true`, the tool first
+wipes `inbox/<name>/` and `sent/<name>/` before submitting the delete
+(mirroring the CLI's `--force` flag); without `force`, the daemon
+refuses to delete any mailbox whose storage directories aren't empty.
+
+**Parameters:**
+| Name    | Type   | Required | Description |
+|---------|--------|----------|-------------|
+| `name`  | string | yes      | Mailbox name (must be owned by you). The catchall mailbox cannot be deleted. |
+| `force` | bool   | no       | Default `false`. When `true`, wipe `inbox/<name>/` and `sent/<name>/` contents before submitting the delete; when `false`, the daemon refuses non-empty mailboxes with a `[NONEMPTY]` error. |
+
+**Returns:** a one-line success message, or an error string on
+failure (`[EACCES]` for not-owner, `[NONEMPTY]` for non-empty without
+`force`, `[ENOENT]` for an unknown mailbox).
+
+**Example, clean up after a transient task:**
+```
+mailbox_delete(name: "task-42", force: true)
+→ "Mailbox 'task-42' deleted."
+```
+
+**Example, refuse to nuke a mailbox you don't own:**
+```
+mailbox_delete(name: "alice", force: true)
+→ "not authorized: mailbox 'alice' not found"
+```
+
+(The error never distinguishes "exists but you don't own it" from
+"doesn't exist" — NFR2 forbids that information leak.)
 
 ---
 

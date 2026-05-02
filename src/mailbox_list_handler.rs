@@ -28,9 +28,7 @@
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
-#[cfg(test)]
-use serde::Deserialize;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::mailbox;
@@ -40,10 +38,20 @@ use crate::uds_authz::Caller;
 
 /// One row of the JSON array returned by `MAILBOX-LIST`. Field order
 /// matches the PRD: identity → paths → counts → registration flag.
-#[derive(Debug, Serialize)]
-#[cfg_attr(test, derive(Deserialize))]
+/// `Deserialize` is unconditional now that the CLI's non-root list
+/// fallback (`mailbox::list_via_daemon`) needs to decode the JSON
+/// outside of test-only builds.
+///
+/// `address` is `None` for unregistered stray on-disk directories
+/// (no `[mailboxes.<name>]` entry → no domain to project the local
+/// part against). Registered rows always carry the address verbatim
+/// from `MailboxConfig::address`, which the MCP `mailbox_create`
+/// tool reads back to surface `<name>@<domain>` to the agent without
+/// requiring a separate config-read path.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MailboxListRow {
     pub name: String,
+    pub address: Option<String>,
     pub inbox_path: String,
     pub sent_path: String,
     pub total: usize,
@@ -82,8 +90,10 @@ fn collect_rows(config: &Config, caller_uid: u32) -> Vec<MailboxListRow> {
         let sent_dir = config.sent_dir(&name);
         let (total, unread) = count_inbox(&inbox_dir);
         let sent_count = mailbox::count_messages(&sent_dir);
+        let address = config.mailboxes.get(&name).map(|mb| mb.address.clone());
         rows.push(MailboxListRow {
             name: name.clone(),
+            address,
             inbox_path: inbox_dir.to_string_lossy().into_owned(),
             sent_path: sent_dir.to_string_lossy().into_owned(),
             total,

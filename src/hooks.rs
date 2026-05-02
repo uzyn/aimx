@@ -229,6 +229,13 @@ fn format_hook_auth_error(err: &AuthError, verb: &str) -> String {
         AuthError::NotOwner { mailbox } => {
             format!("not authorized: caller does not own mailbox '{mailbox}'")
         }
+        // Hook CRUD never produces `OwnerMismatch` (it is created only
+        // by the `MailboxCreate` predicate), but the match must stay
+        // exhaustive so a future variant addition fails loudly here
+        // rather than silently mapping to a default message.
+        AuthError::OwnerMismatch { .. } => {
+            "not authorized: cannot create a resource owned by another user".to_string()
+        }
         AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
     }
 }
