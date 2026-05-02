@@ -482,19 +482,32 @@ fn create(
         resolve_create_owner(cfg, name, owner, &sys)?
     };
 
+    // Effective owner: what the daemon will actually bind on disk.
+    // For non-root callers the daemon discards the wire-supplied value
+    // and synthesizes from SO_PEERCRED, so the honest display value is
+    // the caller's username (when resolvable). Both the S2-1
+    // soft-warning and the success line below read this so they agree.
+    let effective_owner = if !is_root() {
+        let caller = caller_username();
+        if caller.is_empty() {
+            owner.clone()
+        } else {
+            caller
+        }
+    } else {
+        owner.clone()
+    };
+
     // S2-1 soft-warning: a non-root caller who passed `--owner <other>`
     // gets a stderr line clarifying that the daemon will discard the
     // value and bind ownership to the caller's uid via SO_PEERCRED.
     // This is purely UX; the daemon enforces the structural invariant
     // server-side either way.
-    if !is_root() {
-        let caller = caller_username();
-        if !caller.is_empty() && owner != caller {
-            eprintln!(
-                "{} --owner ignored for non-root callers; mailbox will be owned by `{caller}`",
-                term::warn("Warning:"),
-            );
-        }
+    if !is_root() && !effective_owner.is_empty() && owner != effective_owner {
+        eprintln!(
+            "{} --owner ignored for non-root callers; mailbox will be owned by `{effective_owner}`",
+            term::warn("Warning:"),
+        );
     }
 
     // Try the UDS path first so the daemon hot-swaps its in-memory
@@ -506,7 +519,9 @@ fn create(
         Ok(()) => {
             println!(
                 "{}",
-                term::success(&format!("Mailbox '{name}' created (owner: {owner})."))
+                term::success(&format!(
+                    "Mailbox '{name}' created (owner: {effective_owner})."
+                ))
             );
             Ok(())
         }
@@ -527,7 +542,9 @@ fn create(
             create_mailbox(cfg, name, &owner)?;
             println!(
                 "{}",
-                term::success(&format!("Mailbox '{name}' created (owner: {owner})."))
+                term::success(&format!(
+                    "Mailbox '{name}' created (owner: {effective_owner})."
+                ))
             );
             print_restart_hint();
             Ok(())
