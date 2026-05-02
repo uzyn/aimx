@@ -15,9 +15,21 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
     let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
     match cmd {
         MailboxCommand::Create { name, owner } => {
-            // Mailbox CRUD is root-only, decided by the central
-            // predicate so the gate stays consistent with UDS handlers.
-            if !skip_root_check && let Err(e) = authorize(current_euid(), Action::MailboxCrud, None)
+            // Sprint 1 keeps CLI behavior unchanged: the entry-point
+            // predicate is now the new owner-bound `MailboxCreate`
+            // variant, but with `owner_uid = current_euid()` it
+            // trivially passes for any caller (root via the bypass,
+            // non-root because they pass their own uid). Sprint 2
+            // (S2-1) drops the entry-point gate entirely and lets the
+            // daemon do the authz over UDS.
+            if !skip_root_check
+                && let Err(e) = authorize(
+                    current_euid(),
+                    Action::MailboxCreate {
+                        owner_uid: current_euid(),
+                    },
+                    None,
+                )
             {
                 return Err(format_auth_error(&e, "create").into());
             }
@@ -26,7 +38,19 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
         MailboxCommand::List { all } => list(&config, all),
         MailboxCommand::Show { name } => show(&config, &name),
         MailboxCommand::Delete { name, yes, force } => {
-            if !skip_root_check && let Err(e) = authorize(current_euid(), Action::MailboxCrud, None)
+            // See note above on the create path: same Sprint 1
+            // behavior-preserving gate. The mailbox arg is `None` so
+            // non-root callers pre-Sprint-2 cleanly fall through to
+            // `NoSuchMailbox` when the daemon path doesn't catch it
+            // first; root keeps the bypass.
+            if !skip_root_check
+                && let Err(e) = authorize(
+                    current_euid(),
+                    Action::MailboxDelete {
+                        mailbox: name.clone(),
+                    },
+                    config.mailboxes.get(&name),
+                )
             {
                 return Err(format_auth_error(&e, "delete").into());
             }

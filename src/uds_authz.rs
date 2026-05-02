@@ -124,6 +124,29 @@ impl Caller {
     }
 }
 
+/// Resolve a `SO_PEERCRED` uid to the canonical username string the
+/// rest of the codebase uses for mailbox owners.
+///
+/// This is the inverse of `MailboxConfig::owner_uid()` (which calls
+/// `getpwnam` on a username and returns the uid): given the uid we
+/// captured from `SO_PEERCRED`, we look up the corresponding username
+/// via `getpwuid` so the value can round-trip through the on-disk
+/// `config.toml` `owner` field and any subsequent `owner_uid()` call
+/// returns the same uid we started with.
+///
+/// Returns `Err("uid <N> has no passwd entry")` for orphan uids — uids
+/// that exist on the running process (e.g. captured from `SO_PEERCRED`)
+/// but have no matching entry in `/etc/passwd`. This happens when a
+/// local user was deleted via `userdel` while still holding aimx state,
+/// or in exotic container setups where the host's passwd file does not
+/// list every uid that can connect to the daemon.
+///
+/// Errors — does not panic — so handlers can map the failure into a
+/// wire-format `ErrCode::Validation` rather than crashing the daemon.
+pub fn peer_username(uid: u32) -> Result<String, String> {
+    lookup_username(uid).ok_or_else(|| format!("uid {uid} has no passwd entry"))
+}
+
 /// Resolve a Linux uid to a username via `getpwuid(3)`. Root is returned
 /// as `Some("root")` without touching `getpwuid` because test resolvers
 /// and minimal container images have been known to return null for uid 0.
@@ -215,8 +238,15 @@ pub fn require_mailbox_owner_or_root(
     }
 }
 
-/// Require the caller to be root. Used by `MAILBOX-CREATE` and
-/// `MAILBOX-DELETE` per PRD §6.5.
+/// Require the caller to be root.
+///
+/// Sprint 1 of the user-mailbox track retired the `MAILBOX-CREATE` /
+/// `MAILBOX-DELETE` callers of this helper — the daemon now uses
+/// owner-bound `auth::Action` variants so non-root callers can manage
+/// their own mailboxes. The helper is kept available (with the
+/// existing test coverage) for future root-gated UDS verbs and the
+/// SystemCommand-style paths.
+#[allow(dead_code)]
 pub fn require_root(caller: &Caller) -> Result<AuthzDecision, AuthzReject> {
     if caller.is_root() {
         // Not a "bypass" — root is the required identity here, not an
@@ -356,10 +386,15 @@ pub fn enforce_mailbox_owner_or_root(
     }
 }
 
-/// Convenience for verbs whose mailbox identity is not known up front
-/// (e.g. `MAILBOX-CREATE` / `MAILBOX-DELETE`). Logs without a `mailbox`
+/// Convenience for root-gated UDS verbs. Logs without a `mailbox`
 /// field. Same wire/log split as [`enforce_mailbox_owner_or_root`]:
 /// rich reason in the log, opaque `not authorized` on the wire.
+///
+/// Sprint 1 of the user-mailbox track stopped using this helper for
+/// `MAILBOX-CREATE` / `MAILBOX-DELETE` (the daemon now uses the
+/// owner-bound `auth::Action` variants). Kept available for future
+/// root-only UDS verbs.
+#[allow(dead_code)]
 pub fn enforce_root(
     verb: &str,
     caller: &Caller,
@@ -421,6 +456,63 @@ mod tests {
         // 32-bit max UID is reserved for "nobody" on some systems but
         // typically unmapped on CI runners.
         assert!(lookup_username(4_294_967_294).is_none());
+    }
+
+    #[test]
+    fn peer_username_for_root_returns_root() {
+        // Root is guaranteed by POSIX. The `lookup_username` fast-path
+        // also avoids hitting `getpwuid(0)` so this works on every
+        // host, including minimal container images.
+        assert_eq!(peer_username(0).unwrap(), "root");
+    }
+
+    #[test]
+    fn peer_username_orphan_uid_returns_specific_error() {
+        // Pin the exact wording the handler maps into
+        // `ErrCode::Validation`. Tests at the handler layer assert
+        // the same text string-identical, so a future tweak to this
+        // message has to be updated in lockstep.
+        let err = peer_username(4_294_967_294).unwrap_err();
+        assert_eq!(err, "uid 4294967294 has no passwd entry");
+    }
+
+    #[test]
+    fn peer_username_does_not_panic_on_orphan_uid() {
+        // The whole point of `peer_username` returning `Result` is that
+        // a daemon call from a uid the host's passwd file doesn't know
+        // about must surface as an authz reject, never a process
+        // crash. This tiny smoke confirms the API contract holds for
+        // multiple sentinel orphan uids.
+        for orphan in [4_294_967_294u32, 4_294_967_293, 4_294_967_292] {
+            let res = peer_username(orphan);
+            assert!(res.is_err(), "uid {orphan} unexpectedly resolved");
+        }
+    }
+
+    #[test]
+    fn peer_username_round_trip_with_owner_uid() {
+        // Round-trip: for any uid `U` reachable via the current
+        // process, `MailboxConfig { owner: peer_username(U)?, ... }
+        // .owner_uid()? == U`. Using the current effective uid
+        // guarantees the host's passwd file has an entry for it, so
+        // the round-trip can run without any test-only resolver
+        // overrides.
+        let uid = unsafe { libc::geteuid() };
+        let name = peer_username(uid).expect("current euid must resolve via getpwuid");
+        let mb = MailboxConfig {
+            address: "owner@example.com".into(),
+            owner: name,
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        };
+        assert_eq!(
+            mb.owner_uid()
+                .expect("owner_uid resolves the round-trip name"),
+            uid,
+            "uid -> username -> uid must round-trip identity",
+        );
     }
 
     #[test]
