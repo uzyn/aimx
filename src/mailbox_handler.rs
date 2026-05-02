@@ -223,7 +223,13 @@ pub async fn handle_mailbox_crud(
                 AuthError::NotOwner { .. } | AuthError::NoSuchMailbox => {
                     no_such_mailbox_reason(&req.name)
                 }
-                AuthError::NotRoot => not_authorized_wire_reason(),
+                // `OwnerMismatch` only fires from `MailboxCreate`, so it
+                // is unreachable on the DELETE path. Kept exhaustive so
+                // a future variant addition surfaces here as a compile
+                // error rather than silently mapping to the catch-all.
+                AuthError::OwnerMismatch { .. } | AuthError::NotRoot => {
+                    not_authorized_wire_reason()
+                }
             };
             log_decision(
                 verb,

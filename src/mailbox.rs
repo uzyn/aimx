@@ -1,4 +1,4 @@
-use crate::auth::{Action, AuthError, authorize};
+use crate::auth::AuthError;
 use crate::cli::MailboxCommand;
 use crate::config::{Config, MailboxConfig};
 use crate::platform::{current_euid, is_root};
@@ -6,58 +6,28 @@ use crate::term;
 use std::io::{self, Write};
 use std::path::Path;
 
+/// Exit code emitted when a non-root caller can't reach the daemon UDS.
+/// Mirrors `send::EXIT_CONNECT` so tooling treats both socket-missing
+/// failures uniformly.
+pub(crate) const EXIT_SOCKET_MISSING: i32 = 2;
+
+/// Stderr message printed before exiting with [`EXIT_SOCKET_MISSING`].
+/// Lifted to a constant so the integration test can match it verbatim.
+pub(crate) const SOCKET_MISSING_HINT: &str = "daemon must be running for non-root mailbox CRUD; start `aimx serve` \
+     or run with sudo to fall back to direct config edit.";
+
 pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error::Error>> {
-    // `AIMX_TEST_SKIP_ROOT_CHECK=1` is a test-harness opt-in (see the
-    // "Test environment escape hatches" section in `CLAUDE.md`). It
-    // bypasses the root gate so the post-gate code path stays reachable
-    // under a non-root `cargo test` runner; production callers must
-    // never set it.
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    // S2-1: the entry-point root gate is gone. Both CREATE and DELETE
+    // route through the daemon UDS regardless of caller uid; the daemon
+    // (post-Sprint-1) does the authz, owner-binding, atomic config
+    // write, and `Arc<Config>` hot-swap. The CLI is now a thin client.
+    // Root callers retain the direct-on-disk fallback when the socket
+    // is absent; non-root callers fail fast with a precise hint.
     match cmd {
-        MailboxCommand::Create { name, owner } => {
-            // Sprint 1 keeps CLI behavior unchanged: the entry-point
-            // predicate is now the new owner-bound `MailboxCreate`
-            // variant, but with `owner_uid = current_euid()` it
-            // trivially passes for any caller (root via the bypass,
-            // non-root because they pass their own uid). Sprint 2
-            // (S2-1) drops the entry-point gate entirely and lets the
-            // daemon do the authz over UDS.
-            if !skip_root_check
-                && let Err(e) = authorize(
-                    current_euid(),
-                    Action::MailboxCreate {
-                        owner_uid: current_euid(),
-                    },
-                    None,
-                )
-            {
-                return Err(format_auth_error(&e, "create").into());
-            }
-            create(&config, &name, owner.as_deref())
-        }
+        MailboxCommand::Create { name, owner } => create(&config, &name, owner.as_deref()),
         MailboxCommand::List { all } => list(&config, all),
         MailboxCommand::Show { name } => show(&config, &name),
-        MailboxCommand::Delete { name, yes, force } => {
-            // See note above on the create path: same Sprint 1
-            // behavior-preserving gate. The mailbox arg is
-            // `config.mailboxes.get(&name)` — `Some(...)` when the
-            // mailbox is in the on-disk config, `None` otherwise. The
-            // predicate then either passes (caller owns it), returns
-            // `NotOwner` (mailbox exists, owned by someone else), or
-            // `NoSuchMailbox` (mailbox missing). Root keeps the bypass.
-            if !skip_root_check
-                && let Err(e) = authorize(
-                    current_euid(),
-                    Action::MailboxDelete {
-                        mailbox: name.clone(),
-                    },
-                    config.mailboxes.get(&name),
-                )
-            {
-                return Err(format_auth_error(&e, "delete").into());
-            }
-            delete(&config, &name, yes, force)
-        }
+        MailboxCommand::Delete { name, yes, force } => delete(&config, &name, yes, force),
     }
 }
 
@@ -65,15 +35,23 @@ pub fn run(cmd: MailboxCommand, config: Config) -> Result<(), Box<dyn std::error
 /// authorized" prefix so tooling can grep for it, and append the verb
 /// the operator was attempting so the error text makes sense without
 /// re-reading the command.
+///
+/// `NotRoot` is no longer reachable from the mailbox CLI — Sprint 2
+/// (S2-1) dropped the entry-point root gate. The arm is retained so a
+/// future caller that wires `format_auth_error` against a different
+/// surface still gets exhaustive coverage.
 fn format_auth_error(err: &AuthError, verb: &str) -> String {
     match err {
-        AuthError::NotRoot => {
-            format!("not authorized: aimx mailboxes {verb} requires root (run with sudo)")
-        }
         AuthError::NotOwner { mailbox } => {
             format!("not authorized: caller does not own mailbox '{mailbox}'")
         }
+        AuthError::OwnerMismatch { .. } => {
+            format!("not authorized: cannot {verb} a mailbox owned by another user")
+        }
         AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
+        AuthError::NotRoot => {
+            format!("not authorized: aimx mailboxes {verb} requires root (run with sudo)")
+        }
     }
 }
 
@@ -347,11 +325,27 @@ fn create(
     // blocking on stdin.
     let sys = crate::setup::RealSystemOps;
     let owner = resolve_create_owner(config, name, owner, &sys)?;
+
+    // S2-1 soft-warning: a non-root caller who passed `--owner <other>`
+    // gets a stderr line clarifying that the daemon will discard the
+    // value and bind ownership to the caller's uid via SO_PEERCRED.
+    // This is purely UX; the daemon enforces the structural invariant
+    // server-side either way.
+    if !is_root() {
+        let caller = caller_username();
+        if !caller.is_empty() && owner != caller {
+            eprintln!(
+                "{} --owner ignored for non-root callers; mailbox will be owned by `{caller}`",
+                term::warn("Warning:"),
+            );
+        }
+    }
+
     // Try the UDS path first so the daemon hot-swaps its in-memory
-    // Config. On socket-missing (daemon stopped, fresh install), fall
-    // back to direct on-disk edit + the restart-hint banner. When UDS
-    // succeeds we suppress the hint; the daemon already picked up the
-    // change.
+    // Config. On socket-missing (daemon stopped, fresh install), root
+    // falls back to direct on-disk edit + the restart-hint banner;
+    // non-root cannot rename `/etc/aimx/config.toml` (perm `0640
+    // root:root`), so we exit 2 with a precise actionable error.
     match crate::mcp::submit_mailbox_crud_via_daemon(name, true, Some(&owner)) {
         Ok(()) => {
             println!(
@@ -361,6 +355,9 @@ fn create(
             Ok(())
         }
         Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+            if !is_root() {
+                exit_socket_missing();
+            }
             create_mailbox(config, name, &owner)?;
             println!(
                 "{}",
@@ -371,6 +368,22 @@ fn create(
         }
         Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
+}
+
+/// Return the current Linux user's name, or an empty string when the
+/// uid does not resolve via `getpwuid`. Used by the soft-warning path
+/// in `create()` — never panics, never errors; an empty result simply
+/// suppresses the warning rather than confusing it.
+fn caller_username() -> String {
+    crate::uds_authz::lookup_username(current_euid()).unwrap_or_default()
+}
+
+/// Print [`SOCKET_MISSING_HINT`] to stderr and exit with
+/// [`EXIT_SOCKET_MISSING`]. Centralised so the create / delete paths
+/// stay consistent.
+fn exit_socket_missing() -> ! {
+    eprintln!("{} {SOCKET_MISSING_HINT}", term::error("Error:"));
+    std::process::exit(EXIT_SOCKET_MISSING);
 }
 
 /// Resolve the owner value for `mailbox create`. Explicit `--owner`
@@ -643,6 +656,26 @@ fn delete(
         if name == "catchall" {
             return Err("Cannot delete the catchall mailbox".into());
         }
+
+        // S2-2 ordering: ownership pre-flight via in-memory Config
+        // BEFORE the wipe. If a non-root caller asked to `--force` a
+        // mailbox they don't own, we must refuse here — wiping first
+        // would partially destroy data the daemon then refuses to
+        // delete. Root callers bypass this check (the daemon also
+        // bypasses on the wire side); a non-root caller hitting an
+        // unknown mailbox surfaces NoSuchMailbox.
+        if !is_root()
+            && let Err(e) = crate::auth::authorize(
+                current_euid(),
+                crate::auth::Action::MailboxDelete {
+                    mailbox: name.to_string(),
+                },
+                config.mailboxes.get(name),
+            )
+        {
+            return Err(format_auth_error(&e, "delete").into());
+        }
+
         let inbox_dir = config.inbox_dir(name);
         let sent_dir = config.sent_dir(name);
         let inbox_count = count_messages(&inbox_dir);
@@ -695,6 +728,9 @@ fn delete(
             Ok(())
         }
         Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+            if !is_root() {
+                exit_socket_missing();
+            }
             delete_mailbox(config, name)?;
             println!("{}", term::success(&format!("Mailbox '{name}' deleted.")));
             print_restart_hint();
@@ -711,7 +747,12 @@ fn delete(
 /// (no error). Each entry is removed via `remove_dir_all` (for bundle
 /// directories) or `remove_file` (for flat .md files); errors propagate
 /// so the caller can surface the failure verbatim.
-fn wipe_mailbox_contents(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+///
+/// `pub(crate)` so the MCP `mailbox_delete` tool can reuse the same
+/// wipe contract — keeping a single implementation prevents the CLI
+/// and MCP paths from drifting on edge cases like dotfile preservation
+/// or symlink handling.
+pub(crate) fn wipe_mailbox_contents(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -784,14 +825,6 @@ mod tests {
     use crate::auth::AuthError;
 
     #[test]
-    fn format_auth_error_not_root_mentions_sudo_and_verb() {
-        let msg = format_auth_error(&AuthError::NotRoot, "create");
-        assert!(msg.contains("not authorized"), "{msg}");
-        assert!(msg.contains("create"), "{msg}");
-        assert!(msg.contains("sudo"), "{msg}");
-    }
-
-    #[test]
     fn format_auth_error_not_owner_carries_mailbox_name() {
         let msg = format_auth_error(
             &AuthError::NotOwner {
@@ -804,10 +837,42 @@ mod tests {
     }
 
     #[test]
+    fn format_auth_error_owner_mismatch_renders_cleanly() {
+        // S2-1: the legacy `<new>` sentinel rendering is gone. The new
+        // arm reads as a single user-friendly sentence and uses the
+        // verb supplied by the caller (`create` here) so the message
+        // matches the command the operator just ran.
+        let msg = format_auth_error(
+            &AuthError::OwnerMismatch {
+                intended_owner_uid: 0,
+            },
+            "create",
+        );
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("cannot create"), "{msg}");
+        assert!(
+            !msg.contains("'<new>'"),
+            "must not surface the Sprint-1 sentinel: {msg}"
+        );
+        assert!(!msg.contains('0'), "uid must not leak: {msg}");
+    }
+
+    #[test]
     fn format_auth_error_no_such_mailbox_does_not_leak_caller() {
         let msg = format_auth_error(&AuthError::NoSuchMailbox, "create");
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("no such mailbox"), "{msg}");
+    }
+
+    #[test]
+    fn format_auth_error_not_root_arm_still_renders() {
+        // S2-1 dropped the entry-point root gate, so this arm is no
+        // longer reachable from the mailbox CLI dispatch — but the
+        // match must stay exhaustive. The render itself stays
+        // grep-able for any future caller.
+        let msg = format_auth_error(&AuthError::NotRoot, "create");
+        assert!(msg.contains("not authorized"), "{msg}");
+        assert!(msg.contains("requires root"), "{msg}");
     }
 
     fn config_with_owners(owners: &[(&str, &str)]) -> Config {
