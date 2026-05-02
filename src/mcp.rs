@@ -180,7 +180,10 @@ impl AimxMcpServer {
             | crate::auth::Action::MailboxSendAs(n)
             | crate::auth::Action::MarkReadWrite(n)
             | crate::auth::Action::HookCrud(n) => n.clone(),
-            crate::auth::Action::MailboxCrud | crate::auth::Action::SystemCommand => String::new(),
+            crate::auth::Action::MailboxDelete { mailbox } => mailbox.clone(),
+            crate::auth::Action::MailboxCreate { .. } | crate::auth::Action::SystemCommand => {
+                String::new()
+            }
         };
         let mb = if mailbox_name.is_empty() {
             None

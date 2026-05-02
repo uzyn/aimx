@@ -7,16 +7,25 @@
 //!
 //! Per-verb ownership matrix (mirrors `src/uds_authz.rs`):
 //!
-//! | Verb                                | Owner | Other | Root |
-//! |-------------------------------------|-------|-------|------|
-//! | `SEND` (as alice)                   | OK    | EACCES| OK   |
-//! | `MARK-READ` / `MARK-UNREAD`         | OK*   | EACCES| OK*  |
-//! | `HOOK-CREATE` / `HOOK-DELETE`       | OK    | EACCES| OK   |
-//! | `MAILBOX-CREATE` / `MAILBOX-DELETE` |  n/a  | EACCES| OK   |
+//! | Verb                                | Owner | Other  | Root |
+//! |-------------------------------------|-------|--------|------|
+//! | `SEND` (as alice)                   | OK    | EACCES | OK   |
+//! | `MARK-READ` / `MARK-UNREAD`         | OK*   | EACCES | OK*  |
+//! | `HOOK-CREATE` / `HOOK-DELETE`       | OK    | EACCES | OK   |
+//! | `MAILBOX-CREATE`                    | OK†   | OK†    | OK   |
+//! | `MAILBOX-DELETE`                    | OK    | NOMBX‡ | OK   |
 //!
 //! `*` MARK targets a non-existent email so the OK path surfaces as
 //! `NOTFOUND` after authz accepts; the EACCES path exits before the
 //! filesystem lookup.
+//!
+//! `†` Sprint 1 user-mailbox track: non-root `MAILBOX-CREATE` succeeds
+//! but the wire `Owner:` header is dropped on the floor — the on-disk
+//! owner is bound to the caller's `SO_PEERCRED` uid, so a cross-uid
+//! create attempt simply produces a mailbox owned by the caller.
+//!
+//! `‡` Cross-uid `MAILBOX-DELETE` returns the canonical no-such-mailbox
+//! response (NFR2: no information leak about whose mailbox it is).
 //!
 //! Gated on both `#[ignore]` and `AIMX_INTEGRATION_SUDO=1` so it only
 //! runs inside a CI step that explicitly elevates with `sudo`.
@@ -260,6 +269,43 @@ fn uid_of(name: &str) -> u32 {
         .trim()
         .parse::<u32>()
         .expect("uid must parse")
+}
+
+/// `stat -c '%U' <path>` — returns the textual owner username of a
+/// directory or file. Used by the cross-uid `MAILBOX-CREATE` test to
+/// prove the on-disk owner came from `SO_PEERCRED`, not the wire
+/// `Owner:` header.
+fn stat_owner_username(path: &Path) -> String {
+    let output = Command::new("stat")
+        .arg("-c")
+        .arg("%U")
+        .arg(path)
+        .output()
+        .expect("failed to run stat -c %U");
+    assert!(
+        output.status.success(),
+        "stat -c %U {:?} failed: {}",
+        path,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).trim().to_string()
+}
+
+/// Pull the `reason` text out of an `AIMX/1 ERR <CODE> <reason>` status
+/// line. The codec emits `AIMX/1 ERR <CODE> <reason>\nCode: <code>\n\n`
+/// (see `send_protocol::write_ack_response`); tests that need to compare
+/// reason strings route through this helper rather than substring-matching
+/// the whole frame.
+fn extract_err_reason(resp: &[u8]) -> String {
+    let s = String::from_utf8_lossy(resp);
+    let first_line = s.lines().next().unwrap_or("");
+    // `AIMX/1 ERR <CODE> <reason>` — strip the prefix + code.
+    if let Some(rest) = first_line.strip_prefix("AIMX/1 ERR ")
+        && let Some((_code, reason)) = rest.split_once(' ')
+    {
+        return reason.trim().to_string();
+    }
+    String::new()
 }
 
 /// Per-test fixture: tempdir + running daemon + ready socket. The
@@ -718,19 +764,71 @@ fn mailbox_create_root_ok() {
     drop(fx);
 }
 
+/// Sprint 1 NFR1 — the daemon must bind the on-disk owner of a non-root
+/// `MAILBOX-CREATE` to the **caller's** uid (resolved via `SO_PEERCRED`),
+/// completely ignoring whatever the wire `Owner:` header says. This is
+/// the strongest end-to-end privilege-escalation regression guard the
+/// sprint introduces — alice submits `Owner: aimx-test-bob` and the
+/// resulting mailbox must be owned by alice on disk, never by bob.
+///
+/// Replaces the retired `mailbox_create_non_root_forbidden` test that
+/// asserted the pre-Sprint-1 root-only behavior. The unit test in
+/// `mailbox_handler.rs` covers the synthesis logic in isolation; only
+/// this test exercises the real `SO_PEERCRED` codepath end-to-end.
 #[test]
 #[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
-fn mailbox_create_non_root_forbidden() {
+fn mailbox_create_non_root_owner_synthesized_from_peercred() {
     if !integration_gate() {
         return;
     }
     let fx = spin_up_serve();
+    // Alice submits `Owner: aimx-test-bob` — the wire owner the daemon
+    // must drop on the floor for non-root callers. The synthesized
+    // owner is the caller's own username, derived from the `SO_PEERCRED`
+    // uid, never the wire header.
     let resp = send_frame_as(
         Some(ALICE),
         &fx.socket_path,
-        raw_mailbox_create_frame("alicemade", ALICE).as_bytes(),
+        raw_mailbox_create_frame("alicemade", BOB).as_bytes(),
     );
-    assert_response_contains(&resp, "EACCES");
+    assert_response_contains(&resp, "AIMX/1 OK");
+
+    // On-disk owner must be alice (the SO_PEERCRED caller), never bob
+    // (the wire `Owner:` header). NFR1 in one assertion.
+    let inbox = fx.tmp_root.join("data").join("inbox").join("alicemade");
+    let on_disk = stat_owner_username(&inbox);
+    assert_eq!(
+        on_disk, ALICE,
+        "expected on-disk owner to equal SO_PEERCRED caller {ALICE}, got {on_disk} \
+         (wire Owner:{BOB} must NOT be honored for non-root callers)"
+    );
+    let sent = fx.tmp_root.join("data").join("sent").join("alicemade");
+    let on_disk_sent = stat_owner_username(&sent);
+    assert_eq!(on_disk_sent, ALICE, "sent dir owner must match inbox dir");
+
+    drop(fx);
+}
+
+/// Sprint 1 happy path — non-root caller creates a mailbox they
+/// legitimately own. Pins the new default flow end-to-end through real
+/// `SO_PEERCRED` so CI proves the relaxed authz actually allows the
+/// case the sprint exists to enable.
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_create_non_root_owner_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    // Wire owner matches caller — happy path.
+    let resp = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mailbox_create_frame("aliceowned", ALICE).as_bytes(),
+    );
+    assert_response_contains(&resp, "AIMX/1 OK");
+    let inbox = fx.tmp_root.join("data").join("inbox").join("aliceowned");
+    assert_eq!(stat_owner_username(&inbox), ALICE);
     drop(fx);
 }
 
@@ -757,18 +855,115 @@ fn mailbox_delete_root_ok() {
     drop(fx);
 }
 
+/// Sprint 1 NFR2 — the daemon's wire response for a non-root caller
+/// trying to delete a mailbox owned by a different uid must be
+/// byte-identical to the genuine "no such mailbox" response. The
+/// daemon must not leak whether a mailbox exists to a caller who is
+/// not its owner.
+///
+/// Replaces the retired `mailbox_delete_non_root_forbidden` test. Bob
+/// owns the `aimx-test-bob` mailbox in the test config; alice tries
+/// to delete it and must see the same response the daemon would emit
+/// for a genuinely missing mailbox like `aimx-test-bob` if it never
+/// existed.
 #[test]
 #[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
-fn mailbox_delete_non_root_forbidden() {
+fn mailbox_delete_non_root_cross_uid_returns_no_such_mailbox() {
     if !integration_gate() {
         return;
     }
     let fx = spin_up_serve();
+    // Compute the canonical no-such-mailbox text by issuing a delete
+    // for a definitely-missing mailbox name. Captured via root so the
+    // authz layer does not interpose. This pins the byte-identity the
+    // cross-uid delete must match without the test depending on the
+    // exact format string.
+    let canonical = send_frame_as(
+        None,
+        &fx.socket_path,
+        raw_mailbox_delete_frame("definitely-not-a-mailbox").as_bytes(),
+    );
+    let canonical_reason = extract_err_reason(&canonical);
+
+    // Alice tries to delete bob's mailbox. Daemon must return the
+    // no-such-mailbox shape (NOT the not-authorized shape) so the
+    // existence of bob's mailbox is not leaked across the privilege
+    // boundary.
     let resp = send_frame_as(
         Some(ALICE),
         &fx.socket_path,
-        raw_mailbox_delete_frame(ALICE).as_bytes(),
+        raw_mailbox_delete_frame(BOB).as_bytes(),
     );
-    assert_response_contains(&resp, "EACCES");
+    let resp_text = String::from_utf8_lossy(&resp).to_string();
+    let resp_reason = extract_err_reason(&resp);
+
+    // The reason text must match the canonical no-such-mailbox shape
+    // (with the target name substituted). Strip the substituted name
+    // from each side to compare the templates byte-for-byte; this pins
+    // both responses to a single helper (`no_such_mailbox_reason`) so a
+    // future divergence is caught immediately.
+    let canonical_template = canonical_reason.replace("definitely-not-a-mailbox", "<NAME>");
+    let resp_template = resp_reason.replace(BOB, "<NAME>");
+    assert_eq!(
+        resp_template, canonical_template,
+        "cross-uid delete must return the canonical no-such-mailbox response template; \
+         canonical = {canonical_reason:?}, got = {resp_reason:?}"
+    );
+    assert!(
+        resp_reason.contains("does not exist"),
+        "expected canonical no-such-mailbox response, got reason {resp_reason:?} \
+         (canonical for missing was {canonical_reason:?})"
+    );
+    // Safety net: by construction the daemon synthesizes the same
+    // helper for both paths, so the response also must not leak any
+    // word that would signal a permission error.
+    for leak in [
+        "owner",
+        "permission",
+        "EACCES",
+        "root",
+        "authorized",
+        "denied",
+    ] {
+        assert!(
+            !resp_text.to_lowercase().contains(&leak.to_lowercase()),
+            "wire response leaked '{leak}': {resp_text:?}"
+        );
+    }
+
+    // Defense in depth: bob's mailbox still exists on disk after the
+    // failed cross-uid delete attempt.
+    let bob_inbox = fx.tmp_root.join("data").join("inbox").join(BOB);
+    assert!(
+        bob_inbox.exists(),
+        "bob's inbox must still exist after alice's failed cross-uid delete"
+    );
+
+    drop(fx);
+}
+
+/// Sprint 1 happy path — non-root caller creates and then deletes a
+/// mailbox they own. Pins the new default flow end-to-end through
+/// real `SO_PEERCRED` so CI exercises both verbs from a non-root
+/// caller in one transaction.
+#[test]
+#[ignore = "requires two test uids on the host (aimx-test-alice, aimx-test-bob)"]
+fn mailbox_delete_non_root_owner_ok() {
+    if !integration_gate() {
+        return;
+    }
+    let fx = spin_up_serve();
+    let create = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mailbox_create_frame("aliceephemeral", ALICE).as_bytes(),
+    );
+    assert_response_contains(&create, "AIMX/1 OK");
+    let del = send_frame_as(
+        Some(ALICE),
+        &fx.socket_path,
+        raw_mailbox_delete_frame("aliceephemeral").as_bytes(),
+    );
+    assert_response_contains(&del, "AIMX/1 OK");
     drop(fx);
 }

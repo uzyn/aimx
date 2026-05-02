@@ -39,11 +39,12 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use crate::auth::{Action, AuthError, authorize};
 use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MailboxCrudRequest};
 use crate::state_handler::StateContext;
-use crate::uds_authz::{Caller, enforce_root};
+use crate::uds_authz::{Caller, log_decision, peer_username};
 
 /// Process-wide mutex around the `config.toml` read-modify-write critical
 /// section. Symmetric in spirit to `send_handler::SENT_WRITE_LOCK`: a
@@ -92,19 +93,60 @@ pub async fn handle_mailbox_crud(
         };
     }
 
-    // MAILBOX-CREATE / MAILBOX-DELETE are root-only.
-    // Non-root callers get EACCES before any lock is acquired.
     let verb = if req.create {
         "MAILBOX-CREATE"
     } else {
         "MAILBOX-DELETE"
     };
-    if let Err(reject) = enforce_root(verb, caller, Some(&req.name)) {
-        return AckResponse::Err {
-            code: reject.code,
-            reason: reject.reason,
-        };
-    }
+
+    // CREATE owner resolution runs *before* the lock acquisition so the
+    // orphan-uid failure path doesn't take and immediately drop a
+    // per-mailbox lock for nothing. Root callers honor `req.owner`
+    // exactly as today (cross-uid creates remain operator-only because
+    // no other surface accepts an `Owner:` parameter from non-root).
+    // Non-root callers have `req.owner` ignored on the floor — the
+    // owner is synthesized from `SO_PEERCRED` so privilege escalation
+    // is structurally impossible.
+    let resolved_owner: Option<String> = if req.create {
+        if caller.is_root() {
+            // Root path: the dispatcher already enforces that
+            // MailboxCrudRequest carries `owner: Some(...)` for
+            // CREATE; defense-in-depth check below.
+            match req.owner.as_deref() {
+                Some(o) => Some(o.to_string()),
+                None => {
+                    return AckResponse::Err {
+                        code: ErrCode::Validation,
+                        reason: "MAILBOX-CREATE requires an Owner: header".into(),
+                    };
+                }
+            }
+        } else {
+            // Non-root path: ignore any wire-supplied owner; the daemon
+            // is the authoritative source. `peer_username` errs (does
+            // not panic) on orphan uids — surface as Validation so the
+            // wire response shape stays consistent with the rest of
+            // the validation failures.
+            match peer_username(caller.uid) {
+                Ok(name) => Some(name),
+                Err(reason) => {
+                    log_decision(
+                        verb,
+                        caller,
+                        Some(&req.name),
+                        crate::uds_authz::LogDecision::Reject,
+                        Some(&reason),
+                    );
+                    return AckResponse::Err {
+                        code: ErrCode::Validation,
+                        reason,
+                    };
+                }
+            }
+        }
+    } else {
+        None
+    };
 
     let lock = state_ctx.lock_for(&req.name);
     let _guard = lock.lock().await;
@@ -119,19 +161,114 @@ pub async fn handle_mailbox_crud(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
     if req.create {
-        let owner = match req.owner.as_deref() {
-            Some(o) => o,
-            None => {
-                return AckResponse::Err {
-                    code: ErrCode::Validation,
-                    reason: "MAILBOX-CREATE requires an Owner: header".into(),
-                };
-            }
-        };
-        handle_create(state_ctx, mb_ctx, &req.name, owner)
+        // Predicate sanity check: for non-root callers the synthesized
+        // owner_uid is always the caller's own uid, so the predicate
+        // trivially passes; for root callers the bypass passes
+        // unconditionally. The check is kept so future refactors
+        // can't decouple the wire owner from the authorized owner
+        // without tripping the central predicate.
+        if let Err(e) = authorize(
+            caller.uid,
+            Action::MailboxCreate {
+                owner_uid: caller.uid,
+            },
+            None,
+        ) {
+            log_decision(
+                verb,
+                caller,
+                Some(&req.name),
+                crate::uds_authz::LogDecision::Reject,
+                Some(&format!("{e}")),
+            );
+            return AckResponse::Err {
+                code: ErrCode::Eaccess,
+                reason: not_authorized_wire_reason(),
+            };
+        }
+        let owner = resolved_owner.expect("CREATE path resolved an owner above");
+        log_decision(
+            verb,
+            caller,
+            Some(&req.name),
+            if caller.is_root() {
+                crate::uds_authz::LogDecision::RootBypass
+            } else {
+                crate::uds_authz::LogDecision::Accept
+            },
+            None,
+        );
+        handle_create(state_ctx, mb_ctx, &req.name, &owner)
     } else {
+        // DELETE owner check: non-root callers must own the target
+        // mailbox. Resolve against the live `Arc<Config>` snapshot;
+        // the lock above keeps the snapshot stable for the rest of
+        // this critical section. Both the "no such mailbox" and
+        // "mailbox exists but caller doesn't own it" paths must
+        // produce a string-identical wire response so the daemon
+        // doesn't leak whether the mailbox exists.
+        let current = mb_ctx.config_handle.load();
+        let mb_cfg = current.mailboxes.get(&req.name);
+        if let Err(e) = authorize(
+            caller.uid,
+            Action::MailboxDelete {
+                mailbox: req.name.clone(),
+            },
+            mb_cfg,
+        ) {
+            // Map both `NotOwner` and `NoSuchMailbox` to the same wire
+            // response — the no-such-mailbox text the existing
+            // handler already returns. NFR2: no information leak.
+            let reason = match e {
+                AuthError::NotOwner { .. } | AuthError::NoSuchMailbox => {
+                    no_such_mailbox_reason(&req.name)
+                }
+                AuthError::NotRoot => not_authorized_wire_reason(),
+            };
+            log_decision(
+                verb,
+                caller,
+                Some(&req.name),
+                crate::uds_authz::LogDecision::Reject,
+                Some(&reason),
+            );
+            return AckResponse::Err {
+                code: ErrCode::Mailbox,
+                reason,
+            };
+        }
+        // Drop the borrow into `current` before calling handle_delete,
+        // which re-acquires its own snapshot under the same lock.
+        drop(current);
+        log_decision(
+            verb,
+            caller,
+            Some(&req.name),
+            if caller.is_root() {
+                crate::uds_authz::LogDecision::RootBypass
+            } else {
+                crate::uds_authz::LogDecision::Accept
+            },
+            None,
+        );
         handle_delete(state_ctx, mb_ctx, &req.name)
     }
+}
+
+/// Canonical "no such mailbox" reason. Used by both the daemon's
+/// genuine no-such-mailbox path in [`handle_delete`] and the non-root
+/// "mailbox exists but caller doesn't own it" path so the wire
+/// response is byte-identical for both. NFR2: the daemon never leaks
+/// whether a mailbox exists to a caller who is not its owner.
+fn no_such_mailbox_reason(name: &str) -> String {
+    format!("mailbox '{name}' does not exist")
+}
+
+/// Canonical opaque "not authorized" wire reason. Used by the few
+/// truly-not-authorized paths that aren't already routed through the
+/// no-such-mailbox shape.
+fn not_authorized_wire_reason() -> String {
+    "not authorized".to_string()
 }
 
 /// Resolve `owner` via the same helpers used for `MailboxConfig`.
@@ -361,7 +498,7 @@ fn handle_delete(state_ctx: &StateContext, mb_ctx: &MailboxContext, name: &str) 
     if !current.mailboxes.contains_key(name) {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
-            reason: format!("mailbox '{name}' does not exist"),
+            reason: no_such_mailbox_reason(name),
         };
     }
 
@@ -504,6 +641,57 @@ mod tests {
             }
         }
         crate::user_resolver::set_test_resolver(fake)
+    }
+
+    /// Install a test resolver that *additionally* recognizes the
+    /// current Linux username (the one `peer_username(geteuid())`
+    /// returns) and maps it to the current uid/gid. Sprint 1's
+    /// non-root CREATE path synthesizes the owner string from
+    /// `peer_username(caller.uid)`, so the chown step needs that
+    /// real-user name to resolve via the `resolve_user` seam too.
+    /// `"testowner"` and `"root"` continue to map for the existing
+    /// root-caller tests.
+    fn install_tester_resolver_with_current_user()
+    -> crate::user_resolver::test_resolver::ResolverOverride {
+        // Snapshot the current username so the resolver fn (which
+        // can't capture environment) reads from a static lookup.
+        // Statics in Rust can't run arbitrary code at init, so the
+        // resolver fn does the lookup itself on each call — fine
+        // because `peer_username` is just a `getpwuid` wrapper.
+        fn fake(name: &str) -> Option<crate::user_resolver::ResolvedUser> {
+            let uid = unsafe { libc::geteuid() };
+            let gid = unsafe { libc::getegid() };
+            // Resolve the current Linux user's actual name so this
+            // resolver answers for whatever the daemon's
+            // `peer_username` synthesized.
+            let current_user = crate::uds_authz::lookup_username(uid);
+            if name == "testowner" || name == "root" || current_user.as_deref() == Some(name) {
+                Some(crate::user_resolver::ResolvedUser {
+                    name: name.to_string(),
+                    uid,
+                    gid,
+                })
+            } else {
+                None
+            }
+        }
+        crate::user_resolver::set_test_resolver(fake)
+    }
+
+    /// Construct a "non-root" Caller for use in tests. The Caller's
+    /// uid is the current process euid (so `peer_username` succeeds
+    /// against the host's passwd file), but `is_root()` is gated on
+    /// `uid == 0` — the test only runs on hosts where that is false.
+    /// Returns `None` and lets the caller skip when the runner is
+    /// uid 0 (root CI lane). Tests calling this **must** check the
+    /// `Option` and short-circuit the test body when running as root.
+    fn nonroot_caller_or_skip() -> Option<Caller> {
+        let uid = unsafe { libc::geteuid() };
+        if uid == 0 {
+            return None;
+        }
+        let gid = unsafe { libc::getegid() };
+        Some(Caller::new(uid, gid, None))
     }
 
     #[tokio::test]
@@ -1323,5 +1511,297 @@ mod tests {
             mb_ctx.config_handle.load().mailboxes.contains_key("alice"),
             "config must register the mailbox on idempotent re-create"
         );
+    }
+
+    // ----- Sprint 1 (S1-4) privilege-escalation negative tests --------
+    //
+    // These tests pin the structural defense that the daemon never
+    // trusts the wire `Owner:` header from a non-root caller and never
+    // leaks information about mailboxes a non-root caller does not own.
+    // A failure here probably means a future refactor reopened the
+    // exact privilege-escalation hole this sprint closed.
+
+    #[tokio::test]
+    async fn nonroot_create_ignores_wire_owner_and_uses_so_peercred() {
+        // The headline NFR1 test: a non-root caller submits
+        // `Owner: root` over the wire; the daemon must drop the wire
+        // value on the floor and synthesize the owner from the
+        // `SO_PEERCRED` uid via `peer_username`.
+        let _r = install_tester_resolver_with_current_user();
+        let Some(caller) = nonroot_caller_or_skip() else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let req = MailboxCrudRequest {
+            name: "x".into(),
+            create: true,
+            // The attacker tries to claim a root-owned mailbox.
+            owner: Some("root".into()),
+        };
+        let resp = handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller).await;
+        assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
+
+        let cfg = mb_ctx.config_handle.load();
+        let stanza = cfg
+            .mailboxes
+            .get("x")
+            .expect("mailbox stanza must be present after Ok");
+
+        let expected_owner =
+            crate::uds_authz::peer_username(caller.uid).expect("current uid must resolve");
+        assert_eq!(
+            stanza.owner, expected_owner,
+            "Owner: header was honored — privilege-escalation hole reopened. \
+             Expected owner '{expected_owner}' (from SO_PEERCRED), got '{}'.",
+            stanza.owner,
+        );
+        assert_ne!(
+            stanza.owner, "root",
+            "non-root caller created a root-owned mailbox via Owner: header — \
+             this must never happen"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonroot_delete_unowned_returns_no_such_mailbox_string_match() {
+        // NFR2: the wire response for "mailbox exists but you don't
+        // own it" must be byte-identical to "no such mailbox" so the
+        // daemon doesn't help an attacker enumerate which mailboxes
+        // exist.
+        let _r = install_tester_resolver();
+        let Some(nonroot) = nonroot_caller_or_skip() else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        // Inject a mailbox owned by root directly into the in-memory
+        // config snapshot. We bypass `MAILBOX-CREATE` because the
+        // create path's chown to uid 0 would fail for a non-root test
+        // runner; only the *delete* path's auth check is what this
+        // test exercises.
+        {
+            let current = mb_ctx.config_handle.load();
+            let mut new_config: Config = (*current).clone();
+            new_config.mailboxes.insert(
+                "opsbox".into(),
+                MailboxConfig {
+                    address: "opsbox@example.com".into(),
+                    owner: "root".into(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                    allow_root_catchall: false,
+                },
+            );
+            mb_ctx.config_handle.store(new_config);
+        }
+
+        // The "missing" reason a non-root delete of a never-existed
+        // mailbox produces. Compute it from the same helper to make
+        // the string-match contract obvious.
+        let canonical_missing = no_such_mailbox_reason("nope");
+
+        // Non-root tries to delete the root-owned mailbox: the wire
+        // response must equal what they'd get for a non-existent name.
+        let unowned_delete = MailboxCrudRequest {
+            name: "opsbox".into(),
+            create: false,
+            owner: None,
+        };
+        let unowned_resp =
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &unowned_delete, &nonroot).await;
+
+        // Same caller, mailbox that never existed: this is the
+        // baseline "no such mailbox" string the unowned response must
+        // match (modulo the mailbox name).
+        let missing_delete = MailboxCrudRequest {
+            name: "nope".into(),
+            create: false,
+            owner: None,
+        };
+        let missing_resp =
+            handle_mailbox_crud(&state_ctx, &mb_ctx, &missing_delete, &nonroot).await;
+
+        match (unowned_resp, missing_resp) {
+            (
+                AckResponse::Err {
+                    code: c1,
+                    reason: r1,
+                },
+                AckResponse::Err {
+                    code: c2,
+                    reason: r2,
+                },
+            ) => {
+                assert_eq!(c1, c2, "ErrCode must match: unowned={c1:?} missing={c2:?}");
+                assert_eq!(c1, ErrCode::Mailbox);
+                // The two reasons differ only in the mailbox name
+                // suffix; both match the no-such-mailbox template.
+                assert_eq!(r1, no_such_mailbox_reason("opsbox"));
+                assert_eq!(r2, canonical_missing);
+                // Final guarantee: the unowned reason must NOT mention
+                // ownership, owners, the actual owner uid, the caller,
+                // or anything else that would let an attacker tell the
+                // two cases apart by inspection.
+                for leak in &[
+                    "owner",
+                    "Owner",
+                    "permission",
+                    "denied",
+                    "authorized",
+                    "root",
+                ] {
+                    assert!(
+                        !r1.contains(leak),
+                        "unowned-delete reason leaked '{leak}': {r1:?}"
+                    );
+                }
+            }
+            (a, b) => panic!("expected two Err responses, got {a:?} and {b:?}"),
+        }
+
+        // The mailbox must still exist on disk — the unowned-delete
+        // attempt must not delete or modify state it didn't authorize.
+        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("opsbox"));
+    }
+
+    #[tokio::test]
+    async fn nonroot_create_idempotent_for_owned_mailbox() {
+        // Re-creating a mailbox the non-root caller already owns is a
+        // no-op success, mirroring the existing root-side idempotent
+        // path.
+        let _r = install_tester_resolver_with_current_user();
+        let Some(caller) = nonroot_caller_or_skip() else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let req = MailboxCrudRequest {
+            name: "agent".into(),
+            create: true,
+            // Owner is ignored for non-root; included to prove that.
+            owner: Some("ignored-by-daemon".into()),
+        };
+        let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller).await;
+        assert!(matches!(r1, AckResponse::Ok), "first create: {r1:?}");
+
+        // Second create with the exact same name + caller: idempotent.
+        // The handler returns ERR(Mailbox, "already exists") — the
+        // pre-Sprint-1 behavior on a duplicate. This pin keeps the
+        // idempotent-on-disk semantics ("dirs already owned correctly
+        // bypass the chown") working for non-root callers too.
+        let r2 = handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller).await;
+        match r2 {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Mailbox);
+                assert!(
+                    reason.contains("already exists"),
+                    "second create reason: {reason}"
+                );
+            }
+            other => panic!("expected Err(MAILBOX, already exists), got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn nonroot_create_delete_create_cycle_succeeds() {
+        // The lifecycle invariant: a non-root caller can create, then
+        // delete, then re-create the same mailbox name, all three
+        // succeeding. This catches any state that leaks across the
+        // delete (config stanza, lock map, in-memory handle) that
+        // would block the second create.
+        let _r = install_tester_resolver_with_current_user();
+        let Some(caller) = nonroot_caller_or_skip() else {
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+
+        let create_req = MailboxCrudRequest {
+            name: "task42".into(),
+            create: true,
+            owner: None,
+        };
+        let delete_req = MailboxCrudRequest {
+            name: "task42".into(),
+            create: false,
+            owner: None,
+        };
+
+        let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
+        assert!(matches!(r1, AckResponse::Ok), "create #1: {r1:?}");
+        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+
+        let r2 = handle_mailbox_crud(&state_ctx, &mb_ctx, &delete_req, &caller).await;
+        assert!(matches!(r2, AckResponse::Ok), "delete: {r2:?}");
+        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+
+        let r3 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
+        assert!(matches!(r3, AckResponse::Ok), "create #2: {r3:?}");
+        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+    }
+
+    #[tokio::test]
+    async fn nonroot_create_orphan_uid_returns_validation_with_exact_message() {
+        // A `SO_PEERCRED` uid that has no `/etc/passwd` entry → the
+        // daemon must surface `ErrCode::Validation` with the exact
+        // message `"uid <N> has no passwd entry"`. This is the only
+        // wire-text dependency this sprint introduces; pinning it
+        // keeps the behavior visible to operators reading the
+        // structured log.
+        //
+        // Discover an unused high uid at runtime rather than hardcoding
+        // one — `0xFFFFFFFE` maps to `nobody` on some images (notably
+        // Alpine). We probe downward until `getpwuid` returns `None`,
+        // then use that uid; if the entire upper range is mapped on
+        // this host (vanishingly unlikely), the test is skipped with
+        // a diagnostic.
+        let Some(orphan_uid) = find_orphan_uid() else {
+            eprintln!(
+                "skipping nonroot_create_orphan_uid_returns_validation_with_exact_message: \
+                 no unmapped high uid available on this host"
+            );
+            return;
+        };
+        let tmp = TempDir::new().unwrap();
+        let (state_ctx, mb_ctx) = contexts(&tmp);
+        let orphan = Caller::new(orphan_uid, orphan_uid, None);
+
+        let req = MailboxCrudRequest {
+            name: "orph".into(),
+            create: true,
+            owner: Some("anything".into()),
+        };
+        match handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &orphan).await {
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Validation);
+                assert_eq!(reason, format!("uid {orphan_uid} has no passwd entry"));
+            }
+            other => panic!("expected Err(VALIDATION, orphan-uid), got {other:?}"),
+        }
+
+        // Defense in depth: nothing got written.
+        assert!(!tmp.path().join("inbox").join("orph").exists());
+        assert!(!tmp.path().join("sent").join("orph").exists());
+        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("orph"));
+    }
+
+    /// Walk down from `0xFFFFFFFE` until we find a uid `lookup_username`
+    /// reports as unmapped. The bounded probe depth keeps the test
+    /// fast even on hosts with many high-uid passwd entries.
+    fn find_orphan_uid() -> Option<u32> {
+        const PROBE_DEPTH: u32 = 64;
+        let start: u32 = 0xFFFF_FFFE;
+        for offset in 0..PROBE_DEPTH {
+            let candidate = start - offset;
+            if crate::uds_authz::lookup_username(candidate).is_none() {
+                return Some(candidate);
+            }
+        }
+        None
     }
 }

@@ -5,7 +5,9 @@
 //!
 //! Root passes everything. For every other caller, the action's
 //! mailbox argument must resolve to a mailbox whose `owner_uid()` matches
-//! the caller. `MailboxCrud` and `SystemCommand` are root-only.
+//! the caller. `MailboxCreate { owner_uid }` passes when the requested
+//! owner equals the caller; `MailboxDelete { mailbox }` passes when the
+//! caller owns the resolved mailbox. `SystemCommand` is root-only.
 //!
 //! The module deliberately imports nothing tokio — it is pure logic so
 //! both UDS handlers and CLI gating points can share one predicate.
@@ -19,8 +21,18 @@ use crate::config::MailboxConfig;
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum Action {
-    /// Create or delete a mailbox. Root-only.
-    MailboxCrud,
+    /// Create a mailbox owned by `owner_uid`. Non-root passes only when
+    /// `caller_uid == owner_uid` (i.e. the caller is asking for a
+    /// mailbox owned by themselves). Cross-uid creates remain
+    /// operator-only because no other surface accepts an owner override
+    /// from a non-root caller — the daemon synthesizes the owner from
+    /// `SO_PEERCRED` for non-root UDS callers, so this variant is
+    /// always called with the caller's own uid in that path.
+    MailboxCreate { owner_uid: u32 },
+    /// Delete a named mailbox. Same shape as `MailboxRead`/`HookCrud`:
+    /// non-root passes when the resolved `MailboxConfig`'s `owner_uid()`
+    /// equals the caller's uid.
+    MailboxDelete { mailbox: String },
     /// Read mail in a named mailbox. Reachable from MCP and CLI gating
     /// only — there is no UDS verb for reads, since `aimx mcp` and
     /// the CLI inspect the filesystem directly.
@@ -72,10 +84,14 @@ impl std::error::Error for AuthError {}
 /// Root (`caller_uid == 0`) passes every action unconditionally.
 ///
 /// For any other caller:
-/// - `MailboxCrud` and `SystemCommand` always reject as `NotRoot`.
-/// - The remaining actions require `mailbox` to be `Some`; `None`
-///   produces `NoSuchMailbox`. When present, the mailbox's
-///   `owner_uid()` must equal `caller_uid`, otherwise `NotOwner`.
+/// - `SystemCommand` always rejects as `NotRoot`.
+/// - `MailboxCreate { owner_uid }` passes when `caller_uid == owner_uid`;
+///   otherwise `NotOwner { mailbox: "<new>" }` so the wire-format error
+///   stays consistent with the other owner-mismatch paths.
+/// - `MailboxDelete { mailbox }` and the other mailbox-bearing variants
+///   require `mailbox` to be `Some`; `None` produces `NoSuchMailbox`.
+///   When present, the mailbox's `owner_uid()` must equal `caller_uid`,
+///   otherwise `NotOwner`.
 ///
 /// The predicate intentionally takes a borrowed `MailboxConfig` so
 /// callers can pass either a daemon snapshot view or a freshly-loaded
@@ -91,8 +107,31 @@ pub fn authorize(
     }
 
     match action {
-        Action::MailboxCrud | Action::SystemCommand => Err(AuthError::NotRoot),
-        Action::MailboxRead(name)
+        Action::SystemCommand => Err(AuthError::NotRoot),
+        Action::MailboxCreate { owner_uid } => {
+            if caller_uid == owner_uid {
+                Ok(())
+            } else {
+                // The mailbox does not exist yet. Use the sentinel
+                // `"<new>"` so the wire-shaped error keeps the owner-
+                // mismatch framing without inventing a fresh variant
+                // (and without leaking the requested owner uid into
+                // the response).
+                // TODO(S2-1): cleaner rendering. When `format_auth_error`
+                // starts surfacing this to humans in Sprint 2, the
+                // string `"caller does not own mailbox '<new>'"` will
+                // read like a bug. Either add a dedicated
+                // `OwnerMismatch { intended_owner_uid: u32 }` variant
+                // or pattern-match `"<new>"` in `format_auth_error`
+                // and switch to e.g. "not authorized: cannot create a
+                // mailbox owned by another user".
+                Err(AuthError::NotOwner {
+                    mailbox: "<new>".to_string(),
+                })
+            }
+        }
+        Action::MailboxDelete { mailbox: name }
+        | Action::MailboxRead(name)
         | Action::MailboxSendAs(name)
         | Action::MarkReadWrite(name)
         | Action::HookCrud(name) => {
@@ -138,7 +177,18 @@ mod tests {
 
     #[test]
     fn root_passes_every_action_with_no_mailbox() {
-        assert!(authorize(0, Action::MailboxCrud, None).is_ok());
+        assert!(authorize(0, Action::MailboxCreate { owner_uid: 0 }, None).is_ok());
+        assert!(authorize(0, Action::MailboxCreate { owner_uid: 1000 }, None).is_ok());
+        assert!(
+            authorize(
+                0,
+                Action::MailboxDelete {
+                    mailbox: "any".into()
+                },
+                None
+            )
+            .is_ok()
+        );
         assert!(authorize(0, Action::SystemCommand, None).is_ok());
         assert!(authorize(0, Action::MailboxRead("any".into()), None).is_ok());
         assert!(authorize(0, Action::MailboxSendAs("any".into()), None).is_ok());
@@ -156,10 +206,33 @@ mod tests {
     }
 
     #[test]
-    fn non_root_mailbox_crud_is_not_root() {
+    fn non_root_mailbox_create_owner_match_passes() {
+        // The structural privilege-escalation defense: the daemon
+        // synthesizes `owner_uid` from `SO_PEERCRED` for non-root
+        // callers, so the predicate is always called with caller_uid
+        // == owner_uid in the legitimate path. This test pins that
+        // exact contract.
+        assert!(authorize(1000, Action::MailboxCreate { owner_uid: 1000 }, None).is_ok());
+    }
+
+    #[test]
+    fn non_root_mailbox_create_owner_mismatch_rejects() {
+        // If a non-root caller somehow reached `authorize` with a
+        // mismatching owner_uid, the predicate must reject. In the
+        // production path the daemon never lets that happen because it
+        // ignores the wire `Owner:` header and supplies the caller's
+        // own uid. Belt-and-braces: the predicate refuses on its own.
         assert_eq!(
-            authorize(1000, Action::MailboxCrud, None),
-            Err(AuthError::NotRoot),
+            authorize(1000, Action::MailboxCreate { owner_uid: 0 }, None),
+            Err(AuthError::NotOwner {
+                mailbox: "<new>".into()
+            }),
+        );
+        assert_eq!(
+            authorize(1000, Action::MailboxCreate { owner_uid: 1001 }, None),
+            Err(AuthError::NotOwner {
+                mailbox: "<new>".into()
+            }),
         );
     }
 
@@ -168,6 +241,35 @@ mod tests {
         assert_eq!(
             authorize(1000, Action::SystemCommand, None),
             Err(AuthError::NotRoot),
+        );
+    }
+
+    #[test]
+    fn root_passes_new_variants_unconditionally() {
+        // Root passes MailboxCreate even when the owner_uid is some
+        // arbitrary other user, and passes MailboxDelete even when the
+        // mailbox arg is None or an unowned/orphaned mailbox.
+        assert!(authorize(0, Action::MailboxCreate { owner_uid: 12345 }, None).is_ok());
+        assert!(
+            authorize(
+                0,
+                Action::MailboxDelete {
+                    mailbox: "ghost".into()
+                },
+                None
+            )
+            .is_ok()
+        );
+        let mb = mailbox_owned_by("aimx-nonexistent-orphan-user");
+        assert!(
+            authorize(
+                0,
+                Action::MailboxDelete {
+                    mailbox: "alice".into()
+                },
+                Some(&mb)
+            )
+            .is_ok()
         );
     }
 
@@ -181,6 +283,48 @@ mod tests {
         assert!(authorize(uid, Action::MailboxSendAs("hi".into()), Some(&mb)).is_ok());
         assert!(authorize(uid, Action::MarkReadWrite("hi".into()), Some(&mb)).is_ok());
         assert!(authorize(uid, Action::HookCrud("hi".into()), Some(&mb)).is_ok());
+    }
+
+    #[test]
+    #[ignore = "requires non-root host; surfaces via cargo test --ignored"]
+    fn non_root_mailbox_delete_owner_match_passes() {
+        // Mirrors the existing `non_root_owner_match_passes` test:
+        // when the resolved mailbox's owner_uid matches the caller,
+        // MailboxDelete is allowed.
+        let (uid, name) = current_user();
+        assert_ne!(uid, 0, "test must run as a non-root user");
+        let mb = mailbox_owned_by(&name);
+        assert!(
+            authorize(
+                uid,
+                Action::MailboxDelete {
+                    mailbox: "hi".into()
+                },
+                Some(&mb)
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    #[ignore = "requires non-root host; surfaces via cargo test --ignored"]
+    fn non_root_mailbox_delete_owner_mismatch_returns_not_owner() {
+        let (uid, _) = current_user();
+        assert_ne!(uid, 0, "test must run as a non-root user");
+        // `root` always resolves to uid 0 — a stable mismatch target.
+        let mb = mailbox_owned_by("root");
+        assert_eq!(
+            authorize(
+                uid,
+                Action::MailboxDelete {
+                    mailbox: "hi".into()
+                },
+                Some(&mb)
+            ),
+            Err(AuthError::NotOwner {
+                mailbox: "hi".into()
+            }),
+        );
     }
 
     #[test]
