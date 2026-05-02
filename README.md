@@ -134,8 +134,8 @@ Install aimx into your agent with one command:
 
 | Agent | Install command | Activation |
 |-------|-----------------|------------|
-| Claude Code | `aimx agents setup claude-code` | Restart Claude Code (auto-discovered from `~/.claude/plugins/`). |
-| Codex CLI | `aimx agents setup codex` | Restart Codex CLI (auto-discovered from `~/.codex/plugins/`). |
+| Claude Code | `aimx agents setup claude-code` | Auto-registered via `claude mcp add` (fallback hint printed if `claude` is not on PATH). Restart Claude Code so the new server is loaded. |
+| Codex CLI | `aimx agents setup codex` | Auto-registered via `codex mcp add` (fallback hint printed if `codex` is not on PATH). Restart Codex CLI so the new server is loaded. |
 | OpenCode | `aimx agents setup opencode` | Paste the printed JSONC block into `opencode.json`, then restart. |
 | Gemini CLI | `aimx agents setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
 | Goose | `aimx agents setup goose` | Run `goose run --recipe aimx`. |

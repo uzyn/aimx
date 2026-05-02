@@ -1,4 +1,5 @@
 mod agents_cleanup;
+mod agents_mcp;
 mod agents_remove;
 mod agents_setup;
 mod agents_tui;

@@ -51,7 +51,7 @@ pub(crate) fn run_with_env(
 /// Remove plugin files previously laid down by `agents setup`.
 ///
 /// `spec.dest_template` encodes the destination shape. Most agents
-/// install a directory tree (e.g. `~/.claude/plugins/aimx/`), so we
+/// install a directory tree (e.g. `~/.claude/skills/aimx/`), so we
 /// remove the whole directory. Goose is the one exception — it
 /// installs a single `aimx.yaml` file under the recipes directory;
 /// for that shape we remove only the file to avoid collateral damage
@@ -105,7 +105,7 @@ fn remove_plugin_files(
 ///
 /// The Goose spec writes a single `aimx.yaml` under
 /// `~/.config/goose/recipes/`; the others write a directory tree
-/// (e.g. `~/.claude/plugins/aimx/`). Crate-private so tests can pin
+/// (e.g. `~/.claude/skills/aimx/`). Crate-private so tests can pin
 /// the asymmetric behavior.
 pub(crate) fn plugin_removal_target(spec: &AgentSpec, dest_root: &Path) -> (String, PathBuf) {
     if spec.name == "goose" {
@@ -202,10 +202,10 @@ mod tests {
     #[test]
     fn plugin_removal_target_for_directory_agent() {
         let spec = find_agent("claude-code").unwrap();
-        let root = PathBuf::from("/home/alice/.claude/plugins/aimx");
+        let root = PathBuf::from("/home/alice/.claude/skills/aimx");
         let (desc, target) = plugin_removal_target(spec, &root);
         assert_eq!(target, root);
-        assert!(desc.ends_with("/.claude/plugins/aimx"));
+        assert!(desc.ends_with("/.claude/skills/aimx"));
     }
 
     #[test]
@@ -220,13 +220,9 @@ mod tests {
     #[test]
     fn full_removes_directory() {
         let tmp = TempDir::new().unwrap();
-        let dest = tmp.path().join(".claude").join("plugins").join("aimx");
-        std::fs::create_dir_all(dest.join(".claude-plugin")).unwrap();
-        std::fs::write(
-            dest.join(".claude-plugin").join("plugin.json"),
-            r#"{"name":"aimx"}"#,
-        )
-        .unwrap();
+        let dest = tmp.path().join(".claude").join("skills").join("aimx");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
         assert!(dest.exists());
 
         let env = TestEnv::new(tmp.path().to_path_buf(), "alice");

@@ -285,7 +285,7 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     // Without this, `runuser -u aimx-it-agentflow` inherits the
     // default `/home/aimx-it-agentflow/` (which doesn't exist because
     // we `useradd --no-create-home`), and `agents setup` then fails
-    // with EACCES trying to `mkdir $HOME/.claude/plugins/...`.
+    // with EACCES trying to `mkdir $HOME/.claude/skills/...`.
     let usermod_status = Command::new("usermod")
         .arg("-d")
         .arg(&user_home)
@@ -379,12 +379,12 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
         "agents setup stdout should mention {template_name}: {setup_stdout}"
     );
 
-    // Plugin files landed under $HOME/.claude/plugins/aimx.
-    let plugin_dir = user_home.join(".claude/plugins/aimx");
+    // Skill files landed under $HOME/.claude/skills/aimx.
+    let skill_dir = user_home.join(".claude/skills/aimx");
     assert!(
-        plugin_dir.exists(),
-        "plugin dir {} should exist after agents setup",
-        plugin_dir.display()
+        skill_dir.exists(),
+        "skill dir {} should exist after agents setup",
+        skill_dir.display()
     );
 
     // Wire an on_receive hook binding the template to our mailbox.
@@ -604,9 +604,9 @@ fn end_to_end_agent_flow_installs_fires_and_cleans_up() {
     );
 
     assert!(
-        !plugin_dir.exists(),
-        "plugin dir {} should be gone after --full cleanup",
-        plugin_dir.display()
+        !skill_dir.exists(),
+        "skill dir {} should be gone after --full cleanup",
+        skill_dir.display()
     );
 
     // Template should be gone from the daemon's in-memory config. Try
