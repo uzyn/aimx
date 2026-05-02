@@ -99,15 +99,22 @@ When you configure a catchall mailbox, setup creates the `aimx-catchall` system 
 
 ### Provisioning your first mailbox
 
-The setup wizard does **not** prompt for a first mailbox. After setup completes, provision mailboxes from the host CLI as root:
+The setup wizard does **not** prompt for a first mailbox. After setup completes, provision mailboxes from the host CLI. The common case is the operator creating a mailbox owned by themselves — no `sudo` required:
 
 ```bash
-sudo aimx mailboxes create hi --owner ubuntu
+# As yourself, no sudo:
+aimx mailboxes create hi
 ```
 
-This registers `hi@agent.yourdomain.com`, creates `inbox/hi/` and `sent/hi/` chowned `ubuntu:ubuntu 0700`, and hot-reloads the daemon's in-memory config. The mailbox's owner (here `ubuntu`) can then read mail, send mail, and create hooks via CLI or MCP — no further root commands required.
+This registers `hi@agent.yourdomain.com`, creates `inbox/hi/` and `sent/hi/` chowned to your uid at mode `0700`, and hot-reloads the daemon's in-memory config. You can then read mail, send mail, and create template-bound hooks via CLI or MCP — no further root commands required.
 
-`aimx mailboxes create` and `aimx mailboxes delete` are root-only on both the CLI and the UDS (`MAILBOX-CREATE` / `MAILBOX-DELETE`). The `aimx mailboxes list` command is filtered to caller-owned mailboxes for non-root callers; `--all` is root-only.
+If you want to provision a mailbox owned by a **different** Linux user (a service account, an agent uid you manage separately), pass `--owner <user>` under `sudo`:
+
+```bash
+sudo aimx mailboxes create support --owner support-agent
+```
+
+`aimx mailboxes create` and `aimx mailboxes delete` are **owner-gated**, not root-gated: a non-root caller can create or delete mailboxes whose owner equals their own uid, and the daemon synthesizes the owner identity from `SO_PEERCRED` so client-supplied owner data is structurally ignored. Cross-uid creates remain operator-only (only root may pass `--owner <other>`). The `aimx mailboxes list` command is filtered to caller-owned mailboxes for non-root callers; `--all` is root-only. See [Mailboxes § Managing mailboxes](mailboxes.md#managing-mailboxes) for the full owner-binding rules and the agent-driven `mailbox_create` / `mailbox_delete` MCP tools.
 
 ### Wiring agents
 

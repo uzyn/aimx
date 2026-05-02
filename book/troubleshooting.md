@@ -215,11 +215,20 @@ Symptom: `Config::load` fails on daemon startup with `fire_on_untrusted is on_re
 
 Fix: `fire_on_untrusted` is the trust-gate escape hatch for `on_receive` hooks (which fire only on trusted mail by default). It has no meaning on `after_send` because there is no trust gate on outbound delivery. Remove the flag from any `after_send` hook entry.
 
-### `MAILBOX-CREATE` / `MAILBOX-DELETE` rejected for non-root
+### `aimx mailboxes create` / `delete` exits with `daemon must be running for non-root mailbox CRUD`
 
-Symptom: a non-root call to `aimx mailboxes create` or `aimx mailboxes delete` is rejected with exit code 2, or a `MAILBOX-CREATE` / `MAILBOX-DELETE` UDS request from a non-root caller returns `EACCES not authorized`.
+Symptom: a non-root call to `aimx mailboxes create` or `aimx mailboxes delete` exits with code 2 and the message *"daemon must be running for non-root mailbox CRUD; start `aimx serve` or run with sudo to fall back to direct config edit."*
 
-Fix: mailbox CRUD is root-only — both verbs check the caller's uid via `SO_PEERCRED` and refuse anything other than uid 0. Provision mailboxes with `sudo aimx mailboxes create <name> --owner <user>`; the named owner can then CRUD hooks and read/send mail without further root commands. The previous "any local user can create mailboxes via UDS" stance has been retired.
+Fix: mailbox CRUD is **owner-gated**, not root-gated, but the non-root path requires the daemon. The CLI cannot fall back to a direct `config.toml` edit when run as a regular user — `/etc/aimx/config.toml` is `0640 root:root` and the rename would fail with a confusing perm error, so the CLI fails fast instead. Pick one of the two remediations the error names:
+
+- Start the daemon: `sudo systemctl start aimx` (or `sudo rc-service aimx start` on OpenRC). Then re-run `aimx mailboxes create <name>` as yourself.
+- Run with `sudo`: `sudo aimx mailboxes create <name>` keeps the existing direct-write fallback path.
+
+### `MAILBOX-CREATE` / `MAILBOX-DELETE` rejected with `EACCES not authorized`
+
+Symptom: a `MAILBOX-CREATE` or `MAILBOX-DELETE` UDS request returns `EACCES not authorized`, or `aimx mailboxes delete <name>` fails with a not-authorized error from the daemon.
+
+Fix: the caller's uid does not own the target mailbox. Mailbox CRUD is owner-gated — for non-root callers, the daemon enforces that the caller's uid (resolved via `SO_PEERCRED`) matches the mailbox's `owner` field on `MAILBOX-DELETE`, and synthesizes the new mailbox's owner from `SO_PEERCRED` on `MAILBOX-CREATE` (any client-supplied `Owner:` header from a non-root caller is ignored). To delete a mailbox owned by another uid, run the command as that user (`sudo -u <owner> aimx mailboxes delete <name>`) or as root. To create a mailbox owned by a different user, run as root and pass `--owner <user>`. The `mailbox_create` / `mailbox_delete` MCP tools follow the same rules — agents can only CRUD mailboxes owned by the uid the MCP server runs under.
 
 ### `aimx send` returns `not authorized: <local_part>@<domain>`
 

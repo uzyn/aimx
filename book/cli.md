@@ -110,11 +110,13 @@ Alias: `aimx mailbox` works identically to `aimx mailboxes`.
 
 ### `aimx mailboxes create <name>`
 
-Create a mailbox registering `<name>@<domain>` and directories under `inbox/<name>/` and `sent/<name>/` chowned `<owner>:<owner> 0700`. **Requires root** — non-root callers are rejected with exit code 2. The daemon hot-reloads the new mailbox; no restart needed. The `MAILBOX-CREATE` UDS verb is also root-only (per-verb `SO_PEERCRED` check). The reserved literals `catchall` and `aimx-catchall` are rejected with `Validation: reserved`.
+Create a mailbox registering `<name>@<domain>` and directories under `inbox/<name>/` and `sent/<name>/` chowned `<owner>:<owner> 0700`. **Owner-gated, not root-gated.** A non-root caller always creates a mailbox owned by their own uid — the daemon synthesizes the owner from `SO_PEERCRED` and ignores any client-supplied owner. Root may pass `--owner <user>` to create a mailbox owned by another uid. The reserved literals `catchall` and `aimx-catchall` are rejected with `Validation: reserved`.
+
+The CLI prefers the daemon's UDS path for both root and non-root callers when `/run/aimx/aimx.sock` exists, so the daemon hot-reloads the new mailbox with no restart. When the daemon is stopped: root falls back to a direct `config.toml` edit + restart hint; non-root exits with code 2 and the message *"daemon must be running for non-root mailbox CRUD; start `aimx serve` or run with sudo to fall back to direct config edit."*
 
 | Flag | Description |
 |------|-------------|
-| `--owner <user>` | Linux user that owns the mailbox's storage and runs hooks. Required (the CLI prompts when omitted, defaulting to `<name>` if a user with that name already exists). Under `AIMX_NONINTERACTIVE=1` the default is accepted when available, otherwise the command errors hard so scripted installs fail fast. The user must resolve via `getpwnam(3)` on this host. |
+| `--owner <user>` | Linux user that should own the mailbox's storage and run hooks. Honored only when run as root. Non-root callers passing `--owner <other>` get a soft warning to stderr (`--owner ignored for non-root callers; mailbox will be owned by <caller>`) and the daemon synthesizes the correct owner from `SO_PEERCRED`. Under root, the CLI prompts when omitted (default `<name>` if such a user exists). The user must resolve via `getpwnam(3)` on this host. |
 
 ### `aimx mailboxes list`
 
@@ -130,12 +132,14 @@ Print a mailbox's address, owner, effective trust policy, `trusted_senders`, con
 
 ### `aimx mailboxes delete <name>`
 
-Delete a mailbox. **Requires root** (matching `MAILBOX-DELETE` UDS authorization). Refuses non-empty mailboxes with `ERR NONEMPTY` unless `--force` is passed. `catchall` cannot be deleted.
+Delete a mailbox. **Owner-gated.** A non-root caller may only delete a mailbox whose `owner` field matches their uid; the daemon enforces this via `SO_PEERCRED`, returning the canonical `EACCES not authorized` error otherwise (no information leak between "mailbox exists but unowned" and "no such mailbox"). Root passes unconditionally. Refuses non-empty mailboxes with `ERR NONEMPTY` unless `--force` is passed. `catchall` cannot be deleted.
+
+The CLI prefers the daemon's UDS path. When the daemon is stopped: root falls back to a direct `config.toml` edit + restart hint; non-root exits with code 2 and the *"daemon must be running for non-root mailbox CRUD"* message.
 
 | Flag | Description |
 |------|-------------|
 | `-y`, `--yes` | Skip the confirmation prompt. |
-| `--force` | Recursively wipe `inbox/<name>/` and `sent/<name>/` before deleting. Prompts before wiping unless paired with `--yes`. Refuses `catchall`. |
+| `--force` | Recursively wipe `inbox/<name>/` and `sent/<name>/` before deleting. Daemon-side wipe runs under per-mailbox lock + `CONFIG_WRITE_LOCK`, so the wipe and the config rewrite are atomic together. Prompts before wiping unless paired with `--yes`. Refuses `catchall`. |
 
 See [Mailboxes: Managing mailboxes](mailboxes.md#managing-mailboxes).
 

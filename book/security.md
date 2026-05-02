@@ -50,6 +50,49 @@ The clearest view of AIMX is a table of who-can-reach-what:
 
 The only subject that touches the DKIM key is the daemon. Every other subject that wants to send mail under your domain has to ask the daemon nicely, over the socket — and the daemon, not the caller, decides whether to sign.
 
+### Per-action authorization
+
+Every authorization decision in aimx — CLI, UDS, or MCP — flows through the
+single predicate in `src/auth.rs`. Root passes every action unconditionally;
+for any other caller, the per-action rules below apply. The same predicate
+gates the corresponding host CLI verb, UDS verb, and MCP tool, so the model
+is symmetric end-to-end.
+
+| Action            | Root        | Owner-gated (non-root) | Notes |
+|-------------------|-------------|------------------------|-------|
+| `MailboxRead`     | always      | caller uid must equal mailbox `owner_uid` | Used by `aimx mailboxes show`, `email_*` MCP tools, `email_list`. |
+| `MailboxSendAs`   | always      | caller uid must equal mailbox `owner_uid` | Used by `aimx send` and `email_send` / `email_reply`. |
+| `MarkReadWrite`   | always      | caller uid must equal mailbox `owner_uid` | Used by `email_mark_read` / `email_mark_unread`. |
+| `MailboxCreate`   | always (may pass `--owner` to create a mailbox owned by another uid) | caller may only create a mailbox owned by their own uid; the daemon synthesizes the owner from `SO_PEERCRED` and ignores any client-supplied `Owner:` header from non-root | Used by `aimx mailboxes create`, `MAILBOX-CREATE` UDS verb, and `mailbox_create` MCP tool. |
+| `MailboxDelete`   | always      | caller uid must equal mailbox `owner_uid` | Used by `aimx mailboxes delete` (incl. `--force`), `MAILBOX-DELETE` UDS verb, and `mailbox_delete` MCP tool. |
+| `HookCrud`        | always      | caller uid must equal mailbox `owner_uid` | Template-bound hooks via UDS / MCP. Raw-shell `aimx hooks create --cmd '...'` stays operator-only — see [Hooks](hooks.md#raw-cmd-hooks-operator-only). |
+| `SystemCommand`   | always      | rejected | Covers `setup`, `serve`, `uninstall`, `dkim-keygen`, `portcheck`. |
+
+Two consequences of this table are worth naming explicitly. First, mailbox
+create and delete are deliberately **owner-gated**, not root-gated: the
+single-trust-boundary model treats every local uid on the box as inside
+the trust boundary, so requiring `sudo` for an operator to spin up a
+mailbox owned by themselves bought zero security and broke the daily
+workflow. The privilege-escalation defense is structural — for every
+non-root UDS request, the daemon resolves the owner identity from the
+kernel-validated `SO_PEERCRED` peer uid and ignores any `Owner:` field a
+client might supply. There is no path for a non-root caller to cause a
+mailbox to be created with an owner other than their own uid.
+
+Second, two cases stay operator-only by design and are not expressible
+through any non-root surface:
+
+- **Cross-uid creates.** Only root may pass `--owner <other-user>` on
+  `aimx mailboxes create` and have the daemon honor it. The MCP tool
+  `mailbox_create` does not accept an `owner` parameter at all, and the
+  UDS handler discards client-supplied `Owner:` headers from non-root
+  callers. To create a mailbox owned by a different uid (e.g. for a
+  service account), an operator must run the CLI under `sudo`.
+- **The catchall.** The catchall mailbox is owned by the reserved
+  `aimx-catchall` system user, which has no shell and no resolvable
+  login uid. It is provisioned during `aimx setup`, never by a regular
+  CLI / MCP call, and is not exposed through the agent surface.
+
 ## The DKIM boundary
 
 The DKIM private key is the one thing on disk that unprivileged subjects cannot forge, bypass, or reproduce.

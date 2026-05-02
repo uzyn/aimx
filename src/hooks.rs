@@ -21,7 +21,7 @@
 
 use std::io::{self, Write};
 
-use crate::auth::{Action, AuthError, authorize};
+use crate::auth::{Action, AuthErrorContext, authorize, format_auth_error};
 use crate::cli::{HookCommand, HookCreateArgs};
 use crate::config::{Config, validate_hooks};
 use crate::hook::{
@@ -220,24 +220,29 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     }
 }
 
-/// Render an [`AuthError`] for hook CRUD CLI paths.
-fn format_hook_auth_error(err: &AuthError, verb: &str) -> String {
-    match err {
-        AuthError::NotRoot => {
-            format!("not authorized: aimx hooks {verb} requires root (run with sudo)")
-        }
-        AuthError::NotOwner { mailbox } => {
-            format!("not authorized: caller does not own mailbox '{mailbox}'")
-        }
-        // Hook CRUD never produces `OwnerMismatch` (it is created only
-        // by the `MailboxCreate` predicate), but the match must stay
-        // exhaustive so a future variant addition fails loudly here
-        // rather than silently mapping to a default message.
-        AuthError::OwnerMismatch { .. } => {
-            "not authorized: cannot create a resource owned by another user".to_string()
-        }
-        AuthError::NoSuchMailbox => "not authorized: no such mailbox".to_string(),
-    }
+/// Render an [`crate::auth::AuthError`] for hook CRUD CLI paths.
+///
+/// Thin wrapper around the canonical [`format_auth_error`] in
+/// `auth.rs`. Sprint 3 (S3-5) consolidated the three previous
+/// duplicates (`mailbox.rs`, `hooks.rs`, `mcp.rs`) into one renderer so
+/// the four-arm match can never drift between surfaces. We keep this
+/// helper as a one-line shim because the call sites read more naturally
+/// with `format_hook_auth_error(&err, "create")` than with the explicit
+/// `AuthErrorContext` constructor.
+fn format_hook_auth_error(err: &crate::auth::AuthError, verb: &str) -> String {
+    format_auth_error(
+        err,
+        &AuthErrorContext {
+            surface: Some("aimx hooks"),
+            verb: Some(verb),
+            // Hook CRUD never produces `OwnerMismatch` in practice (it
+            // is only created by the `MailboxCreate` predicate), but the
+            // resource label here keeps the message correct if a future
+            // variant change ever surfaces it on this path.
+            resource: Some("resource"),
+            ..Default::default()
+        },
+    )
 }
 
 /// Build the JSON body the daemon's `HookCreateBody` deserializer
