@@ -48,6 +48,10 @@
 //!   Content-Length: 0\n
 //!   \n
 //!
+//! Client → Server (HOOK-LIST):
+//!   AIMX/1 HOOK-LIST\n
+//!   \n
+//!
 //! Server → Client:
 //!   AIMX/1 OK [<message-id>]\n
 //! or
@@ -168,6 +172,13 @@ pub struct HookDeleteRequest {
     pub name: String,
 }
 
+// `AIMX/1 HOOK-LIST` carries no payload; the daemon resolves the
+// caller via `SO_PEERCRED` and returns the hooks visible to the
+// caller's uid (root sees every hook on every mailbox; non-root sees
+// only hooks on mailboxes it owns). The verb mirrors `MAILBOX-LIST`
+// line-for-line so the codec stays uniform — see `Request::HookList`
+// below and `parse_hook_list_headers` for the codec entry points.
+
 /// JSON payload of an `AIMX/1 VERSION` response. Mirrors the four
 /// `crate::version` build-metadata helpers so a client can render the
 /// same `aimx <tag> (<sha>) <target> built <date>` banner without
@@ -193,6 +204,11 @@ pub enum Request {
     MailboxList,
     HookCreate(HookCreateRequest),
     HookDelete(HookDeleteRequest),
+    /// `AIMX/1 HOOK-LIST` carries no payload. The daemon resolves the
+    /// caller via `SO_PEERCRED` and returns a JSON array of the hooks
+    /// visible to the caller; non-root callers see only hooks on
+    /// mailboxes they own. Mirrors `MAILBOX-LIST` line-for-line.
+    HookList,
     /// `AIMX/1 VERSION` carries no payload. Returns the daemon's build
     /// metadata so operators can detect drift between an upgraded
     /// binary on disk and a still-running pre-upgrade daemon. Open to
@@ -421,6 +437,9 @@ where
         "HOOK-DELETE" => parse_hook_delete_headers(reader)
             .await
             .map(Request::HookDelete),
+        "HOOK-LIST" => parse_hook_list_headers(reader)
+            .await
+            .map(|()| Request::HookList),
         "VERSION" => parse_version_headers(reader)
             .await
             .map(|()| Request::Version),
@@ -447,9 +466,9 @@ where
         Request::MailboxLifecycle(_) | Request::MailboxList => Err(ParseError::Malformed(
             "expected SEND verb, got MAILBOX-*".to_string(),
         )),
-        Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
-            "expected SEND verb, got HOOK-*".to_string(),
-        )),
+        Request::HookCreate(_) | Request::HookDelete(_) | Request::HookList => Err(
+            ParseError::Malformed("expected SEND verb, got HOOK-*".to_string()),
+        ),
         Request::Version => Err(ParseError::Malformed(
             "expected SEND verb, got VERSION".to_string(),
         )),
@@ -772,6 +791,26 @@ where
     if !line.is_empty() {
         return Err(ParseError::Malformed(format!(
             "MAILBOX-LIST takes no headers, got {line:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Parse the empty body of an `AIMX/1 HOOK-LIST` request. Mirrors
+/// `parse_mailbox_list_headers` line-for-line: the verb carries no
+/// headers, and silently ignoring one would let a future caller smuggle
+/// a forged owner header past the `SO_PEERCRED` filter.
+async fn parse_hook_list_headers<R>(reader: &mut R) -> Result<(), ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let line = read_line(reader)
+        .await?
+        .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+    let line = line.trim_end_matches('\r');
+    if !line.is_empty() {
+        return Err(ParseError::Malformed(format!(
+            "HOOK-LIST takes no headers, got {line:?}"
         )));
     }
     Ok(())
@@ -1188,6 +1227,18 @@ where
     Ok(())
 }
 
+/// Write an `AIMX/1 HOOK-LIST` request frame. Bare verb line plus a
+/// single blank separator — no headers, no body. Mirrors
+/// [`write_mailbox_list_request`] line-for-line.
+pub async fn write_hook_list_request<W>(writer: &mut W) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(b"AIMX/1 HOOK-LIST\n\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Write an `AIMX/1 VERSION` request frame. Bare verb line plus a single
 /// blank separator — no headers, no body. Used by the doctor's daemon
 /// version probe.
@@ -1431,6 +1482,47 @@ mod mailbox_list_codec_tests {
             Err(ParseError::Malformed(reason)) => {
                 assert!(reason.contains("Folder"), "{reason}");
             }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a `HOOK-LIST` frame: writer emits the bare verb +
+    /// blank separator, parser decodes it as `Request::HookList`.
+    #[tokio::test]
+    async fn round_trip_hook_list_request() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_hook_list_request(&mut buf).await.unwrap();
+        assert_eq!(buf, b"AIMX/1 HOOK-LIST\n\n");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let req = parse_request(&mut reader).await.unwrap();
+        assert_eq!(req, Request::HookList);
+    }
+
+    /// Any header on a `HOOK-LIST` frame is rejected. The verb resolves
+    /// the caller via `SO_PEERCRED`; client-supplied owner / mailbox
+    /// hints would defeat that and must be a hard parse error.
+    #[tokio::test]
+    async fn hook_list_rejects_owner_header() {
+        let frame = b"AIMX/1 HOOK-LIST\nOwner: alice\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("HOOK-LIST"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// `Content-Length:` headers are also rejected — `HOOK-LIST` has
+    /// no body, and silently ignoring the header would invite a future
+    /// caller to send one and have it skipped.
+    #[tokio::test]
+    async fn hook_list_rejects_content_length_header() {
+        let frame = b"AIMX/1 HOOK-LIST\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(_)) => {}
             other => panic!("expected Malformed, got {other:?}"),
         }
     }

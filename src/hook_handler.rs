@@ -241,12 +241,17 @@ pub async fn handle_hook_delete(
         }
     };
 
-    if let Err(reject) =
+    if let Err(_reject) =
         enforce_mailbox_owner_or_root("HOOK-DELETE", caller, mailbox_name, &mailbox_cfg)
     {
+        // NFR2 opacity: a non-owner caller must not be able to
+        // distinguish "hook exists on a mailbox you don't own" from
+        // "hook doesn't exist anywhere." Both surface as ENOENT with
+        // the same canonical reason. The full reject is still logged
+        // (above) for operator forensics; only the wire shape collapses.
         return AckResponse::Err {
-            code: reject.code,
-            reason: reject.reason,
+            code: ErrCode::Enoent,
+            reason: format!("hook '{}' not found", req.name),
         };
     }
 
@@ -817,9 +822,19 @@ mod tests {
         let del = HookDeleteRequest {
             name: "greet".into(),
         };
+        // NFR2 opacity: a non-owner caller must not be able to
+        // distinguish "hook exists on a mailbox you don't own" from
+        // "hook doesn't exist anywhere." Both surface as ENOENT.
         match handle_hook_delete(&state_ctx, &mb_ctx, &del, &attacker).await {
-            AckResponse::Err { code, .. } => assert_eq!(code, ErrCode::Eaccess),
-            other => panic!("expected EACCES, got {other:?}"),
+            AckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Enoent);
+                assert!(reason.contains("not found"), "{reason}");
+                assert!(
+                    !reason.contains("not authorized"),
+                    "wire reason must not leak authz state: {reason}"
+                );
+            }
+            other => panic!("expected ENOENT, got {other:?}"),
         }
         assert_eq!(
             mb_ctx.config_handle.load().mailboxes["alice"].hooks.len(),

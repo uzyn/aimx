@@ -720,7 +720,14 @@ fn hook_delete_as_other_forbidden() {
         &fx.socket_path,
         raw_hook_delete_frame("alice_owned_hook").as_bytes(),
     );
-    assert_response_contains(&del, "EACCES");
+    // NFR2 opacity: a non-owner caller must not be able to distinguish
+    // "hook exists on a mailbox you don't own" from "hook doesn't exist
+    // anywhere." Both surface as ENOENT with the same canonical reason;
+    // the wire response must not leak that authz rejected the request.
+    assert_response_contains(&del, "ENOENT");
+    assert_response_contains(&del, "hook 'alice_owned_hook' not found");
+    assert_response_does_not_contain(&del, "not authorized");
+    assert_response_does_not_contain(&del, "EACCES");
     drop(fx);
 }
 
