@@ -54,11 +54,11 @@ See [Installation](installation.md) for install flags (`--tag`, `--target`, `--t
 
 ## Security model
 
-AIMX is a **single-operator** mail server designed for AI agents on a domain you own. It stores mail under `/var/lib/aimx/` (world-readable). Any local user or agent can read email files. This is by design: AIMX assumes a single-admin server where all agents are trusted to read each other's mail. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
+AIMX is a **single-operator** mail server designed for AI agents on a domain you own. Mail is stored under `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/`, with each mailbox's directories chowned to its configured Linux owner at mode `0700` — non-owners (and non-root) cannot read another mailbox's contents. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
 
-All mutations (send, reply, mark-read, create/delete mailboxes) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS send socket at `/run/aimx/aimx.sock` is world-writable. Any local user can submit outbound mail through `aimx send`. The authorisation boundary is the root-only DKIM private key, not filesystem ACLs on the mailbox tree.
+All mutations (send, reply, mark-read, create/delete mailboxes, hooks) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS at `/run/aimx/aimx.sock` is world-writable, but every verb runs server-side `auth::authorize` keyed on the caller's `SO_PEERCRED` uid before doing anything. AIMX has two authorisation boundaries: the root-only DKIM private key on the SMTP-out external surface, and per-verb owner-gated authorization on the UDS internal surface.
 
-**If you need per-user mailbox isolation** (multiple humans with private inboxes, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), AIMX is the wrong tool. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use AIMX in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
+**If two users on one host genuinely cannot trust each other to operate the daemon** (multiple mutually-distrustful humans, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), AIMX is the wrong tool. Per-owner `0700` mailboxes prevent non-owners from reading another mailbox, but the trust boundary AIMX defends is *the host*, not *each user on the host*. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use AIMX in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
 
 See [Security](security.md) for the full threat model, trust boundaries, and non-goals.
 
