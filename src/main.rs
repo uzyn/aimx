@@ -84,11 +84,12 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
         // Portcheck does not read config for storage, only `verify_host`.
         Command::Portcheck { verify_host } => portcheck::run(verify_host.as_deref()),
-        // MCP server reloads config on each tool call; pass the override through.
+        // MCP tools route through the daemon UDS; no config or data-dir
+        // override is read in-process.
         Command::Mcp => {
             let rt = tokio::runtime::Runtime::new()
                 .map_err(|e| format!("Failed to create runtime: {e}"))?;
-            rt.block_on(mcp::run(cli.data_dir.as_deref()))
+            rt.block_on(mcp::run())
         }
         // `aimx agents <command>`: the canonical plural-noun-with-verb
         // shape. Setup / Remove / List dispatch to their dedicated

@@ -17,11 +17,6 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct AimxMcpServer {
-    /// CLI `--data-dir` / `AIMX_DATA_DIR` override. Read by the
-    /// test-only `load_config` helper; production tools route through
-    /// the daemon UDS and never read `config.toml` directly.
-    #[allow(dead_code)]
-    data_dir_override: Option<PathBuf>,
     /// Effective uid of the process running `aimx mcp`. Captured at
     /// `new()` and read by the test-only `authorize_mailbox` helper.
     /// Production tools delegate authorization to the daemon (which
@@ -167,21 +162,20 @@ pub struct MailboxDeleteParams {
 }
 
 impl AimxMcpServer {
-    pub fn new(data_dir_override: Option<PathBuf>) -> Self {
-        Self::with_caller_uid(data_dir_override, crate::platform::current_euid())
+    pub fn new() -> Self {
+        Self::with_caller_uid(crate::platform::current_euid())
     }
 
     /// Test-only constructor that lets the caller pin the authorization
     /// principal. Production code calls `new()`, which derives the uid
     /// from `geteuid()` at startup.
     #[cfg(test)]
-    pub fn with_caller_uid_for_test(data_dir_override: Option<PathBuf>, caller_uid: u32) -> Self {
-        Self::with_caller_uid(data_dir_override, caller_uid)
+    pub fn with_caller_uid_for_test(caller_uid: u32) -> Self {
+        Self::with_caller_uid(caller_uid)
     }
 
-    fn with_caller_uid(data_dir_override: Option<PathBuf>, caller_uid: u32) -> Self {
+    fn with_caller_uid(caller_uid: u32) -> Self {
         Self {
-            data_dir_override,
             caller_uid,
             tool_router: Self::tool_router(),
         }
@@ -1097,8 +1091,8 @@ impl ServerHandler for AimxMcpServer {
     }
 }
 
-pub async fn run(data_dir: Option<&std::path::Path>) -> Result<(), Box<dyn std::error::Error>> {
-    let server = AimxMcpServer::new(data_dir.map(|p| p.to_path_buf()));
+pub async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let server = AimxMcpServer::new();
     let transport = rmcp::transport::io::stdio();
 
     let service = server
@@ -1800,7 +1794,7 @@ mod auth_tests {
     fn root_caller_passes_authorize_mailbox_for_any_action() {
         let tmp = TempDir::new().unwrap();
         let config = build_config(tmp.path(), &[("alice", "root")]);
-        let server = AimxMcpServer::with_caller_uid_for_test(None, 0);
+        let server = AimxMcpServer::with_caller_uid_for_test(0);
 
         assert!(
             server
@@ -1826,7 +1820,7 @@ mod auth_tests {
         // Pick a uid that's almost certainly not 0 and not root —
         // exact value is irrelevant since the orphan-owner branch
         // collapses to NoSuchMailbox before the uid match runs.
-        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+        let server = AimxMcpServer::with_caller_uid_for_test(1000);
 
         let err = server
             .authorize_mailbox(Action::MailboxRead("alice".into()), &config)
@@ -1844,7 +1838,7 @@ mod auth_tests {
         // Caller uid 1000 vs mailbox owner uid 0 → NotOwner.
         let tmp = TempDir::new().unwrap();
         let config = build_config(tmp.path(), &[("admin", "root")]);
-        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+        let server = AimxMcpServer::with_caller_uid_for_test(1000);
 
         let err = server
             .authorize_mailbox(Action::MailboxRead("admin".into()), &config)
@@ -1857,7 +1851,7 @@ mod auth_tests {
     fn missing_mailbox_returns_not_authorized_not_found_for_non_root() {
         let tmp = TempDir::new().unwrap();
         let config = build_config(tmp.path(), &[]);
-        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+        let server = AimxMcpServer::with_caller_uid_for_test(1000);
 
         let err = server
             .authorize_mailbox(Action::MailboxRead("missing".into()), &config)
@@ -2275,7 +2269,7 @@ mod email_list_tests {
         // Without this guard a force-wipe on `catchall` would clear
         // the catchall storage even when the daemon would refuse the
         // delete itself.
-        let server = AimxMcpServer::with_caller_uid_for_test(None, 1000);
+        let server = AimxMcpServer::with_caller_uid_for_test(1000);
         let err = server
             .mailbox_delete(Parameters(MailboxDeleteParams {
                 name: "catchall".to_string(),
