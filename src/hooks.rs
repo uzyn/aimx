@@ -215,9 +215,12 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
             // config.toml; non-root callers hard-error so we don't
             // pretend the change went through. Route the error through
             // the canonical `format_auth_error` so wording stays
-            // consistent with every other authz-error surface.
+            // consistent with every other authz-error surface, then
+            // append a daemon-down hint so operators see why sudo is
+            // required (the canonical wording mentions sudo but not
+            // the underlying "daemon is down" cause).
             if !skip_authz_check && !is_root() {
-                return Err(format_auth_error(
+                return Err(append_daemon_down_hint(format_auth_error(
                     &crate::auth::AuthError::NotRoot,
                     &AuthErrorContext {
                         surface: Some("aimx hooks"),
@@ -225,7 +228,7 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
                         resource: Some("resource"),
                         ..Default::default()
                     },
-                )
+                ))
                 .into());
             }
             apply_create_direct(config, &args.mailbox, hook)?;
@@ -322,7 +325,7 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
         }
         Err(HookCrudFallback::SocketMissing) => {
             if !skip_authz_check && !is_root() {
-                return Err(format_auth_error(
+                return Err(append_daemon_down_hint(format_auth_error(
                     &crate::auth::AuthError::NotRoot,
                     &AuthErrorContext {
                         surface: Some("aimx hooks"),
@@ -330,7 +333,7 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
                         resource: Some("resource"),
                         ..Default::default()
                     },
-                )
+                ))
                 .into());
             }
             apply_delete_direct(config, name)?;
@@ -436,6 +439,19 @@ fn print_restart_hint() {
     );
 }
 
+/// Appends a daemon-down hint to a canonical authz error string. Used
+/// only on the socket-missing + non-root hook CRUD path, where the
+/// canonical `NotRoot` rendering tells the operator to use `sudo` but
+/// no longer mentions the underlying cause (the daemon is not running,
+/// which is why we fell through to the root-only direct-config-edit
+/// path in the first place). The hint is local to that call site so
+/// the canonical renderer's surface stays narrow.
+fn append_daemon_down_hint(msg: String) -> String {
+    format!(
+        "{msg}\nhint: if the daemon is running, hook CRUD over UDS would handle this without sudo."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +535,19 @@ mod tests {
         let msg = render_for_hooks(&AuthError::NoSuchMailbox, "create");
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("no such mailbox"), "{msg}");
+    }
+
+    #[test]
+    fn append_daemon_down_hint_preserves_canonical_message_and_appends_hint() {
+        let canonical = render_for_hooks(&AuthError::NotRoot, "create");
+        let with_hint = append_daemon_down_hint(canonical.clone());
+        // Canonical wording is preserved verbatim as the first line so
+        // the regression guard for the canonical renderer stays valid.
+        assert!(with_hint.starts_with(&canonical), "{with_hint}");
+        // Operator-helpful daemon-down context is restored on its own
+        // line so the suffix can be grepped for in CI / docs.
+        assert!(with_hint.contains("\nhint:"), "{with_hint}");
+        assert!(with_hint.contains("daemon"), "{with_hint}");
+        assert!(with_hint.contains("UDS"), "{with_hint}");
     }
 }

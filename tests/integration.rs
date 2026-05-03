@@ -6012,8 +6012,12 @@ fn prodperm_assert_no_eacces(text: &str, tool: &str) {
 /// `runuser` so the on-disk uid matches `inbox/alice/`'s owner.
 #[cfg(unix)]
 fn prodperm_seed_email(tmp: &Path, id: &str) {
+    // Match the production frontmatter writer: optional fields with no
+    // value (`in_reply_to`, `references`) are omitted entirely rather
+    // than written as empty strings, so deserializers see `None` rather
+    // than `Some("")`.
     let body = format!(
-        "+++\nid = \"{id}\"\nmessage_id = \"<{id}@test.com>\"\nfrom = \"sender@example.com\"\nto = \"alice@agent.example.com\"\nsubject = \"Hello {id}\"\ndate = \"2025-06-01T12:00:00Z\"\nin_reply_to = \"\"\nreferences = \"\"\nattachments = []\nmailbox = \"alice\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\n\nbody {id}\n"
+        "+++\nid = \"{id}\"\nmessage_id = \"<{id}@test.com>\"\nfrom = \"sender@example.com\"\nto = \"alice@agent.example.com\"\nsubject = \"Hello {id}\"\ndate = \"2025-06-01T12:00:00Z\"\nattachments = []\nmailbox = \"alice\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\n\nbody {id}\n"
     );
     let path = tmp.join("inbox").join("alice").join(format!("{id}.md"));
     std::fs::write(&path, body).unwrap();
@@ -6167,6 +6171,28 @@ fn email_list_full_cycle_against_root_owned_config() {
     );
     let text = get_tool_text(&resp);
     prodperm_assert_no_eacces(&text, "email_send");
+
+    // The daemon must have written a sent-copy `.md` under
+    // `sent/alice/`. Without this assertion a future regression where
+    // the sent-copy persistence silently no-ops would only be caught
+    // by the EACCES guard, which would not fire.
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_md_count = std::fs::read_dir(&sent_dir)
+        .expect("sent/alice/ must exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s == "md")
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(
+        sent_md_count >= 1,
+        "email_send should have written a sent-copy .md under {}; found {sent_md_count}",
+        sent_dir.display()
+    );
 
     // email_reply — replies to the seeded message.
     let resp = client.call_tool(
