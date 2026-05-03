@@ -272,7 +272,7 @@ impl AimxMcpServer {
         // via SO_PEERCRED, so a missing row collapses "no such mailbox"
         // and "you don't own that mailbox" into the same opaque error
         // (NFR2 opacity contract). This avoids the previous
-        // `self.load_config()` path which fails with EACCES on a
+        // direct config-load path which fails with EACCES on a
         // production-perm `0640 root:root` config from a non-root MCP
         // process.
         let row = lookup_mailbox_row(&params.mailbox)?;
@@ -632,7 +632,7 @@ impl AimxMcpServer {
         // client-side wipe left open AND removes the MCP process's
         // dependency on local read access to `/etc/aimx/config.toml`
         // (which is `0640 root:root` in production, so the previous
-        // `self.load_config()` inevitably failed for non-root agents).
+        // direct config-load path inevitably failed for non-root agents).
         match submit_mailbox_crud_via_daemon(&params.name, false, None, force) {
             Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
             Err(MailboxLifecycleFallback::SocketMissing) => {

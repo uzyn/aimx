@@ -2,6 +2,38 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
+## Unreleased — MCP email and hook tools now work for non-root operators
+
+The mailbox-lifecycle ship below covered the three MCP tools that an agent uses to provision its own mailboxes. A post-ship audit found that the remaining nine tools — every email and hook tool — still failed for the exact persona the design targeted: a non-root operator running an MCP client against a real install with `/etc/aimx/config.toml` at `0600 root:root`. This release closes that gap and adds the regression guard that should have caught it.
+
+### What was broken
+
+On a production install, `/etc/aimx/config.toml` is `0600 root:root` and the MCP server runs as the operator's own uid. Nine of the twelve MCP tools — `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`, `email_send`, `email_reply`, `hook_create`, `hook_list`, `hook_delete` — opened the tool method with `self.load_config()?` and hit `Permission denied (os error 13)` before the daemon authorization predicate ever ran. The MCP surface was structurally 75% broken for non-root operators on every install that had ever run `aimx setup`.
+
+### Why it shipped that way
+
+The first round of MCP work ran every test against a writable temp config. The production-permission scenario — a `0600 root:root` config readable only by root, with the MCP client running as the operator's own uid — was never exercised in CI or local testing. The mailbox-tool fix landed correctly because it was caught in review, but the same fix never propagated to the email and hook tools.
+
+### What's now guarded
+
+- **Every email and hook tool now routes through the daemon UDS.** `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`, `email_send`, `email_reply`, `hook_create`, and `hook_list` resolve the requested mailbox over `MAILBOX-LIST` (which the daemon filters by caller uid) and use the row's `inbox_path` / `sent_path` / `address` for filesystem ops; `hook_list` routes through the new `HOOK-LIST` verb; `hook_delete` submits `HOOK-DELETE` directly. The MCP process no longer opens `/etc/aimx/config.toml`.
+- **`AimxMcpServer::load_config` is gone from non-test code.** The method only exists behind `#[cfg(test)]` now. A release build will fail to compile if any future tool reintroduces the pattern — a structural regression guard, not a grep one.
+- **End-to-end CI smoke covers all twelve tools.** A new sudo-lane integration test starts `aimx serve` against a `0600 root:root` config and exercises every MCP tool from a non-root caller. Any future tool that drifts back to direct config reads fails CI.
+
+### New `HOOK-LIST` UDS verb
+
+A new read-only verb on `/run/aimx/aimx.sock` returns the daemon's view of every hook the caller's uid is allowed to see. The daemon filters server-side: a non-root caller sees only hooks on mailboxes whose `owner_uid` matches their own; root sees everything. The frame shape mirrors `MAILBOX-LIST` line-for-line — empty request body, JSON array on the response — with rows of `{name, mailbox, event, cmd, fire_on_untrusted, timeout_secs}`. See [CLI Reference § UDS protocol verbs](cli.md#uds-protocol-verbs) for the verb table and [MCP Server § hook_list](mcp.md#hook_list) for the agent surface.
+
+### User-visible behavior changes
+
+- **`hook_delete` no longer pre-flights.** The previous implementation read config to find the hook's mailbox, ran a client-side authorization check, and only then submitted `HOOK-DELETE`. The daemon already does the lookup, the authorization, and the canonical "not found" response for both unowned and nonexistent hooks. The MCP tool now submits `HOOK-DELETE` directly and returns whatever the daemon returns. Error wording from the daemon is canonical; do not parse the response shape.
+- **No tool caches the `MAILBOX-LIST` response across calls.** Each invocation re-reads from the daemon so `Arc<Config>` hot-swaps and inter-call mailbox CRUD stay correctly observed.
+- **No CLI flag changes.** Operators who already had MCP working as root see no difference. Operators whose MCP-as-non-root setup was broken simply find the previously-broken tools working.
+
+### Tooling note
+
+The test-only env var that bypasses the `authorize()` call in `aimx hooks --cmd` paths is now named `AIMX_TEST_SKIP_AUTHZ_CHECK` — the previous name suggested a narrower scope than what the gate actually covers. The variable is read only by the test harness; production callers must never set it.
+
 ## Unreleased — Mailbox create/delete no longer requires root
 
 Mailbox lifecycle is now **owner-gated** end-to-end. A non-root operator can create and delete the mailboxes they own without `sudo`, and agents can self-serve mailboxes over MCP. Existing sudo-based workflows continue to work unchanged — root passes every action.

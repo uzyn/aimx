@@ -437,7 +437,7 @@ hook_create(
 
 ### `hook_list`
 
-List hooks on mailboxes you own (or one when `mailbox` is set).
+List hooks on mailboxes you own (or one when `mailbox` is set). Backed by the `HOOK-LIST` UDS verb — the daemon filters to hooks on mailboxes the caller's uid owns server-side, so the MCP process never reads `/etc/aimx/config.toml` directly.
 
 **Parameters:**
 | Name      | Type   | Required | Description |
