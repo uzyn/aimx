@@ -245,3 +245,21 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 |------|---------|-------------|
 | `--selector <name>` | `aimx` | DKIM selector name (controls the DNS record `<selector>._domainkey.<domain>`). |
 | `--force` | off | Overwrite existing keys. |
+
+## UDS protocol verbs
+
+`aimx serve` exposes a small `AIMX/1` request set on `/run/aimx/aimx.sock` (mode `0666`). The CLI subcommands above and the [`aimx mcp`](mcp.md) tools all submit these verbs; the daemon resolves the caller's uid via `SO_PEERCRED` and runs the central `auth::authorize` predicate before any state work. Operators do not normally speak the wire format directly — this table is the source of truth for what the socket accepts.
+
+| Verb | Direction | Authorization | Used by |
+|------|-----------|---------------|---------|
+| `SEND` | request + body (RFC 5322 message) | caller uid must own the mailbox resolved from `From:` | `aimx send`, `email_send` / `email_reply` MCP tools |
+| `MARK-READ` / `MARK-UNREAD` | header (mailbox + path) | caller uid must own the mailbox | `email_mark_read` / `email_mark_unread` MCP tools |
+| `MAILBOX-CREATE` | header + JSON body | caller uid synthesized as owner from `SO_PEERCRED` (root may pass `Owner:` for cross-uid creates) | `aimx mailboxes create`, `mailbox_create` MCP tool |
+| `MAILBOX-DELETE` | header (mailbox) | caller uid must own the mailbox | `aimx mailboxes delete` (incl. `--force`), `mailbox_delete` MCP tool |
+| `MAILBOX-LIST` | request only | none server-side; the response is filtered to caller-owned rows (root sees all) | `aimx mailboxes list`, `mailbox_list` MCP tool, every other MCP tool's resolution pre-flight |
+| `HOOK-CREATE` | header + JSON body | caller uid must own the hook's mailbox | `aimx hooks create` (UDS path), `hook_create` MCP tool |
+| `HOOK-DELETE` | header (hook name) | caller uid must own the hook's mailbox; operator-origin hooks are CLI-only | `aimx hooks delete` (UDS path), `hook_delete` MCP tool |
+| `HOOK-LIST` | request only | none server-side; the response is filtered to hooks on caller-owned mailboxes (root sees all) | `hook_list` MCP tool |
+| `VERSION` | request only | none — payload is daemon build metadata only | `aimx doctor`'s `Server version:` line |
+
+`HOOK-LIST` mirrors `MAILBOX-LIST`'s frame shape: empty request body, JSON array on the response. Each row is `{name, mailbox, event, cmd, fire_on_untrusted, timeout_secs}` where `event` serializes to `on_receive` / `after_send`. See [MCP Server § hook_list](mcp.md#hook_list) for the agent-facing surface.
