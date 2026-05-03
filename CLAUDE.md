@@ -49,13 +49,13 @@ A handful of CLI gating points refuse to run as non-root in production. The
 test suite injects an opt-in to keep the post-gate code paths exercised under
 a non-root `cargo test` runner. Set this only from the test harness:
 
-- **`AIMX_TEST_SKIP_ROOT_CHECK=1`** — bypasses the `is_root()` / `euid != 0`
-  refusal in `aimx hooks --cmd` raw-shell paths so the rest of the
-  command (config writes, fallback hints, error formatting) stays
-  reachable without `sudo`. Read by `src/hooks.rs` only — the user-mailbox
-  Sprint 2 work removed the entry-point root gate from `src/mailbox.rs`,
-  so this env var no longer touches mailbox CRUD. Production callers
-  must never set this — it neutralizes the root gate by design.
+- **`AIMX_TEST_SKIP_AUTHZ_CHECK=1`** — bypasses the `authorize()` call
+  (gating `Action::HookCrud`) in `aimx hooks --cmd` raw-shell paths so
+  the rest of the command (config writes, fallback hints, error
+  formatting) stays reachable without `sudo`. Read by `src/hooks.rs`
+  only — mailbox CRUD authz is enforced server-side over UDS and never
+  consults this env var. Production callers must never set this — it
+  neutralizes the authz predicate by design.
 
 Other test-only env vars are documented next to their read sites:
 `AIMX_SANDBOX_FORCE_FALLBACK` (force the non-systemd-run hook executor),
