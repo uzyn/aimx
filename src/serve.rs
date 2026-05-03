@@ -881,6 +881,10 @@ async fn handle_uds_connection_with_timeout(
                 ),
                 false,
             ),
+            Ok(Ok(Request::HookList)) => (
+                Reply::Json(crate::hook_list_handler::handle_hook_list(&state_ctx, &caller).await),
+                false,
+            ),
             Ok(Ok(Request::Version)) => (
                 Reply::Version(crate::version_handler::current_version_response()),
                 false,

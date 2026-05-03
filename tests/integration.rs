@@ -962,6 +962,18 @@ fn mcp_email_list_and_read() {
         true,
     );
 
+    // The MCP `email_*` tools route through the daemon's `MAILBOX-LIST`
+    // for path resolution so the non-root MCP process never reads
+    // root-owned `/etc/aimx/config.toml`. Tests must spawn a daemon
+    // even for read-only tools.
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
@@ -994,6 +1006,7 @@ fn mcp_email_list_and_read() {
     assert!(text.contains("Body of 2025-06-01-001"));
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
@@ -1010,6 +1023,14 @@ fn mcp_email_list_pagination() {
         create_email_file(&alice_dir, &id, "s@example.com", "S", false);
     }
 
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
@@ -1025,12 +1046,21 @@ fn mcp_email_list_pagination() {
     assert_eq!(rows[1]["id"], "2025-06-03-001");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
 fn mcp_email_list_empty_mailbox_returns_empty_json_array() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -1040,12 +1070,21 @@ fn mcp_email_list_empty_mailbox_returns_empty_json_array() {
     assert_eq!(text, "[]");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
 fn mcp_email_read_nonexistent_error() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -1059,12 +1098,21 @@ fn mcp_email_read_nonexistent_error() {
     assert!(text.contains("not found"), "Got: {text}");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
 fn mcp_email_list_nonexistent_mailbox_error() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -1075,6 +1123,7 @@ fn mcp_email_list_nonexistent_mailbox_error() {
     assert!(text.contains("does not exist"), "Got: {text}");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[cfg(unix)]
@@ -1222,6 +1271,14 @@ fn mcp_email_send_missing_mailbox_error() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
@@ -1239,12 +1296,21 @@ fn mcp_email_send_missing_mailbox_error() {
     assert!(text.contains("does not exist"), "Got: {text}");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
 fn mcp_email_reply_nonexistent_email_error() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -1262,6 +1328,7 @@ fn mcp_email_reply_nonexistent_email_error() {
     assert!(text.contains("not found"), "Got: {text}");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 #[test]
@@ -3651,6 +3718,426 @@ fn mailbox_list_with_unreadable_config_falls_back_to_uds() {
     stop_serve(daemon);
 }
 
+// ---------------------------------------------------------------------------
+// Per-tool production-perm regression tests for the 9 MCP tools that
+// previously fell through `self.load_config()` and broke on a real
+// install (`/etc/aimx/config.toml` is `0640 root:root`; the non-root
+// MCP process would always fail with `Permission denied (os error
+// 13)`). Every tool now routes through the daemon's `MAILBOX-LIST` /
+// `HOOK-LIST` verbs, and `AimxMcpServer::load_config` was deleted from
+// `src/mcp.rs` so production code cannot accidentally reintroduce the
+// bug class.
+//
+// Each test follows the same shape: spawn the daemon (which loaded
+// `Arc<Config>` at startup so it keeps serving from memory), `chmod
+// 0000` on the on-disk config so any client-side direct read would
+// fail with EACCES, then invoke the tool and assert (a) it works and
+// (b) no EACCES surfaces from a config-load path.
+// ---------------------------------------------------------------------------
+
+/// Regression test: `email_list` must not surface EACCES on a config
+/// with `0000` perms — the tool now derives `inbox_path` / `sent_path`
+/// from the daemon's `MAILBOX-LIST` row, never reads `config.toml`.
+#[cfg(unix)]
+#[test]
+fn mcp_email_list_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "alice"}));
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_list must not surface EACCES on `0000` config; got: {text}"
+    );
+    // Empty mailbox returns the literal `[]` string.
+    assert_eq!(text, "[]", "{text}");
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `email_read` against `0000` config — same shape.
+#[cfg(unix)]
+#[test]
+fn mcp_email_read_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(&alice_dir, "2025-06-01-001", "s@example.com", "Hi", false);
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_read must not surface EACCES; got: {text}"
+    );
+    assert!(
+        text.contains("Body of 2025-06-01-001"),
+        "email_read must return body; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `email_mark_read` against `0000` config.
+#[cfg(unix)]
+#[test]
+fn mcp_email_mark_read_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(&alice_dir, "2025-06-01-001", "s@example.com", "Hi", false);
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_mark_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_mark_read must not surface EACCES; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `email_mark_unread` against `0000` config.
+#[cfg(unix)]
+#[test]
+fn mcp_email_mark_unread_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(&alice_dir, "2025-06-01-001", "s@example.com", "Hi", true);
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_mark_unread",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_mark_unread must not surface EACCES; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `email_send` against `0000` config — the tool now
+/// derives the from-address from the daemon's `MAILBOX-LIST` row, no
+/// `config.toml` read.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    // Send to a nonexistent recipient — we don't care whether the SMTP
+    // delivery itself succeeds, only that a config-EACCES does not
+    // surface from the MCP tool entry point.
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "nobody@invalid.example.invalid",
+            "subject": "perm test",
+            "body": "x"
+        }),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_send must not surface EACCES; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `email_reply` against `0000` config.
+#[cfg(unix)]
+#[test]
+fn mcp_email_reply_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let alice_dir = inbox(tmp.path(), "alice");
+    create_email_file(&alice_dir, "2025-06-01-001", "s@example.com", "Hi", false);
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_reply",
+        serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-01-001",
+            "body": "reply body"
+        }),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "email_reply must not surface EACCES; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `hook_create` against `0000` config — the tool now
+/// pre-flights via `MAILBOX-LIST` over UDS, no `config.toml` read.
+#[cfg(unix)]
+#[test]
+fn mcp_hook_create_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "cmd": ["/bin/true"]
+        }),
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "hook_create must not surface EACCES; got: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `hook_list` against `0000` config — routes through
+/// the new `HOOK-LIST` UDS verb, no `config.toml` read.
+#[cfg(unix)]
+#[test]
+fn mcp_hook_list_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "hook_list must not surface EACCES; got: {text}"
+    );
+    assert_eq!(text, "[]", "{text}");
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
+/// Regression test: `hook_delete` against `0000` config — the tool is
+/// a thin pass-through to `HOOK-DELETE`, no `config.toml` read.
+#[cfg(unix)]
+#[test]
+fn mcp_hook_delete_with_unreadable_config_does_not_surface_eacces() {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!("skipping: chmod 0000 has no effect on root");
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    use std::os::unix::fs::PermissionsExt;
+    let config_path = tmp.path().join("config.toml");
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "no_such_hook"}));
+    let text = get_tool_text(&resp);
+    assert!(
+        !text.contains("Permission denied"),
+        "hook_delete must not surface EACCES; got: {text}"
+    );
+    // The daemon-side handler will canonically return ENOENT for a
+    // hook name it doesn't know.
+    assert!(
+        text.contains("not found") || text.contains("ENOENT"),
+        "hook_delete error should be opaque not-found: {text}"
+    );
+
+    client.shutdown();
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o640)).unwrap();
+    stop_serve(daemon);
+}
+
 /// Cycle 2 regression guard for Blocker 2: the MCP `mailbox_create`
 /// tool must work end-to-end against a real daemon for a non-root
 /// caller. Cycle 1 shipped the tool but the wire-protocol parser
@@ -4842,6 +5329,14 @@ fn mcp_hook_create_unowned_mailbox_returns_not_authorized() {
     std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
     install_cached_dkim_keys(tmp.path());
 
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
@@ -4855,22 +5350,36 @@ fn mcp_hook_create_unowned_mailbox_returns_not_authorized() {
     );
     assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
+    // NFR2 opacity: a hook_create on a mailbox the caller doesn't own
+    // surfaces as the same opaque "does not exist" error a missing
+    // mailbox would, because the daemon's MAILBOX-LIST is filtered
+    // by SO_PEERCRED. The MCP-side pre-flight cannot distinguish
+    // "doesn't exist" from "exists but unowned" client-side.
     assert!(
-        text.contains("not authorized"),
-        "expected not-authorized error, got: {text}"
+        text.contains("does not exist"),
+        "expected opaque does-not-exist error, got: {text}"
     );
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 /// `hook_delete` against a hook that does not exist returns the
-/// canonical "not found" error without ever reaching the daemon. The
-/// test deliberately uses the standard fixture (no daemon spawned) to
-/// pin behavior under the new MCP shape.
+/// canonical "not found" error from the daemon's HOOK-DELETE handler.
+/// The MCP tool is now a thin pass-through (no client-side
+/// `load_config` pre-flight), so the daemon must be running.
 #[test]
 fn mcp_hook_delete_unknown_hook_returns_not_found() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4878,9 +5387,13 @@ fn mcp_hook_delete_unknown_hook_returns_not_found() {
     let resp = client.call_tool("hook_delete", serde_json::json!({"name": "no_such_hook"}));
     assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    assert!(text.contains("not found"), "{text}");
+    assert!(
+        text.contains("not found") || text.contains("ENOENT"),
+        "{text}"
+    );
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 /// `hook_delete` against a hook that lives on a mailbox the caller
@@ -4926,13 +5439,24 @@ fn mcp_hook_delete_unowned_hook_returns_not_found_not_unauthorized() {
     std::fs::write(tmp.path().join("config.toml"), &config).unwrap();
     install_cached_dkim_keys(tmp.path());
 
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
     let resp = client.call_tool("hook_delete", serde_json::json!({"name": "hidden_hook"}));
     assert!(is_tool_error(&resp), "{resp}");
     let text = get_tool_text(&resp);
-    assert!(text.contains("not found"), "expected `not found`: {text}");
+    assert!(
+        text.contains("not found") || text.contains("ENOENT"),
+        "expected `not found` (or ENOENT): {text}"
+    );
     // Crucially, the foreign mailbox name must not appear in the error
     // shown to a non-owner caller.
     assert!(
@@ -4945,14 +5469,24 @@ fn mcp_hook_delete_unowned_hook_returns_not_found_not_unauthorized() {
     );
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 /// `hook_list` with no hooks configured returns `[]`. Exercises the
-/// new MCP `hook_list` tool's empty-output shape end-to-end.
+/// new MCP `hook_list` tool's empty-output shape end-to-end through
+/// the new `HOOK-LIST` UDS verb.
 #[test]
 fn mcp_hook_list_empty_returns_empty_array() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
 
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
@@ -4962,6 +5496,7 @@ fn mcp_hook_list_empty_returns_empty_array() {
     assert_eq!(text, "[]", "{text}");
 
     client.shutdown();
+    stop_serve(daemon);
 }
 
 // ---------------------------------------------------------------------

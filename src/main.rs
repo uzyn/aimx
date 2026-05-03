@@ -12,6 +12,7 @@ mod doctor;
 mod frontmatter;
 mod hook;
 mod hook_handler;
+mod hook_list_handler;
 mod hooks;
 mod ingest;
 mod logging;

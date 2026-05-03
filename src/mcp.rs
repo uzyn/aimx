@@ -1,7 +1,7 @@
 use crate::cli::SendArgs;
+#[cfg(test)]
 use crate::config::Config;
 use crate::frontmatter::InboundFrontmatter;
-use crate::mailbox;
 use crate::send;
 use crate::send_protocol::{
     self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxLifecycleRequest, MarkRequest,
@@ -17,14 +17,18 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct AimxMcpServer {
-    /// CLI `--data-dir` / `AIMX_DATA_DIR` override. When `Some`, it
-    /// supersedes `config.data_dir` for all storage operations; when
-    /// `None`, the value from `/etc/aimx/config.toml` is used.
+    /// CLI `--data-dir` / `AIMX_DATA_DIR` override. Read by the
+    /// test-only `load_config` helper; production tools route through
+    /// the daemon UDS and never read `config.toml` directly.
+    #[allow(dead_code)]
     data_dir_override: Option<PathBuf>,
     /// Effective uid of the process running `aimx mcp`. Captured at
-    /// `new()` and passed into `auth::authorize` for every tool call.
-    /// Agents inherit the operator's uid via the launching shell, so
-    /// this is the agent's authorization principal.
+    /// `new()` and read by the test-only `authorize_mailbox` helper.
+    /// Production tools delegate authorization to the daemon (which
+    /// resolves the caller via SO_PEERCRED and runs the central
+    /// `authorize()` predicate) so this field is never read in shipped
+    /// builds.
+    #[allow(dead_code)]
     caller_uid: u32,
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -183,16 +187,15 @@ impl AimxMcpServer {
         }
     }
 
-    fn load_config(&self) -> Result<Config, String> {
-        Config::load_resolved_with_data_dir(self.data_dir_override.as_deref())
-            .map(|(cfg, _warnings)| cfg)
-            .map_err(|e| format!("Failed to load config: {e}"))
-    }
-
     /// Return the auth predicate's verdict for `action` against the
     /// named mailbox. Mirrors the daemon-side helper so the auth gate
     /// runs the same way through CLI, daemon UDS, and MCP. The MCP
     /// surface returns errors as `String` per `rmcp` conventions.
+    /// Now test-only: production tools delegate authz to the daemon
+    /// over UDS (the daemon owns the central `authorize()` predicate
+    /// and re-runs it on every wire request, so the MCP-side
+    /// pre-flight is redundant).
+    #[cfg(test)]
     fn authorize_mailbox(
         &self,
         action: crate::auth::Action,
@@ -271,24 +274,17 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailListParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
-
-        if !config.mailboxes.contains_key(&params.mailbox) {
-            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
-        }
-
-        // Point operations on mailboxes the caller doesn't own return
-        // the canonical "not authorized" error. This is distinct from
-        // `mailbox_list`, which silently filters — point ops surface
-        // an explicit failure so the agent doesn't loop on an empty
-        // list it cannot interpret.
-        self.authorize_mailbox(
-            crate::auth::Action::MailboxRead(params.mailbox.clone()),
-            &config,
-        )?;
+        // The daemon's `MAILBOX-LIST` is filtered to the caller's uid
+        // via SO_PEERCRED, so a missing row collapses "no such mailbox"
+        // and "you don't own that mailbox" into the same opaque error
+        // (NFR2 opacity contract). This avoids the previous
+        // `self.load_config()` path which fails with EACCES on a
+        // production-perm `0640 root:root` config from a non-root MCP
+        // process.
+        let row = lookup_mailbox_row(&params.mailbox)?;
 
         let folder = resolve_folder(params.folder.as_deref())?;
-        let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
+        let mailbox_dir = folder_path_from_row(&row, folder);
 
         let limit = clamp_limit(params.limit);
         let offset = params.offset.unwrap_or(0) as usize;
@@ -301,23 +297,15 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailReadParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
         validate_email_id(&params.id)?;
-
-        if !config.mailboxes.contains_key(&params.mailbox) {
-            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
-        }
-        self.authorize_mailbox(
-            crate::auth::Action::MailboxRead(params.mailbox.clone()),
-            &config,
-        )?;
+        let row = lookup_mailbox_row(&params.mailbox)?;
 
         let folder = resolve_folder(params.folder.as_deref())?;
-        let mailbox_dir = folder_dir(&config, &params.mailbox, folder);
-        // Read paths audit — `email_read` goes through
-        // the strict resolver so a planted symlink or escape path
-        // cannot exfiltrate another mailbox's mail via `email_read`,
-        // not just via the MARK verbs.
+        let mailbox_dir = folder_path_from_row(&row, folder);
+        // Read paths audit — `email_read` goes through the strict
+        // resolver so a planted symlink or escape path cannot
+        // exfiltrate another mailbox's mail via `email_read`, not just
+        // via the MARK verbs.
         let filepath = resolve_email_path_strict(&mailbox_dir, &params.id).ok_or_else(|| {
             format!(
                 "Email '{}' not found in mailbox '{}'.",
@@ -338,15 +326,11 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
-        let config = self.load_config()?;
-        self.authorize_mailbox(
-            crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
-            &config,
-        )?;
-        // Route through the daemon; mailbox files are root-owned and
-        // the MCP process runs as the invoking user. The daemon
-        // re-checks via SO_PEERCRED, so MCP's pre-flight authz is
-        // defense in depth, not the security boundary.
+        // The daemon's MARK handler re-runs SO_PEERCRED-based authz;
+        // the MCP-side row lookup is the friendly pre-flight that
+        // surfaces "mailbox not found / not yours" as the opaque
+        // shared error rather than the daemon's wire reason.
+        let _row = lookup_mailbox_row(&params.mailbox)?;
         submit_mark_via_daemon(&params.mailbox, &params.id, true)?;
         Ok(format!("Email '{}' marked as read.", params.id))
     }
@@ -361,11 +345,7 @@ impl AimxMcpServer {
         Parameters(params): Parameters<EmailMarkParams>,
     ) -> Result<String, String> {
         validate_email_id(&params.id)?;
-        let config = self.load_config()?;
-        self.authorize_mailbox(
-            crate::auth::Action::MarkReadWrite(params.mailbox.clone()),
-            &config,
-        )?;
+        let _row = lookup_mailbox_row(&params.mailbox)?;
         submit_mark_via_daemon(&params.mailbox, &params.id, false)?;
         Ok(format!("Email '{}' marked as unread.", params.id))
     }
@@ -378,17 +358,17 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailSendParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
-
-        if !config.mailboxes.contains_key(&params.from_mailbox) {
-            return Err(format!("Mailbox '{}' does not exist.", params.from_mailbox));
-        }
-        self.authorize_mailbox(
-            crate::auth::Action::MailboxSendAs(params.from_mailbox.clone()),
-            &config,
-        )?;
-
-        let from_address = &config.mailboxes[&params.from_mailbox].address;
+        // The daemon's MAILBOX-LIST row carries the registered address
+        // verbatim. We derive the from-address (and only secondarily
+        // the domain) from it without reading root-owned
+        // `/etc/aimx/config.toml`. The daemon-side SEND handler
+        // re-runs SO_PEERCRED authz; the MCP pre-flight is operator
+        // UX, not the security boundary.
+        let row = lookup_mailbox_row(&params.from_mailbox)?;
+        let from_address = row
+            .address
+            .as_deref()
+            .ok_or_else(|| format!("Mailbox '{}' is not registered.", params.from_mailbox))?;
         if from_address.starts_with('*') {
             return Err(format!(
                 "Cannot send from '{}': catchall mailbox has no valid sender address. Use a named mailbox.",
@@ -409,24 +389,14 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailReplyParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
         validate_email_id(&params.id)?;
+        let row = lookup_mailbox_row(&params.mailbox)?;
 
-        if !config.mailboxes.contains_key(&params.mailbox) {
-            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
-        }
-        // `email_reply` reads the parent and submits a new outbound
-        // message — both surfaces are scoped to caller-owned mailboxes.
-        self.authorize_mailbox(
-            crate::auth::Action::MailboxSendAs(params.mailbox.clone()),
-            &config,
-        )?;
-
-        let mailbox_dir = config.inbox_dir(&params.mailbox);
-        // `email_reply` reads the parent message to
-        // inherit threading headers; route through the strict resolver
-        // so a symlink cannot leak another mailbox's message into a
-        // reply composition.
+        let mailbox_dir = folder_path_from_row(&row, Folder::Inbox);
+        // `email_reply` reads the parent message to inherit threading
+        // headers; route through the strict resolver so a symlink
+        // cannot leak another mailbox's message into a reply
+        // composition.
         let filepath = resolve_email_path_strict(&mailbox_dir, &params.id).ok_or_else(|| {
             format!(
                 "Email '{}' not found in mailbox '{}'.",
@@ -440,7 +410,10 @@ impl AimxMcpServer {
         let meta = parse_frontmatter(&content)
             .ok_or_else(|| "Failed to parse email frontmatter.".to_string())?;
 
-        let from_address = &config.mailboxes[&params.mailbox].address;
+        let from_address = row
+            .address
+            .as_deref()
+            .ok_or_else(|| format!("Mailbox '{}' is not registered.", params.mailbox))?;
         if from_address.starts_with('*') {
             return Err(format!(
                 "Cannot reply from '{}': catchall mailbox has no valid sender address. Use a named mailbox.",
@@ -465,7 +438,7 @@ impl AimxMcpServer {
         };
 
         let args = SendArgs {
-            from: from_address.clone(),
+            from: from_address.to_string(),
             to: reply_to_email.to_string(),
             subject,
             body: params.body,
@@ -489,17 +462,14 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<HookCreateParams>,
     ) -> Result<String, String> {
-        let config = self.load_config()?;
-        if !config.mailboxes.contains_key(&params.mailbox) {
-            return Err(format!("Mailbox '{}' does not exist.", params.mailbox));
-        }
-        // Authorize against the central predicate before any wire I/O so
-        // a non-owner sees the canonical "not authorized" error rather
-        // than the daemon's opaque rejection text.
-        self.authorize_mailbox(
-            crate::auth::Action::HookCrud(params.mailbox.clone()),
-            &config,
-        )?;
+        // Pre-flight: verify the mailbox is visible to the caller via
+        // the daemon's MAILBOX-LIST. The listing is SO_PEERCRED-
+        // filtered so a missing row collapses "no such mailbox" and
+        // "exists but you don't own it" into one opaque error (NFR2).
+        // The daemon's HOOK-CREATE handler runs the central
+        // `authorize()` predicate again — this pre-flight only exists
+        // for a friendly error vs. relying on the daemon's wire shape.
+        let _row = lookup_mailbox_row(&params.mailbox)?;
 
         if params.cmd.is_empty() {
             return Err("cmd must not be empty".to_string());
@@ -538,58 +508,29 @@ impl AimxMcpServer {
                        every hook on every mailbox you own."
     )]
     fn hook_list(&self, Parameters(params): Parameters<HookListParams>) -> Result<String, String> {
-        let config = self.load_config()?;
+        // Route through the daemon's HOOK-LIST so the non-root MCP
+        // process never reads root-owned `/etc/aimx/config.toml`. The
+        // daemon's listing is SO_PEERCRED-filtered to the caller's uid
+        // (root sees every hook on every mailbox; non-root sees only
+        // hooks on mailboxes it owns), matching the previous behavior
+        // exactly.
+        let json = submit_hook_list_via_daemon()?;
 
-        if let Some(name) = &params.mailbox {
-            if !config.mailboxes.contains_key(name) {
-                return Err(format!("Mailbox '{name}' does not exist."));
-            }
-            self.authorize_mailbox(crate::auth::Action::HookCrud(name.clone()), &config)?;
-        }
-
-        let mut rows: Vec<serde_json::Value> = Vec::new();
-        for (mailbox_name, mb) in &config.mailboxes {
-            // Filter by --mailbox, or by caller ownership for non-root.
-            if let Some(f) = &params.mailbox
-                && f != mailbox_name
-            {
-                continue;
-            }
-            if self.caller_uid != 0 && !mailbox::caller_owns(&config, mailbox_name, self.caller_uid)
-            {
-                continue;
-            }
-            for hook in &mb.hooks {
-                rows.push(serde_json::json!({
-                    "name": crate::hook::effective_hook_name(hook),
-                    "mailbox": mailbox_name,
-                    "event": hook.event.as_str(),
-                    "cmd": hook.cmd,
-                    "fire_on_untrusted": hook.fire_on_untrusted,
-                    "timeout_secs": hook.timeout_secs,
-                }));
-            }
-        }
-        rows.sort_by(|a, b| {
-            a["mailbox"]
-                .as_str()
-                .unwrap_or("")
-                .cmp(b["mailbox"].as_str().unwrap_or(""))
-                .then_with(|| {
-                    a["event"]
-                        .as_str()
-                        .unwrap_or("")
-                        .cmp(b["event"].as_str().unwrap_or(""))
-                })
-                .then_with(|| {
-                    a["name"]
-                        .as_str()
-                        .unwrap_or("")
-                        .cmp(b["name"].as_str().unwrap_or(""))
-                })
-        });
-
-        serde_json::to_string(&rows).map_err(|e| format!("Failed to serialize: {e}"))
+        // The optional `mailbox` filter narrows the daemon's response
+        // to a single mailbox; the daemon-side filter already removed
+        // unowned mailboxes, so this is a pure post-filter for UX.
+        // When `mailbox` references a mailbox the caller doesn't own
+        // (or that doesn't exist), `lookup_mailbox_row` surfaces the
+        // canonical opaque error rather than silently returning `[]`.
+        let Some(name) = params.mailbox.as_deref() else {
+            return Ok(json);
+        };
+        let _row = lookup_mailbox_row(name)?;
+        let rows: Vec<crate::hook_list_handler::HookListRow> =
+            serde_json::from_str(&json).map_err(|e| format!("Failed to parse hook list: {e}"))?;
+        let filtered: Vec<crate::hook_list_handler::HookListRow> =
+            rows.into_iter().filter(|r| r.mailbox == name).collect();
+        serde_json::to_string(&filtered).map_err(|e| format!("Failed to serialize: {e}"))
     }
 
     #[tool(
@@ -601,36 +542,15 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<HookDeleteParams>,
     ) -> Result<String, String> {
-        // Resolve the hook to its mailbox so the auth predicate runs
-        // against the right principal. Hidden mailboxes (owned by other
-        // users) surface as "hook not found" — we deliberately do not
-        // distinguish "exists but you don't own it" from "doesn't exist"
-        // to avoid leaking ownership of foreign mailboxes. The UDS wire
-        // already returns canonical opaque text on auth failures; this
-        // collapse keeps the MCP surface from leaking more than the wire.
-        let config = self.load_config()?;
-        let mailbox_name = config
-            .mailboxes
-            .iter()
-            .find_map(|(mb_name, mb)| {
-                mb.hooks
-                    .iter()
-                    .find(|h| crate::hook::effective_hook_name(h) == params.name)
-                    .map(|_| mb_name.clone())
-            })
-            .ok_or_else(|| format!("Hook '{}' not found", params.name))?;
-
-        // If authorization fails (caller is not the mailbox's owner and
-        // is not root), surface as `not found` rather than leaking the
-        // foreign mailbox's name through a "caller does not own
-        // mailbox 'X'" error.
-        if self
-            .authorize_mailbox(crate::auth::Action::HookCrud(mailbox_name.clone()), &config)
-            .is_err()
-        {
-            return Err(format!("Hook '{}' not found", params.name));
-        }
-
+        // Thin pass-through to HOOK-DELETE. The daemon's handler
+        // resolves the hook by effective name, runs the central
+        // `authorize()` predicate, and returns the canonical opaque
+        // not-found error for both unowned and nonexistent hooks
+        // (NFR2 opacity contract). The previous MCP-side pre-flight
+        // duplicated that work AND introduced the EACCES bug class on
+        // production-perm `0640 root:root` configs by reading
+        // `/etc/aimx/config.toml` from a non-root MCP process. Trust
+        // the daemon.
         match submit_hook_delete_via_daemon(&params.name) {
             Ok(()) => Ok(format!("Hook '{}' deleted.", params.name)),
             Err(HookCrudFallback::SocketMissing) => {
@@ -1209,6 +1129,26 @@ fn lookup_mailbox_address(name: &str) -> Option<String> {
         .and_then(|r| r.address)
 }
 
+/// Fetch the daemon's `MAILBOX-LIST` and return the row matching
+/// `name`. Used by every email tool to resolve `inbox_path` /
+/// `sent_path` / `address` without the non-root MCP process needing
+/// read access to root-owned `/etc/aimx/config.toml`.
+///
+/// Returns the daemon's verbatim error string on a wire-level failure
+/// (socket missing, malformed response, daemon-side ERR), and a
+/// canonical "not found" error when the listing comes back clean but
+/// no row matches — the listing is already SO_PEERCRED-filtered to
+/// the caller's uid, so a missing row is opaque between "doesn't
+/// exist" and "exists but you don't own it" (NFR2 opacity).
+fn lookup_mailbox_row(name: &str) -> Result<crate::mailbox_list_handler::MailboxListRow, String> {
+    let json = submit_mailbox_list_via_daemon()?;
+    let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
+        serde_json::from_str(&json).map_err(|e| format!("Failed to parse mailbox list: {e}"))?;
+    rows.into_iter()
+        .find(|r| r.name == name)
+        .ok_or_else(|| format!("Mailbox '{name}' does not exist."))
+}
+
 fn submit_mailbox_list_via_daemon() -> Result<String, String> {
     submit_mailbox_list_raw().map_err(|e| match e {
         MailboxLifecycleFallback::SocketMissing => {
@@ -1216,6 +1156,72 @@ fn submit_mailbox_list_via_daemon() -> Result<String, String> {
         }
         MailboxLifecycleFallback::Daemon(msg) => msg,
     })
+}
+
+/// Submit an `AIMX/1 HOOK-LIST` and return the JSON body verbatim.
+/// Mirrors [`submit_mailbox_list_via_daemon`] line-for-line so the
+/// non-root MCP process answers `hook_list` without reading
+/// root-owned `/etc/aimx/config.toml`.
+fn submit_hook_list_via_daemon() -> Result<String, String> {
+    submit_hook_list_raw().map_err(|e| match e {
+        MailboxLifecycleFallback::SocketMissing => {
+            "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
+        }
+        MailboxLifecycleFallback::Daemon(msg) => msg,
+    })
+}
+
+fn submit_hook_list_raw() -> Result<String, MailboxLifecycleFallback> {
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(submit_hook_list_request(&socket)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_hook_list_request(&socket))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            MailboxLifecycleFallback::SocketMissing
+        } else {
+            MailboxLifecycleFallback::Daemon(format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            ))
+        }
+    })?;
+
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
+}
+
+/// Open the UDS, ship `AIMX/1 HOOK-LIST`, and return the raw daemon
+/// response bytes. Decoding shares the `MAILBOX-LIST` decoder because
+/// the wire shape (status line + Content-Length + JSON body) is
+/// identical — only the schema of the JSON differs.
+async fn submit_hook_list_request(
+    socket_path: &std::path::Path,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_hook_list_request(&mut writer).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
 }
 
 /// CLI-friendly variant of [`submit_mailbox_list_via_daemon`] that
@@ -1644,10 +1650,25 @@ pub fn resolve_folder(raw: Option<&str>) -> Result<Folder, String> {
     }
 }
 
+#[cfg(test)]
 fn folder_dir(config: &Config, mailbox: &str, folder: Folder) -> PathBuf {
     match folder {
         Folder::Inbox => config.inbox_dir(mailbox),
         Folder::Sent => config.sent_dir(mailbox),
+    }
+}
+
+/// Pick the folder-specific path a `MAILBOX-LIST` row carries. The
+/// daemon already populates `inbox_path` / `sent_path` per row, so MCP
+/// tools rendering email pages no longer need to read root-owned
+/// `/etc/aimx/config.toml` to compute the path themselves.
+fn folder_path_from_row(
+    row: &crate::mailbox_list_handler::MailboxListRow,
+    folder: Folder,
+) -> PathBuf {
+    match folder {
+        Folder::Inbox => PathBuf::from(&row.inbox_path),
+        Folder::Sent => PathBuf::from(&row.sent_path),
     }
 }
 
