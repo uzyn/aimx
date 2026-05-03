@@ -589,6 +589,39 @@ struct McpClient {
     stdin: std::process::ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
     id: i64,
+    /// Background-drained stderr from the MCP subprocess. The drain
+    /// thread reads to EOF into a shared buffer so a child that prints
+    /// a startup error before dying still has its diagnostic captured.
+    /// Surfaced by `send_request` whenever a JSON-RPC read returns EOF
+    /// (the original failure mode silently ate the child's stderr).
+    stderr_buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr_drain: Option<std::thread::JoinHandle<()>>,
+}
+
+#[allow(dead_code)]
+fn spawn_stderr_drain(
+    mut stderr: std::process::ChildStderr,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let buf_w = std::sync::Arc::clone(&buf);
+    let handle = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut g) = buf_w.lock() {
+                        g.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
+    (buf, handle)
 }
 
 impl McpClient {
@@ -614,13 +647,17 @@ impl McpClient {
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let reader = BufReader::new(stdout);
+        let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
 
         Self {
             child,
             stdin,
             reader,
             id: 0,
+            stderr_buf,
+            stderr_drain: Some(stderr_drain),
         }
     }
 
@@ -638,8 +675,70 @@ impl McpClient {
         self.stdin.flush().unwrap();
 
         let mut line = String::new();
-        self.reader.read_line(&mut line).unwrap();
-        serde_json::from_str(line.trim()).unwrap()
+        let n = self.reader.read_line(&mut line).unwrap_or_else(|e| {
+            panic!(
+                "MCP read failed for method {method:?}: {e}{}",
+                self.format_dead_child_diag()
+            )
+        });
+        if n == 0 {
+            // EOF — the MCP subprocess closed stdout. Almost always
+            // means it died at startup or while parsing the request.
+            // Surface the captured stderr + child status so future CI
+            // failures land with a real diagnostic instead of the
+            // opaque `Error("EOF while parsing a value", ...)` panic
+            // that this helper used to produce.
+            panic!(
+                "MCP subprocess closed stdout (EOF) before responding to {method:?}{}",
+                self.format_dead_child_diag()
+            );
+        }
+        serde_json::from_str(line.trim()).unwrap_or_else(|e| {
+            panic!(
+                "MCP returned non-JSON for {method:?}: {e}; raw line {:?}{}",
+                line,
+                self.format_dead_child_diag()
+            )
+        })
+    }
+
+    /// Wait briefly for the MCP child to exit (so its stderr drain
+    /// thread reaches EOF), then format a diagnostic block carrying the
+    /// captured stderr + exit status. Used by `send_request` when the
+    /// child dies mid-handshake.
+    fn format_dead_child_diag(&mut self) -> String {
+        // Give the child up to 1s to exit so the drain thread captures
+        // any final stderr lines. We don't kill it — many failure
+        // modes already exited; for the rare hung case the test
+        // harness's outer timeout still reaps.
+        let started = std::time::Instant::now();
+        let mut status = None;
+        while started.elapsed() < std::time::Duration::from_secs(1) {
+            match self.child.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        if let Some(h) = self.stderr_drain.take() {
+            let _ = h.join();
+        }
+        let stderr = self
+            .stderr_buf
+            .lock()
+            .map(|g| String::from_utf8_lossy(&g).into_owned())
+            .unwrap_or_default();
+        let status_str = match status {
+            Some(s) => format!("{s}"),
+            None => "still running".to_string(),
+        };
+        format!(
+            "\n  child status: {status_str}\n  child stderr:\n----\n{}\n----",
+            stderr.trim_end()
+        )
     }
 
     fn send_notification(&mut self, method: &str, params: serde_json::Value) {
@@ -689,6 +788,9 @@ impl McpClient {
     fn shutdown(mut self) {
         drop(self.stdin);
         let _ = self.child.wait();
+        if let Some(h) = self.stderr_drain.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -787,11 +889,15 @@ fn mcp_mailbox_list_returns_caller_owned() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -862,11 +968,15 @@ fn mcp_mailbox_list_without_daemon_reports_missing_socket() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -1167,11 +1277,15 @@ fn mcp_email_mark_read_unread() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -1241,11 +1355,15 @@ fn mcp_email_mark_without_daemon_reports_missing_socket() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -2949,11 +3067,15 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
                 .expect("Failed to spawn aimx mcp");
             let stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
             let mut client = McpClient {
                 child,
                 stdin,
                 reader: BufReader::new(stdout),
                 id: 0,
+                stderr_buf,
+                stderr_drain: Some(stderr_drain),
             };
             client.initialize();
             let resp = client.call_tool(
@@ -3452,7 +3574,7 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
         "UDS socket never appeared after `aimx serve` start"
     );
 
-    // CREATE — non-root, no sudo, no AIMX_TEST_SKIP_ROOT_CHECK.
+    // CREATE — non-root, no sudo, no AIMX_TEST_SKIP_AUTHZ_CHECK.
     // Pass `--owner <runner>` so `prompt_mailbox_owner` is skipped
     // entirely (it would otherwise loop 5 times under non-TTY stdin
     // because the local part `task-mb` does not resolve via getpwnam).
@@ -4438,11 +4560,15 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
                 .expect("Failed to spawn aimx mcp");
             let stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
             let mut client = McpClient {
                 child,
                 stdin,
                 reader: BufReader::new(stdout),
                 id: 0,
+                stderr_buf,
+                stderr_drain: Some(stderr_drain),
             };
             client.initialize();
             let resp = client.call_tool(
@@ -4782,7 +4908,7 @@ fn aimx_cmd_isolated(tmp: &Path) -> Command {
     // non-root, so tests set this test-only escape hatch to exercise
     // the direct-write + SIGHUP path on behalf of the fake-root
     // operator. Production systemd units never pass this env var.
-    cmd.env("AIMX_TEST_SKIP_ROOT_CHECK", "1");
+    cmd.env("AIMX_TEST_SKIP_AUTHZ_CHECK", "1");
     cmd
 }
 
@@ -5114,7 +5240,7 @@ fn hooks_raw_cmd_sighup_hot_swaps_config() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .env("AIMX_TEST_SKIP_AUTHZ_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -5176,7 +5302,7 @@ fn hooks_create_anonymous_prints_derived_name_via_daemon() {
         .unwrap()
         .env("AIMX_CONFIG_DIR", tmp.path())
         .env("AIMX_RUNTIME_DIR", &runtime)
-        .env("AIMX_TEST_SKIP_ROOT_CHECK", "1")
+        .env("AIMX_TEST_SKIP_AUTHZ_CHECK", "1")
         .arg("--data-dir")
         .arg(tmp.path())
         .args([
@@ -5820,4 +5946,503 @@ fn uds_version_verb_returns_running_daemon_metadata() {
     );
 
     stop_serve(child);
+}
+
+// ---------------------------------------------------------------------------
+// End-to-end production-perm smoke tests.
+//
+// Every MCP tool must work against a `chmod 0600 root:root` config +
+// running `aimx serve`. The bug class these guard against: the
+// non-root MCP process trying (and failing with EACCES) to read the
+// root-owned `/etc/aimx/config.toml`. The structural guard (the
+// `load_config` deletion) prevents the most-direct reintroduction;
+// these run-time tests catch any structurally-different reintroduction
+// (e.g. a future tool that grabs a path via a different code path).
+//
+// The tests are gated on:
+//   - `cfg(unix)` (uid model only meaningful on Unix)
+//   - `#[ignore]` (only run when the test binary is invoked with
+//     `--ignored`)
+//   - `AIMX_INTEGRATION_SUDO=1` env var (defense-in-depth so a casual
+//     `cargo test -- --ignored` skips them)
+//   - `geteuid() == 0` (the daemon must be started by root to chown the
+//     config to `root:root` and bind `/run/aimx/`).
+//
+// They reuse the `aimx-test-alice` system user provisioned by the
+// `mailbox-dir-perms-isolation` CI lane and spawn `aimx mcp` under
+// `runuser -u aimx-test-alice` so the MCP process really is non-root.
+// One full-cycle test per category (mailbox / email / hook) collectively
+// exercises all 12 MCP tools.
+// ---------------------------------------------------------------------------
+
+#[cfg(unix)]
+const PRODPERM_USER: &str = "aimx-test-alice";
+
+#[cfg(unix)]
+fn prodperm_skip() -> bool {
+    if std::env::var_os("AIMX_INTEGRATION_SUDO").is_none() {
+        eprintln!("skipping: production-perm smoke requires AIMX_INTEGRATION_SUDO=1 + sudo");
+        return true;
+    }
+    if unsafe { libc::geteuid() } != 0 {
+        eprintln!("skipping: production-perm smoke must run as root (sudo lane)");
+        return true;
+    }
+    let id = StdCommand::new("id")
+        .arg(PRODPERM_USER)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !id {
+        eprintln!(
+            "skipping: production-perm smoke requires {PRODPERM_USER} \
+             system user (CI lane provisions this)"
+        );
+        return true;
+    }
+    false
+}
+
+#[cfg(unix)]
+fn prodperm_uid_of(name: &str) -> u32 {
+    let output = StdCommand::new("id")
+        .arg("-u")
+        .arg(name)
+        .output()
+        .expect("failed to run `id -u`");
+    assert!(output.status.success(), "id -u {name} failed");
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<u32>()
+        .expect("id -u returned non-numeric")
+}
+
+/// Build a tempdir with a production-shape layout: `config.toml`
+/// chowned to `root:root` with mode `0600`, mailbox storage owned by
+/// `aimx-test-alice`. Returns the tmpdir guard so callers can keep it
+/// alive for the test duration.
+#[cfg(unix)]
+fn prodperm_setup_env(tmp: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let alice_uid = prodperm_uid_of(PRODPERM_USER);
+
+    // Top-level dirs must be traversable by alice so `aimx mcp` (run
+    // under her uid) can reach config + storage paths it has rights to
+    // (the config file is intentionally unreadable; the directory
+    // itself must allow `x`).
+    std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let config_content = format!(
+        "domain = \"agent.example.com\"\ndata_dir = \"{}\"\n\n[mailboxes.catchall]\naddress = \"*@agent.example.com\"\nowner = \"aimx-catchall\"\n\n[mailboxes.alice]\naddress = \"alice@agent.example.com\"\nowner = \"{PRODPERM_USER}\"\n",
+        tmp.display()
+    );
+    let config_path = tmp.join("config.toml");
+    std::fs::write(&config_path, config_content).unwrap();
+    // Mirror the production install: `0600 root:root`.
+    std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let cstr = std::ffi::CString::new(config_path.as_os_str().as_encoded_bytes()).unwrap();
+    let chown_rc = unsafe { libc::chown(cstr.as_ptr(), 0, 0) };
+    assert_eq!(chown_rc, 0, "chown root:root config.toml failed");
+
+    // The catchall system user must exist so the config validator
+    // doesn't surface a hard-fail on the orphan owner.
+    let _ = StdCommand::new("useradd")
+        .arg("--system")
+        .arg("--no-create-home")
+        .arg("--shell")
+        .arg("/usr/sbin/nologin")
+        .arg("aimx-catchall")
+        .status();
+
+    for sub in [
+        "inbox/catchall",
+        "sent/catchall",
+        "inbox/alice",
+        "sent/alice",
+    ] {
+        let dir = tmp.join(sub);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cstr = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).unwrap();
+        // alice owns `inbox/alice/` + `sent/alice/`; the catchall dirs
+        // are owned by `aimx-catchall` to mirror production.
+        let owner_uid = if sub.contains("alice") {
+            alice_uid
+        } else {
+            prodperm_uid_of("aimx-catchall")
+        };
+        unsafe {
+            libc::chown(cstr.as_ptr(), owner_uid, owner_uid);
+        }
+    }
+
+    install_cached_dkim_keys(tmp);
+    // DKIM private.key is `0600`; the daemon (root) reads it directly,
+    // so leaving it owned by the test runner is fine. Storage dirs
+    // already covered above.
+    let runtime = tmp.join("run");
+    std::fs::create_dir_all(&runtime).unwrap();
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Copy the `aimx` binary into the tempdir so `aimx-test-alice` can
+    // exec it. The binary's canonical location is somewhere under
+    // `target/debug/`, which on most CI/dev hosts sits beneath a home
+    // directory whose mode is `0o750` — the alice uid (not in the
+    // owner's group) cannot traverse it, and `runuser -u alice -- /path`
+    // exits with `Permission denied` before the MCP child even starts.
+    // The tempdir itself is `0o755` and lives under `/tmp` (always
+    // world-traversable), so the copy is reachable from any uid.
+    prodperm_copy_aimx_binary(tmp);
+}
+
+/// Path inside the prodperm tempdir where we stash a world-traversable
+/// copy of the aimx binary. Used by `prodperm_spawn_mcp` to spawn `aimx
+/// mcp` as the alice uid without depending on the host's `$HOME` mode.
+#[cfg(unix)]
+fn prodperm_aimx_binary(tmp: &Path) -> std::path::PathBuf {
+    tmp.join("aimx")
+}
+
+#[cfg(unix)]
+fn prodperm_copy_aimx_binary(tmp: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let src = aimx_binary_path();
+    let dst = prodperm_aimx_binary(tmp);
+    std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+        panic!(
+            "failed to copy aimx binary {} -> {}: {e}",
+            src.display(),
+            dst.display()
+        )
+    });
+    // `0o755` so any uid (including `aimx-test-alice`) can exec it.
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Spawn `aimx mcp` under `runuser -u aimx-test-alice` so the resulting
+/// process really is non-root and any client-side `config.toml` read
+/// will fail with EACCES (the bug class we are guarding against).
+///
+/// Uses the tempdir-local copy of the `aimx` binary planted by
+/// `prodperm_setup_env` (`/tmp/.../aimx`) rather than the original under
+/// `target/debug/`, which on most CI/dev hosts sits beneath a `0o750`
+/// `$HOME` and can't be exec'd by the alice uid. The runtime dir +
+/// config dir env vars survive the `runuser` env reset (verified on
+/// Ubuntu's `util-linux` `runuser`: only `HOME`/`USER`/`MAIL`/`LOGNAME`
+/// are rewritten), so the MCP child finds the daemon socket via
+/// `AIMX_RUNTIME_DIR` exactly the same way the test's daemon binds it.
+#[cfg(unix)]
+fn prodperm_spawn_mcp(tmp: &Path) -> McpClient {
+    let runtime = tmp.join("run");
+    let bin = prodperm_aimx_binary(tmp);
+    let mut child = StdCommand::new("runuser")
+        .arg("-u")
+        .arg(PRODPERM_USER)
+        .arg("--")
+        .arg(&bin)
+        .env("AIMX_CONFIG_DIR", tmp)
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp)
+        .arg("mcp")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn aimx mcp under runuser");
+
+    let stdin = child.stdin.take().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let reader = BufReader::new(stdout);
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
+
+    McpClient {
+        child,
+        stdin,
+        reader,
+        id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
+    }
+}
+
+#[cfg(unix)]
+fn prodperm_assert_no_eacces(text: &str, tool: &str) {
+    assert!(
+        !text.contains("Permission denied"),
+        "{tool}: must not surface EACCES on production-perm config; got: {text}"
+    );
+    assert!(
+        !text.contains("os error 13"),
+        "{tool}: must not surface EACCES on production-perm config; got: {text}"
+    );
+}
+
+/// Write a simple email file as `aimx-test-alice` so the inbox carries
+/// content the MCP tools can read / mark / reply to. Done from root via
+/// `runuser` so the on-disk uid matches `inbox/alice/`'s owner.
+#[cfg(unix)]
+fn prodperm_seed_email(tmp: &Path, id: &str) {
+    // Match the production frontmatter writer: optional fields with no
+    // value (`in_reply_to`, `references`) are omitted entirely rather
+    // than written as empty strings, so deserializers see `None` rather
+    // than `Some("")`.
+    let body = format!(
+        "+++\nid = \"{id}\"\nmessage_id = \"<{id}@test.com>\"\nfrom = \"sender@example.com\"\nto = \"alice@agent.example.com\"\nsubject = \"Hello {id}\"\ndate = \"2025-06-01T12:00:00Z\"\nattachments = []\nmailbox = \"alice\"\nread = false\ndkim = \"none\"\nspf = \"none\"\n+++\n\nbody {id}\n"
+    );
+    let path = tmp.join("inbox").join("alice").join(format!("{id}.md"));
+    std::fs::write(&path, body).unwrap();
+    let cstr = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
+    let alice_uid = prodperm_uid_of(PRODPERM_USER);
+    unsafe {
+        libc::chown(cstr.as_ptr(), alice_uid, alice_uid);
+    }
+}
+
+/// `mailbox_list_full_cycle` — covers `mailbox_list`, `mailbox_create`,
+/// and `mailbox_delete` against a `chmod 0600 root:root` config.
+#[cfg(unix)]
+#[test]
+#[ignore = "production-perm smoke; requires root + AIMX_INTEGRATION_SUDO=1"]
+fn mailbox_list_full_cycle_against_root_owned_config() {
+    if prodperm_skip() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    prodperm_setup_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    let mut client = prodperm_spawn_mcp(tmp.path());
+    client.initialize();
+
+    // mailbox_list
+    let resp = client.call_tool("mailbox_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "mailbox_list");
+    assert!(
+        text.contains("alice"),
+        "mailbox_list should show alice's mailbox: {text}"
+    );
+
+    // mailbox_create — alice (uid bound by SO_PEERCRED) creates a
+    // new mailbox; the daemon must hot-swap the config.
+    let resp = client.call_tool("mailbox_create", serde_json::json!({"name": "alice-extra"}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "mailbox_create");
+    assert!(
+        text.contains("alice-extra") || text.contains("created"),
+        "mailbox_create should succeed: {text}"
+    );
+
+    // mailbox_delete — same caller deletes what they just created.
+    let resp = client.call_tool("mailbox_delete", serde_json::json!({"name": "alice-extra"}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "mailbox_delete");
+    assert!(
+        text.contains("alice-extra") || text.contains("deleted"),
+        "mailbox_delete should succeed: {text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// `email_list_full_cycle` — covers `email_list`, `email_read`,
+/// `email_mark_read`, `email_mark_unread`, `email_send`, `email_reply`
+/// against a `chmod 0600 root:root` config.
+#[cfg(unix)]
+#[test]
+#[ignore = "production-perm smoke; requires root + AIMX_INTEGRATION_SUDO=1"]
+fn email_list_full_cycle_against_root_owned_config() {
+    if prodperm_skip() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    prodperm_setup_env(tmp.path());
+    prodperm_seed_email(tmp.path(), "2025-06-01-001");
+
+    let port = find_free_port();
+    // The daemon must use the file-drop transport so `email_send` does
+    // not block on real MX delivery. `AIMX_TEST_MAIL_DROP` must point
+    // at a *file* path — `FileDropTransport::send` opens it with
+    // `OpenOptions::create(true).append(true)` and surfaces `Is a
+    // directory (os error 21)` if a directory is passed instead.
+    let mail_drop = tmp.path().join("outbound.log");
+    let daemon = start_serve_with_env(
+        tmp.path(),
+        port,
+        &[("AIMX_TEST_MAIL_DROP", mail_drop.to_str().unwrap())],
+    );
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    let mut client = prodperm_spawn_mcp(tmp.path());
+    client.initialize();
+
+    // email_list
+    let resp = client.call_tool("email_list", serde_json::json!({"mailbox": "alice"}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "email_list");
+    assert!(
+        text.contains("2025-06-01-001"),
+        "email_list should include the seeded id: {text}"
+    );
+
+    // email_read
+    let resp = client.call_tool(
+        "email_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "email_read");
+    assert!(
+        text.contains("body 2025-06-01-001"),
+        "email_read should return body: {text}"
+    );
+
+    // email_mark_read
+    let resp = client.call_tool(
+        "email_mark_read",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "email_mark_read");
+
+    // email_mark_unread
+    let resp = client.call_tool(
+        "email_mark_unread",
+        serde_json::json!({"mailbox": "alice", "id": "2025-06-01-001"}),
+    );
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "email_mark_unread");
+
+    // email_send — recipient is intentionally unrouteable; the
+    // file-drop transport short-circuits delivery so we are only
+    // testing that the MCP tool reaches the daemon and the daemon's
+    // sent-copy write succeeds without surfacing config EACCES.
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "rcpt@invalid.example.invalid",
+            "subject": "perm test",
+            "body": "x"
+        }),
+    );
+    let send_text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&send_text, "email_send");
+
+    // The daemon must have written a sent-copy `.md` under
+    // `sent/alice/`. Without this assertion a future regression where
+    // the sent-copy persistence silently no-ops would only be caught
+    // by the EACCES guard, which would not fire.
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_md_count = std::fs::read_dir(&sent_dir)
+        .expect("sent/alice/ must exist")
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s == "md")
+                .unwrap_or(false)
+        })
+        .count();
+    assert!(
+        sent_md_count >= 1,
+        "email_send should have written a sent-copy .md under {} (daemon response: {send_text}); found {sent_md_count}",
+        sent_dir.display()
+    );
+
+    // email_reply — replies to the seeded message.
+    let resp = client.call_tool(
+        "email_reply",
+        serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-01-001",
+            "body": "reply body"
+        }),
+    );
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "email_reply");
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// `hook_list_full_cycle` — covers `hook_list`, `hook_create`, and
+/// `hook_delete` against a `chmod 0600 root:root` config.
+#[cfg(unix)]
+#[test]
+#[ignore = "production-perm smoke; requires root + AIMX_INTEGRATION_SUDO=1"]
+fn hook_list_full_cycle_against_root_owned_config() {
+    if prodperm_skip() {
+        return;
+    }
+    let tmp = TempDir::new().unwrap();
+    prodperm_setup_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o666)).unwrap();
+
+    let mut client = prodperm_spawn_mcp(tmp.path());
+    client.initialize();
+
+    // hook_list (initially empty for alice)
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "hook_list");
+    assert_eq!(text, "[]", "hook_list initially empty: {text}");
+
+    // hook_create
+    let resp = client.call_tool(
+        "hook_create",
+        serde_json::json!({
+            "mailbox": "alice",
+            "event": "on_receive",
+            "cmd": ["/bin/true"],
+            "name": "prod_perm_hook"
+        }),
+    );
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "hook_create");
+
+    // Re-list to confirm it's there.
+    let resp = client.call_tool("hook_list", serde_json::json!({}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "hook_list");
+    assert!(
+        text.contains("prod_perm_hook"),
+        "hook_list should show the new hook: {text}"
+    );
+
+    // hook_delete
+    let resp = client.call_tool("hook_delete", serde_json::json!({"name": "prod_perm_hook"}));
+    let text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&text, "hook_delete");
+
+    client.shutdown();
+    stop_serve(daemon);
 }

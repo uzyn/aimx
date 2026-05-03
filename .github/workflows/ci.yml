@@ -73,6 +73,7 @@ jobs:
           cargo test --no-run --test mailbox_isolation
           cargo test --no-run --test uds_authz
           cargo test --no-run --test hooks_list_filter
+          cargo test --no-run --test integration
 
       - name: Run mailbox isolation test (under sudo)
         run: |
@@ -107,6 +108,21 @@ jobs:
           BIN=$(ls -t target/debug/deps/hooks_list_filter-* | grep -v '\.d$' | head -n 1)
           test -x "$BIN"
           sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored
+
+      - name: Run end-to-end production-perm MCP smoke (under sudo)
+        run: |
+          # Exercises every MCP tool against a `chmod 0600 root:root`
+          # config + running `aimx serve`, with the MCP process spawned
+          # under `runuser -u aimx-test-alice` so the bug class
+          # ("non-root MCP cannot read root-owned config") is in scope.
+          # Three tests in `tests/integration.rs` collectively cover all
+          # 12 MCP tools.
+          BIN=$(ls -t target/debug/deps/integration-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --ignored --test-threads=1 \
+            mailbox_list_full_cycle_against_root_owned_config \
+            email_list_full_cycle_against_root_owned_config \
+            hook_list_full_cycle_against_root_owned_config
 
       - name: Tear down test users
         if: always()

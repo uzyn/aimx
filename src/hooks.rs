@@ -155,15 +155,25 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
     // consistently rather than producing a misleading "daemon not
     // running" message.
     let euid = current_euid();
-    // `AIMX_TEST_SKIP_ROOT_CHECK=1` is the test-harness opt-in documented
+    // `AIMX_TEST_SKIP_AUTHZ_CHECK=1` is the test-harness opt-in documented
     // in `CLAUDE.md`'s "Test environment escape hatches" section. It
-    // bypasses the auth predicate so the post-gate code path stays
-    // exercised under non-root `cargo test`. Never set in production.
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
-    if !skip_root_check
+    // bypasses the entire `authorize()` call (gating `Action::HookCrud`)
+    // so the post-gate code path stays exercised under non-root
+    // `cargo test`. Never set in production.
+    let skip_authz_check = std::env::var_os("AIMX_TEST_SKIP_AUTHZ_CHECK").is_some();
+    if !skip_authz_check
         && let Err(e) = authorize(euid, Action::HookCrud(args.mailbox.clone()), Some(mb_cfg))
     {
-        return Err(format_hook_auth_error(&e, "create").into());
+        return Err(format_auth_error(
+            &e,
+            &AuthErrorContext {
+                surface: Some("aimx hooks"),
+                verb: Some("create"),
+                resource: Some("resource"),
+                ..Default::default()
+            },
+        )
+        .into());
     }
 
     let event = parse_event(&args.event)?;
@@ -203,9 +213,23 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         Err(HookCrudFallback::SocketMissing) => {
             // Daemon down. Only root can rewrite the root-owned
             // config.toml; non-root callers hard-error so we don't
-            // pretend the change went through.
-            if !skip_root_check && !is_root() {
-                return Err("daemon not running, non-root hook CRUD requires daemon".into());
+            // pretend the change went through. Route the error through
+            // the canonical `format_auth_error` so wording stays
+            // consistent with every other authz-error surface, then
+            // append a daemon-down hint so operators see why sudo is
+            // required (the canonical wording mentions sudo but not
+            // the underlying "daemon is down" cause).
+            if !skip_authz_check && !is_root() {
+                return Err(append_daemon_down_hint(format_auth_error(
+                    &crate::auth::AuthError::NotRoot,
+                    &AuthErrorContext {
+                        surface: Some("aimx hooks"),
+                        verb: Some("create"),
+                        resource: Some("resource"),
+                        ..Default::default()
+                    },
+                ))
+                .into());
             }
             apply_create_direct(config, &args.mailbox, hook)?;
             println!(
@@ -218,31 +242,6 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         }
         Err(HookCrudFallback::Daemon(msg)) => Err(msg.into()),
     }
-}
-
-/// Render an [`crate::auth::AuthError`] for hook CRUD CLI paths.
-///
-/// Thin wrapper around the canonical [`format_auth_error`] in
-/// `auth.rs`. Sprint 3 (S3-5) consolidated the three previous
-/// duplicates (`mailbox.rs`, `hooks.rs`, `mcp.rs`) into one renderer so
-/// the four-arm match can never drift between surfaces. We keep this
-/// helper as a one-line shim because the call sites read more naturally
-/// with `format_hook_auth_error(&err, "create")` than with the explicit
-/// `AuthErrorContext` constructor.
-fn format_hook_auth_error(err: &crate::auth::AuthError, verb: &str) -> String {
-    format_auth_error(
-        err,
-        &AuthErrorContext {
-            surface: Some("aimx hooks"),
-            verb: Some(verb),
-            // Hook CRUD never produces `OwnerMismatch` in practice (it
-            // is only created by the `MailboxCreate` predicate), but the
-            // resource label here keeps the message correct if a future
-            // variant change ever surfaces it on this path.
-            resource: Some("resource"),
-            ..Default::default()
-        },
-    )
 }
 
 /// Build the JSON body the daemon's `HookCreateBody` deserializer
@@ -294,15 +293,24 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
     }
 
     let euid = current_euid();
-    let skip_root_check = std::env::var_os("AIMX_TEST_SKIP_ROOT_CHECK").is_some();
+    let skip_authz_check = std::env::var_os("AIMX_TEST_SKIP_AUTHZ_CHECK").is_some();
 
     // Pre-flight authz: same predicate the daemon enforces, run here so
     // a non-owner hits a precise error before the daemon-or-fallback
     // dispatch.
-    if !skip_root_check {
+    if !skip_authz_check {
         let mb_cfg = config.mailboxes.get(&mailbox);
         if let Err(e) = authorize(euid, Action::HookCrud(mailbox.clone()), mb_cfg) {
-            return Err(format_hook_auth_error(&e, "delete").into());
+            return Err(format_auth_error(
+                &e,
+                &AuthErrorContext {
+                    surface: Some("aimx hooks"),
+                    verb: Some("delete"),
+                    resource: Some("resource"),
+                    ..Default::default()
+                },
+            )
+            .into());
         }
     }
 
@@ -316,8 +324,17 @@ fn delete(config: &Config, name: &str, yes: bool) -> Result<(), Box<dyn std::err
             Ok(())
         }
         Err(HookCrudFallback::SocketMissing) => {
-            if !skip_root_check && !is_root() {
-                return Err("daemon not running, non-root hook CRUD requires daemon".into());
+            if !skip_authz_check && !is_root() {
+                return Err(append_daemon_down_hint(format_auth_error(
+                    &crate::auth::AuthError::NotRoot,
+                    &AuthErrorContext {
+                        surface: Some("aimx hooks"),
+                        verb: Some("delete"),
+                        resource: Some("resource"),
+                        ..Default::default()
+                    },
+                ))
+                .into());
             }
             apply_delete_direct(config, name)?;
             println!(
@@ -422,6 +439,19 @@ fn print_restart_hint() {
     );
 }
 
+/// Appends a daemon-down hint to a canonical authz error string. Used
+/// only on the socket-missing + non-root hook CRUD path, where the
+/// canonical `NotRoot` rendering tells the operator to use `sudo` but
+/// no longer mentions the underlying cause (the daemon is not running,
+/// which is why we fell through to the root-only direct-config-edit
+/// path in the first place). The hint is local to that call site so
+/// the canonical renderer's surface stays narrow.
+fn append_daemon_down_hint(msg: String) -> String {
+    format!(
+        "{msg}\nhint: if the daemon is running, hook CRUD over UDS would handle this without sudo."
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,9 +494,26 @@ mod tests {
         assert!(parsed.get("stdin").is_none(), "{parsed}");
     }
 
+    /// Helper mirroring the per-call rendering hooks paths use after
+    /// the canonical-renderer consolidation. The two paths live inline
+    /// in `create` / `delete`; this tiny shim exists only so the test
+    /// assertions stay focused on the rendered wording rather than on
+    /// repeating the `AuthErrorContext` construction.
+    fn render_for_hooks(err: &AuthError, verb: &str) -> String {
+        format_auth_error(
+            err,
+            &AuthErrorContext {
+                surface: Some("aimx hooks"),
+                verb: Some(verb),
+                resource: Some("resource"),
+                ..Default::default()
+            },
+        )
+    }
+
     #[test]
-    fn format_hook_auth_error_not_owner_names_mailbox() {
-        let msg = format_hook_auth_error(
+    fn hook_auth_error_not_owner_names_mailbox() {
+        let msg = render_for_hooks(
             &AuthError::NotOwner {
                 mailbox: "alice".into(),
             },
@@ -477,16 +524,30 @@ mod tests {
     }
 
     #[test]
-    fn format_hook_auth_error_not_root_mentions_verb() {
-        let msg = format_hook_auth_error(&AuthError::NotRoot, "delete");
+    fn hook_auth_error_not_root_mentions_verb() {
+        let msg = render_for_hooks(&AuthError::NotRoot, "delete");
         assert!(msg.contains("delete"), "{msg}");
         assert!(msg.contains("sudo"), "{msg}");
     }
 
     #[test]
-    fn format_hook_auth_error_no_such_mailbox_is_opaque() {
-        let msg = format_hook_auth_error(&AuthError::NoSuchMailbox, "create");
+    fn hook_auth_error_no_such_mailbox_is_opaque() {
+        let msg = render_for_hooks(&AuthError::NoSuchMailbox, "create");
         assert!(msg.contains("not authorized"), "{msg}");
         assert!(msg.contains("no such mailbox"), "{msg}");
+    }
+
+    #[test]
+    fn append_daemon_down_hint_preserves_canonical_message_and_appends_hint() {
+        let canonical = render_for_hooks(&AuthError::NotRoot, "create");
+        let with_hint = append_daemon_down_hint(canonical.clone());
+        // Canonical wording is preserved verbatim as the first line so
+        // the regression guard for the canonical renderer stays valid.
+        assert!(with_hint.starts_with(&canonical), "{with_hint}");
+        // Operator-helpful daemon-down context is restored on its own
+        // line so the suffix can be grepped for in CI / docs.
+        assert!(with_hint.contains("\nhint:"), "{with_hint}");
+        assert!(with_hint.contains("daemon"), "{with_hint}");
+        assert!(with_hint.contains("UDS"), "{with_hint}");
     }
 }
