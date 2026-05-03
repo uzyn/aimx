@@ -854,7 +854,7 @@ async fn handle_uds_connection_with_timeout(
                 Reply::Ack(crate::state_handler::handle_mark(&state_ctx, &req, &caller).await),
                 false,
             ),
-            Ok(Ok(Request::MailboxCrud(req))) => (
+            Ok(Ok(Request::MailboxLifecycle(req))) => (
                 Reply::Ack(
                     crate::mailbox_handler::handle_mailbox_crud(&state_ctx, &mb_ctx, &req, &caller)
                         .await,

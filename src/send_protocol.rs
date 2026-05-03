@@ -127,7 +127,7 @@ pub struct MarkRequest {
 /// the config rewrite are atomic together (no data-destruction race
 /// window between client-side wipe and daemon-side delete).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct MailboxCrudRequest {
+pub struct MailboxLifecycleRequest {
     pub name: String,
     /// `true` for `MAILBOX-CREATE`, `false` for `MAILBOX-DELETE`.
     pub create: bool,
@@ -186,7 +186,7 @@ pub struct VersionResponse {
 pub enum Request {
     Send(SendRequest),
     Mark(MarkRequest),
-    MailboxCrud(MailboxCrudRequest),
+    MailboxLifecycle(MailboxLifecycleRequest),
     /// `AIMX/1 MAILBOX-LIST` carries no payload. The daemon resolves
     /// the caller via `SO_PEERCRED` and returns the mailboxes the uid
     /// owns; root sees every mailbox.
@@ -408,10 +408,10 @@ where
         "MARK-UNREAD" => parse_mark_headers(reader, false).await.map(Request::Mark),
         "MAILBOX-CREATE" => parse_mailbox_crud_headers(reader, true)
             .await
-            .map(Request::MailboxCrud),
+            .map(Request::MailboxLifecycle),
         "MAILBOX-DELETE" => parse_mailbox_crud_headers(reader, false)
             .await
-            .map(Request::MailboxCrud),
+            .map(Request::MailboxLifecycle),
         "MAILBOX-LIST" => parse_mailbox_list_headers(reader)
             .await
             .map(|()| Request::MailboxList),
@@ -444,7 +444,7 @@ where
         Request::Mark(_) => Err(ParseError::Malformed(
             "expected SEND verb, got MARK-*".to_string(),
         )),
-        Request::MailboxCrud(_) | Request::MailboxList => Err(ParseError::Malformed(
+        Request::MailboxLifecycle(_) | Request::MailboxList => Err(ParseError::Malformed(
             "expected SEND verb, got MAILBOX-*".to_string(),
         )),
         Request::HookCreate(_) | Request::HookDelete(_) => Err(ParseError::Malformed(
@@ -621,7 +621,7 @@ where
 async fn parse_mailbox_crud_headers<R>(
     reader: &mut R,
     create: bool,
-) -> Result<MailboxCrudRequest, ParseError>
+) -> Result<MailboxLifecycleRequest, ParseError>
 where
     R: AsyncRead + Unpin,
 {
@@ -748,7 +748,7 @@ where
     // re-introduce the protocol-level rejection that broke the MCP
     // `mailbox_create` tool for non-root callers in production.
 
-    Ok(MailboxCrudRequest {
+    Ok(MailboxLifecycleRequest {
         name,
         create,
         owner,
@@ -1154,7 +1154,7 @@ where
 /// lock that already guards the stanza removal.
 pub async fn write_mailbox_crud_request<W>(
     writer: &mut W,
-    request: &MailboxCrudRequest,
+    request: &MailboxLifecycleRequest,
 ) -> Result<(), std::io::Error>
 where
     W: AsyncWrite + Unpin,

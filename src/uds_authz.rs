@@ -238,33 +238,6 @@ pub fn require_mailbox_owner_or_root(
     }
 }
 
-/// Require the caller to be root.
-///
-/// Sprint 1 of the user-mailbox track retired the `MAILBOX-CREATE` /
-/// `MAILBOX-DELETE` callers of this helper — the daemon now uses
-/// owner-bound `auth::Action` variants so non-root callers can manage
-/// their own mailboxes. The helper is kept available (with the
-/// existing test coverage) for future root-gated UDS verbs and the
-/// SystemCommand-style paths.
-#[allow(dead_code)]
-pub fn require_root(caller: &Caller) -> Result<AuthzDecision, AuthzReject> {
-    if caller.is_root() {
-        // Not a "bypass" — root is the required identity here, not an
-        // escalation past an ownership rule. Surface as Accept so the
-        // structured log says `decision = "accept"`.
-        Ok(AuthzDecision::Accept)
-    } else {
-        Err(AuthzReject {
-            code: ErrCode::Eaccess,
-            reason: format!(
-                "mailbox CRUD is root-only (caller uid {} / '{}')",
-                caller.uid,
-                caller.username_display()
-            ),
-        })
-    }
-}
-
 /// Decision value passed to [`log_decision`]. Typed so the compiler —
 /// rather than a string-match wildcard — catches new variants: if a
 /// future caller invents a fourth outcome, it has to add an arm here
@@ -375,41 +348,6 @@ pub fn enforce_mailbox_owner_or_root(
                 verb,
                 caller,
                 Some(mailbox_name),
-                LogDecision::Reject,
-                Some(&reject.reason),
-            );
-            Err(AuthzReject {
-                code: reject.code,
-                reason: WIRE_REASON_NOT_AUTHORIZED.to_string(),
-            })
-        }
-    }
-}
-
-/// Convenience for root-gated UDS verbs. Logs without a `mailbox`
-/// field. Same wire/log split as [`enforce_mailbox_owner_or_root`]:
-/// rich reason in the log, opaque `not authorized` on the wire.
-///
-/// Sprint 1 of the user-mailbox track stopped using this helper for
-/// `MAILBOX-CREATE` / `MAILBOX-DELETE` (the daemon now uses the
-/// owner-bound `auth::Action` variants). Kept available for future
-/// root-only UDS verbs.
-#[allow(dead_code)]
-pub fn enforce_root(
-    verb: &str,
-    caller: &Caller,
-    mailbox_hint: Option<&str>,
-) -> Result<(), AuthzReject> {
-    match require_root(caller) {
-        Ok(_) => {
-            log_decision(verb, caller, mailbox_hint, LogDecision::Accept, None);
-            Ok(())
-        }
-        Err(reject) => {
-            log_decision(
-                verb,
-                caller,
-                mailbox_hint,
                 LogDecision::Reject,
                 Some(&reject.reason),
             );
@@ -559,21 +497,6 @@ mod tests {
     }
 
     #[test]
-    fn require_root_rejects_non_root() {
-        let c = Caller::new(1002, 1002, None);
-        let _ = c.username_cache.set(Some("bob".to_string()));
-        let err = require_root(&c).unwrap_err();
-        assert_eq!(err.code, ErrCode::Eaccess);
-        assert!(err.reason.contains("bob"));
-    }
-
-    #[test]
-    fn require_root_accepts_root() {
-        let c = Caller::internal_root();
-        assert_eq!(require_root(&c).unwrap(), AuthzDecision::Accept);
-    }
-
-    #[test]
     #[tracing_test::traced_test]
     fn enforce_mailbox_owner_or_root_logs_accept() {
         let c = Caller::new(1001, 1001, None);
@@ -630,25 +553,5 @@ mod tests {
             "leaked owner: {}",
             err.reason
         );
-    }
-
-    #[test]
-    #[tracing_test::traced_test]
-    fn enforce_root_logs_reject() {
-        // Generic test of the `enforce_root` helper's logging shape.
-        // Sprint 3 (S3-6) intentionally uses a placeholder verb label
-        // here. The user-mailbox spot-check verifies no production
-        // mailbox-lifecycle verb is wired to this helper — every
-        // mailbox CRUD UDS verb is now owner-gated, never root-gated.
-        let c = Caller::new(1002, 1002, None);
-        let _ = c.username_cache.set(Some("bob".to_string()));
-        let err = enforce_root("DEMO-VERB", &c, Some("alice")).unwrap_err();
-        assert_eq!(err.code, ErrCode::Eaccess);
-        // Wire reason is opaque.
-        assert_eq!(err.reason, "not authorized");
-        assert!(logs_contain("decision=\"reject\""));
-        assert!(logs_contain("verb=\"DEMO-VERB\""));
-        // Log keeps the rich diagnostic naming the caller.
-        assert!(logs_contain("caller uid 1002"));
     }
 }
