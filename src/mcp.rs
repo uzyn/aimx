@@ -4,7 +4,7 @@ use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox;
 use crate::send;
 use crate::send_protocol::{
-    self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxCrudRequest, MarkRequest,
+    self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxLifecycleRequest, MarkRequest,
     SendRequest,
 };
 
@@ -208,6 +208,14 @@ impl AimxMcpServer {
                 String::new()
             }
         };
+        // Derive the rendering verb from the action so a future change
+        // that produces `OwnerMismatch` from a non-create predicate
+        // doesn't render "cannot create a..." for, say, a delete.
+        let verb = match &action {
+            crate::auth::Action::MailboxCreate { .. } => Some("create"),
+            crate::auth::Action::MailboxDelete { .. } => Some("delete"),
+            _ => None,
+        };
         let mb = if mailbox_name.is_empty() {
             None
         } else {
@@ -217,10 +225,10 @@ impl AimxMcpServer {
             // Sprint 3 (S3-5): the MCP, CLI, and hooks surfaces all
             // share `auth::format_auth_error` so the four-arm match
             // can never drift between them. The MCP surface skips the
-            // `surface` / `verb` hints (the renderer falls back to the
-            // generic "requires root" line) but does pass the resolved
-            // mailbox name so `NoSuchMailbox` reads as
-            // "mailbox '<name>' not found" — the agent-friendly form.
+            // `surface` hint (the renderer falls back to the generic
+            // "requires root" line) but does pass the resolved mailbox
+            // name so `NoSuchMailbox` reads as "mailbox '<name>' not
+            // found" — the agent-friendly form.
             crate::auth::format_auth_error(
                 &e,
                 &crate::auth::AuthErrorContext {
@@ -229,7 +237,7 @@ impl AimxMcpServer {
                     } else {
                         Some(&mailbox_name)
                     },
-                    verb: Some("create"),
+                    verb,
                     ..Default::default()
                 },
             )
@@ -669,10 +677,10 @@ impl AimxMcpServer {
                     Ok(address)
                 }
             }
-            Err(MailboxCrudFallback::SocketMissing) => {
+            Err(MailboxLifecycleFallback::SocketMissing) => {
                 Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
             }
-            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+            Err(MailboxLifecycleFallback::Daemon(msg)) => Err(msg),
         }
     }
 
@@ -713,10 +721,10 @@ impl AimxMcpServer {
         // `self.load_config()` inevitably failed for non-root agents).
         match submit_mailbox_crud_via_daemon(&params.name, false, None, force) {
             Ok(()) => Ok(format!("Mailbox '{}' deleted.", params.name)),
-            Err(MailboxCrudFallback::SocketMissing) => {
+            Err(MailboxLifecycleFallback::SocketMissing) => {
                 Err("aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string())
             }
-            Err(MailboxCrudFallback::Daemon(msg)) => Err(msg),
+            Err(MailboxLifecycleFallback::Daemon(msg)) => Err(msg),
         }
     }
 }
@@ -845,7 +853,7 @@ pub(crate) enum MarkOutcome {
 /// Tracks socket-missing distinctly from daemon-side errors so the MCP
 /// tool can decide whether to fall back to the direct on-disk edit or
 /// surface the daemon's reason verbatim.
-pub(crate) enum MailboxCrudFallback {
+pub(crate) enum MailboxLifecycleFallback {
     /// Socket not present / not connectable (daemon stopped, socket
     /// cleaned up, first-time setup). Callers fall back to direct edit.
     SocketMissing,
@@ -868,8 +876,8 @@ pub(crate) fn submit_mailbox_crud_via_daemon(
     create: bool,
     owner: Option<&str>,
     force: bool,
-) -> Result<(), MailboxCrudFallback> {
-    let request = MailboxCrudRequest {
+) -> Result<(), MailboxLifecycleFallback> {
+    let request = MailboxLifecycleRequest {
         name: name.to_string(),
         create,
         owner: owner.map(|s| s.to_string()),
@@ -887,7 +895,7 @@ pub(crate) fn submit_mailbox_crud_via_daemon(
                 .enable_all()
                 .build()
                 .map_err(|e| {
-                    MailboxCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
                 })?;
             rt.block_on(submit_mailbox_crud_request(&socket, &request))
         }
@@ -895,18 +903,18 @@ pub(crate) fn submit_mailbox_crud_via_daemon(
 
     match io_result {
         Ok(MarkOutcome::Ok) => Ok(()),
-        Ok(MarkOutcome::Err { code, reason }) => Err(MailboxCrudFallback::Daemon(format!(
+        Ok(MarkOutcome::Err { code, reason }) => Err(MailboxLifecycleFallback::Daemon(format!(
             "[{}] {reason}",
             code.as_str()
         ))),
-        Ok(MarkOutcome::Malformed(reason)) => Err(MailboxCrudFallback::Daemon(format!(
+        Ok(MarkOutcome::Malformed(reason)) => Err(MailboxLifecycleFallback::Daemon(format!(
             "Malformed response from aimx daemon: {reason}"
         ))),
         Err(e) => {
             if is_socket_missing(&e) {
-                Err(MailboxCrudFallback::SocketMissing)
+                Err(MailboxLifecycleFallback::SocketMissing)
             } else {
-                Err(MailboxCrudFallback::Daemon(format!(
+                Err(MailboxLifecycleFallback::Daemon(format!(
                     "Failed to connect to aimx daemon at {}: {e}",
                     socket.display()
                 )))
@@ -917,7 +925,7 @@ pub(crate) fn submit_mailbox_crud_via_daemon(
 
 async fn submit_mailbox_crud_request(
     socket_path: &std::path::Path,
-    request: &MailboxCrudRequest,
+    request: &MailboxLifecycleRequest,
 ) -> Result<MarkOutcome, std::io::Error> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -934,7 +942,7 @@ async fn submit_mailbox_crud_request(
 }
 
 /// Outcome of a `HOOK-CREATE` / `HOOK-DELETE` UDS submission. Mirrors
-/// [`MailboxCrudFallback`] so callers can decide whether to fall back to
+/// [`MailboxLifecycleFallback`] so callers can decide whether to fall back to
 /// a direct on-disk edit (only when the caller is root) or surface the
 /// daemon's reason verbatim.
 pub(crate) enum HookCrudFallback {
@@ -1203,10 +1211,10 @@ fn lookup_mailbox_address(name: &str) -> Option<String> {
 
 fn submit_mailbox_list_via_daemon() -> Result<String, String> {
     submit_mailbox_list_raw().map_err(|e| match e {
-        MailboxCrudFallback::SocketMissing => {
+        MailboxLifecycleFallback::SocketMissing => {
             "aimx daemon not running. Start with 'sudo systemctl start aimx'".to_string()
         }
-        MailboxCrudFallback::Daemon(msg) => msg,
+        MailboxLifecycleFallback::Daemon(msg) => msg,
     })
 }
 
@@ -1214,12 +1222,12 @@ fn submit_mailbox_list_via_daemon() -> Result<String, String> {
 /// distinguishes socket-missing from a daemon-side error so the
 /// caller can decide whether to surface the canonical "daemon must
 /// be running" hint or render the daemon's reason verbatim. Mirrors
-/// the [`MailboxCrudFallback`] shape used by the CRUD path.
-pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxCrudFallback> {
+/// the [`MailboxLifecycleFallback`] shape used by the CRUD path.
+pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
     submit_mailbox_list_raw()
 }
 
-fn submit_mailbox_list_raw() -> Result<String, MailboxCrudFallback> {
+fn submit_mailbox_list_raw() -> Result<String, MailboxLifecycleFallback> {
     let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
@@ -1232,7 +1240,7 @@ fn submit_mailbox_list_raw() -> Result<String, MailboxCrudFallback> {
                 .enable_all()
                 .build()
                 .map_err(|e| {
-                    MailboxCrudFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
                 })?;
             rt.block_on(submit_mailbox_list_request(&socket))
         }
@@ -1240,16 +1248,16 @@ fn submit_mailbox_list_raw() -> Result<String, MailboxCrudFallback> {
 
     let raw = io_result.map_err(|e| {
         if is_socket_missing(&e) {
-            MailboxCrudFallback::SocketMissing
+            MailboxLifecycleFallback::SocketMissing
         } else {
-            MailboxCrudFallback::Daemon(format!(
+            MailboxLifecycleFallback::Daemon(format!(
                 "Failed to connect to aimx daemon at {}: {e}",
                 socket.display()
             ))
         }
     })?;
 
-    decode_mailbox_list_response(&raw).map_err(MailboxCrudFallback::Daemon)
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
 }
 
 /// Open the UDS, ship `AIMX/1 MAILBOX-LIST`, and return the raw

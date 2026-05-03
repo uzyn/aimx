@@ -99,10 +99,10 @@ fn list_dispatch(loaded: Option<&Config>, all: bool) -> Result<(), Box<dyn std::
 fn list_via_daemon() -> Result<(), Box<dyn std::error::Error>> {
     let json = match crate::mcp::submit_mailbox_list_via_daemon_for_cli() {
         Ok(s) => s,
-        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+        Err(crate::mcp::MailboxLifecycleFallback::SocketMissing) => {
             exit_socket_missing();
         }
-        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => {
+        Err(crate::mcp::MailboxLifecycleFallback::Daemon(msg)) => {
             return Err(msg.into());
         }
     };
@@ -490,7 +490,7 @@ fn create(
             );
             Ok(())
         }
-        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+        Err(crate::mcp::MailboxLifecycleFallback::SocketMissing) => {
             if !is_root() {
                 exit_socket_missing();
             }
@@ -514,7 +514,7 @@ fn create(
             print_restart_hint();
             Ok(())
         }
-        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
+        Err(crate::mcp::MailboxLifecycleFallback::Daemon(msg)) => Err(msg.into()),
     }
 }
 
@@ -869,7 +869,7 @@ fn delete(
             );
             Ok(())
         }
-        Err(crate::mcp::MailboxCrudFallback::SocketMissing) => {
+        Err(crate::mcp::MailboxLifecycleFallback::SocketMissing) => {
             if !is_root() {
                 exit_socket_missing();
             }
@@ -895,7 +895,7 @@ fn delete(
             print_restart_hint();
             Ok(())
         }
-        Err(crate::mcp::MailboxCrudFallback::Daemon(msg)) => Err(msg.into()),
+        Err(crate::mcp::MailboxLifecycleFallback::Daemon(msg)) => Err(msg.into()),
     }
 }
 

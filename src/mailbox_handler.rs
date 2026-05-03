@@ -42,7 +42,7 @@ use std::sync::Mutex;
 use crate::auth::{Action, AuthError, authorize};
 use crate::config::{Config, ConfigHandle, MailboxConfig};
 use crate::ownership::chown_as_owner;
-use crate::send_protocol::{AckResponse, ErrCode, MailboxCrudRequest};
+use crate::send_protocol::{AckResponse, ErrCode, MailboxLifecycleRequest};
 use crate::state_handler::StateContext;
 use crate::uds_authz::{Caller, log_decision, peer_username};
 
@@ -83,7 +83,7 @@ impl MailboxContext {
 pub async fn handle_mailbox_crud(
     state_ctx: &StateContext,
     mb_ctx: &MailboxContext,
-    req: &MailboxCrudRequest,
+    req: &MailboxLifecycleRequest,
     caller: &Caller,
 ) -> AckResponse {
     if let Err(e) = crate::mailbox::validate_mailbox_name(&req.name) {
@@ -110,7 +110,7 @@ pub async fn handle_mailbox_crud(
     let resolved_owner: Option<String> = if req.create {
         if caller.is_root() {
             // Root path: the dispatcher already enforces that
-            // MailboxCrudRequest carries `owner: Some(...)` for
+            // MailboxLifecycleRequest carries `owner: Some(...)` for
             // CREATE; defense-in-depth check below.
             match req.owner.as_deref() {
                 Some(o) => Some(o.to_string()),
@@ -706,6 +706,10 @@ mod tests {
             // Resolve the current Linux user's actual name so this
             // resolver answers for whatever the daemon's
             // `peer_username` synthesized.
+            // Per-call `lookup_username` (a thin `getpwuid` wrapper) is
+            // intentional and cheap — do not memoize: tests rely on
+            // each invocation re-reading passwd so resolver overrides
+            // installed/torn down between calls stay isolated.
             let current_user = crate::uds_authz::lookup_username(uid);
             if name == "testowner" || name == "root" || current_user.as_deref() == Some(name) {
                 Some(crate::user_resolver::ResolvedUser {
@@ -742,7 +746,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -773,7 +777,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         // Seed a non-reserved mailbox first.
-        let seed = MailboxCrudRequest {
+        let seed = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -784,7 +788,7 @@ mod tests {
             AckResponse::Ok
         ));
 
-        let dup = MailboxCrudRequest {
+        let dup = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -805,7 +809,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         for name in ["catchall", "aimx-catchall"] {
-            let req = MailboxCrudRequest {
+            let req = MailboxLifecycleRequest {
                 name: name.into(),
                 create: true,
                 owner: Some("testowner".into()),
@@ -833,7 +837,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         let attacker = Caller::with_username(99999, 99999, "attacker");
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "catchall".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -853,7 +857,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -871,7 +875,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         for bad in ["../etc", "foo/bar", "foo\\bar", "a\0b"] {
-            let req = MailboxCrudRequest {
+            let req = MailboxLifecycleRequest {
                 name: bad.into(),
                 create: true,
                 owner: Some("testowner".into()),
@@ -893,7 +897,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         // Pre-create
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -905,7 +909,7 @@ mod tests {
         ));
 
         // Delete with empty dirs should succeed.
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: false,
             owner: None,
@@ -928,7 +932,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
         // Create
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -944,7 +948,7 @@ mod tests {
         std::fs::write(inbox.join("2025-06-01-001.md"), "content").unwrap();
 
         // Delete must be refused
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: false,
             owner: None,
@@ -976,7 +980,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "catchall".into(),
             create: false,
             owner: None,
@@ -996,7 +1000,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "ghost".into(),
             create: false,
             owner: None,
@@ -1036,7 +1040,7 @@ mod tests {
         std::fs::write(dir_path.join("blocker"), "x").unwrap();
         let bad_ctx = MailboxContext::new(dir_path.clone(), mb_ctx.config_handle.clone());
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -1151,7 +1155,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -1241,7 +1245,7 @@ mod tests {
             let m = mb_ctx.clone();
             let n = name.clone();
             handles.push(tokio::spawn(async move {
-                let req = MailboxCrudRequest {
+                let req = MailboxLifecycleRequest {
                     name: n,
                     create: true,
                     owner: Some("testowner".into()),
@@ -1291,7 +1295,7 @@ mod tests {
         let _r = install_tester_resolver();
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: None,
@@ -1314,7 +1318,7 @@ mod tests {
         let _r = install_tester_resolver();
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("ghost".into()),
@@ -1361,7 +1365,7 @@ mod tests {
         }
         let _r = crate::user_resolver::set_test_resolver(nobody);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
@@ -1430,7 +1434,7 @@ mod tests {
         // touch it even if rollback *did* try to remove it.
         std::fs::write(inbox.join("do-not-delete"), b"operator data").unwrap();
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
@@ -1509,7 +1513,7 @@ mod tests {
         assert!(!inbox.exists());
         assert!(!sent.exists());
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("nobody".into()),
@@ -1557,7 +1561,7 @@ mod tests {
         std::fs::create_dir_all(&inbox).unwrap();
         std::fs::create_dir_all(&sent).unwrap();
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "alice".into(),
             create: true,
             owner: Some("testowner".into()),
@@ -1598,7 +1602,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "x".into(),
             create: true,
             // The attacker tries to claim a root-owned mailbox.
@@ -1671,7 +1675,7 @@ mod tests {
 
         // Non-root tries to delete the root-owned mailbox: the wire
         // response must equal what they'd get for a non-existent name.
-        let unowned_delete = MailboxCrudRequest {
+        let unowned_delete = MailboxLifecycleRequest {
             name: "opsbox".into(),
             create: false,
             owner: None,
@@ -1683,7 +1687,7 @@ mod tests {
         // Same caller, mailbox that never existed: this is the
         // baseline "no such mailbox" string the unowned response must
         // match (modulo the mailbox name).
-        let missing_delete = MailboxCrudRequest {
+        let missing_delete = MailboxLifecycleRequest {
             name: "nope".into(),
             create: false,
             owner: None,
@@ -1747,7 +1751,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "agent".into(),
             create: true,
             // Owner is ignored for non-root; included to prove that.
@@ -1789,13 +1793,13 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let (state_ctx, mb_ctx) = contexts(&tmp);
 
-        let create_req = MailboxCrudRequest {
+        let create_req = MailboxLifecycleRequest {
             name: "task42".into(),
             create: true,
             owner: None,
             force: false,
         };
-        let delete_req = MailboxCrudRequest {
+        let delete_req = MailboxLifecycleRequest {
             name: "task42".into(),
             create: false,
             owner: None,
@@ -1841,7 +1845,7 @@ mod tests {
         let (state_ctx, mb_ctx) = contexts(&tmp);
         let orphan = Caller::new(orphan_uid, orphan_uid, None);
 
-        let req = MailboxCrudRequest {
+        let req = MailboxLifecycleRequest {
             name: "orph".into(),
             create: true,
             owner: Some("anything".into()),
