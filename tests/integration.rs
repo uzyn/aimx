@@ -589,6 +589,39 @@ struct McpClient {
     stdin: std::process::ChildStdin,
     reader: BufReader<std::process::ChildStdout>,
     id: i64,
+    /// Background-drained stderr from the MCP subprocess. The drain
+    /// thread reads to EOF into a shared buffer so a child that prints
+    /// a startup error before dying still has its diagnostic captured.
+    /// Surfaced by `send_request` whenever a JSON-RPC read returns EOF
+    /// (the original failure mode silently ate the child's stderr).
+    stderr_buf: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr_drain: Option<std::thread::JoinHandle<()>>,
+}
+
+#[allow(dead_code)]
+fn spawn_stderr_drain(
+    mut stderr: std::process::ChildStderr,
+) -> (
+    std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    std::thread::JoinHandle<()>,
+) {
+    let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let buf_w = std::sync::Arc::clone(&buf);
+    let handle = std::thread::spawn(move || {
+        use std::io::Read as _;
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if let Ok(mut g) = buf_w.lock() {
+                        g.extend_from_slice(&chunk[..n]);
+                    }
+                }
+            }
+        }
+    });
+    (buf, handle)
 }
 
 impl McpClient {
@@ -614,13 +647,17 @@ impl McpClient {
 
         let stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
+        let stderr = child.stderr.take().unwrap();
         let reader = BufReader::new(stdout);
+        let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
 
         Self {
             child,
             stdin,
             reader,
             id: 0,
+            stderr_buf,
+            stderr_drain: Some(stderr_drain),
         }
     }
 
@@ -638,8 +675,70 @@ impl McpClient {
         self.stdin.flush().unwrap();
 
         let mut line = String::new();
-        self.reader.read_line(&mut line).unwrap();
-        serde_json::from_str(line.trim()).unwrap()
+        let n = self.reader.read_line(&mut line).unwrap_or_else(|e| {
+            panic!(
+                "MCP read failed for method {method:?}: {e}{}",
+                self.format_dead_child_diag()
+            )
+        });
+        if n == 0 {
+            // EOF — the MCP subprocess closed stdout. Almost always
+            // means it died at startup or while parsing the request.
+            // Surface the captured stderr + child status so future CI
+            // failures land with a real diagnostic instead of the
+            // opaque `Error("EOF while parsing a value", ...)` panic
+            // that this helper used to produce.
+            panic!(
+                "MCP subprocess closed stdout (EOF) before responding to {method:?}{}",
+                self.format_dead_child_diag()
+            );
+        }
+        serde_json::from_str(line.trim()).unwrap_or_else(|e| {
+            panic!(
+                "MCP returned non-JSON for {method:?}: {e}; raw line {:?}{}",
+                line,
+                self.format_dead_child_diag()
+            )
+        })
+    }
+
+    /// Wait briefly for the MCP child to exit (so its stderr drain
+    /// thread reaches EOF), then format a diagnostic block carrying the
+    /// captured stderr + exit status. Used by `send_request` when the
+    /// child dies mid-handshake.
+    fn format_dead_child_diag(&mut self) -> String {
+        // Give the child up to 1s to exit so the drain thread captures
+        // any final stderr lines. We don't kill it — many failure
+        // modes already exited; for the rare hung case the test
+        // harness's outer timeout still reaps.
+        let started = std::time::Instant::now();
+        let mut status = None;
+        while started.elapsed() < std::time::Duration::from_secs(1) {
+            match self.child.try_wait() {
+                Ok(Some(s)) => {
+                    status = Some(s);
+                    break;
+                }
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(50)),
+                Err(_) => break,
+            }
+        }
+        if let Some(h) = self.stderr_drain.take() {
+            let _ = h.join();
+        }
+        let stderr = self
+            .stderr_buf
+            .lock()
+            .map(|g| String::from_utf8_lossy(&g).into_owned())
+            .unwrap_or_default();
+        let status_str = match status {
+            Some(s) => format!("{s}"),
+            None => "still running".to_string(),
+        };
+        format!(
+            "\n  child status: {status_str}\n  child stderr:\n----\n{}\n----",
+            stderr.trim_end()
+        )
     }
 
     fn send_notification(&mut self, method: &str, params: serde_json::Value) {
@@ -689,6 +788,9 @@ impl McpClient {
     fn shutdown(mut self) {
         drop(self.stdin);
         let _ = self.child.wait();
+        if let Some(h) = self.stderr_drain.take() {
+            let _ = h.join();
+        }
     }
 }
 
@@ -787,11 +889,15 @@ fn mcp_mailbox_list_returns_caller_owned() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -862,11 +968,15 @@ fn mcp_mailbox_list_without_daemon_reports_missing_socket() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -1167,11 +1277,15 @@ fn mcp_email_mark_read_unread() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -1241,11 +1355,15 @@ fn mcp_email_mark_without_daemon_reports_missing_socket() {
         .expect("Failed to spawn aimx mcp");
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
     let mut client = McpClient {
         child,
         stdin,
         reader: BufReader::new(stdout),
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     };
     client.initialize();
 
@@ -2949,11 +3067,15 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
                 .expect("Failed to spawn aimx mcp");
             let stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
             let mut client = McpClient {
                 child,
                 stdin,
                 reader: BufReader::new(stdout),
                 id: 0,
+                stderr_buf,
+                stderr_drain: Some(stderr_drain),
             };
             client.initialize();
             let resp = client.call_tool(
@@ -4438,11 +4560,15 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
                 .expect("Failed to spawn aimx mcp");
             let stdin = child.stdin.take().unwrap();
             let stdout = child.stdout.take().unwrap();
+            let stderr = child.stderr.take().unwrap();
+            let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
             let mut client = McpClient {
                 child,
                 stdin,
                 reader: BufReader::new(stdout),
                 id: 0,
+                stderr_buf,
+                stderr_drain: Some(stderr_drain),
             };
             client.initialize();
             let resp = client.call_tool(
@@ -5959,19 +6085,63 @@ fn prodperm_setup_env(tmp: &Path) {
     let runtime = tmp.join("run");
     std::fs::create_dir_all(&runtime).unwrap();
     std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    // Copy the `aimx` binary into the tempdir so `aimx-test-alice` can
+    // exec it. The binary's canonical location is somewhere under
+    // `target/debug/`, which on most CI/dev hosts sits beneath a home
+    // directory whose mode is `0o750` — the alice uid (not in the
+    // owner's group) cannot traverse it, and `runuser -u alice -- /path`
+    // exits with `Permission denied` before the MCP child even starts.
+    // The tempdir itself is `0o755` and lives under `/tmp` (always
+    // world-traversable), so the copy is reachable from any uid.
+    prodperm_copy_aimx_binary(tmp);
+}
+
+/// Path inside the prodperm tempdir where we stash a world-traversable
+/// copy of the aimx binary. Used by `prodperm_spawn_mcp` to spawn `aimx
+/// mcp` as the alice uid without depending on the host's `$HOME` mode.
+#[cfg(unix)]
+fn prodperm_aimx_binary(tmp: &Path) -> std::path::PathBuf {
+    tmp.join("aimx")
+}
+
+#[cfg(unix)]
+fn prodperm_copy_aimx_binary(tmp: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let src = aimx_binary_path();
+    let dst = prodperm_aimx_binary(tmp);
+    std::fs::copy(&src, &dst).unwrap_or_else(|e| {
+        panic!(
+            "failed to copy aimx binary {} -> {}: {e}",
+            src.display(),
+            dst.display()
+        )
+    });
+    // `0o755` so any uid (including `aimx-test-alice`) can exec it.
+    std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 
 /// Spawn `aimx mcp` under `runuser -u aimx-test-alice` so the resulting
 /// process really is non-root and any client-side `config.toml` read
 /// will fail with EACCES (the bug class we are guarding against).
+///
+/// Uses the tempdir-local copy of the `aimx` binary planted by
+/// `prodperm_setup_env` (`/tmp/.../aimx`) rather than the original under
+/// `target/debug/`, which on most CI/dev hosts sits beneath a `0o750`
+/// `$HOME` and can't be exec'd by the alice uid. The runtime dir +
+/// config dir env vars survive the `runuser` env reset (verified on
+/// Ubuntu's `util-linux` `runuser`: only `HOME`/`USER`/`MAIL`/`LOGNAME`
+/// are rewritten), so the MCP child finds the daemon socket via
+/// `AIMX_RUNTIME_DIR` exactly the same way the test's daemon binds it.
 #[cfg(unix)]
 fn prodperm_spawn_mcp(tmp: &Path) -> McpClient {
     let runtime = tmp.join("run");
+    let bin = prodperm_aimx_binary(tmp);
     let mut child = StdCommand::new("runuser")
         .arg("-u")
         .arg(PRODPERM_USER)
         .arg("--")
-        .arg(aimx_binary_path())
+        .arg(&bin)
         .env("AIMX_CONFIG_DIR", tmp)
         .env("AIMX_RUNTIME_DIR", &runtime)
         .arg("--data-dir")
@@ -5985,13 +6155,17 @@ fn prodperm_spawn_mcp(tmp: &Path) -> McpClient {
 
     let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     let reader = BufReader::new(stdout);
+    let (stderr_buf, stderr_drain) = spawn_stderr_drain(stderr);
 
     McpClient {
         child,
         stdin,
         reader,
         id: 0,
+        stderr_buf,
+        stderr_drain: Some(stderr_drain),
     }
 }
 
@@ -6100,9 +6274,11 @@ fn email_list_full_cycle_against_root_owned_config() {
 
     let port = find_free_port();
     // The daemon must use the file-drop transport so `email_send` does
-    // not block on real MX delivery.
-    let mail_drop = tmp.path().join("mail_drop");
-    std::fs::create_dir_all(&mail_drop).unwrap();
+    // not block on real MX delivery. `AIMX_TEST_MAIL_DROP` must point
+    // at a *file* path — `FileDropTransport::send` opens it with
+    // `OpenOptions::create(true).append(true)` and surfaces `Is a
+    // directory (os error 21)` if a directory is passed instead.
+    let mail_drop = tmp.path().join("outbound.log");
     let daemon = start_serve_with_env(
         tmp.path(),
         port,
@@ -6169,8 +6345,8 @@ fn email_list_full_cycle_against_root_owned_config() {
             "body": "x"
         }),
     );
-    let text = get_tool_text(&resp);
-    prodperm_assert_no_eacces(&text, "email_send");
+    let send_text = get_tool_text(&resp);
+    prodperm_assert_no_eacces(&send_text, "email_send");
 
     // The daemon must have written a sent-copy `.md` under
     // `sent/alice/`. Without this assertion a future regression where
@@ -6190,7 +6366,7 @@ fn email_list_full_cycle_against_root_owned_config() {
         .count();
     assert!(
         sent_md_count >= 1,
-        "email_send should have written a sent-copy .md under {}; found {sent_md_count}",
+        "email_send should have written a sent-copy .md under {} (daemon response: {send_text}); found {sent_md_count}",
         sent_dir.display()
     );
 
