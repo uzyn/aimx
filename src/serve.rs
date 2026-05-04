@@ -1566,6 +1566,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                signature: None,
                 upgrade: None,
             };
 
@@ -1876,6 +1877,7 @@ mod tests {
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            signature: None,
             upgrade: None,
         }
     }
@@ -2036,6 +2038,7 @@ mod tests {
                 mailboxes,
                 verify_host: None,
                 enable_ipv6: false,
+                signature: None,
                 upgrade: None,
             };
             let handle_cfg = ConfigHandle::new(config);
