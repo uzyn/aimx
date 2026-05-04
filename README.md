@@ -23,7 +23,7 @@ Human-friendly setup. LLM-friendly everything else.
 
 AIMX (AI Mail Exchange) is a self-hosted mail server for AI agents. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted means full sovereignty.
 
-Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent: Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
+Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent: Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, NanoClaw.
 
 
 - **Single binary.** One binary, no other dependencies.
@@ -141,6 +141,7 @@ Install aimx into your agent with one command:
 | Goose | `aimx agents setup goose` | Run `goose run --recipe aimx`. |
 | OpenClaw | `aimx agents setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
 | Hermes | `aimx agents setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
+| NanoClaw | `aimx agents setup nanoclaw` | Auto-merged into `<fork>/.mcp.json` under `mcpServers.aimx`. Default fork path is `~/nanoclaw`; override with `$NANOCLAW_HOME`. Restart NanoClaw so the new server is loaded. |
 
 Run `aimx agents setup` (no args, launches the interactive picker) or `aimx agents list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
 
@@ -183,7 +184,7 @@ cmd = ["/usr/bin/ntfy", "pub", "agent-mail", "$AIMX_SUBJECT from $AIMX_FROM"]
 fire_on_untrusted = true
 ```
 
-See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider).
+See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider). NanoClaw is a long-running daemon and uses a scheduled-job pull model rather than `on_receive` hooks — see [`book/agent-integration.md`](book/agent-integration.md#nanoclaw).
 
 
 ## Email format

@@ -65,11 +65,12 @@ pub(crate) fn build_rows(env: &dyn AgentEnv) -> Vec<Row> {
         .home_dir()
         .expect("agents setup TUI requires HOME to be resolved by the caller");
     let xdg = env.xdg_config_home();
+    let nanoclaw = env.nanoclaw_home();
     registry()
         .iter()
         .enumerate()
         .map(|(i, spec)| {
-            let state = detect_install_state(spec, &home, xdg.clone());
+            let state = detect_install_state(spec, &home, xdg.clone(), nanoclaw.clone());
             let selected = matches!(state, InstallState::InstalledNotWired);
             Row {
                 spec_index: i,
@@ -506,6 +507,9 @@ mod tests {
         }
         fn xdg_config_home(&self) -> Option<PathBuf> {
             self.xdg.clone()
+        }
+        fn nanoclaw_home(&self) -> Option<PathBuf> {
+            None
         }
         fn is_root(&self) -> bool {
             false

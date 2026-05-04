@@ -45,7 +45,7 @@ pub struct AgentSpec {
 /// Static registry of supported agents.
 ///
 /// v1 roster: `claude-code`, `codex`, `opencode`, `gemini`, `goose`,
-/// `openclaw`, `hermes`. Source-tree layout asymmetry is by
+/// `openclaw`, `hermes`, `nanoclaw`. Source-tree layout asymmetry is by
 /// design; `assemble_plugin_files` walks each source tree relative to its
 /// root and handles all three shapes. Do not "normalize" the layout;
 /// the destination template determines the depth.
@@ -141,6 +141,24 @@ pub fn registry() -> &'static [AgentSpec] {
             agent_root_template: "$HOME/.hermes",
             display_name: "Hermes",
             activation_hint: hermes_hint,
+            progressive_disclosure: true,
+        },
+        AgentSpec {
+            name: "nanoclaw",
+            source_subdir: "nanoclaw",
+            // NanoClaw is forked per-user from qwibitai/nanoclaw and run
+            // from the clone, so there is no global $HOME config dir. The
+            // fork dir comes from $NANOCLAW_HOME (default $HOME/nanoclaw)
+            // and skills live at <fork>/skills/<name>/SKILL.md, mirroring
+            // the Claude Agent SDK convention NanoClaw is built on. MCP
+            // wiring lives in <fork>/.mcp.json (project-scoped MCP); the
+            // installer merges an entry there directly because NanoClaw
+            // exposes no `mcp add` CLI and hand-editing JSON5 is the
+            // worst option for users.
+            dest_template: "$NANOCLAW_HOME/skills/aimx",
+            agent_root_template: "$NANOCLAW_HOME",
+            display_name: "NanoClaw",
+            activation_hint: nanoclaw_hint,
             progressive_disclosure: true,
         },
     ]
@@ -325,6 +343,56 @@ fn hermes_hint(data_dir: Option<&Path>) -> String {
     )
 }
 
+fn nanoclaw_hint(data_dir: Option<&Path>) -> String {
+    // NanoClaw is the one supported agent where aimx mutates the agent's
+    // own MCP config file (`<fork>/.mcp.json`). Every other agent either
+    // has a first-class registration CLI (Claude Code, Codex, OpenClaw)
+    // or expects the user to paste a snippet (OpenCode, Gemini, Hermes,
+    // Goose). NanoClaw exposes neither — `nanoclaw mcp add` does not
+    // exist, and asking the user to hand-edit `.mcp.json` (a JSON5-ish
+    // file the user already customises in their fork) is the worst of
+    // the three options. So `install_to_writer` calls `patch_mcp_json`
+    // before this hint runs to merge an entry under `mcpServers.aimx`.
+    //
+    // The hint is the post-merge confirmation: it prints the JSON we
+    // wrote so the user can see exactly what landed, plus a one-line
+    // pointer to `<fork>/.mcp.json` and a reminder to restart NanoClaw.
+    // It also reuses serde_json so paths containing `"`/`\` escape
+    // safely — same defensive shape as the OpenCode / Gemini hints.
+    let args: Vec<String> = match data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
+    };
+    let snippet = serde_json::json!({
+        "mcpServers": {
+            "aimx": {
+                "command": "/usr/local/bin/aimx",
+                "args": args,
+            }
+        }
+    });
+    let snippet_text = serde_json::to_string_pretty(&snippet)
+        .unwrap_or_else(|_| "<failed to render snippet>".to_string());
+    format!(
+        "Skill installed and aimx merged into <fork>/.mcp.json under \
+         mcpServers.aimx:\n\
+         \n\
+         {snippet_text}\n\
+         \n\
+         If the merge was skipped (fork directory missing or \
+         .mcp.json not writable), add the block above to the \
+         `mcpServers` object in <fork>/.mcp.json by hand. Set \
+         $NANOCLAW_HOME if your fork is not at ~/nanoclaw. Restart \
+         NanoClaw after the file is in place so the new server is \
+         loaded; then add a NanoClaw scheduled job that calls \
+         email_list via aimx MCP on the cadence you want."
+    )
+}
+
 fn openclaw_hint(data_dir: Option<&Path>) -> String {
     // OpenClaw exposes `openclaw mcp set <name> <json>`. The user can wire
     // MCP with one pasted command. Route the JSON through serde_json so
@@ -383,6 +451,14 @@ pub fn find_agent(name: &str) -> Option<&'static AgentSpec> {
 pub trait AgentEnv {
     fn home_dir(&self) -> Option<PathBuf>;
     fn xdg_config_home(&self) -> Option<PathBuf>;
+    /// Resolve `$NANOCLAW_HOME` for the NanoClaw integration. Returns
+    /// `None` when the variable is unset; `resolve_template_in_home`
+    /// then falls back to `<home>/nanoclaw`. Lives on the trait so
+    /// tests can pin the path to a tempdir without mutating the real
+    /// env.
+    fn nanoclaw_home(&self) -> Option<PathBuf> {
+        std::env::var_os("NANOCLAW_HOME").map(PathBuf::from)
+    }
     fn is_root(&self) -> bool;
     fn is_stdin_tty(&self) -> bool;
     fn read_line(&self) -> io::Result<String>;
@@ -465,6 +541,15 @@ impl<'a> AgentEnv for OverrideHomeEnv<'a> {
         None
     }
 
+    fn nanoclaw_home(&self) -> Option<PathBuf> {
+        // Forward to the inner env so an explicit `$NANOCLAW_HOME` still
+        // wins under `--dangerously-allow-root`. When unset, the default
+        // resolves under `home_dir()` (now `/root`), giving
+        // `/root/nanoclaw`, which mirrors how XDG defaults to
+        // `<home>/.config` in the same code path.
+        self.inner.nanoclaw_home()
+    }
+
     fn is_root(&self) -> bool {
         self.inner.is_root()
     }
@@ -537,7 +622,7 @@ pub struct InstallOptions<'a> {
 }
 
 /// Resolve a destination template against the environment. Substitutes
-/// `$HOME` and `$XDG_CONFIG_HOME`.
+/// `$HOME`, `$XDG_CONFIG_HOME`, and `$NANOCLAW_HOME`.
 pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, String> {
     let home = env.home_dir().ok_or_else(|| {
         "HOME is not set; agents setup writes to the user's home directory".to_string()
@@ -546,19 +631,28 @@ pub fn resolve_dest(template: &str, env: &dyn AgentEnv) -> Result<PathBuf, Strin
         template,
         &home,
         env.xdg_config_home(),
+        env.nanoclaw_home(),
     ))
 }
 
-/// Substitute `$HOME` / `$XDG_CONFIG_HOME` in a template against an explicit
-/// home path. The `detect_install_state` probe uses this helper
-/// to resolve paths against a caller-chosen home — for
+/// Substitute `$HOME` / `$XDG_CONFIG_HOME` / `$NANOCLAW_HOME` in a template
+/// against an explicit home path. The `detect_install_state` probe uses this
+/// helper to resolve paths against a caller-chosen home — for
 /// `--dangerously-allow-root` that's `/root`, not the ambient env's HOME.
 /// When `xdg` is `None`, defaults to `<home>/.config` per the XDG Base
-/// Directory spec.
-pub fn resolve_template_in_home(template: &str, home: &Path, xdg: Option<PathBuf>) -> PathBuf {
+/// Directory spec. When `nanoclaw` is `None`, defaults to `<home>/nanoclaw`
+/// (matches the canonical `git clone … nanoclaw && cd nanoclaw` workflow).
+pub fn resolve_template_in_home(
+    template: &str,
+    home: &Path,
+    xdg: Option<PathBuf>,
+    nanoclaw: Option<PathBuf>,
+) -> PathBuf {
     let xdg_dir = xdg.unwrap_or_else(|| home.join(".config"));
+    let nanoclaw_dir = nanoclaw.unwrap_or_else(|| home.join("nanoclaw"));
     let substituted = template
         .replace("$XDG_CONFIG_HOME", &xdg_dir.to_string_lossy())
+        .replace("$NANOCLAW_HOME", &nanoclaw_dir.to_string_lossy())
         .replace("$HOME", &home.to_string_lossy());
     PathBuf::from(substituted)
 }
@@ -609,13 +703,19 @@ pub enum InstallState {
 ///
 /// `xdg` is threaded through so agents whose paths use `$XDG_CONFIG_HOME`
 /// (opencode, goose) resolve identically to how the installer would
-/// resolve them. `None` falls back to `<home>/.config`.
-pub fn detect_install_state(spec: &AgentSpec, home: &Path, xdg: Option<PathBuf>) -> InstallState {
-    let dest = resolve_template_in_home(spec.dest_template, home, xdg.clone());
+/// resolve them. `None` falls back to `<home>/.config`. `nanoclaw` does
+/// the same job for `$NANOCLAW_HOME` (defaulting to `<home>/nanoclaw`).
+pub fn detect_install_state(
+    spec: &AgentSpec,
+    home: &Path,
+    xdg: Option<PathBuf>,
+    nanoclaw: Option<PathBuf>,
+) -> InstallState {
+    let dest = resolve_template_in_home(spec.dest_template, home, xdg.clone(), nanoclaw.clone());
     if dest.exists() && dest_contains_aimx_entry(spec, &dest) {
         return InstallState::InstalledWired;
     }
-    let root = resolve_template_in_home(spec.agent_root_template, home, xdg);
+    let root = resolve_template_in_home(spec.agent_root_template, home, xdg, nanoclaw);
     if root.exists() {
         return InstallState::InstalledNotWired;
     }
@@ -898,6 +998,25 @@ fn install_to_writer(
         cleanup_legacy_claude_plugin(env, out)?;
     }
 
+    // NanoClaw is installed *into* a user-owned fork of qwibitai/nanoclaw,
+    // not into a system-style config dir. If we let `write_files` blindly
+    // create the missing parent we would happily create a `~/nanoclaw/`
+    // stub on a host that hasn't cloned NanoClaw yet — and a follow-up
+    // `git clone … nanoclaw` would fail because the directory exists.
+    // Fail fast with a message that names the override env var instead.
+    if spec.name == "nanoclaw" {
+        let fork_dir = resolve_dest(spec.agent_root_template, env)?;
+        if !fork_dir.exists() {
+            return Err(format!(
+                "NanoClaw fork directory {} does not exist. Clone NanoClaw first \
+                 (e.g. `git clone https://github.com/qwibitai/nanoclaw.git ~/nanoclaw`), \
+                 or set $NANOCLAW_HOME if your fork lives elsewhere, then re-run.",
+                fork_dir.display()
+            )
+            .into());
+        }
+    }
+
     let dest_root = resolve_dest(spec.dest_template, env)?;
     write_files(&dest_root, &files, opts.force, env)?;
 
@@ -907,6 +1026,11 @@ fn install_to_writer(
         term::success("Installed"),
         term::highlight(&dest_root.to_string_lossy())
     )?;
+
+    if spec.name == "nanoclaw" {
+        let fork_dir = resolve_dest(spec.agent_root_template, env)?;
+        merge_nanoclaw_mcp_json(&fork_dir, opts, out)?;
+    }
 
     if let Some(registration) = try_auto_register_mcp(spec, env, opts.data_dir) {
         match registration {
@@ -966,6 +1090,168 @@ fn try_auto_register_mcp(
         "codex" => Some(crate::agents_mcp::register_codex(env.mcp_cli(), data_dir)),
         _ => None,
     }
+}
+
+/// Outcome of `patch_nanoclaw_mcp_json`. Drives the printed status line
+/// in `merge_nanoclaw_mcp_json` so the user can tell what happened.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpJsonMergeOutcome {
+    /// `<fork>/.mcp.json` did not exist; created it with our entry.
+    Created,
+    /// `<fork>/.mcp.json` existed; merged our entry under `mcpServers.aimx`,
+    /// preserving any other servers untouched.
+    Merged,
+    /// `mcpServers.aimx` already existed and `force` was not set. The
+    /// caller should print the activation hint so the user can re-run
+    /// with `--force` once they confirm the override is intended.
+    Conflict,
+    /// Fork directory does not exist on disk. The user has not cloned
+    /// NanoClaw yet, or `$NANOCLAW_HOME` points somewhere stale. The
+    /// caller falls back to printing the activation hint as a snippet.
+    ForkMissing,
+}
+
+/// Merge an `mcpServers.aimx` entry into `<fork>/.mcp.json`. NanoClaw is
+/// the one supported agent where aimx mutates the agent's own MCP
+/// config file directly: there is no `nanoclaw mcp add` CLI, and
+/// hand-editing JSON5 is the worst path for users. See the design
+/// note at the top of `agents/nanoclaw/README.md` for why this is
+/// intentional rather than the start of a pattern.
+///
+/// The write is atomic (temp file in the same directory + rename) so
+/// concurrent reads of `.mcp.json` (e.g. by a running NanoClaw process
+/// reloading its config) never observe a half-written file. Any servers
+/// already configured under `mcpServers` are preserved verbatim;
+/// only the `aimx` key is touched.
+///
+/// `force=true` overwrites an existing `mcpServers.aimx` entry without
+/// prompting. `force=false` returns `Conflict` instead so the caller
+/// can surface a clear error rather than silently overwriting whatever
+/// the user had before.
+pub fn patch_nanoclaw_mcp_json(
+    fork_dir: &Path,
+    command_path: &str,
+    args: &[String],
+    force: bool,
+) -> Result<McpJsonMergeOutcome, Box<dyn std::error::Error>> {
+    if !fork_dir.exists() {
+        return Ok(McpJsonMergeOutcome::ForkMissing);
+    }
+    let mcp_path = fork_dir.join(".mcp.json");
+    let existed_before = mcp_path.exists();
+
+    let entry = serde_json::json!({
+        "command": command_path,
+        "args": args,
+    });
+
+    let mut root: serde_json::Value = if existed_before {
+        let bytes = std::fs::read(&mcp_path)?;
+        let text = std::str::from_utf8(&bytes)
+            .map_err(|e| format!("{}: not valid UTF-8: {}", mcp_path.display(), e))?;
+        if text.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(text)
+                .map_err(|e| format!("{}: not valid JSON: {}", mcp_path.display(), e))?
+        }
+    } else {
+        serde_json::json!({})
+    };
+
+    let root_obj = root.as_object_mut().ok_or_else(|| {
+        format!(
+            "{}: top-level value is not a JSON object",
+            mcp_path.display()
+        )
+    })?;
+
+    let servers = root_obj
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::json!({}))
+        .as_object_mut()
+        .ok_or_else(|| format!("{}: mcpServers is not a JSON object", mcp_path.display()))?;
+
+    if servers.contains_key("aimx") && !force {
+        return Ok(McpJsonMergeOutcome::Conflict);
+    }
+    servers.insert("aimx".to_string(), entry);
+
+    let mut serialized = serde_json::to_string_pretty(&root)?;
+    serialized.push('\n');
+
+    // Write to a sibling temp file, then atomic-rename. Same FS as the
+    // target, so rename(2) is atomic. The `.aimx-tmp` suffix is unique
+    // enough to not collide with any user file the fork might carry.
+    let tmp_path = fork_dir.join(".mcp.json.aimx-tmp");
+    std::fs::write(&tmp_path, serialized.as_bytes())?;
+    set_file_mode(&tmp_path)?;
+    std::fs::rename(&tmp_path, &mcp_path)?;
+
+    Ok(if existed_before {
+        McpJsonMergeOutcome::Merged
+    } else {
+        McpJsonMergeOutcome::Created
+    })
+}
+
+/// Wrapper around `patch_nanoclaw_mcp_json` that picks the command/args
+/// from `InstallOptions::data_dir` and prints a status line. Skips the
+/// patch under `--print` (dry-run); the activation hint already shows
+/// the proposed JSON in that path.
+fn merge_nanoclaw_mcp_json(
+    fork_dir: &Path,
+    opts: &InstallOptions,
+    out: &mut dyn Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if opts.print {
+        return Ok(());
+    }
+    let args: Vec<String> = match opts.data_dir {
+        Some(dd) => vec![
+            "--data-dir".to_string(),
+            dd.to_string_lossy().into_owned(),
+            "mcp".to_string(),
+        ],
+        None => vec!["mcp".to_string()],
+    };
+    let mcp_path = fork_dir.join(".mcp.json");
+    match patch_nanoclaw_mcp_json(fork_dir, "/usr/local/bin/aimx", &args, opts.force)? {
+        McpJsonMergeOutcome::Created => {
+            writeln!(
+                out,
+                "{} created {} with mcpServers.aimx",
+                term::success_mark(),
+                term::highlight(&mcp_path.to_string_lossy()),
+            )?;
+        }
+        McpJsonMergeOutcome::Merged => {
+            writeln!(
+                out,
+                "{} merged mcpServers.aimx into {}",
+                term::success_mark(),
+                term::highlight(&mcp_path.to_string_lossy()),
+            )?;
+        }
+        McpJsonMergeOutcome::Conflict => {
+            writeln!(
+                out,
+                "{} mcpServers.aimx already exists in {}; pass --force to overwrite",
+                term::warn_mark(),
+                mcp_path.display(),
+            )?;
+        }
+        McpJsonMergeOutcome::ForkMissing => {
+            writeln!(
+                out,
+                "{} fork directory {} not found; skipping .mcp.json merge \
+                 (set $NANOCLAW_HOME or clone NanoClaw, then re-run)",
+                term::warn_mark(),
+                fork_dir.display(),
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Remove `~/.claude/plugins/aimx/` if it exists. aimx <= 0.x installed
@@ -1345,6 +1631,7 @@ mod tests {
     struct MockEnv {
         home: PathBuf,
         xdg: Option<PathBuf>,
+        nanoclaw: Option<PathBuf>,
         root: bool,
         tty: bool,
         responses: RefCell<Vec<String>>,
@@ -1356,6 +1643,7 @@ mod tests {
             Self {
                 home,
                 xdg: None,
+                nanoclaw: None,
                 root: false,
                 tty: false,
                 responses: RefCell::new(Vec::new()),
@@ -1370,6 +1658,9 @@ mod tests {
         }
         fn xdg_config_home(&self) -> Option<PathBuf> {
             self.xdg.clone()
+        }
+        fn nanoclaw_home(&self) -> Option<PathBuf> {
+            self.nanoclaw.clone()
         }
         fn is_root(&self) -> bool {
             self.root
@@ -1446,7 +1737,7 @@ mod tests {
         // Pristine tempdir → every agent's root dir is missing.
         let tmp = TempDir::new().unwrap();
         for spec in registry() {
-            let state = detect_install_state(spec, tmp.path(), None);
+            let state = detect_install_state(spec, tmp.path(), None, None);
             assert_eq!(
                 state,
                 InstallState::NotInstalled,
@@ -1463,7 +1754,7 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
         let spec = find_agent("claude-code").unwrap();
-        let state = detect_install_state(spec, tmp.path(), None);
+        let state = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(state, InstallState::InstalledNotWired);
     }
 
@@ -1477,12 +1768,12 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         let spec = find_agent("claude-code").unwrap();
         // Empty dir → NotWired (falls back to agent_root existence = InstalledNotWired).
-        let state_empty = detect_install_state(spec, tmp.path(), None);
+        let state_empty = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(state_empty, InstallState::InstalledNotWired);
 
         // Drop a SKILL.md mentioning "aimx" → Wired.
         std::fs::write(skill_dir.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
-        let state_wired = detect_install_state(spec, tmp.path(), None);
+        let state_wired = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(state_wired, InstallState::InstalledWired);
     }
 
@@ -1499,7 +1790,7 @@ mod tests {
         std::fs::write(skill_dir.join("SKILL.md"), "---\nname: aimx\n---\nbody").unwrap();
 
         let spec = find_agent("claude-code").unwrap();
-        let state = detect_install_state(spec, tmp.path(), None);
+        let state = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(
             state,
             InstallState::InstalledWired,
@@ -1515,7 +1806,7 @@ mod tests {
         let skill_dir = tmp.path().join(".claude").join("skills").join("aimx");
         std::fs::create_dir_all(&skill_dir).unwrap();
         let spec = find_agent("claude-code").unwrap();
-        let state = detect_install_state(spec, tmp.path(), None);
+        let state = detect_install_state(spec, tmp.path(), None, None);
         // Empty dir is not Wired (agent_root exists → NotWired).
         assert_eq!(state, InstallState::InstalledNotWired);
     }
@@ -1529,7 +1820,7 @@ mod tests {
         std::fs::create_dir_all(&skill_dir).unwrap();
         std::fs::write(skill_dir.join("stale.txt"), "nothing to see").unwrap();
         let spec = find_agent("claude-code").unwrap();
-        let state = detect_install_state(spec, tmp.path(), None);
+        let state = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(state, InstallState::InstalledNotWired);
     }
 
@@ -1543,12 +1834,12 @@ mod tests {
         let xdg = tmp.path().join("custom-xdg");
         std::fs::create_dir_all(xdg.join("opencode")).unwrap();
         let spec = find_agent("opencode").unwrap();
-        let state_with_xdg = detect_install_state(spec, tmp.path(), Some(xdg.clone()));
+        let state_with_xdg = detect_install_state(spec, tmp.path(), Some(xdg.clone()), None);
         assert_eq!(state_with_xdg, InstallState::InstalledNotWired);
 
         // Without the override, `<home>/.config/opencode` is missing, so
         // the same spec reports NotInstalled.
-        let state_no_xdg = detect_install_state(spec, tmp.path(), None);
+        let state_no_xdg = detect_install_state(spec, tmp.path(), None, None);
         assert_eq!(state_no_xdg, InstallState::NotInstalled);
     }
 
@@ -1564,12 +1855,12 @@ mod tests {
         std::fs::create_dir_all(&recipes).unwrap();
         let spec = find_agent("goose").unwrap();
         // No aimx.yaml yet → NotWired.
-        let state_empty = detect_install_state(spec, tmp.path(), Some(xdg.clone()));
+        let state_empty = detect_install_state(spec, tmp.path(), Some(xdg.clone()), None);
         assert_eq!(state_empty, InstallState::InstalledNotWired);
 
         // Drop aimx.yaml → Wired.
         std::fs::write(recipes.join("aimx.yaml"), "# aimx recipe\n").unwrap();
-        let state_wired = detect_install_state(spec, tmp.path(), Some(xdg));
+        let state_wired = detect_install_state(spec, tmp.path(), Some(xdg), None);
         assert_eq!(state_wired, InstallState::InstalledWired);
     }
 
@@ -1607,7 +1898,7 @@ mod tests {
         let env = OverrideHomeEnv::new(&inner, root_home.clone());
         let home = env.home_dir().unwrap();
         let spec = find_agent("claude-code").unwrap();
-        let state = detect_install_state(spec, &home, env.xdg_config_home());
+        let state = detect_install_state(spec, &home, env.xdg_config_home(), env.nanoclaw_home());
         assert_eq!(state, InstallState::InstalledNotWired);
     }
 
@@ -2372,7 +2663,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_lists_seven_agents_in_canonical_order() {
+    fn registry_lists_agents_in_canonical_order() {
         let names: Vec<&str> = registry().iter().map(|s| s.name).collect();
         assert_eq!(
             names,
@@ -2384,6 +2675,7 @@ mod tests {
                 "goose",
                 "openclaw",
                 "hermes",
+                "nanoclaw",
             ]
         );
     }
@@ -3858,6 +4150,401 @@ mod tests {
         assert!(
             printed.contains("claude mcp add"),
             "expected manual fallback hint after RegisterFailed: {printed}"
+        );
+    }
+
+    // --- NanoClaw integration tests ---------------------------------------
+
+    /// Build a `MockEnv` that points at a tempdir and pins NanoClaw's fork
+    /// to `<tmp>/nanoclaw` (created on disk so the install path doesn't
+    /// fail the fork-dir precheck). Returns the env plus the fork path
+    /// for the test to assert against.
+    fn nanoclaw_mock_env(tmp: &TempDir) -> (MockEnv, PathBuf) {
+        let fork = tmp.path().join("nanoclaw");
+        std::fs::create_dir_all(&fork).unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.nanoclaw = Some(fork.clone());
+        (env, fork)
+    }
+
+    #[test]
+    fn registry_contains_nanoclaw() {
+        let spec = find_agent("nanoclaw").expect("registry must include nanoclaw");
+        assert_eq!(spec.dest_template, "$NANOCLAW_HOME/skills/aimx");
+        assert_eq!(spec.agent_root_template, "$NANOCLAW_HOME");
+        assert!(spec.progressive_disclosure);
+    }
+
+    #[test]
+    fn install_nanoclaw_lays_out_expected_files() {
+        let tmp = TempDir::new().unwrap();
+        let (env, fork) = nanoclaw_mock_env(&tmp);
+
+        run_with_env(Some("nanoclaw".into()), false, false, false, None, &env).unwrap();
+
+        let dest = fork.join("skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(!dest.join("SKILL.md.header").exists());
+        assert!(!dest.join("README.md").exists());
+
+        let skill = std::fs::read_to_string(dest.join("SKILL.md")).unwrap();
+        assert!(
+            skill.starts_with("---\n"),
+            "missing YAML frontmatter: {skill:.200}"
+        );
+        assert!(skill.contains("name: aimx"));
+        assert!(skill.contains("description:"));
+        assert!(skill.contains("nanoclaw"));
+        assert!(skill.contains("scheduled job"));
+        assert!(skill.contains("mailbox_list()"));
+    }
+
+    #[test]
+    fn nanoclaw_progressive_disclosure_installs_references() {
+        let tmp = TempDir::new().unwrap();
+        let (env, fork) = nanoclaw_mock_env(&tmp);
+
+        run_with_env(Some("nanoclaw".into()), false, false, false, None, &env).unwrap();
+
+        let dest = fork.join("skills/aimx");
+        assert!(dest.join("SKILL.md").exists());
+        assert!(dest.join("references/mcp-tools.md").exists());
+        assert!(dest.join("references/frontmatter.md").exists());
+        assert!(dest.join("references/workflows.md").exists());
+        assert!(dest.join("references/troubleshooting.md").exists());
+        assert!(dest.join("references/hooks.md").exists());
+    }
+
+    #[test]
+    fn nanoclaw_activation_hint_mentions_mcp_json_and_scheduled_job() {
+        let spec = find_agent("nanoclaw").unwrap();
+        let hint = (spec.activation_hint)(None);
+        assert!(hint.contains("<fork>/.mcp.json"));
+        assert!(hint.contains("mcpServers"));
+        assert!(hint.contains("\"aimx\""));
+        assert!(hint.contains("/usr/local/bin/aimx"));
+        assert!(hint.contains("scheduled job"));
+        assert!(hint.contains("$NANOCLAW_HOME"));
+        // Default install must not leak --data-dir into the snippet.
+        assert!(!hint.contains("--data-dir"));
+    }
+
+    #[test]
+    fn nanoclaw_activation_hint_with_custom_data_dir_rewrites_args() {
+        let spec = find_agent("nanoclaw").unwrap();
+        let hint = (spec.activation_hint)(Some(Path::new("/custom/aimx-data")));
+        // The path is routed through serde_json so it always renders as a
+        // proper JSON string, even for "safe" inputs.
+        assert!(hint.contains("\"--data-dir\""));
+        assert!(hint.contains("\"/custom/aimx-data\""));
+        assert!(hint.contains("\"mcp\""));
+    }
+
+    #[test]
+    fn nanoclaw_activation_hint_escapes_json_special_chars_in_data_dir() {
+        // A `--data-dir` containing `"` or `\` MUST be JSON-escaped, or
+        // the rendered snippet is invalid JSON when the user pastes it
+        // back. Mirrors the equivalent regression test for Hermes/YAML.
+        let spec = find_agent("nanoclaw").unwrap();
+        let hint = (spec.activation_hint)(Some(Path::new(r#"/opt/a"b\c"#)));
+        // Pull out the JSON snippet and parse it back to confirm it round-trips.
+        let snippet_start = hint.find('{').expect("hint must contain JSON");
+        let snippet_end = hint.rfind('}').expect("hint must contain closing brace");
+        let snippet = &hint[snippet_start..=snippet_end];
+        let parsed: serde_json::Value = serde_json::from_str(snippet)
+            .unwrap_or_else(|e| panic!("rendered snippet must be valid JSON: {e}\n{snippet}"));
+        let args = parsed
+            .pointer("/mcpServers/aimx/args")
+            .and_then(|v| v.as_array())
+            .expect("args array must be present");
+        // The original path must round-trip byte-for-byte through JSON.
+        assert_eq!(args[1].as_str().unwrap(), r#"/opt/a"b\c"#);
+    }
+
+    #[test]
+    fn assembled_nanoclaw_skill_is_header_plus_primer_byte_for_byte() {
+        let source = AGENTS_DIR.get_dir("nanoclaw").unwrap();
+        let files = assemble_plugin_files(source, None).unwrap();
+
+        let (_, skill_bytes) = files
+            .iter()
+            .find(|(rel, _)| rel.to_string_lossy() == "SKILL.md")
+            .expect("assembled SKILL.md should be present");
+
+        let header = AGENTS_DIR
+            .get_file("nanoclaw/SKILL.md.header")
+            .unwrap()
+            .contents();
+        let primer = AGENTS_DIR
+            .get_file("common/aimx-primer.md")
+            .unwrap()
+            .contents();
+
+        let mut expected = Vec::with_capacity(header.len() + primer.len());
+        expected.extend_from_slice(header);
+        expected.extend_from_slice(primer);
+
+        assert_eq!(skill_bytes, &expected);
+    }
+
+    #[test]
+    fn resolve_dest_substitutes_nanoclaw_home() {
+        let tmp = TempDir::new().unwrap();
+        let mut env = MockEnv::new(tmp.path().to_path_buf());
+        env.nanoclaw = Some(PathBuf::from("/opt/custom-nanoclaw"));
+        let spec = find_agent("nanoclaw").unwrap();
+        let dest = resolve_dest(spec.dest_template, &env).unwrap();
+        assert_eq!(
+            dest,
+            PathBuf::from("/opt/custom-nanoclaw/skills/aimx"),
+            "nanoclaw_home() override must replace $NANOCLAW_HOME in dest_template"
+        );
+    }
+
+    #[test]
+    fn resolve_dest_defaults_nanoclaw_home_to_home_nanoclaw() {
+        let tmp = TempDir::new().unwrap();
+        let env = MockEnv::new(tmp.path().to_path_buf()); // nanoclaw = None
+        let spec = find_agent("nanoclaw").unwrap();
+        let dest = resolve_dest(spec.dest_template, &env).unwrap();
+        assert_eq!(
+            dest,
+            tmp.path().join("nanoclaw").join("skills").join("aimx"),
+            "unset $NANOCLAW_HOME must fall back to <home>/nanoclaw"
+        );
+    }
+
+    #[test]
+    fn install_nanoclaw_errors_when_fork_dir_missing() {
+        // No fork dir on disk → install must fail fast with a message
+        // that names $NANOCLAW_HOME so the user can fix the misconfig.
+        let tmp = TempDir::new().unwrap();
+        // tmp.path() exists but `<tmp>/nanoclaw` (the default fork path)
+        // does not.
+        let env = MockEnv::new(tmp.path().to_path_buf());
+        let err = run_with_env(Some("nanoclaw".into()), false, false, false, None, &env)
+            .expect_err("install must fail when fork dir is missing");
+        let msg = err.to_string();
+        assert!(msg.contains("NanoClaw"), "{msg}");
+        assert!(msg.contains("$NANOCLAW_HOME"), "{msg}");
+        // No skill files should have been written.
+        assert!(!tmp.path().join("nanoclaw").exists());
+    }
+
+    // --- patch_nanoclaw_mcp_json -----------------------------------------
+
+    #[test]
+    fn patch_mcp_json_creates_when_absent() {
+        let tmp = TempDir::new().unwrap();
+        let fork = tmp.path().join("fork");
+        std::fs::create_dir_all(&fork).unwrap();
+
+        let outcome =
+            patch_nanoclaw_mcp_json(&fork, "/usr/local/bin/aimx", &["mcp".to_string()], false)
+                .unwrap();
+        assert_eq!(outcome, McpJsonMergeOutcome::Created);
+
+        let written = std::fs::read_to_string(fork.join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.pointer("/mcpServers/aimx/command").unwrap(),
+            "/usr/local/bin/aimx"
+        );
+        let args = parsed
+            .pointer("/mcpServers/aimx/args")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].as_str().unwrap(), "mcp");
+    }
+
+    #[test]
+    fn patch_mcp_json_merges_into_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let fork = tmp.path().join("fork");
+        std::fs::create_dir_all(&fork).unwrap();
+        // Pre-existing .mcp.json with another server. The patcher must
+        // preserve `someone-else` untouched while adding `aimx`.
+        let initial = serde_json::json!({
+            "mcpServers": {
+                "someone-else": {
+                    "command": "/opt/other",
+                    "args": ["serve"],
+                }
+            },
+            "unrelated": "must-survive"
+        });
+        std::fs::write(
+            fork.join(".mcp.json"),
+            serde_json::to_string_pretty(&initial).unwrap(),
+        )
+        .unwrap();
+
+        let outcome =
+            patch_nanoclaw_mcp_json(&fork, "/usr/local/bin/aimx", &["mcp".to_string()], false)
+                .unwrap();
+        assert_eq!(outcome, McpJsonMergeOutcome::Merged);
+
+        let written = std::fs::read_to_string(fork.join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.pointer("/mcpServers/someone-else/command").unwrap(),
+            "/opt/other"
+        );
+        assert_eq!(
+            parsed.pointer("/mcpServers/aimx/command").unwrap(),
+            "/usr/local/bin/aimx"
+        );
+        assert_eq!(parsed.pointer("/unrelated").unwrap(), "must-survive");
+    }
+
+    #[test]
+    fn patch_mcp_json_conflict_without_force_keeps_existing_entry() {
+        let tmp = TempDir::new().unwrap();
+        let fork = tmp.path().join("fork");
+        std::fs::create_dir_all(&fork).unwrap();
+        let initial = serde_json::json!({
+            "mcpServers": {
+                "aimx": {
+                    "command": "/opt/old-aimx",
+                    "args": ["mcp"],
+                }
+            }
+        });
+        std::fs::write(
+            fork.join(".mcp.json"),
+            serde_json::to_string_pretty(&initial).unwrap(),
+        )
+        .unwrap();
+
+        let outcome =
+            patch_nanoclaw_mcp_json(&fork, "/usr/local/bin/aimx", &["mcp".to_string()], false)
+                .unwrap();
+        assert_eq!(outcome, McpJsonMergeOutcome::Conflict);
+
+        // File must be unchanged.
+        let written = std::fs::read_to_string(fork.join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.pointer("/mcpServers/aimx/command").unwrap(),
+            "/opt/old-aimx"
+        );
+    }
+
+    #[test]
+    fn patch_mcp_json_force_overwrites_existing_aimx_entry() {
+        let tmp = TempDir::new().unwrap();
+        let fork = tmp.path().join("fork");
+        std::fs::create_dir_all(&fork).unwrap();
+        let initial = serde_json::json!({
+            "mcpServers": {
+                "aimx": {
+                    "command": "/opt/old-aimx",
+                    "args": ["mcp"],
+                }
+            }
+        });
+        std::fs::write(
+            fork.join(".mcp.json"),
+            serde_json::to_string_pretty(&initial).unwrap(),
+        )
+        .unwrap();
+
+        let outcome = patch_nanoclaw_mcp_json(
+            &fork,
+            "/usr/local/bin/aimx",
+            &[
+                "--data-dir".to_string(),
+                "/x".to_string(),
+                "mcp".to_string(),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(outcome, McpJsonMergeOutcome::Merged);
+
+        let written = std::fs::read_to_string(fork.join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.pointer("/mcpServers/aimx/command").unwrap(),
+            "/usr/local/bin/aimx"
+        );
+        let args = parsed
+            .pointer("/mcpServers/aimx/args")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0].as_str().unwrap(), "--data-dir");
+        assert_eq!(args[1].as_str().unwrap(), "/x");
+        assert_eq!(args[2].as_str().unwrap(), "mcp");
+    }
+
+    #[test]
+    fn patch_mcp_json_fork_missing_returns_outcome() {
+        // No fork dir on disk → return the ForkMissing variant rather
+        // than erroring. The caller decides whether to surface it as a
+        // warning or a hard error.
+        let tmp = TempDir::new().unwrap();
+        let outcome = patch_nanoclaw_mcp_json(
+            &tmp.path().join("does-not-exist"),
+            "/usr/local/bin/aimx",
+            &["mcp".to_string()],
+            false,
+        )
+        .unwrap();
+        assert_eq!(outcome, McpJsonMergeOutcome::ForkMissing);
+    }
+
+    #[test]
+    fn install_nanoclaw_dry_run_does_not_touch_mcp_json() {
+        // `--print` must not write to disk. Run install with print=true
+        // and confirm no .mcp.json was created.
+        let tmp = TempDir::new().unwrap();
+        let (env, fork) = nanoclaw_mock_env(&tmp);
+        let mut buf: Vec<u8> = Vec::new();
+
+        run_with_env_to_writer(
+            Some("nanoclaw".into()),
+            false,
+            false,
+            true, // print
+            None,
+            &env,
+            &mut buf,
+        )
+        .unwrap();
+
+        assert!(
+            !fork.join(".mcp.json").exists(),
+            "--print must not create .mcp.json"
+        );
+        // The skill files must also not have been written under print mode.
+        assert!(
+            !fork.join("skills/aimx/SKILL.md").exists(),
+            "--print must not write skill files"
+        );
+
+        // The printed output must include the proposed JSON snippet so the
+        // user can preview it.
+        let printed = String::from_utf8(buf).unwrap();
+        assert!(printed.contains("=== activation ==="));
+        assert!(printed.contains("mcpServers"));
+        assert!(printed.contains("/usr/local/bin/aimx"));
+    }
+
+    #[test]
+    fn install_nanoclaw_writes_mcp_json_under_normal_install() {
+        // Sanity: a real (non-print) install merges the entry.
+        let tmp = TempDir::new().unwrap();
+        let (env, fork) = nanoclaw_mock_env(&tmp);
+
+        run_with_env(Some("nanoclaw".into()), false, false, false, None, &env).unwrap();
+
+        let written = std::fs::read_to_string(fork.join(".mcp.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&written).unwrap();
+        assert_eq!(
+            parsed.pointer("/mcpServers/aimx/command").unwrap(),
+            "/usr/local/bin/aimx"
         );
     }
 }

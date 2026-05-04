@@ -180,6 +180,9 @@ pub fn removal_hint(spec: &AgentSpec) -> String {
         "hermes" => {
             "Remove the `aimx` block from `~/.hermes/config.yaml` under `mcp_servers:` to also unregister the MCP server.".to_string()
         }
+        "nanoclaw" => {
+            "Remove the `aimx` entry from `mcpServers` in `<fork>/.mcp.json` to also unregister the MCP server (set $NANOCLAW_HOME if your fork is not at ~/nanoclaw).".to_string()
+        }
         // Future-proof: never panic on a registry-name mismatch.
         other => format!("(No agent-specific cleanup hint registered for `{other}`.)"),
     }
@@ -242,6 +245,9 @@ mod tests {
             Some(self.home.clone())
         }
         fn xdg_config_home(&self) -> Option<PathBuf> {
+            None
+        }
+        fn nanoclaw_home(&self) -> Option<PathBuf> {
             None
         }
         fn is_root(&self) -> bool {

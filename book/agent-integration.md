@@ -103,8 +103,11 @@ aimx agents remove claude-code
 | Goose | `aimx agents setup goose` | `~/.config/goose/recipes/aimx.yaml` | Run `goose run --recipe aimx`. The recipe bundles its own MCP extension, so no separate config step. | Single YAML blob (primer as `prompt` block scalar). References inlined |
 | OpenClaw | `aimx agents setup openclaw` | `~/.openclaw/skills/aimx/` | Run the printed `openclaw mcp set aimx '...'` command, then restart the OpenClaw gateway. | Primer as skill + `references/` directory copied as siblings |
 | Hermes | `aimx agents setup hermes` | `~/.hermes/skills/aimx/` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. | Primer as skill + `references/` directory copied as siblings |
+| NanoClaw | `aimx agents setup nanoclaw` | `<fork>/skills/aimx/` (default `~/nanoclaw/`, override via `$NANOCLAW_HOME`) | Auto-merged into `<fork>/.mcp.json` under `mcpServers.aimx`. Restart NanoClaw so the new server is loaded. | Primer as skill + `references/` directory copied as siblings |
 
-> **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
+> **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes, NanoClaw) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
+
+> **`.mcp.json` auto-merge (NanoClaw only).** NanoClaw is the one supported agent where `aimx agents setup` writes to the agent's primary MCP config file. NanoClaw exposes no `mcp add` CLI and ships its MCP servers as JSON5 in the per-fork `.mcp.json`, so the installer reads that file (if present), merges an `mcpServers.aimx` entry preserving any other servers, and writes back via temp-file + atomic rename. `--print` shows the proposed JSON without touching disk; `--force` overwrites an existing `aimx` entry. Every other agent either has a registration CLI or expects the user to paste a snippet; aimx does not mutate their config files.
 
 ### Per-agent hook recipes
 
@@ -387,6 +390,76 @@ The printed YAML's `args` line will become
 `args: [--data-dir, /custom/path, mcp]`.
 
 See [`agents/hermes/README.md`](https://github.com/uzyn/aimx/tree/main/agents/hermes)
+for the schema reference.
+
+### NanoClaw
+
+[NanoClaw](https://nanoclaw.dev/) is a lightweight container-isolated
+personal AI agent built on Anthropic's Claude Agent SDK. It is forked
+per-user from `qwibitai/nanoclaw` and run from the clone, so there is
+no global `~/.nanoclaw/` directory; instead the integration target is
+the fork directory itself. The installer resolves the fork path from
+`$NANOCLAW_HOME`, defaulting to `~/nanoclaw` (the path the upstream
+README's `git clone … nanoclaw && cd nanoclaw` workflow leaves you
+in). Set the env var before running setup if your fork lives
+elsewhere.
+
+NanoClaw is the one supported agent where aimx mutates the agent's
+own MCP config file. NanoClaw exposes no `mcp add` CLI, and its MCP
+servers live in `<fork>/.mcp.json` (Claude-Agent-SDK project-scoped
+convention). Asking the user to hand-edit that JSON5 file is the
+worst of three options, so the installer reads it (if present),
+merges an `mcpServers.aimx` entry under `mcpServers`, and writes
+back via temp-file + atomic rename. Other servers in the file are
+preserved untouched.
+
+Install:
+
+```bash
+aimx agents setup nanoclaw
+```
+
+(or, with a non-default fork path):
+
+```bash
+NANOCLAW_HOME=/opt/my-nanoclaw aimx agents setup nanoclaw
+```
+
+The installer requires the fork directory to exist (no
+auto-`mkdir`) so it never creates a stub a follow-up `git clone`
+would fail on. After it succeeds, restart NanoClaw so it loads the
+new `.mcp.json` entry and discovers the skill.
+
+For a custom data directory:
+
+```bash
+aimx --data-dir /custom/path agents setup nanoclaw
+```
+
+The merged `.mcp.json` entry's `args` array will include
+`--data-dir /custom/path`.
+
+**Re-running.** The installer is idempotent on the skill files
+(re-running with `--force` overwrites them). On `.mcp.json`, an
+existing `mcpServers.aimx` entry is left in place unless `--force`
+is passed; the installer prints a clear "pass --force to overwrite"
+warning and exits cleanly so a stale entry never silently
+shadows what the user had before.
+
+**Channel triggers / hooks.** NanoClaw is a long-running Node.js
+daemon listening on messaging channels inside a container; it does
+not expose a one-shot CLI suitable for an aimx `on_receive` hook.
+The natural integration is the **other direction**: NanoClaw pulls
+unread mail from aimx via MCP on its own scheduled-job cadence,
+acts on each message (reply, file, label), then marks it read.
+Wire one of NanoClaw's first-class scheduled jobs to call
+`email_list(folder: "inbox", unread_only: true)` every N minutes.
+For sub-second-latency reactions to inbound mail, wire a different
+agent (Claude Code, Codex, or Hermes) as the on_receive hook on the
+aimx side and let NanoClaw consume the resulting state on its next
+tick.
+
+See [`agents/nanoclaw/README.md`](https://github.com/uzyn/aimx/tree/main/agents/nanoclaw)
 for the schema reference.
 
 ## Manual MCP wiring
