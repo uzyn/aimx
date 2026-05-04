@@ -5823,6 +5823,24 @@ fn agents_setup_list_works() {
         .stdout(predicate::str::contains("claude-code"));
 }
 
+/// NanoClaw was added as the eighth supported agent. A separate assertion
+/// (rather than folding it into `agents_setup_list_works`) keeps the failure
+/// message specific if NanoClaw is ever accidentally dropped from
+/// `registry()`. Also confirms the `$NANOCLAW_HOME` template surfaces in
+/// the printed destination so users see the env var without reading the
+/// guide.
+#[test]
+fn agents_setup_list_includes_nanoclaw() {
+    Command::cargo_bin("aimx")
+        .unwrap()
+        .args(["agents", "setup", "--list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("nanoclaw"))
+        .stdout(predicate::str::contains("NanoClaw"))
+        .stdout(predicate::str::contains("nanoclaw/skills/aimx"));
+}
+
 /// `aimx agents remove <unknown>` must surface an explicit "Unknown agent"
 /// error rather than a clap usage hint or a silent no-op.
 #[test]

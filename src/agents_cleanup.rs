@@ -139,6 +139,9 @@ mod tests {
         fn xdg_config_home(&self) -> Option<PathBuf> {
             None
         }
+        fn nanoclaw_home(&self) -> Option<PathBuf> {
+            None
+        }
         fn is_root(&self) -> bool {
             self.is_root
         }

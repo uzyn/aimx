@@ -1,0 +1,46 @@
+---
+name: aimx
+description: Self-hosted email for AI agents. Send, read, reply to, and manage email via aimx MCP tools. Invoke when the user asks about sending mail, checking an inbox, replying to a message, or managing mailboxes, or when the conversation references aimx.
+author: U-Zyn Chua <chua@uzyn.com>
+version: 1.0.0
+metadata: {"nanoclaw": {"requires": {"bins": ["aimx"]}}}
+---
+
+## Wiring yourself up as a mailbox hook (NanoClaw)
+
+Headless mailbox hooks (the `cmd: ["/usr/local/bin/...", ...]` recipe
+that other agents use under `hook_create(event="on_receive", ...)`) are
+not the right shape for NanoClaw. NanoClaw is a long-running Node.js
+process listening on messaging channels (WhatsApp, Slack, Telegram,
+…) inside a container; it does not expose a one-shot CLI that can be
+re-launched per inbound email. Spawning a fresh NanoClaw process from
+an aimx hook would skip its container isolation and its in-memory
+state.
+
+The integration is the **other direction** instead — NanoClaw pulls
+from aimx on its own schedule using the aimx MCP server:
+
+1. The aimx MCP server is registered in `<fork>/.mcp.json`. The
+   `aimx agents setup nanoclaw` installer adds this entry for you.
+2. Add a NanoClaw scheduled job (one of the agent's first-class
+   features) that runs every N minutes and:
+   - calls `email_list(folder: "inbox", unread_only: true)` via aimx
+     MCP for each mailbox the user owns,
+   - reads each unread message with `email_read`,
+   - acts on the message (reply, file, label, …) using the regular
+     aimx MCP write tools,
+   - marks the message read with `email_mark_read` so the next tick
+     ignores it.
+
+If you later need an immediate reaction (sub-second latency on inbound
+mail), wire a different agent that does support headless one-shot
+invocation (Claude Code's `claude -p`, Codex's `codex run`, Hermes's
+`hermes chat -q`) as the on_receive hook on the aimx side, and let
+NanoClaw consume the resulting state via MCP on its next tick.
+
+Note: the user the scheduled job runs as (the mailbox's owner) must
+have the aimx skill installed too — re-run `aimx agents setup
+nanoclaw` against the fork that user is running, or the scheduled job
+will start without the skill loaded and the agent won't know what to
+do with the email.
+
