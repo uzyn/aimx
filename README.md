@@ -6,7 +6,7 @@
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
-        <img src="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg" alt="aimx Pigeon Mascot" width="300">
+        <img src="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg" alt="AIMX Pigeon Mascot" width="300">
     </picture>
 </p>
 
@@ -21,28 +21,26 @@ Human-friendly setup. LLM-friendly everything else.
 </em></p>
 
 
-AIMX (AI Mail Exchange) is a self-hosted mail server for AI agents. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted means full sovereignty.
+AIMX (AI Mail Exchange) is a self-hosted mail server (SMTP) and Standard-IO (stdio) Model Context Protocol (MCP) for AI agents and harnesses. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted on the server that you have already provisioned for your AI agents.
 
-Mail in as Markdown. Mail out DKIM-signed. MCP built in. Works with any MCP-capable agent: Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, NanoClaw.
+## Features
 
+* **Single binary.** One binary, simple installaiton.
+* **Markdown-based email storage**, coupled with TOML frontmatter. Friendly for your LLMs, RAGs and AI brains.
+* **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.
+* **Instant hooks** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
+* **Trust modeling.** Built-in DKIM-based trust model. Widely compatible. Minimizes prompt injection attacks.
+* **Built-in MCP server.** Stdio MCP. Efficient. MCP server only runs on demand, kills off when done.
+* **No third parties.** Mail lives on your server,. No need to trust and third-party servers with your sensitive data.
+* **One-line agent integration.** Integrates directly into your favorite AI agents: OpenClaw, Hermes, NanoClaw, Claude Code, etc.
+* **IPv6-ready.** IPv4 by default, but future-proof with IPv6 support.
+* **MIT licensed.** Free and open source.
 
-- **Single binary.** One binary, no other dependencies.
-- **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery. Feels like an API call.
-- **Push, not poll.** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
-- **Markdown emails.** No `.eml`, no database. Just Markdown with TOML frontmatter, LLM and RAG friendly. Your agent can `cat` the mailbox. Your inbox becomes your knowledge base.
-- **Trust modeling.** Built-in DKIM-based trust model. Widely compatible. Minimizes prompt injection attacks.
-- **You own the inbox.** Mail lives on your disk, under your domain. Nothing phones home.
-- **Hot-swappable mailboxes.** Agents (or you) create and manage mailboxes. Changes take effect live.
-- **Built-in MCP server.** Stdio MCP. Efficient. Create address, send mail, receive mail and more.
-- **One-line agent integration.** Integrates directly into your favorite AI agents: OpenClaw, Claude Code, etc.
-- **IPv6-ready.** One flag opts in. IPv4 by default keeps your SPF simple.
-- **MIT licensed.** No license server, no telemetry, no account.
-
-Read the [Book](book/) to learn more. See also [Frequently Asked Questions](book/faq.md).
+Read the [Book](https://aimx.email/book/) to learn more. See also [Frequently Asked Questions](https://aimx.email/book/faq.html).
 
 ## Requirements
 
-- A Linux server (VPS) with port 25 open (inbound and outbound)
+- A Linux server with port 25 open (inbound and outbound)
 - A domain or subdomain you control
 
 ## Quick start
