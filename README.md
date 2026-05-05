@@ -104,22 +104,20 @@ Options:
   -h, --help                 Print help
 ```
 
-### MCP server (for AI agents)
+### MCP server for AI agents
 
-Install aimx into your agent with one command:
+AIMX supports an easy MCP wiring for your AI agents and harnesses. Simply run `aimx agents setup` and follow the interactive prompts. Most harnesses are wired automatically.
 
-| Agent | Install command | Activation |
-|-------|-----------------|------------|
-| Claude Code | `aimx agents setup claude-code` | Auto-registered via `claude mcp add` (fallback hint printed if `claude` is not on PATH). Restart Claude Code so the new server is loaded. |
-| Codex CLI | `aimx agents setup codex` | Auto-registered via `codex mcp add` (fallback hint printed if `codex` is not on PATH). Restart Codex CLI so the new server is loaded. |
-| OpenCode | `aimx agents setup opencode` | Paste the printed JSONC block into `opencode.json`, then restart. |
-| Gemini CLI | `aimx agents setup gemini` | Merge the printed JSON block into `~/.gemini/settings.json`, then restart. |
-| Goose | `aimx agents setup goose` | Run `goose run --recipe aimx`. |
-| OpenClaw | `aimx agents setup openclaw` | Run the printed `openclaw mcp set aimx '...'` command, then restart the gateway. |
-| Hermes | `aimx agents setup hermes` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. |
-| NanoClaw | `aimx agents setup nanoclaw` | Auto-merged into `<fork>/.mcp.json` under `mcpServers.aimx`. Default fork path is `~/nanoclaw`; override with `$NANOCLAW_HOME`. Restart NanoClaw so the new server is loaded. |
-
-Run `aimx agents setup` (no args, launches the interactive picker) or `aimx agents list` to print the supported-agent registry. See [`book/agent-integration.md`](book/agent-integration.md) for per-agent activation steps and manual MCP wiring, and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste hook recipes covering every supported agent plus Aider.
+  | Agent | MCP | Skill / Recipe |
+  |-------|-----|----------------|
+  | Claude Code | ✅ Auto-wired | ✅ `~/.claude/skills/aimx/` |
+  | Codex CLI | ✅ Auto-wired | ✅ `~/.codex/skills/aimx/` |
+  | NanoClaw | ✅ Auto-wired (`<fork>/.mcp.json`; default `~/nanoclaw`, override with `$NANOCLAW_HOME`) | ✅ `<fork>/skills/aimx/` |
+  | Goose | ✅ Bundled in the recipe; activate with `goose run --recipe aimx` | ✅ `~/.config/goose/recipes/aimx.yaml` |
+  | OpenClaw | ✅ Run the guided `openclaw mcp set aimx '...'` command after setup. | ✅ `~/.openclaw/skills/aimx/` |
+  | OpenCode | ✅ Paste the printed JSONC block into `opencode.json` after setup. | ✅ `~/.config/opencode/skills/aimx/` |
+  | Gemini CLI | ✅ Merge the printed JSON block into `~/.gemini/settings.json` after setup. | ✅ `~/.gemini/skills/aimx/` |
+  | Hermes | ✅ Paste the printed YAML in `~/.hermes/config.yaml` after setup. | ✅ `~/.hermes/skills/aimx/` |
 
 Available MCP tools:
 - `mailbox_list`: list all mailboxes with message counts
@@ -132,7 +130,7 @@ Available MCP tools:
 - `email_mark_read`: mark an email as read
 - `email_mark_unread`: mark an email as unread
 
-
+For more details, see the [MCP documentation](https://aimx.email/book/mcp.html) and the [agent integration guide](https://aimx.email/book/agent-integration.html#agent-mcp-integration).
 
 ## Configuration
 
