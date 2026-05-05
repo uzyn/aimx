@@ -38,10 +38,14 @@ fi
 
 HELP_OUT="$("${HELP_CMD[@]}" 2>/dev/null)"
 
+# Verb listings are indented with two spaces and begin with a
+# lowercase letter. This matches both the legacy clap `Commands:`
+# block and the hand-rolled `after_help` groupings ("Operations (as
+# current user):", "Server administration:") used by `src/cli.rs` to
+# split subcommands by audience.
 VERBS="$(
     printf '%s\n' "${HELP_OUT}" \
-        | awk '/^Commands:/ {flag=1; next} /^[A-Za-z]/ && flag {flag=0} flag' \
-        | awk '{print $1}' \
+        | awk '/^  [a-z][a-z0-9-]*[ \t]+[A-Z]/ {print $1}' \
         | grep -E '^[a-z][a-z0-9-]*$' \
         | sort -u
 )"
@@ -66,6 +70,10 @@ ALLOWED_NON_VERBS=(
     # `#[command(... alias = "...")]` attributes.
     hook
     mailbox
+    # Subcommands marked `#[command(hide = true)]` in `src/cli.rs`.
+    # These do not appear in `aimx --help` but remain valid CLI
+    # entry points and are documented in `book/`.
+    ingest
     # Words that appear after `aimx ` inside quoted-output examples
     # rather than as subcommand invocations (e.g. the success banner
     # `aimx is running for <domain>.` and the upgrade banner
