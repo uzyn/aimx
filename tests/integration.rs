@@ -2776,6 +2776,10 @@ fn send_uds_end_to_end_delivers_signed_message() {
         payload_str.contains("From: alice@agent.example.com"),
         "captured message must echo the original From header"
     );
+    assert!(
+        payload_str.contains("Sent from AIMX.") && payload_str.contains("https://aimx.email"),
+        "default signature must be appended to the delivered body when config omits it; got:\n{payload_str}"
+    );
 
     // Cryptographic DKIM body-hash verification using relaxed
     // canonicalization.

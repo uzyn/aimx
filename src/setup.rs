@@ -1502,6 +1502,7 @@ pub fn finalize_setup(
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            signature: None,
             upgrade: None,
         };
         install_config_file(&cfg, &config_path)?;
@@ -4435,6 +4436,7 @@ owner = "aimx-catchall"
             mailboxes,
             verify_host: None,
             enable_ipv6: false,
+            signature: None,
             upgrade: None,
         };
 

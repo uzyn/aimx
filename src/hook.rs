@@ -677,6 +677,7 @@ mod tests {
             mailboxes: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
+            signature: None,
             upgrade: None,
         }
     }

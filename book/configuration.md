@@ -55,6 +55,7 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 | `trusted_senders` | array | `[]` | Default allowlist of glob patterns applied to every mailbox. Per-mailbox `trusted_senders` replaces this list (no merging). |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
+| `signature` | string | *(built-in)* | Outbound signature appended to every email's body. Omit to use the built-in default `Sent from AIMX.\nhttps://aimx.email`. Set to a custom string to override. Set to `""` to disable the signature entirely. See [Outbound signature](#outbound-signature). |
 
 `aimx setup` asks for a list of trusted sender addresses interactively on
 the first run (comma-separated, accepts plain addresses and globs like
@@ -148,6 +149,30 @@ Unknown fields on a hook table are rejected at config load. The legacy fields `s
 
 Each mailbox directory is chowned to `<owner>:<owner>` mode `0700` at create time and stays that way through every subsequent write (ingest, send, mark-read). Files inside are written by the daemon as `root:root 0644` — root bypasses dir perms regardless, while the mailbox owner reads via uid match. Other users cannot traverse the directory.
 
+## Outbound signature
+
+Every outbound email gets a signature appended to the body before DKIM signing. By default this is:
+
+```
+Sent from AIMX.
+https://aimx.email
+```
+
+Override via the top-level `signature` key in `config.toml`:
+
+```toml
+# Use the built-in default (omit the key entirely):
+# signature = "Sent from AIMX.\nhttps://aimx.email"
+
+# Custom signature:
+signature = "Best regards,\nThe team"
+
+# Disable the signature entirely:
+signature = ""
+```
+
+The signature is injected into the first `text/plain` body region: for plain messages it is appended after the body; for messages with attachments it lands inside the text part, before the first attachment boundary. Operators can edit `signature` and the new value applies to the next send (no daemon restart required) — `aimx serve` reads the live `Config` snapshot for each request.
+
 ## IPv6 delivery (advanced)
 
 By default, `aimx serve` delivers outbound email over IPv4 only (submitted to it by `aimx send` via `/run/aimx/aimx.sock`). This matches the SPF record that `aimx setup` generates (which lists only the server's IPv4 address) and is the right choice for most users.
@@ -207,6 +232,9 @@ dkim_selector = "aimx"
 
 # Opt into IPv6 outbound delivery (advanced, default: false)
 # enable_ipv6 = true
+
+# Outbound signature (omit for built-in default; "" disables; any other string overrides)
+# signature = "Best regards,\nThe team"
 
 # ----------------------------
 # Default trust policy (applies to every mailbox unless overridden)
