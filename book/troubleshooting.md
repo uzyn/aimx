@@ -39,7 +39,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 
 ## Restarting setup from scratch
 
-`aimx setup` is idempotent: re-running it preserves the operator's prior trust policy and skips TLS / install steps once they are in place. The wizard now generates the DKIM keypair early (step 2, while rendering the DNS guidance table), so a hard reset means clearing more than just `config.toml`.
+`aimx setup` is idempotent: re-running it preserves the operator's prior trust policy and skips STARTTLS / install steps once they are in place. The wizard now generates the DKIM keypair early (step 2, while rendering the DNS guidance table), so a hard reset means clearing more than just `config.toml`.
 
 To wipe a partially-installed host and start from a clean slate:
 
@@ -47,9 +47,9 @@ To wipe a partially-installed host and start from a clean slate:
 # Stop the daemon if it's running.
 sudo systemctl stop aimx 2>/dev/null || sudo rc-service aimx stop 2>/dev/null || true
 
-# Remove config + DKIM keys + (optionally) the self-signed TLS cert.
+# Remove config + DKIM keys + (optionally) the self-signed STARTTLS cert.
 sudo rm -rf /etc/aimx/config.toml /etc/aimx/dkim/
-sudo rm -rf /etc/ssl/aimx/   # only if you want a fresh TLS cert
+sudo rm -rf /etc/ssl/aimx/   # only if you want a fresh STARTTLS cert
 
 # Re-run the wizard.
 sudo aimx setup

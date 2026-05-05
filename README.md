@@ -134,36 +134,73 @@ For more details, see the [MCP documentation](https://aimx.email/book/mcp.html) 
 
 ## Configuration
 
-aimx reads a single TOML file at `/etc/aimx/config.toml`, written by `aimx setup` with mode `0640 root:root`. Top-level settings cover `domain`, `dkim_selector`, and the defaults for `trust` / `trusted_senders`. Per-mailbox tables attach addresses, override those defaults, and declare hooks.
+A single TOML file at `/etc/aimx/config.toml` is everything. `aimx setup` writes the initial file for you; edit it directly to add mailboxes, override defaults, or attach hooks.
 
-See [`book/configuration.md`](book/configuration.md) for the full field reference.
+### Top-level
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `domain` | string | *(required)* | The email domain (e.g. `agent.yourdomain.com`). |
+| `data_dir` | string | `/var/lib/aimx` | Where mailboxes are stored on disk. |
+| `dkim_selector` | string | `aimx` | Selector name used in your DKIM TXT record. |
+| `trust` | string | `none` | Default trust policy: `none` or `verified`. |
+| `trusted_senders` | array | `[]` | Default sender allowlist (globs, e.g. `*@yourcompany.com`). |
+| `enable_ipv6` | bool | `false` | Opt into IPv6 outbound delivery. |
+| `verify_host` | string | `https://check.aimx.email` | Preflight port 25 checking service used by `aimx portcheck` and `aimx setup`. |
+
+### Mailbox `[mailboxes.<name>]`
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `address` | string | *(required)* | Email address pattern (e.g. `support@…` or `*@…` for catchall). |
+| `owner` | string | *(required)* | Linux user that owns the mailbox storage and runs hooks. |
+| `trust` | string | *(inherited)* | Override the global default. |
+| `trusted_senders` | array | *(inherited)* | Override the global allowlist. Replaces, no merge. |
+| `hooks` | array | `[]` | `on_receive` / `after_send` commands — see [Hooks](#hooks) below. |
+
+### Example
+
+```toml
+domain = "agent.yourdomain.com"
+trust = "verified"
+trusted_senders = ["*@yourcompany.com"]
+
+[mailboxes.support]
+address = "support@agent.yourdomain.com"
+owner = "support-bot"
+```
+
+See [`book/configuration`](https://aimx.email/book/configuration.html) for the full field reference (hook fields, IPv6, env-var overrides).
 
 
-## Trust policy
+## Trust & security
 
-Every inbound email is checked for DKIM, SPF, and DMARC, and the results are written into the TOML frontmatter alongside a summary `trusted` field (`none`, `true`, or `false`). Trust only gates `on_receive` hook execution. Mail is always stored on disk regardless of the outcome, so agents and humans can still read untrusted messages via MCP or the filesystem.
+**Phishing-aware by default.** Every inbound message is checked for DKIM, SPF, and DMARC. Untrusted mail is still stored on disk so you can read it, but it never fires `on_receive` hooks. Your agent *sees* the message; it doesn't *act on* it. Untrusted emails are also clearly marked as `trusted: false` in the frontmatter for agent's reference.
 
-See [`book/hooks.md`](book/hooks.md#trust-gate-on_receive-only) for the gate logic and [`book/configuration.md`](book/configuration.md#inbound-email-verification) for the per-field semantics.
+* **DKIM-gated hooks.** Only mail that verifies (and matches your `trusted_senders` list) can trigger automation.
+* **Per-mailbox owner.** One user per mailbox. Each mailbox runs as its own system user that owns the directory and executes hooks. Run a finance agent on one, family mail on another. They can't read each other's mail or interfere with each other's processes — enforced by the operating system, not by aimx.
+
+Learn more about [`book/security`](https://aimx.email/book/security.html) for the threat model and [`book/hooks`](https://aimx.email/book/hooks.html#trust-gate-on_receive-only) for the trust gate.
 
 
 ## Hooks
 
-aimx fires commands on two events: `on_receive` (after an inbound email is stored) and `after_send` (after the outbound MX attempt resolves to `delivered` / `failed` / `deferred`). Hooks are declared per mailbox in `config.toml` and fire on every event of their configured type; `on_receive` hooks only fire on trusted mail unless a hook opts in with `fire_on_untrusted = true`. Hooks may carry an optional `name`; when omitted, aimx derives a stable 12-char hex id from `event + cmd + fire_on_untrusted` so `aimx hooks list` / `delete` can still target the hook. Each hook executes as the mailbox's owning Linux user (`setuid` from root before `exec`); there is no per-hook `run_as` override.
+**Mail is an event** Inbound mail fires `on_receive` the instant SMTP `DATA` completes. Outbound delivery fires `after_send` when the MX attempt resolves to `delivered` / `failed` / `deferred`. Hooks are declared per mailbox and `exec`'d directly — no shell, no cron, no heartbeat.
 
 ```toml
 [[mailboxes.support.hooks]]
-# name is optional. A stable 12-char hex id is derived from event+cmd+fire_on_untrusted if omitted.
 event = "on_receive"
 cmd = ["/usr/bin/ntfy", "pub", "agent-mail", "$AIMX_SUBJECT from $AIMX_FROM"]
-fire_on_untrusted = true
 ```
 
-See [`book/hooks.md`](book/hooks.md) for the hook model and [`book/hook-recipes.md`](book/hook-recipes.md) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider). NanoClaw is a long-running daemon and uses a scheduled-job pull model rather than `on_receive` hooks — see [`book/agent-integration.md`](book/agent-integration.md#nanoclaw).
+Each hook runs as the mailbox's owning Linux user and only on trusted emails that pass DKIM and match the `trusted_senders` allowlist. This makes it safe to plug directly into your agents without worrying about prompt injection or malicious emails.
+
+See [`book/hooks`](https://aimx.email/book/hooks.html) for the hook model and [`book/hook-recipes`](https://aimx.email/book/hook-recipes.html) for copy-paste recipes (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, Aider).
 
 
 ## Email format
 
-Inbound emails are stored as Markdown with TOML frontmatter. A minimal file looks like:
+**No `.eml`. No database.** Mail lands as plain Markdown your agent can `cat`, `grep`, or stream straight into a context window. Frontmatter is TOML between `+++` delimiters. Attachments live as sibling files inside a Zola-style bundle directory — no MIME parser required.
 
 ```markdown
 +++
@@ -182,12 +219,11 @@ read = false
 Hello, this is the email body in plain text.
 ```
 
-See [`book/mailboxes.md`](book/mailboxes.md#email-format) for the full field schema, attachment bundles, and outbound sent-copy fields.
-
+See [`book/mailboxes`](https://aimx.email/book/mailboxes.html#email-format) for the full schema and outbound sent-copy fields.
 
 ## DNS records
 
-`aimx setup` will guide you through DNS configuration. The required records are:
+`aimx setup` prints these for you to copy-paste. Listed here for reference.
 
 | Type | Name | Value |
 |------|------|-------|
@@ -198,27 +234,55 @@ See [`book/mailboxes.md`](book/mailboxes.md#email-format) for the full field sch
 | TXT | _dmarc.agent.yourdomain.com | v=DMARC1; p=reject |
 
 
-## Building from source
+## Why AIMX?
 
-Source builds are supported for contributors and air-gapped environments. Everyone else should use the one-line installer above — it is faster and pins a tested release.
+| | Gmail / Outlook | SaaS relays<br>(SendGrid / Postmark) | AgentMail / LobsterMail | Postfix / Stalwart | **AIMX** |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Built for AI agents | ❌ | ❌ | ✅ | ❌ | ✅ |
+| MCP support | via 3rd-party | via 3rd-party | ✅ (ext server) | ❌ | ✅ (local stdio) |
+| Self-sovereign | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Direct delivery | ❌ | ❌ | ❌ | ✅ | ✅ |
+| Markdown emails | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Free & open source | ❌ | ❌ | ❌ | ✅ | ✅ |
 
-```bash
-# Prereqs: rustup + a recent stable toolchain
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
+### Use cases
 
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo install -m 0755 target/release/aimx /usr/local/bin/aimx
-aimx --version
-```
+1. **Finance agent.** Forward invoices, receipts, and statements to `finance@…`. The agent extracts amounts and vendors, files attachments, and reconciles against your ledger.
+1. **Privacy-sensitive workflows.** Bank statements, medical records, legal correspondence — mail that shouldn't sit in someone else's datacenter. No SaaS relay, no third-party MCP wrapper, no Gmail scanning the contents.
+1. **Morning briefing.** A cron job kicks the agent at 7am. It reads overnight mails, research news and emails you your daily briefing.
+1. **Support triage.** `support@…` drafts replies via MCP, tags by severity, and escalates when confidence is low. Threading is preserved, so customers see a normal Gmail conversation.
+1. **Monitoring & alerts.** Datadog, GitHub Actions, and cron jobs page `alerts@…`. The `on_receive` hook decides whether to wake you, file a ticket, or self-remediate.
+1. **Newsletter digest.** `news@…` collects Substack, arXiv, and HN digests. A nightly job ships one summary instead of 40 unread threads.
+1. **Travel concierge.** Forward bookings to `travel@…`. The agent builds a live itinerary, pushes calendar events, and pings you on gate or check-in changes.
+1. **Personal CRM.** `contacts@…` ingests intros and follow-ups. The agent extracts who, where, and why, and reminds you before the connection goes cold.
+1. **Cross-agent message bus.** Two agents on different boxes use email as durable, DKIM-signed transport. Markdown is a payload format both already speak.
+1. **Knowledge-base ingest.** Forward anything to `kb@…`. Markdown plus YAML frontmatter is RAG-ready the moment it hits disk.
 
-See [`CLAUDE.md`](CLAUDE.md) for the full developer workflow (lint, format, tests, verifier service).
+### Design philosophy
 
+AIMX is a mail server for AI agents, not a Postfix replacement.
+
+1. AIMX is designed for a single operator (you) and a single domain (youragent.yourdomain.com). No multi-user, multi-domain, or shared hosting use cases. If you need those, run Postfix or Stalwart.
+2. AIMX is designed for direct MTA-to-MTA delivery.
+3. AIMX mails (data) are stored as Markdown for LLM-friendliness, not as `.eml` or in a database. Attachments are stored as files in a bundle directory, not as MIME parts, also for LLM-friendliness and ease of access.
+
+As such, currently, by design:
+* No IMAP or POP3
+* No Webmail
+* No SMTP AUTH
+* No retry queues. Send is an synchronous operation that either delivers or fails immediately so your agent can react to the result in real time.
+* No bounces. AIMX doesn't generate or process DSNs.
+* No mail indexing or search. Bring your own RAG, indexing system or AI brains.
+
+Subject to change, but for now AIMX is intentionally single-operator and single-domain. If you need multi-user, multi-domain, or IMAP access, run [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/).
+
+
+## Contributing
+
+Issues, PRs, and new hook recipes are very welcomed.
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT. See [LICENSE](LICENSE).
 
 Copyright (c) 2026 [U-Zyn Chua](https://uzyn.com).

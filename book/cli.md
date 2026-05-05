@@ -28,7 +28,7 @@ See [Setup](setup.md) for service installation and [Configuration](configuration
 
 ### `aimx setup [domain]`
 
-Interactive setup wizard. Requires root. Generates TLS cert and DKIM keys, writes `/etc/aimx/config.toml`, installs a systemd (or OpenRC) unit for `aimx serve`, and drives DNS verification. Re-entrant: running it on an existing install skips install and jumps to DNS verification.
+Interactive setup wizard. Requires root. Generates STARTTLS cert and DKIM keys, writes `/etc/aimx/config.toml`, installs a systemd (or OpenRC) unit for `aimx serve`, and drives DNS verification. Re-entrant: running it on an existing install skips install and jumps to DNS verification.
 
 | Flag | Description |
 |------|-------------|

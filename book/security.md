@@ -190,7 +190,7 @@ The `From:` validation is strict:
 
 This means a local user who submits mail over the socket can sign as any configured mailbox, but cannot invent new senders or hide behind the wildcard. A compromised agent can send under its own mailbox (that is the point) but cannot impersonate another configured mailbox unless your agents share a mailbox — a configuration choice you make, not a design flaw.
 
-Delivery is direct: AIMX resolves the recipient's MX records via hickory-resolver (falling back to A per RFC 5321) and connects to port 25. Opportunistic TLS is attempted on the outbound leg. There is no relay, no submission server, no queued retry. A 4xx transient failure is returned to the caller and is *not* persisted; the calling agent is expected to retry. A 5xx permanent failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the reason in `delivery_details`. No DSN is ever generated.
+Delivery is direct: AIMX resolves the recipient's MX records via hickory-resolver (falling back to A per RFC 5321) and connects to port 25. Opportunistic STARTTLS is attempted on the outbound leg. There is no relay, no submission server, no queued retry. A 4xx transient failure is returned to the caller and is *not* persisted; the calling agent is expected to retry. A 5xx permanent failure is persisted to `sent/<mailbox>/` with `delivery_status = "failed"` and the reason in `delivery_details`. No DSN is ever generated.
 
 This trades reliability for visibility. The calling agent always knows whether its message went out, failed, or deferred — no background queue quietly burns retries.
 

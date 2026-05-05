@@ -78,14 +78,14 @@ The wizard will:
 
 1. Run a port 25 preflight (outbound + inbound)
 2. Prompt for the domain (if not passed as an argument) and the trusted-sender list
-3. Generate a self-signed TLS certificate, a 2048-bit RSA DKIM keypair, and `/etc/aimx/config.toml`
+3. Generate a self-signed STARTTLS certificate, a 2048-bit RSA DKIM keypair, and `/etc/aimx/config.toml`
 4. Create the unprivileged `aimx-catchall` service user and the default `catchall` mailbox
 5. Print the DNS records you need to add, then re-verify on Enter (press `q` to skip and run `aimx doctor` later)
 6. Install and start `aimx.service`, waiting for port 25 to come up
 7. Print a single-line `aimx is running for <domain>.` banner and a short `[MCP]` summary
 8. Drop through to `aimx agents setup` as your regular user (via `runuser -u $SUDO_USER`) so you can tick the AI agents to wire into AIMX
 
-Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips the TLS / DKIM / config-write steps, re-verifies DNS, and drops through to `aimx agents setup` again so you can wire additional agents.
+Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips the STARTTLS / DKIM / config-write steps, re-verifies DNS, and drops through to `aimx agents setup` again so you can wire additional agents.
 
 Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup: DNS Configuration](setup.md#dns-configuration) for per-record details.
 
