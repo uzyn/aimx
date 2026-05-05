@@ -2371,7 +2371,7 @@ pub fn print_welcome_banner(checklist: &Checklist) {
     println!("{}", term::header("🐦‍⬛ AIMX setup"));
     println!(
         "{}",
-        term::dim("Self-hosted email for AI agents. One binary, one setup.")
+        term::dim("Self-hosted email SMTP and MCP server for AI agents.")
     );
     println!();
     print_step_list(checklist);

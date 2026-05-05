@@ -21,12 +21,12 @@ Human-friendly setup. LLM-friendly everything else.
 </em></p>
 
 
-AIMX (AI Mail Exchange) is a self-hosted mail server (SMTP) and Standard-IO (stdio) Model Context Protocol (MCP) for AI agents and harnesses. One command gives your agents their own email addresses. No Gmail, no OAuth, no SaaS. Self-hosted on the server that you have already provisioned for your AI agents.
+AIMX (AI Mail Exchange) is a self-hosted email server (SMTP) and MCP stdio server that gives AI agents their own email addresses. Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and any other agent harness. No Gmail, no OAuth, no SaaS. Runs on the same VPS you already provisioned for your agents.
 
 ## Features
 
-* **Single binary.** One binary, simple installaiton.
-* **Markdown-based email storage**, coupled with TOML frontmatter. Friendly for your LLMs, RAGs and AI brains.
+* **Single binary.** With human-friendly guided set up process.
+* **Markdown-based email**, coupled with clean TOML frontmatter. Friendly for your LLMs, RAGs and AI brains.
 * **Direct MTA-to-MTA.** Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.
 * **Instant hooks** Inbound mail fires `on_receive` hooks the moment SMTP `DATA` completes. Outbound delivery fires `after_send` hooks when the MX attempt resolves. No cron, no heartbeat.
 * **Trust modeling.** Built-in DKIM-based trust model. Widely compatible. Minimizes prompt injection attacks.
@@ -38,6 +38,8 @@ AIMX (AI Mail Exchange) is a self-hosted mail server (SMTP) and Standard-IO (std
 
 Read the [Book](https://aimx.email/book/) to learn more. See also [Frequently Asked Questions](https://aimx.email/book/faq.html).
 
+Contributions are welcomed!
+
 ## Requirements
 
 - A Linux server with port 25 open (inbound and outbound)
@@ -45,85 +47,61 @@ Read the [Book](https://aimx.email/book/) to learn more. See also [Frequently As
 
 ## Quick start
 
-aimx ships as a single prebuilt binary for Linux (x86_64 and aarch64, glibc and musl). You need `sudo` rights — port 25 is a [privileged port](https://www.w3.org/Daemon/User/Installation/PrivilegedPorts.html).
+```bash
+curl -fsSL https://aimx.email/install.sh | sh
+```
+
+This will lead you to a guided setup with the following steps:
+
+- [ ] Preflight checks on port 25
+- [ ] Set up domain and DNS
+- [ ] Set up STARTTLS certificate
+- [ ] Set up trust policy
+- [ ] Install AIMX service
+- [ ] Set up MCP for agent(s)
+
+To upgrade, simply run `sudo aimx upgrade`.
+
+## How to build
 
 ```bash
-
-# 1. Install the latest release into /usr/local/bin
-curl -fsSL https://aimx.email/install.sh | sh
-
-# or compile and install it from source
 git clone https://github.com/uzyn/aimx.git
 cd aimx
 cargo build --release
 sudo cp target/release/aimx /usr/local/bin/
 
-# 2. Run setup and follow the guided instructions
+# Run setup and follow the guided instructions
 sudo aimx setup
-
-# 3. Check health
-aimx doctor
 ```
-
-Later, upgrade in place:
-
-```bash
-sudo aimx upgrade
-```
-
-No wizard re-run, no DNS re-verify; the binary is swapped atomically and the service is restarted. See [`book/installation.md`](book/installation.md) for install flags, upgrade semantics, and the manual rollback path (`/usr/local/bin/aimx.prev`).
-
-### Verification (optional)
-
-If you would rather not `curl | sh`, every release ships a `.sha256` per tarball and a release-wide `SHA256SUMS`. The trust anchor in v1 is HTTPS on the GitHub Releases domain — signed releases are deferred to v2. Verify manually:
-
-```bash
-# Tags are bare SemVer (no `v` prefix). Tarball filenames drop the
-# `-unknown-` vendor field; the canonical target triple is still what
-# `aimx --version` prints in its target slot.
-TAG=0.1.0
-TARBALL_TARGET=x86_64-linux-gnu
-TARBALL=aimx-${TAG}-${TARBALL_TARGET}.tar.gz
-
-curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}"
-curl -fL -O "https://github.com/uzyn/aimx/releases/download/${TAG}/${TARBALL}.sha256"
-sha256sum -c "${TARBALL}.sha256"
-
-tar -xzf "${TARBALL}"
-sudo install -m 0755 "aimx-${TAG}-${TARBALL_TARGET}/aimx" /usr/local/bin/aimx
-aimx --version
-```
-
-Or inspect the installer itself before running it: `curl -fsSL https://aimx.email/install.sh | less`.
 
 ### CLI Commands
 
 ```text
-$ aimx
-SMTP for AI agents. No middleman.
-
 Usage: aimx [OPTIONS] <COMMAND>
 
-Commands:
-  ingest       Ingest an email from stdin (called by aimx serve or via stdin)
-  send         Compose and send an email
+Operations (as current user):
+  send         Send an email
   mailboxes    Manage mailboxes
   hooks        Manage hooks
-  mcp          Start MCP server in stdio mode
-  setup        Run interactive setup wizard
-  uninstall    Uninstall the aimx daemon service (config and data are retained)
-  doctor       Show server health, mailbox counts, configuration, DNS verification, and recent logs
-  logs         Tail or follow the aimx service log
-  serve        Start the embedded SMTP listener daemon
-  portcheck    Check port 25 connectivity (outbound, inbound)
-  agents       Manage AI agent MCP wiring (setup / remove / list)
-  dkim-keygen  Generate DKIM keypair for email signing
-  help         Print this message or the help of the given subcommand(s)
+  agents       Manage AI agent MCP wiring
+  mcp          Start the stdio MCP server (for AI agents)
+
+Server administration:
+  setup        Run the interactive setup wizard
+  serve        Start the SMTP daemon
+  doctor       Show server health, DNS, and recent logs
+  logs         Tail the aimx service log
+  dkim-keygen  Generate a DKIM keypair
+  portcheck    Check port 25 connectivity (inbound, outbound)
+  uninstall    Uninstall the aimx service (config and data retained)
+  upgrade      Fetch the latest release and swap the installed binary
+
+  help         Print help for a subcommand
 
 Options:
       --data-dir <DATA_DIR>  Data directory override (default: /var/lib/aimx) [env: AIMX_DATA_DIR=]
-  -h, --help                 Print help (see more with '--help')
   -V, --version              Print version
+  -h, --help                 Print help
 ```
 
 ### MCP server (for AI agents)

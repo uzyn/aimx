@@ -6,11 +6,12 @@ pub use crate::version::{build_date, git_hash, release_tag, target_triple, versi
 #[derive(Parser)]
 #[command(
     name = "aimx",
-    about = "SMTP for AI agents. No middleman.",
-    long_about = "aimx (AI Mail Exchange). Self-hosted email for AI agents.\n\n\
-                   One command to give your AI agents their own email addresses.\n\
-                   Incoming mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
-                   MCP is built in. Hooks trigger agent actions on incoming mail.",
+    about = "Self-hosted SMTP and MCP server for AI agents.",
+    long_about = "AIMX (AI Mail Exchange). The internet's oldest protocol, rebuilt for AI agents.\n\n\
+                One command gives your agents their own email addresses.\n\
+                Inbound mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
+                MCP is built in. Hooks trigger agent actions on inbound mail.\n\
+                Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and other agent harnesses.",
     // We render `--version` ourselves so the output is exactly the
     // banner produced by `version_string()`. Clap's built-in version flag
     // would prepend the binary name, yielding `aimx aimx <tag> ...`.
