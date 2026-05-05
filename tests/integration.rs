@@ -170,7 +170,8 @@ fn help_shows_subcommands() {
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicate::str::contains("ingest"))
+        .stdout(predicate::str::contains("Operations (as current user)"))
+        .stdout(predicate::str::contains("Server administration"))
         .stdout(predicate::str::contains("send"))
         .stdout(predicate::str::contains("mailboxes"))
         .stdout(predicate::str::contains("mcp"))
@@ -178,7 +179,10 @@ fn help_shows_subcommands() {
         .stdout(predicate::str::contains("doctor"))
         .stdout(predicate::str::contains("serve"))
         .stdout(predicate::str::contains("portcheck"))
-        .stdout(predicate::str::contains("dkim-keygen"));
+        .stdout(predicate::str::contains("dkim-keygen"))
+        // `ingest` is wired (called by `aimx serve` over stdin) but hidden
+        // from top-level --help so the user-facing command list stays clean.
+        .stdout(predicate::str::contains("ingest").not());
 }
 
 #[test]
