@@ -1,16 +1,16 @@
 # Getting Started
 
-Install AIMX (AI Mail Exchange) and run your first setup.
+Install AIMX and run setup.
 
 ## Requirements
 
-- **OS:** Linux (x86_64 or aarch64, glibc or musl). Release tarballs ship for all four targets; CI covers Ubuntu, Alpine, Fedora.
-- **Server:** A VPS with port 25 open (inbound and outbound)
-- **Domain:** A domain you control with access to DNS management
+- **OS:** Linux (x86_64 or aarch64, glibc or musl). CI covers Ubuntu, Alpine, Fedora.
+- **Server:** A VPS with port 25 open both ways.
+- **Domain:** One you control with DNS access.
 
 ### Compatible VPS providers
 
-AIMX requires direct SMTP access on port 25. Not all cloud providers allow this.
+AIMX needs direct SMTP on port 25; not every cloud provider allows it.
 
 | Provider | Port 25 | Notes |
 |----------|---------|-------|
@@ -24,19 +24,13 @@ Providers that **block** port 25 permanently (not compatible): DigitalOcean, AWS
 
 ## Pre-install: check port 25
 
-Not sure your VPS allows SMTP traffic on port 25? Run the connectivity check before committing to install:
+Run the connectivity check before installing:
 
 ```bash
 curl -fsSL https://aimx.email/portcheck.sh | sh
 ```
 
-`portcheck.sh` is a thin alias for `install.sh --port-check-only` — same trust anchor, same checks, shorter URL. The longer form still works:
-
-```bash
-curl -fsSL https://aimx.email/install.sh | sh -s -- --port-check-only
-```
-
-This runs the same outbound + inbound port-25 checks as `aimx portcheck`, then exits without installing anything. Run it as `sudo` for the inbound check (otherwise inbound is reported as `[skip]` and only outbound is verified). Exits `0` on pass-or-skip, `1` on fail, `2` if a required tool (curl, python3/nc/bash) is missing. Use `--verify-host <URL>` (or `AIMX_VERIFY_HOST`) to point at a self-hosted verifier instead of the default `https://check.aimx.email`.
+`portcheck.sh` is an alias for `install.sh --port-check-only`. It runs the same outbound and inbound EHLO probes as `aimx portcheck` and exits without installing. Run it under `sudo` to include the inbound check; otherwise inbound is reported as `[skip]`. Exits `0` on pass, `1` on fail, `2` if a required tool is missing. Override the verifier with `--verify-host <URL>` (or `AIMX_VERIFY_HOST`).
 
 ## Install
 
@@ -54,11 +48,7 @@ See [Installation](installation.md) for install flags (`--tag`, `--target`, `--t
 
 ## Security model
 
-AIMX is a **single-operator** mail server designed for AI agents on a domain you own. Mail is stored under `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/`, with each mailbox's directories chowned to its configured Linux owner at mode `0700` — non-owners (and non-root) cannot read another mailbox's contents. Configuration and DKIM secrets live under `/etc/aimx/` (root-owned, not readable by non-root).
-
-All mutations (send, reply, mark-read, create/delete mailboxes, hooks) go through the `aimx` MCP server or CLI. Never write to the data directory directly. The UDS at `/run/aimx/aimx.sock` is world-writable, but every verb runs server-side `auth::authorize` keyed on the caller's `SO_PEERCRED` uid before doing anything. AIMX has two authorisation boundaries: the root-only DKIM private key on the SMTP-out external surface, and per-verb owner-gated authorization on the UDS internal surface.
-
-**If two users on one host genuinely cannot trust each other to operate the daemon** (multiple mutually-distrustful humans, IMAP/POP3, webmail, or a conventional multi-tenant mail setup), AIMX is the wrong tool. Per-owner `0700` mailboxes prevent non-owners from reading another mailbox, but the trust boundary AIMX defends is *the host*, not *each user on the host*. Use a general-purpose MTA like [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/) instead. See [Can I use AIMX in place of Postfix or Stalwart?](faq.md#can-i-use-aimx-in-place-of-postfix-or-stalwart) in the FAQ.
+AIMX is a single-operator server: it assumes one administrator and treats every local user on the host as inside the trust boundary. Mailbox storage is per-owner (`<owner>:<owner> 0700`), config and DKIM secrets stay root-only under `/etc/aimx/`, and every UDS verb is authorized server-side via `SO_PEERCRED`. If multiple humans on the box cannot trust each other to operate the daemon, AIMX is the wrong tool — use [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/).
 
 See [Security](security.md) for the full threat model, trust boundaries, and non-goals.
 
@@ -74,20 +64,16 @@ sudo aimx setup agent.yourdomain.com
 sudo aimx setup
 ```
 
-The wizard will:
+The wizard runs a six-step checklist:
 
-1. Run a port 25 preflight (outbound + inbound)
-2. Prompt for the domain (if not passed as an argument) and the trusted-sender list
-3. Generate a self-signed STARTTLS certificate, a 2048-bit RSA DKIM keypair, and `/etc/aimx/config.toml`
-4. Create the unprivileged `aimx-catchall` service user and the default `catchall` mailbox
-5. Print the DNS records you need to add, then re-verify on Enter (press `q` to skip and run `aimx doctor` later)
-6. Install and start `aimx.service`, waiting for port 25 to come up
-7. Print a single-line `aimx is running for <domain>.` banner and a short `[MCP]` summary
-8. Drop through to `aimx agents setup` as your regular user (via `runuser -u $SUDO_USER`) so you can tick the AI agents to wire into AIMX
+1. Port 25 preflight (outbound + inbound).
+2. Prompt for domain and trusted-sender list.
+3. Generate STARTTLS cert, DKIM keypair, and `/etc/aimx/config.toml`.
+4. Create the `aimx-catchall` system user and the default catchall mailbox.
+5. Print DNS records and re-verify on Enter (press `q` to skip and run `aimx doctor` later).
+6. Install and start `aimx.service`, then re-exec `aimx agents setup` as `$SUDO_USER` so you can pick which AI agents to wire in.
 
-Re-running `sudo aimx setup agent.yourdomain.com` on an existing install skips the STARTTLS / DKIM / config-write steps, re-verifies DNS, and drops through to `aimx agents setup` again so you can wire additional agents.
-
-Follow the on-screen prompts to add the required DNS records at your domain registrar. See [Setup: DNS Configuration](setup.md#dns-configuration) for per-record details.
+Re-running `sudo aimx setup` on an existing install skips the cert/key/config writes, re-verifies DNS, and re-runs the agents picker. See [Setup: DNS Configuration](setup.md#dns-configuration).
 
 ## Verify
 
@@ -118,16 +104,4 @@ Install AIMX into your agent with one command:
 aimx agents setup claude-code    # or codex / opencode / gemini / goose / openclaw / hermes
 ```
 
-Run `aimx agents list` to see every supported agent and its
-destination path, and see the [Agent Integration](agent-integration.md)
-chapter for per-agent activation steps.
-
-The agent can now list, read, send, and reply to email via MCP. See [MCP Server](mcp.md) for the full tool set.
-
-## Next steps
-
-- **[Setup](setup.md)**: detailed walkthrough of every setup step, DNS records, DKIM management, and production hardening
-- **[Configuration](configuration.md)**: full `config.toml` reference for mailboxes, hooks, and trust policies
-- **[Hooks & Trust](hooks.md)**: fire agent actions automatically on inbound/outbound events
-- **[MCP Server](mcp.md)**: integrate with Claude Code, OpenClaw, or any MCP client
-- **[Troubleshooting](troubleshooting.md)**: common issues and diagnostic commands
+Run `aimx agents list` to see every supported agent and destination path; [Agent Integration](agent-integration.md) covers per-agent activation. The agent can now list, read, send, and reply to email via MCP — see [MCP Server](mcp.md) for the full tool set.

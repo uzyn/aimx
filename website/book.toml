@@ -17,7 +17,7 @@ additional-css = [
     "styles/chrome.css",
 ]
 additional-js = [
-    "scripts/nav.js",
+    "scripts/nav.js", "mermaid.min.js", "mermaid-init.js",
 ]
 
 [output.html.fold]
@@ -30,3 +30,8 @@ runnable = false
 [build]
 build-dir = "dist/book"
 create-missing = false
+
+[preprocessor]
+
+[preprocessor.mermaid]
+command = "mdbook-mermaid"

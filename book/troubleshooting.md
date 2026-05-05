@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Diagnostic commands and solutions for common issues.
+Diagnostic commands and fixes for common failure modes.
 
 ## Diagnostic commands
 
@@ -37,11 +37,11 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 | Hooks not firing | Trust gate | `on_receive` hooks fire iff `trusted == "true"` OR the hook sets `fire_on_untrusted = true`. Check `trust` / `trusted_senders` and the email's DKIM result. See [trust gate](hooks.md#trust-gate-on_receive-only). |
 | DKIM verification failing | DNS record mismatch or key regenerated | Ensure DKIM DNS record matches current public key |
 
-## Restarting setup from scratch
+## Reset
 
-`aimx setup` is idempotent: re-running it preserves the operator's prior trust policy and skips STARTTLS / install steps once they are in place. The wizard now generates the DKIM keypair early (step 2, while rendering the DNS guidance table), so a hard reset means clearing more than just `config.toml`.
+`aimx setup` is idempotent: re-running it preserves the prior trust policy and skips STARTTLS / install steps once in place. The wizard generates the DKIM keypair early (step 2), so a hard reset means clearing more than just `config.toml`.
 
-To wipe a partially-installed host and start from a clean slate:
+To wipe a partially-installed host and start clean:
 
 ```bash
 # Stop the daemon if it's running.
@@ -89,9 +89,9 @@ less /var/log/messages
 rc-service aimx restart
 ```
 
-## Where are the logs?
+## Logs
 
-AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. The first-line debugging command is `aimx logs`, which wraps the right tool for the running init system:
+AIMX does not write its own log files. Output from `aimx serve` goes to stdout/stderr and is captured by the init system. `aimx logs` wraps the right tool for the running init:
 
 ```bash
 # Tail the last 50 lines (default)
@@ -314,22 +314,17 @@ curl -fsSL https://aimx.email/portcheck.sh | sudo sh
 
 `portcheck.sh` is a thin alias for `install.sh --port-check-only`; both URLs run the same checks. See [Getting Started: Pre-install check](getting-started.md#pre-install-check-port-25).
 
-## Useful commands reference
+## Useful commands
 
 | Command | Purpose |
 |---------|---------|
-| `sudo aimx portcheck` | Check port 25 connectivity (requires root) |
-| `aimx doctor` | Show config, mailboxes, message counts, DNS record verification, and a pointer to `aimx logs` |
-| `aimx logs [--lines N] [--follow]` | Tail or follow the aimx service log |
-| `aimx mailboxes list` | List all mailboxes |
-| `aimx dkim-keygen` | Generate DKIM keypair |
-| `aimx dkim-keygen --force` | Regenerate DKIM keys (update DNS record after) |
-| `aimx --data-dir /path doctor` | Use a custom data directory |
-| `sudo systemctl status aimx` | Check aimx serve service |
-| `journalctl -u aimx -e` | View aimx serve logs (or use `aimx logs`) |
-| `dig +short TXT agent.yourdomain.com` | Check DNS records |
-| `cat /etc/aimx/dkim/public.key` | View DKIM public key |
+| `sudo aimx portcheck` | Check port 25 connectivity (root) |
+| `aimx doctor` | Server health, mailbox counts, DNS verification |
+| `aimx logs [--lines N] [--follow]` | Tail or follow the service log |
+| `aimx mailboxes list` | List mailboxes |
+| `aimx dkim-keygen [--force]` | Generate or rotate DKIM keypair |
+| `sudo systemctl status aimx` | Check the daemon's service state |
+| `dig +short TXT agent.yourdomain.com` | Inspect DNS records |
+| `cat /etc/aimx/dkim/public.key` | Show the DKIM public key |
 
----
-
-Back to: [Index](index.md) | [Setup](setup.md) | [Configuration](configuration.md)
+See [CLI Reference](cli.md) for every subcommand and flag.

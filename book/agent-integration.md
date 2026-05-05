@@ -1,8 +1,6 @@
 # Agent Integration
 
-`aimx agents setup <agent>` is the one command that wires an AI agent into aimx. It installs the agent's plugin/skill package under the caller's `$HOME` so the agent can call aimx's MCP tools and (when the operator asks it to) create `on_receive` / `after_send` hooks via MCP. No sudo, no manual config edit, no second `aimx setup` run. When you are done, `aimx agents remove <agent>` removes what was installed.
-
-> **Names.** `aimx agents` (plural noun, with `setup` / `remove` / `list` verbs) matches the rest of the CLI's CRUD shape (`aimx mailboxes`, `aimx hooks`).
+`aimx agents setup <agent>` wires an AI agent into AIMX in one command. It installs the agent's plugin or skill bundle under `$HOME` so the agent can call AIMX's MCP tools and create hooks via MCP. No sudo, no manual config edit. `aimx agents remove <agent>` is the inverse.
 
 For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
@@ -12,29 +10,22 @@ For email-triggered workflows after installation, see [Hook Recipes](hook-recipe
 aimx agents setup claude-code
 ```
 
-What this does, in order:
+In order:
 
-1. **Refuse root.** `sudo aimx agents setup ...` is rejected. Run it as the user whose agent you are configuring.
-2. **Install skill files.** The skill tree embedded in the `aimx` binary is written under the agent's per-user destination (e.g. `~/.claude/skills/aimx/`). File mode `0o644`, directory mode `0o755`.
-3. **Auto-register the MCP server (when supported).** For Claude Code and Codex CLI, the installer shells out to `claude mcp add` / `codex mcp add` so the server is wired with no extra step. If the agent CLI is not on PATH, the installer falls back to printing the equivalent command for you to run manually.
-4. **Print activation hint (snippet-style agents).** OpenCode, Gemini CLI, OpenClaw, and Hermes have JSON/YAML MCP configs the installer prints so you can paste the snippet into the agent's config file.
+1. Refuses root — run it as the user whose agent you are configuring.
+2. Writes the embedded skill tree under the agent's per-user destination (e.g. `~/.claude/skills/aimx/`).
+3. Auto-registers the MCP server when the agent has a registration CLI (Claude Code → `claude mcp add`, Codex → `codex mcp add`, NanoClaw → merge into `<fork>/.mcp.json`). Falls back to printing the equivalent command if the CLI is not on PATH.
+4. Prints an activation hint for snippet-style agents (OpenCode, Gemini CLI, OpenClaw, Hermes) so you can paste the JSON/YAML block into the agent's config.
 
-Example output for alice running `aimx agents setup claude-code`:
-
-```text
-Installed /home/alice/.claude/skills/aimx
-✓ MCP server registered with Claude Code.
-```
-
-After this, alice's agent can call aimx's MCP tools (including `hook_create` / `hook_list` / `hook_delete`) for any mailbox alice owns. The bundled plugin includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with `hook_create` — the agent reads its own skill at session start and writes its own `cmd` recipe at hook-creation time, no operator intervention required.
+After this, the agent can call AIMX's MCP tools (including `hook_create`, `hook_list`, `hook_delete`) for any mailbox the calling user owns. The bundled plugin includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv.
 
 ## Discovering supported agents
 
-`aimx agents setup` with no argument launches an interactive checkbox TUI listing every supported agent with its detected install state (AIMX MCP wired, installed but not wired, or not detected). Use the arrow keys to move, `Space` to toggle, `Enter` to confirm, or `q` to cancel. The TUI defaults the right boxes for you: installed-but-not-wired agents are pre-checked; already-wired agents are listed but unchecked; not-detected agents are dimmed and skipped by the cursor.
+`aimx agents setup` with no argument launches an interactive checkbox TUI listing every supported agent with its detected state (AIMX MCP wired, installed but not wired, or not detected). Arrow keys to move, `Space` to toggle, `Enter` to confirm, `q` to cancel. The TUI pre-checks installed-but-not-wired agents and dims undetected ones.
 
-After you press `Enter`, the TUI renders a confirmation screen listing each task with the right verb (`Install AIMX MCP for ...` / `Re-install AIMX MCP for ...`) and reads `Confirm? [Y/n]` before any files are written. Pressing `n` returns to the picker with your previous selections preserved.
+`Enter` shows a confirmation screen with the right verb per task (`Install AIMX MCP for ...` / `Re-install AIMX MCP for ...`) and asks `Confirm? [Y/n]` before writing any files.
 
-`aimx agents list` prints the same registry as a plain table with no prompt. `aimx agents setup --no-interactive` prints the same table when invoked with no agent argument. Piping the output to `cat` / `less` also falls back to the plain table automatically.
+`aimx agents list` and `aimx agents setup --no-interactive` print the same registry as a plain table. Piping to `cat` or `less` also falls back to the plain table.
 
 ### Reference: TUI visual
 
@@ -66,12 +57,11 @@ Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 
 ## Key properties
 
-- **Runs as the current user.** `aimx agents setup` refuses to run as root by default.
-- **`--dangerously-allow-root` escape hatch.** For single-user root-login VPS setups that have no separate operator account, pass `--dangerously-allow-root` to wire aimx into `/root`'s home. The flag applies uniformly to the TUI, per-agent runs, and `--no-interactive`. It is **never** passed implicitly by the `aimx setup` drop-through — you must opt in by hand. On any machine with a regular user, prefer `sudo -u <user> aimx agents setup` instead.
-- **Writes only to `$HOME`.** Nothing under `/etc` or `/var` is touched by the plugin-install step.
-- **Hook authorization is by mailbox ownership.** When the agent later calls `hook_create`, the daemon reads the caller's uid via `SO_PEERCRED` and accepts the request only if the caller owns the target mailbox (or is root). Hooks always exec as the mailbox's owner uid — there is no per-hook `run_as` override.
-- **Offline.** The plugin tree is embedded at compile time. No network access is required.
-- **Idempotent re-runs.** Re-running `aimx agents setup <agent>` with `--force` overwrites existing plugin files.
+- **Refuses root.** Run `aimx agents setup` as the user whose agent you are configuring. For single-user root-login VPS setups, pass `--dangerously-allow-root` to wire AIMX into root's home. The flag applies to the TUI, per-agent runs, and `--no-interactive`, and is never passed implicitly by `aimx setup`'s drop-through.
+- **Writes only to `$HOME`.** Nothing under `/etc/` or `/var/` is touched by the plugin-install step.
+- **Offline.** The plugin tree is embedded at compile time.
+- **Idempotent.** `--force` overwrites existing plugin files.
+- **Hook authorization is by mailbox ownership.** When the agent later calls `hook_create`, the daemon authorizes via `SO_PEERCRED` and runs hooks as the mailbox's owner uid — see [Security: Per-action authorization](security.md#per-action-authorization).
 
 ## Flags
 
@@ -79,7 +69,7 @@ Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 |------|---------|
 | `--list` | Print the registry (agent name, destination, activation hint). No TUI. |
 | `--no-interactive` | Skip the checkbox TUI when no agent is named; print the same plain registry dump as `--list`. Intended for scripting. |
-| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Applies uniformly across the TUI, per-agent runs, and `--no-interactive`. See Key properties above. |
+| `--dangerously-allow-root` | Bypass the root-refusal check and wire AIMX into `/root`'s home. Applies to the TUI, per-agent runs, and `--no-interactive`. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. |
 | `--data-dir <path>` | Global flag. If aimx was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
@@ -105,9 +95,9 @@ aimx agents remove claude-code
 | Hermes | `aimx agents setup hermes` | `~/.hermes/skills/aimx/` | Paste the printed YAML block under `mcp_servers:` in `~/.hermes/config.yaml`, then run `/reload-mcp` inside Hermes. | Primer as skill + `references/` directory copied as siblings |
 | NanoClaw | `aimx agents setup nanoclaw` | `<fork>/skills/aimx/` (default `~/nanoclaw/`, override via `$NANOCLAW_HOME`) | Auto-merged into `<fork>/.mcp.json` under `mcpServers.aimx`. Restart NanoClaw so the new server is loaded. | Primer as skill + `references/` directory copied as siblings |
 
-> **Progressive disclosure.** Every agent receives the same canonical aimx primer (`agents/common/aimx-primer.md`). Agents with multi-file skill directories (Claude Code, Codex CLI, OpenClaw, Hermes, NanoClaw) also receive `agents/common/references/` as siblings so detailed material loads on demand without bloating the initial context. Single-file agents (OpenCode, Gemini CLI, Goose) receive the primer inline. The `references/` content remains available in the aimx source tree and at `/var/lib/aimx/README.md`.
+Every agent receives the canonical AIMX primer (`agents/common/aimx-primer.md`). Multi-file targets (Claude Code, Codex CLI, OpenClaw, Hermes, NanoClaw) also get `agents/common/references/` as siblings for progressive disclosure. Single-file targets (OpenCode, Gemini CLI, Goose) get the primer inline.
 
-> **`.mcp.json` auto-merge (NanoClaw only).** NanoClaw is the one supported agent where `aimx agents setup` writes to the agent's primary MCP config file. NanoClaw exposes no `mcp add` CLI and ships its MCP servers as JSON5 in the per-fork `.mcp.json`, so the installer reads that file (if present), merges an `mcpServers.aimx` entry preserving any other servers, and writes back via temp-file + atomic rename. `--print` shows the proposed JSON without touching disk; `--force` overwrites an existing `aimx` entry. Every other agent either has a registration CLI or expects the user to paste a snippet; aimx does not mutate their config files.
+NanoClaw is the only supported agent where `aimx agents setup` writes to the agent's MCP config file: NanoClaw has no `mcp add` CLI and ships MCP servers as JSON5 in the per-fork `.mcp.json`. The installer reads that file (if present), merges an `mcpServers.aimx` entry preserving any other servers, and writes back via temp-file + atomic rename. `--print` shows the proposed JSON without touching disk; `--force` overwrites an existing `aimx` entry. Every other agent either has a registration CLI or expects the user to paste a snippet — AIMX does not mutate their config files.
 
 ### Per-agent hook recipes
 
@@ -119,33 +109,13 @@ See [MCP Server § Hook tools](mcp.md#hook-tools) for the full tool reference.
 
 ### Claude Code
 
-Claude Code auto-discovers user-scope skills under `~/.claude/skills/`,
-but the MCP server is **not** auto-activated. In particular `claude -p`
-(headless mode, used by hook recipes) needs an explicit `claude mcp add`
-so the server is registered in its MCP registry. The aimx skill ships:
-
-- `SKILL.md`: a skill Claude Code loads when the conversation touches
-  email, inboxes, or aimx. The skill body is the canonical aimx primer:
-  MCP tool names and parameters, the on-disk storage layout, the
-  frontmatter format, read/unread semantics, and the DKIM/SPF trust
-  model.
-- `references/`: detailed reference docs (MCP tool signatures,
-  frontmatter schema, workflows, troubleshooting, hooks) loaded on
-  demand via progressive disclosure.
-
-Install:
+Claude Code auto-discovers user-scope skills under `~/.claude/skills/`, but the MCP server is not auto-activated — `claude -p` (headless mode, used by hook recipes) needs an explicit `claude mcp add`. The skill ships `SKILL.md` (the AIMX primer) plus a `references/` directory loaded on demand.
 
 ```bash
 aimx agents setup claude-code
 ```
 
-The installer auto-runs `claude mcp add --scope user aimx --
-/usr/local/bin/aimx mcp`, which updates `~/.claude.json` (the
-user-scope MCP registry) so both the interactive REPL and `claude -p`
-headless invocations see the `aimx` server. If `claude` is not on
-PATH, the installer prints the equivalent command for you to run
-manually. Restart Claude Code after install so the new MCP server is
-loaded.
+The installer auto-runs `claude mcp add --scope user aimx -- /usr/local/bin/aimx mcp`, which updates `~/.claude.json` so both the interactive REPL and `claude -p` see the server. Restart Claude Code after install. If `claude` is not on PATH, the installer prints the equivalent command instead.
 
 Custom data directory:
 
@@ -159,23 +129,13 @@ is missing).
 
 ### Codex CLI
 
-Codex CLI's MCP wiring lives in `~/.codex/config.toml` under
-`[mcp_servers.<name>]`, managed via `codex mcp add`. It does **not**
-auto-discover plugins under `~/.codex/plugins/` (validated against
-Codex CLI 0.117.0). The aimx skill ships at `~/.codex/skills/aimx/`
-with a `SKILL.md` body (canonical aimx primer) and a `references/`
-directory.
-
-Install:
+Codex CLI's MCP wiring lives in `~/.codex/config.toml` under `[mcp_servers.<name>]` and is managed via `codex mcp add`. The skill ships at `~/.codex/skills/aimx/` with `SKILL.md` plus a `references/` directory.
 
 ```bash
 aimx agents setup codex
 ```
 
-The installer auto-runs `codex mcp add aimx -- /usr/local/bin/aimx
-mcp` so the MCP server is registered with no extra step. If `codex`
-is not on PATH, the installer prints the equivalent command for you
-to run manually.
+The installer auto-runs `codex mcp add aimx -- /usr/local/bin/aimx mcp`. If `codex` is not on PATH, the equivalent command is printed instead.
 
 Custom data directory:
 
@@ -188,21 +148,13 @@ auto-registration command and the fallback hint.
 
 ### OpenCode
 
-OpenCode discovers skills from `~/.config/opencode/skills/<name>/` (user)
-or `<repo>/.opencode/skills/<name>/` (project). The aimx package is
-skill-only. MCP servers in OpenCode are configured in `opencode.json`,
-not alongside the skill.
-
-Install:
+OpenCode discovers skills from `~/.config/opencode/skills/<name>/` (user) or `<repo>/.opencode/skills/<name>/` (project). MCP servers are configured separately in `opencode.json`, not alongside the skill.
 
 ```bash
 aimx agents setup opencode
 ```
 
-The installer writes `~/.config/opencode/skills/aimx/SKILL.md` and prints
-a JSONC block. Paste that block into the `mcp` object in your
-`opencode.json` (user-level at `~/.config/opencode/opencode.json` or
-project-level at `<repo>/opencode.json`):
+The installer writes `~/.config/opencode/skills/aimx/SKILL.md` and prints a JSONC block. Paste it into the `mcp` object in `~/.config/opencode/opencode.json` (or project-level `<repo>/opencode.json`):
 
 ```jsonc
 {
@@ -229,12 +181,7 @@ for the schema reference.
 
 ### Gemini CLI
 
-Gemini CLI picks up skills from `~/.gemini/skills/<name>/` and configures
-MCP servers in `~/.gemini/settings.json`. aimx does not mutate
-`settings.json` directly. Instead the installer prints the exact JSON
-block to merge.
-
-Install:
+Gemini CLI picks up skills from `~/.gemini/skills/<name>/` and configures MCP servers in `~/.gemini/settings.json`. The installer prints the exact JSON block to merge rather than mutating `settings.json` directly.
 
 ```bash
 aimx agents setup gemini
@@ -271,19 +218,13 @@ for the schema reference.
 
 ### Goose
 
-[Goose](https://goose-docs.ai/) uses YAML "recipes" rather than plugins or
-skills. A recipe bundles a goal, an agent-facing `prompt`, and the MCP
-`extensions` that run alongside the agent. One file carries both the
-MCP wiring AND the aimx primer. No separate config-file edit is needed.
-
-Install:
+[Goose](https://goose-docs.ai/) uses YAML recipes — one file bundles the goal, agent-facing prompt, and MCP extensions. The recipe carries both the MCP wiring and the AIMX primer; no separate config edit is needed.
 
 ```bash
 aimx agents setup goose
 ```
 
-The installer writes `~/.config/goose/recipes/aimx.yaml`. Run the recipe
-with:
+The installer writes `~/.config/goose/recipes/aimx.yaml`. Run it with:
 
 ```bash
 goose run --recipe aimx
@@ -313,20 +254,13 @@ for the schema reference.
 
 ### OpenClaw
 
-[OpenClaw](https://docs.openclaw.ai/) uses skill directories (similar
-to Claude Code) for agent-facing instructions and a separate JSON5
-config file for MCP servers at `~/.openclaw/openclaw.json`. Rather than
-having you hand-edit the JSON5 file, aimx uses OpenClaw's first-class
-`openclaw mcp set` CLI to register the MCP server non-interactively.
-
-Install:
+[OpenClaw](https://docs.openclaw.ai/) uses skill directories like Claude Code, with MCP servers configured in `~/.openclaw/openclaw.json`. The installer uses OpenClaw's `openclaw mcp set` CLI to register the server non-interactively.
 
 ```bash
 aimx agents setup openclaw
 ```
 
-The installer writes `~/.openclaw/skills/aimx/SKILL.md` and prints a
-command like:
+The installer writes `~/.openclaw/skills/aimx/SKILL.md` and prints a command like:
 
 ```bash
 openclaw mcp set aimx '{"command":"/usr/local/bin/aimx","args":["mcp"]}'
@@ -349,23 +283,13 @@ for the schema reference.
 
 ### Hermes
 
-[Hermes Agent](https://hermes-agent.nousresearch.com/) (by Nous Research)
-loads skills from `~/.hermes/skills/<name>/SKILL.md` (with optional
-`references/` siblings) and reads MCP server definitions from
-`~/.hermes/config.yaml` under the top-level `mcp_servers:` key. There is
-no shell-side CLI for registering external MCP servers in Hermes today
-(`hermes mcp serve` runs Hermes as an MCP server, the opposite
-direction), so aimx prints a YAML snippet for you to paste into the
-config file, mirroring the Gemini CLI / OpenCode flow.
-
-Install:
+[Hermes Agent](https://hermes-agent.nousresearch.com/) loads skills from `~/.hermes/skills/<name>/SKILL.md` (optionally with `references/` siblings) and reads MCP server definitions from `~/.hermes/config.yaml` under `mcp_servers:`. There is no shell-side CLI for registering external MCP servers in Hermes, so the installer prints a YAML snippet to paste into the config.
 
 ```bash
 aimx agents setup hermes
 ```
 
-The installer writes `~/.hermes/skills/aimx/SKILL.md` and the bundled
-`references/` directory, then prints a YAML block like:
+The installer writes `~/.hermes/skills/aimx/SKILL.md` and the bundled `references/` directory, then prints a YAML block like:
 
 ```yaml
 mcp_servers:
@@ -394,24 +318,9 @@ for the schema reference.
 
 ### NanoClaw
 
-[NanoClaw](https://nanoclaw.dev/) is a lightweight container-isolated
-personal AI agent built on Anthropic's Claude Agent SDK. It is forked
-per-user from `qwibitai/nanoclaw` and run from the clone, so there is
-no global `~/.nanoclaw/` directory; instead the integration target is
-the fork directory itself. The installer resolves the fork path from
-`$NANOCLAW_HOME`, defaulting to `~/nanoclaw` (the path the upstream
-README's `git clone … nanoclaw && cd nanoclaw` workflow leaves you
-in). Set the env var before running setup if your fork lives
-elsewhere.
+[NanoClaw](https://nanoclaw.dev/) is forked per-user from `qwibitai/nanoclaw` and run from the clone, so there is no global `~/.nanoclaw/`. The installer resolves the fork path from `$NANOCLAW_HOME` (default `~/nanoclaw`); set the env var before running setup if your fork lives elsewhere.
 
-NanoClaw is the one supported agent where aimx mutates the agent's
-own MCP config file. NanoClaw exposes no `mcp add` CLI, and its MCP
-servers live in `<fork>/.mcp.json` (Claude-Agent-SDK project-scoped
-convention). Asking the user to hand-edit that JSON5 file is the
-worst of three options, so the installer reads it (if present),
-merges an `mcpServers.aimx` entry under `mcpServers`, and writes
-back via temp-file + atomic rename. Other servers in the file are
-preserved untouched.
+NanoClaw exposes no `mcp add` CLI and ships MCP servers as JSON5 in `<fork>/.mcp.json`. The installer reads the file (if present), merges an `mcpServers.aimx` entry, and writes back via temp-file + atomic rename. Other servers in the file are preserved.
 
 Install:
 
@@ -425,10 +334,7 @@ aimx agents setup nanoclaw
 NANOCLAW_HOME=/opt/my-nanoclaw aimx agents setup nanoclaw
 ```
 
-The installer requires the fork directory to exist (no
-auto-`mkdir`) so it never creates a stub a follow-up `git clone`
-would fail on. After it succeeds, restart NanoClaw so it loads the
-new `.mcp.json` entry and discovers the skill.
+The installer requires the fork directory to exist (no auto-`mkdir`) so it never creates a stub a later `git clone` would refuse. Restart NanoClaw after install so it loads the new `.mcp.json` entry and discovers the skill.
 
 For a custom data directory:
 
@@ -439,25 +345,9 @@ aimx --data-dir /custom/path agents setup nanoclaw
 The merged `.mcp.json` entry's `args` array will include
 `--data-dir /custom/path`.
 
-**Re-running.** The installer is idempotent on the skill files
-(re-running with `--force` overwrites them). On `.mcp.json`, an
-existing `mcpServers.aimx` entry is left in place unless `--force`
-is passed; the installer prints a clear "pass --force to overwrite"
-warning and exits cleanly so a stale entry never silently
-shadows what the user had before.
+**Re-running.** Skill files are idempotent (re-run with `--force` to overwrite). On `.mcp.json`, an existing `mcpServers.aimx` entry is left in place unless `--force` is passed; the installer warns and exits cleanly rather than silently shadowing what was there.
 
-**Channel triggers / hooks.** NanoClaw is a long-running Node.js
-daemon listening on messaging channels inside a container; it does
-not expose a one-shot CLI suitable for an aimx `on_receive` hook.
-The natural integration is the **other direction**: NanoClaw pulls
-unread mail from aimx via MCP on its own scheduled-job cadence,
-acts on each message (reply, file, label), then marks it read.
-Wire one of NanoClaw's first-class scheduled jobs to call
-`email_list(folder: "inbox", unread_only: true)` every N minutes.
-For sub-second-latency reactions to inbound mail, wire a different
-agent (Claude Code, Codex, or Hermes) as the on_receive hook on the
-aimx side and let NanoClaw consume the resulting state on its next
-tick.
+**Channel triggers and hooks.** NanoClaw is a long-running Node.js daemon listening on messaging channels inside a container; it does not expose a one-shot CLI suitable for an `on_receive` hook. The natural integration is the other direction — NanoClaw pulls unread mail via MCP on its own scheduled-job cadence. For sub-second reactions to inbound mail, wire a different agent (Claude Code, Codex, or Hermes) as the `on_receive` hook and let NanoClaw consume the resulting state on its next tick.
 
 See [`agents/nanoclaw/README.md`](https://github.com/uzyn/aimx/tree/main/agents/nanoclaw)
 for the schema reference.
@@ -546,9 +436,7 @@ Goose resolves `--recipe <name>` to `<name>.yaml` under
 ls ~/.config/goose/recipes/aimx.yaml
 ```
 
-If it is missing, re-run `aimx agents setup goose`. If `XDG_CONFIG_HOME`
-is set to a non-default value, Goose and aimx will both honour it.
-Check under `$XDG_CONFIG_HOME/goose/recipes/` instead.
+If it is missing, re-run `aimx agents setup goose`. If `XDG_CONFIG_HOME` is set to a non-default value, Goose and AIMX both honour it — check under `$XDG_CONFIG_HOME/goose/recipes/` instead.
 
 ### OpenClaw: `openclaw mcp set` says "command not found"
 

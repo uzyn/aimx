@@ -1,14 +1,12 @@
 # MCP Server
 
-> To install aimx into your agent, see [Agent Integration](agent-integration.md).
-
-aimx includes a built-in MCP (Model Context Protocol) server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
+AIMX includes a Model Context Protocol server that gives AI agents programmatic access to email. Agents can list, read, send, reply to, and manage email through standard MCP tool calls.
 
 ## Overview
 
-- **Transport:** stdio (launched on-demand, no daemon)
-- **Protocol:** Model Context Protocol (MCP)
-- **Compatible clients:** any MCP-compatible client — see [Compatible agent frameworks](#compatible-agent-frameworks) below for the per-agent integration matrix.
+- **Transport:** stdio (launched on-demand by the MCP client; no background daemon).
+- **Protocol:** Model Context Protocol.
+- **Compatible clients:** any MCP-compatible client. See [Agent Integration § Supported agents](agent-integration.md#supported-agents) for the per-agent matrix.
 
 ## Running the MCP server
 
@@ -16,33 +14,17 @@ aimx includes a built-in MCP (Model Context Protocol) server that gives AI agent
 aimx mcp
 ```
 
-The server runs in stdio mode. It reads from stdin and writes to stdout. It is launched on-demand by MCP clients, not run as a background service.
-
-## Agent integration
-
-See [Agent Integration](agent-integration.md) for one-line `aimx agents setup <agent>` installers and the manual MCP wiring pattern for clients not yet in the registry.
+The server reads from stdin and writes to stdout. To install it into a supported agent, see [Agent Integration](agent-integration.md).
 
 ## Per-user authorization
 
-The MCP server inherits the uid of the user that launched the client (stdio transport — there is no server process doing multi-user auth). At startup the server records its euid as the authorization principal; every tool call checks the same predicate the daemon enforces over the UDS:
+The MCP server inherits the uid of the user that launched the client. Every tool call routes through the daemon UDS, which authorizes against the caller's uid via `SO_PEERCRED`: caller is root, or caller's uid equals the target mailbox's `owner_uid`. Tools acting on mailboxes the caller does not own return `EACCES not authorized`; `hook_delete` for an unowned hook collapses to `Hook '<name>' not found` so foreign mailbox names do not leak.
 
-> Caller is root, or caller's uid equals the target mailbox's `owner_uid`.
-
-What that buys you per tool:
-
-- `mailbox_list` returns only mailboxes whose `owner` resolves to the caller's uid (catchalls are filtered for non-root callers since the catchall owner is `aimx-catchall`).
-- `email_list`, `email_read`, `email_mark_read`, `email_mark_unread`, `email_send`, `email_reply` all reject with `EACCES not authorized` when the target mailbox is owned by another user.
-- `hook_create`, `hook_list`, `hook_delete` operate only on mailboxes the caller owns. `hook_delete` for a hook the caller does not own collapses to `Hook '<name>' not found` so foreign mailbox names do not leak.
-
-Filesystem enforcement backs this up: every mailbox directory is `0700 <owner>:<owner>`, so even direct `.md` reads only succeed for the mailbox's owner. On a single-user box the rules are invisible (one user owns everything); on a multi-user box they give real isolation between alice and bob.
-
-Root running the MCP server bypasses mailbox-ownership checks (and is logged at info level). Non-root callers see only their own world.
-
-See [Hooks § UDS authorization (`SO_PEERCRED`)](hooks.md#uds-authorization-so_peercred) for the full per-verb authz table.
+Root running the MCP server bypasses mailbox-ownership checks (and is logged at info level). See [Security: Per-action authorization](security.md#per-action-authorization).
 
 ## MCP tools
 
-aimx exposes 12 MCP tools organized into mailbox lifecycle, email operations, and hook management.
+AIMX exposes 12 MCP tools organized into mailbox lifecycle, email operations, and hook management.
 
 ### Mailbox tools
 
@@ -116,9 +98,7 @@ Without `force`, the daemon refuses non-empty mailboxes with `ERR NONEMPTY` and 
 
 #### `email_list`
 
-List a page of email metadata in a mailbox, sorted descending by
-filename (newest first). aimx never scans on the agent's behalf —
-agents page through the listing and filter client-side.
+List a page of email metadata in a mailbox, sorted descending by filename (newest first). AIMX never scans on the agent's behalf — agents page through the listing and filter client-side.
 
 | Parameter | Type   | Required | Description |
 |-----------|--------|----------|-------------|
@@ -284,62 +264,21 @@ Returns `Hook '<name>' not found` for hooks on mailboxes the caller does not own
 
 ## Frontmatter reference
 
-Every email stored by aimx carries a TOML frontmatter block between `+++` delimiters. Inbound emails include:
-
-| Field | Always written | Description |
-|-------|----------------|-------------|
-| `id` | yes | Filename stem (e.g. `2025-04-15-143022-hello`) |
-| `message_id` | yes | RFC 5322 `Message-ID` |
-| `thread_id` | yes | 16-hex-char SHA-256 of the resolved thread root |
-| `from` | yes | Sender address |
-| `to` | yes | Recipient address |
-| `delivered_to` | yes | Actual RCPT TO |
-| `subject` | yes | Subject line |
-| `date` | yes | Sender-claimed datetime (RFC 3339) |
-| `received_at` | yes | Server receipt datetime (RFC 3339 UTC) |
-| `dkim` | yes | `pass`, `fail`, or `none` |
-| `spf` | yes | `pass`, `fail`, or `none` |
-| `dmarc` | yes | `pass`, `fail`, or `none` |
-| `trusted` | yes | `none`, `true`, or `false`. Per-mailbox trust evaluation result (see [Configuration](configuration.md)) |
-| `mailbox` | yes | Target mailbox name |
-| `read` | yes | Read/unread status |
-| `outbound` | sent only | Always `true` on sent copies |
-| `delivery_status` | sent only | `delivered`, `failed`, `deferred`, or `pending` |
-| `bcc` | sent only (optional) | Array of BCC recipient addresses |
-| `delivered_at` | sent only (optional) | RFC 3339 UTC timestamp of successful MX handoff |
-| `delivery_details` | sent only (optional) | SMTP reason string on permanent failure |
-
-See [Mailboxes: Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the full outbound schema.
+Every email carries a TOML frontmatter block between `+++` delimiters. See [Mailboxes: Frontmatter fields](mailboxes.md#frontmatter-fields) for the full inbound schema and [Mailboxes: Outbound frontmatter](mailboxes.md#outbound-frontmatter) for the outbound additions.
 
 ## Agent-facing documentation
 
-Two reference documents help agents understand aimx:
+Two reference documents help agents understand AIMX:
 
-- **`agents/common/aimx-primer.md`**: the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, common workflows, and a "Self-trigger as a mailbox hook" pointer to the agent's own recipe.
-- **`/var/lib/aimx/README.md`**: the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers the on-disk layout, file naming, slug algorithm, bundle rules, and the UDS send protocol.
-
-## Compatible agent frameworks
-
-| Framework | Integration method |
-|-----------|-------------------|
-| Claude Code | MCP stdio mode via `~/.claude/settings.json` |
-| OpenClaw | MCP stdio mode or [hooks](hooks.md) via shell |
-| OpenCode | MCP stdio mode |
-| Codex | [Hooks](hooks.md) via shell command |
-| Any MCP client | Standard MCP stdio transport |
+- `agents/common/aimx-primer.md` — the canonical primer bundled into every agent plugin. Covers MCP tools, storage layout, frontmatter, trust model, workflows.
+- `/var/lib/aimx/README.md` — the runtime datadir guide written by `aimx setup` and refreshed on `aimx serve` startup. Covers on-disk layout, file naming, slug algorithm, bundle rules.
 
 ## Example workflow
 
-A typical agent email workflow:
+1. Call `email_list` and filter rows where `read == false`.
+2. Call `email_read` with the mailbox and email ID, or read `<inbox_path>/<id>.md` from the filesystem.
+3. Process the content.
+4. Call `email_reply` with the response body.
+5. Call `email_mark_read`.
 
-1. **Check for new mail.** Call `email_list` and filter the JSON output to rows where `read == false`
-2. **Read an email.** Call `email_read` with the mailbox and email ID, or `Read` `<inbox_path>/<id>.md` directly
-3. **Process the content.** Agent decides how to respond
-4. **Reply.** Call `email_reply` with the response body
-5. **Mark as read.** Call `email_mark_read`
-
-For automated processing without MCP, use [hooks](hooks.md) to trigger commands on incoming email.
-
----
-
-Next: [Hooks & Trust](hooks.md) | [Mailboxes & Email](mailboxes.md) | [Setup](setup.md)
+For automated processing without MCP, use [hooks](hooks.md).

@@ -1,18 +1,16 @@
 # Mailboxes & Email
 
-Mailboxes are the core organizational unit in AIMX. Each mailbox maps an email address to a directory on disk.
-
-> **CLI alias:** Examples below use `aimx mailboxes`. The singular `aimx mailbox` is retained as a clap alias for muscle-memory and works identically.
+A mailbox maps an email address to a directory on disk. `aimx mailbox` is a clap alias for `aimx mailboxes` and works identically.
 
 ## Concepts
 
-- **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/` and one under `sent/`) and registers an address. No passwords, no database.
-- **Per-mailbox owner.** Every mailbox has an `owner` field in `config.toml` naming the Linux user who owns it. Storage is chowned `<owner>:<owner>` mode `0700` at create time and kept consistent through every write. One user can own many mailboxes; one mailbox has exactly one owner. Only the owner (and root) can read a mailbox's contents. The MCP server and UDS socket both enforce per-mailbox owner checks on every request — alice cannot list, read, or act on bob's mailboxes. See [Hooks § UDS authorization](hooks.md#uds-authorization-so_peercred) for the authz table.
-- **Catchall.** The `catchall` mailbox (created by default during setup) receives email for any unrecognized address at your domain. Catchall is inbox-only. No `sent/catchall/` directory is created. The catchall's owner is always the reserved `aimx-catchall` system user, created on demand by setup.
-- **No sudo needed for the mailboxes you own.** Both `aimx mailboxes create` and `aimx mailboxes delete` work as your regular Linux user. The daemon resolves your uid via `SO_PEERCRED`, treats it as the canonical owner identity, and writes the mailbox stanza atomically — no `sudo`, no shell context switch. Root may still create mailboxes owned by another uid (`--owner <user>`); non-root callers can only create mailboxes owned by themselves.
-- **No restart needed. The daemon picks up `create` / `delete` live.** When `aimx serve` is running, `aimx mailboxes create` / `delete` route through the daemon's UDS socket (`/run/aimx/aimx.sock`). The daemon atomically rewrites `config.toml` and hot-swaps its in-memory snapshot, so inbound mail addressed to a freshly-created mailbox is routed correctly on the very next SMTP session. If the daemon is stopped, root falls back to editing `config.toml` directly and prints a hint reminding you to restart `aimx` for the change to take effect (`sudo systemctl restart aimx`, or `sudo rc-service aimx restart` on OpenRC). Non-root callers cannot fall back — `/etc/aimx/config.toml` is `0640 root:root` and the rename would fail with a confusing perm error — so they get a precise error pointing at both remediations: start `aimx serve`, or re-run the command with `sudo`.
-- **Delete is file-safe.** The daemon refuses to delete a mailbox whose `inbox/<name>/` or `sent/<name>/` still contains files. It returns `ERR NONEMPTY` with the file count and asks you to archive or remove the files first. This prevents accidental mail loss from a stray `mailboxes delete`. The directories themselves are left on disk after a successful delete so an operator can `rmdir` them at their leisure.
-- **Wipe-and-delete (CLI only).** `aimx mailboxes delete --force <name>` deletes a non-empty mailbox by recursively wiping `inbox/<name>/` and `sent/<name>/` first. It always prompts (`inbox: N files, sent: M files, continue? [y/N]`) unless `--yes` is passed. Force is **CLI-only**. The MCP `mailbox_delete` tool deliberately does not gain a force variant. Destructive wipes stay where the operator sees prompts. `catchall` cannot be deleted, with or without `--force`.
+- **Mailboxes are directories.** Creating a mailbox creates two folders (one under `inbox/`, one under `sent/`) and registers an address. No passwords, no database.
+- **Per-mailbox owner.** Every mailbox has a single Linux `owner` in `config.toml`. Storage is chowned `<owner>:<owner> 0700` at create and kept consistent through every write. Only the owner and root can read it; the MCP server and UDS both authorize on `SO_PEERCRED` matching the owner uid. See [Security: Per-action authorization](security.md#per-action-authorization).
+- **Catchall.** The `catchall` mailbox catches mail for unrecognized addresses at your domain. It is inbound-only (no `sent/catchall/`), owned by the reserved `aimx-catchall` system user.
+- **No sudo for the mailboxes you own.** `aimx mailboxes create / delete` route through the daemon's UDS, so the daemon synthesizes the owner from `SO_PEERCRED` and atomically rewrites `config.toml`. Root may still pass `--owner <user>` to provision a mailbox for another uid.
+- **Hot-reload.** When `aimx serve` is running, create and delete take effect on the next SMTP session — no restart needed.
+- **Delete is file-safe.** Non-empty mailboxes are refused with `ERR NONEMPTY` and a file count. Archive or remove the files first. The directories are left on disk after delete so an operator can `rmdir` them at leisure.
+- **Force-delete is CLI-only.** `aimx mailboxes delete --force <name>` recursively wipes `inbox/<name>/` and `sent/<name>/` first. It always prompts unless `--yes` is passed. The MCP `mailbox_delete` tool deliberately has no force variant — destructive wipes stay where the operator sees prompts. `catchall` is refused with or without `--force`.
 
 ### On-disk layout
 
@@ -58,29 +56,9 @@ This creates `support@agent.yourdomain.com` and both directories:
 your uid at mode `0700`. Deletion removes both; `catchall` cannot be
 deleted.
 
-**Owner-binding rule.** You can create and delete mailboxes you own. Root
-can create mailboxes owned by anyone. Concretely:
+**Owner-binding rule.** Non-root callers create and delete only mailboxes they own — the daemon synthesizes the owner from `SO_PEERCRED` and ignores any client-supplied owner. Root passes unconditionally and may use `--owner <user>` to provision a mailbox owned by another Linux user. Passing `--owner <other>` from a non-root shell prints a soft warning to stderr and submits the request with the synthesized owner anyway.
 
-- A non-root caller always creates a mailbox owned by their own Linux
-  user — the daemon resolves the owner from `SO_PEERCRED` and ignores any
-  client-supplied owner.
-- A non-root caller can only delete mailboxes whose `owner` matches their
-  uid; deletes targeting another uid's mailbox are rejected with a
-  canonical not-authorized error.
-- Root passes both unconditionally and may use `--owner <user>` on create
-  to provision a mailbox owned by a different Linux user (e.g. a service
-  account).
-
-**`--owner` flag.** The flag is honored only when run as root. Non-root
-callers may pass `--owner <self>` (no-op, matches the synthesized owner)
-or omit it entirely. Passing `--owner <other>` from a non-root shell
-prints a soft warning to stderr — *"--owner ignored for non-root callers;
-mailbox will be owned by `<caller>`"* — and submits the request anyway;
-the daemon synthesizes the correct owner from `SO_PEERCRED` so the
-mailbox lands on disk owned by you, not the user you named.
-
-**Worked example (cross-uid create — root only):** the operator sets up
-a shared `support` mailbox owned by a dedicated service account:
+**Cross-uid create (root only).** Provision a shared mailbox owned by a service account:
 
 ```bash
 # create the Linux user first
@@ -94,42 +72,20 @@ ls -la /var/lib/aimx/inbox/support/    # drwx------  support-agent support-agent
 ls -la /var/lib/aimx/sent/support/     # drwx------  support-agent support-agent
 ```
 
-Any agent running under uid `support-agent` can now read
-`/var/lib/aimx/inbox/support/` and use the MCP tools against the
-`support` mailbox. Other users' uids cannot read it (unless they are
-also root) — isolation is filesystem-enforced.
+Any agent running under uid `support-agent` can now read `/var/lib/aimx/inbox/support/` and use the MCP tools against the `support` mailbox. Other users cannot read it — isolation is filesystem-enforced.
 
-For the day-to-day case where you just want a fresh mailbox for your own
-agent, drop the `--owner` flag and skip `sudo`:
+For the day-to-day case, drop the `--owner` flag and skip `sudo`:
 
 ```bash
 # As yourself, no sudo:
 aimx mailboxes create agent-1
 ```
 
-The daemon writes `owner = "<your-username>"` to the config and chowns
-the storage to your uid:gid at mode `0700`. The daemon must be running
-for non-root mailbox CRUD; if it is stopped, you'll get a precise error
-naming both remediations (start `aimx serve`, or re-run with `sudo` to
-fall back to a direct `config.toml` edit).
+The daemon must be running for non-root mailbox CRUD; if it is stopped, the CLI exits with a precise error naming both remediations. See [Troubleshooting](troubleshooting.md#aimx-mailboxes-create--delete-exits-with-daemon-must-be-running-for-non-root-mailbox-crud).
 
 ### Agents can self-serve via MCP
 
-Agents can call `mailbox_create` and `mailbox_delete` over MCP. These
-tools always operate on the agent process's own uid — there is no
-`owner` parameter on either, by construction. An agent calling
-`mailbox_create("task-42")` provisions a mailbox owned by whatever uid
-the MCP server is running under (typically the operator's own user when
-the agent is launched by `claude` / `codex` / `opencode` / etc.).
-`mailbox_delete` similarly only targets mailboxes owned by the agent's
-uid. See [MCP Server § Mailbox tools](mcp.md#mailbox-tools) for the
-full tool reference.
-
-This flow is the canonical "agent provisions an inbox for a transient
-task" pattern: the agent calls `mailbox_create("task-42")`, sends and
-receives mail on it, and either keeps it long-term or calls
-`mailbox_delete("task-42", force: true)` when the task is done. No
-operator intervention required.
+Agents call [`mailbox_create`](mcp.md#mailbox_create) and [`mailbox_delete`](mcp.md#mailbox_delete) over MCP. Neither accepts an `owner` parameter — the daemon synthesizes the owner from the MCP process's uid via `SO_PEERCRED`. An agent provisions an inbox for a transient task, sends and receives on it, then calls `mailbox_delete("task-42", force: true)` when done. No operator intervention required.
 
 ### List mailboxes
 
@@ -181,8 +137,7 @@ prints a restart-hint banner.
 
 ### Force-delete a non-empty mailbox
 
-> **Destructive.** `--force` permanently removes every email under `inbox/<name>/`
-> and `sent/<name>/` before unregistering the mailbox. There is no undo.
+`--force` permanently removes every email under `inbox/<name>/` and `sent/<name>/` before unregistering the mailbox. There is no undo.
 
 ```bash
 # Interactive: shows file counts and prompts before wiping
@@ -192,12 +147,7 @@ aimx mailboxes delete --force support
 aimx mailboxes delete --force --yes support
 ```
 
-Without `--force`, a non-empty mailbox cannot be deleted. The command
-fails with the daemon's `ERR NONEMPTY` error and reports per-directory
-file counts. Use `--force` only when you are sure you want to lose those
-emails. `catchall` is still refused even with `--force`. Force is CLI-only.
-The MCP `mailbox_delete` tool returns a hint pointing at this command on
-NONEMPTY rather than gaining its own force variant.
+Without `--force`, a non-empty mailbox is refused with `ERR NONEMPTY`. `catchall` is refused even with `--force`. Force is CLI-only — the MCP `mailbox_delete` tool returns a hint pointing here on NONEMPTY rather than gaining its own force variant.
 
 Mailboxes can also be managed via [MCP tools](mcp.md#mailbox-tools) (`mailbox_list`, `mailbox_create`, `mailbox_delete`).
 
@@ -355,11 +305,11 @@ aimx send --from support@agent.yourdomain.com \
 
 Agents send email using the `email_send` and `email_reply` MCP tools. See [MCP Server](mcp.md#email-tools) for details.
 
-### How sending works
+### Send pipeline
 
-1. `aimx send` composes an RFC 5322 compliant message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. The client does not read `config.toml`. It just composes bytes and writes them to the socket.
-2. `aimx serve` parses the `From:` header from the submitted body, verifies the domain matches the configured primary domain and the local part resolves to an explicitly configured non-wildcard mailbox, DKIM-signs the message (RSA-SHA256) with the domain's private key it loaded at startup, and delivers the signed message directly to the recipient's MX server via SMTP. The catchall (`*@domain`) is inbound-routing only and is never accepted as an outbound sender.
-3. `aimx send` exits as soon as the daemon returns a status. Signing, mailbox resolution, and delivery never run inside the client, so it does not need to read `config.toml`, does not need to read the DKIM key, and does not need to run as root.
+1. `aimx send` composes an RFC 5322 message and submits it over `/run/aimx/aimx.sock`. The client does not read `config.toml`.
+2. `aimx serve` parses `From:` from the body, verifies the domain matches `config.domain` and the local part resolves to a configured non-wildcard mailbox, DKIM-signs the message with RSA-SHA256, and delivers it directly to the recipient's MX over SMTP. The catchall (`*@domain`) is never accepted as an outbound sender.
+3. `aimx send` exits as soon as the daemon returns a status. Signing, mailbox resolution, and delivery happen entirely in the daemon — the client does not need root, does not read the DKIM key, and does not read `config.toml`.
 
 ### Reply threading
 
@@ -369,13 +319,4 @@ The `email_reply` MCP tool handles threading automatically by reading the origin
 
 ## Email ID format
 
-Each email's `id` field is the filename stem
-`YYYY-MM-DD-HHMMSS-<slug>` in UTC. The slug is derived from the subject:
-lowercase, non-alphanumeric runs collapsed to `-`, trimmed, capped at 20
-characters, with `no-subject` as a fallback for empty results. Two emails
-with the same subject in the same UTC second have `-2`, `-3`, … appended
-to disambiguate.
-
----
-
-Next: [Hooks & Trust](hooks.md) | [MCP Server](mcp.md) | [Configuration](configuration.md)
+Each email's `id` field is the filename stem `YYYY-MM-DD-HHMMSS-<slug>` in UTC. The slug is derived from the subject: lowercase, non-alphanumeric runs collapsed to `-`, trimmed, capped at 20 characters, falling back to `no-subject` when empty. Two emails with the same subject in the same UTC second get `-2`, `-3`, … appended.

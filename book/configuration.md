@@ -1,10 +1,10 @@
 # Configuration
 
-aimx uses a single TOML configuration file for all settings.
+AIMX reads a single TOML file at `/etc/aimx/config.toml`.
 
-## Config file location
+## Config file
 
-The default config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`). It is created automatically by `aimx setup`. Config and DKIM secrets live under `/etc/aimx/` (root-owned, unreadable by non-root processes), separate from mailbox data under `/var/lib/aimx/`.
+The config file is at `/etc/aimx/config.toml` (mode `0640`, owner `root:root`), created automatically by `aimx setup`. Config and DKIM secrets live under `/etc/aimx/`; mailbox storage lives under `/var/lib/aimx/`. The two trees are separate by design — see [Security: File and socket layout](security.md#file-and-socket-layout).
 
 ### Data directory override
 
@@ -82,29 +82,29 @@ See [Mailboxes](mailboxes.md) for mailbox management and [Hooks & Trust](hooks.m
 
 ### Inbound email verification
 
-aimx verifies three authentication mechanisms on every inbound email and records the results in the email's TOML frontmatter:
+AIMX records three authentication results on every inbound email:
 
 | Field | Values | Description |
 |-------|--------|-------------|
-| `dkim` | `pass`, `fail`, `none` | DKIM signature verification result. `none` when no DKIM signature is present. |
-| `spf` | `pass`, `fail`, `none` | SPF record check against the sending server's IP. `none` when no SPF record exists or no IP could be extracted. |
-| `dmarc` | `pass`, `fail`, `none` | DMARC alignment check combining DKIM and SPF results against the sender's published DMARC policy. `none` when no DMARC record is published or the check could not be performed. |
+| `dkim` | `pass`, `fail`, `none` | DKIM signature result. `none` when no signature is present. |
+| `spf` | `pass`, `fail`, `none` | SPF check against the sending server's IP. `none` when no SPF record or no extractable IP. |
+| `dmarc` | `pass`, `fail`, `none` | DMARC alignment of DKIM + SPF against the sender's policy. `none` when no DMARC record. |
 
-All three fields are always written (never omitted), so agents can reliably check authentication status without guessing whether a missing field means "not checked" or "failed."
+All three are always written, so agents can reliably check authentication status without guessing whether a missing field means "not checked" or "failed."
 
-The `trusted` frontmatter field summarizes the effective trust evaluation for the email's mailbox (its own `trust` / `trusted_senders` if set, otherwise the top-level defaults):
+The `trusted` frontmatter field summarizes the effective trust evaluation for the mailbox:
 
 | Value | Meaning |
 |-------|---------|
-| `"none"` | Effective `trust` is `none` (default). No trust evaluation performed. |
-| `"true"` | Effective `trust` is `verified`, sender matches the effective `trusted_senders`, AND DKIM passed. |
-| `"false"` | Effective `trust` is `verified`, any other outcome. |
+| `"none"` | Effective `trust` is `none` (default). No evaluation performed. |
+| `"true"` | Effective `trust` is `verified`, sender matches `trusted_senders`, and DKIM passed. |
+| `"false"` | Effective `trust` is `verified` but the conditions above did not hold. |
 
-Trust only gates hook execution (`on_receive`). All email is stored regardless of the `trusted` result.
+Trust gates hook execution only — every email is stored regardless. See [Hooks: Trust gate](hooks.md#trust-gate-on_receive-only) for the model.
 
 ### Hook settings
 
-Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array exec'd directly as the mailbox's `owner` — the daemon `setuid`s to `mailbox.owner_uid()` before `exec`. The first element must be an absolute path; there is no shell wrapping. If you need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly.
+Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array exec'd directly as the mailbox's owner — `cmd[0]` must be an absolute path. There is no shell wrapping; spell out `["/bin/sh", "-c", "..."]` when you need shell expansion. See [Hooks & Trust](hooks.md) for the full model.
 
 | Setting | Type | Description |
 |---------|------|-------------|
@@ -115,9 +115,9 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array
 | `timeout_secs` | int | Hard subprocess timeout in seconds. Default `60`, range `[1, 600]`. SIGTERM at the limit, SIGKILL 5s later. |
 | `fire_on_untrusted` | bool | `on_receive` only: fire even when `trusted != "true"`. Rejected on `after_send` hooks at config load with `ERR fire_on_untrusted is on_receive only`. |
 
-The raw `.md` (frontmatter + body) is always piped to the hook's stdin and the same path is also exposed as `$AIMX_FILEPATH`. If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
+The raw `.md` (frontmatter + body) is always piped to the hook's stdin and the same path is exposed as `$AIMX_FILEPATH`. Hooks that only need the subject or sender can read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin.
 
-Unknown fields on a hook table are rejected at config load. The legacy fields `stdin`, `template`, `params`, `run_as`, `origin`, and `dangerously_support_untrusted` are also rejected with a pointer to `book/hooks.md` — the template-hook surface, `aimx-hook` shared-uid sandbox, and the per-hook stdin opt-out have been retired in favor of the per-mailbox owner model with an unconditional pipe. See [Hooks & Trust](hooks.md) for full details on events and trust policies.
+Unknown fields are rejected at config load. The legacy fields `stdin`, `template`, `params`, `run_as`, `origin`, and `dangerously_support_untrusted` are rejected with a pointer to [Hooks & Trust](hooks.md).
 
 ## Storage layout
 
@@ -183,12 +183,7 @@ If your server has a global IPv6 address and you want outbound mail to use it:
 
 See the full DNS records table in [Setup](setup.md#dns-configuration) for formats. Without these DNS updates, messages delivered over IPv6 will fail SPF and may be rejected under your DMARC policy.
 
-**When `enable_ipv6` is unset or `false`:** `aimx setup` ignores IPv6 entirely. No AAAA is advertised, no `ip6:` SPF is generated, and existing AAAA records in DNS are not validated (their presence is harmless). `aimx portcheck` only probes port 25 connectivity and is unaffected by this flag.
-
-Leave `enable_ipv6` unset (or `false`) if any of these apply:
-- Your server does not have a global IPv6 address
-- You do not control the AAAA / SPF DNS records
-- You just want outbound mail to work reliably with the default SPF record
+When `enable_ipv6` is unset or `false`, `aimx setup` ignores IPv6 entirely: no AAAA advertised, no `ip6:` SPF generated, and any existing AAAA in DNS is left untouched. `aimx portcheck` is unaffected by the flag. Leave it off unless you have a global IPv6 address, control the AAAA / SPF records, and need outbound IPv6 delivery.
 
 ## Full config example
 
@@ -256,7 +251,3 @@ cmd = ["/usr/local/bin/claude", "-p", "Read the piped email and act on it via th
 address = "notifications@agent.yourdomain.com"
 owner = "ubuntu"
 ```
-
----
-
-Next: [Mailboxes & Email](mailboxes.md) | [Hooks & Trust](hooks.md)

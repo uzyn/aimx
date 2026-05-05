@@ -61,7 +61,7 @@ A handful of operations remain root-gated because they cross a genuine privilege
 
 ### Upgrade compatibility
 
-No config-file migration. No daemon restart required by the change itself (though you do need a daemon binary that includes Sprint 1 + Sprint 2 of the user-mailbox track). Sudo-based scripts that already say `sudo aimx mailboxes create / delete` continue to work — the root path is unchanged. Operators can leave their automation alone and simply drop the `sudo` from new mailbox-create commands when they're ready.
+No config-file migration. No daemon restart required by the change itself (though you do need a daemon binary that includes the full owner-gated mailbox CRUD path). Sudo-based scripts that already say `sudo aimx mailboxes create / delete` continue to work — the root path is unchanged. Operators can leave their automation alone and simply drop the `sudo` from new mailbox-create commands when they're ready.
 
 If you previously read [Troubleshooting](troubleshooting.md): the old `MAILBOX-CREATE / MAILBOX-DELETE rejected for non-root` entry has been replaced. The new failure mode for a non-root caller is *"daemon must be running for non-root mailbox CRUD; start `aimx serve` or run with sudo to fall back to direct config edit"* — fix it by starting the daemon, or by running the command under `sudo` to keep the existing direct-write fallback path.
 

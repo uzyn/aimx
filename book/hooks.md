@@ -1,25 +1,23 @@
 # Hooks & Trust
 
-Hooks trigger commands on specific email events. Two events are supported:
+Hooks trigger commands on email events. Two events:
 
-- **`on_receive`** fires during inbound ingest, after the email is stored.
-- **`after_send`** fires during outbound delivery, after the MX attempt resolves (success, failure, or deferred).
+- `on_receive` — fires during inbound ingest, after the email is stored.
+- `after_send` — fires during outbound delivery, after the MX attempt resolves (delivered, failed, or deferred).
 
-Combined with the mailbox-level `trust` policy, hooks gate shell-side automation on DKIM-verified inbound mail and on outbound delivery outcomes.
-
-> For copy-paste agent-specific invocations (Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, webhook), see [Hook Recipes](hook-recipes.md).
+Combined with the per-mailbox `trust` policy, hooks gate shell-side automation on DKIM-verified inbound mail and on outbound delivery outcomes. For copy-paste agent invocations, see [Hook Recipes](hook-recipes.md).
 
 ## Mailbox ownership = hook authorization
 
-Every mailbox declares a single `owner` (a Linux user on the host). Ownership is the authorization predicate for everything that touches the mailbox:
+Every mailbox declares one Linux `owner`. Ownership is the authorization predicate for everything that touches the mailbox:
 
-- Mailbox storage (`/var/lib/aimx/inbox/<name>/` and `/var/lib/aimx/sent/<name>/`) is `<owner>:<owner>` mode `0700`. Only the owner — and root — can read or list its contents.
-- Hooks on that mailbox can be created, listed, and deleted only by root or by the owner (via CLI as the owner's uid, or via the MCP `hook_create` / `hook_delete` tools running under the owner's uid).
-- Hooks always execute as the mailbox's owner uid. The daemon spawns the subprocess and `setuid`s to `mailbox.owner_uid()` before `exec`. There is no per-hook `run_as` override.
+- Storage (`/var/lib/aimx/inbox/<name>/` and `/var/lib/aimx/sent/<name>/`) is `<owner>:<owner> 0700`. Only the owner and root can read or list it.
+- Hook CRUD is gated to the owner or root (CLI checks euid; UDS checks `SO_PEERCRED`).
+- Hooks always exec as the owner uid — the daemon `setuid`s to `mailbox.owner_uid()` before `exec`. There is no per-hook `run_as` override.
 
-What this buys you: a hook on `alice`'s mailbox can do anything `alice` could already do (cron, `~/.bashrc`, systemd `--user`, etc.). It cannot escalate privilege, and it cannot read `bob`'s mail — `/var/lib/aimx/inbox/bob/` is `bob:bob 0700`, which `alice` cannot even traverse.
+A hook on `alice`'s mailbox can do anything `alice` could already do (cron, `~/.bashrc`, systemd `--user`). It cannot escalate privilege, and it cannot read `bob`'s mail.
 
-To run a hook as root, set `mailbox.owner = "root"` in `/etc/aimx/config.toml`. That requires editing the root-owned file directly. Catchall mailboxes are owned by the reserved `aimx-catchall` system user (created on demand by `aimx setup`); **hooks on the catchall mailbox are forbidden** at config-load time because the catchall user has no shell and no resolvable login uid that `setuid` can drop into.
+To run a hook as root, set `mailbox.owner = "root"` in `/etc/aimx/config.toml` — which already requires root. Hooks on the catchall mailbox are forbidden at config load: `aimx-catchall` has no shell and no resolvable login uid for `setuid` to drop into.
 
 ## Hook schema
 
@@ -88,17 +86,15 @@ See [MCP Server: hook_create](mcp.md#hook_create) for the full tool reference. E
 
 ## How hooks fire
 
-When an email is ingested or sent:
+1. The email is parsed and saved (ingest), or the MX result is known (send).
+2. The daemon walks the mailbox's `hooks` array and picks entries matching the event.
+3. For `on_receive`, the trust gate applies: the hook fires iff `trusted == "true"` OR `fire_on_untrusted = true`.
+4. The argv `cmd` is `execvp`'d directly. The daemon `setuid`s to `mailbox.owner_uid()` first.
+5. On systemd, the subprocess runs under `systemd-run` with `--uid=<owner>`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, `RuntimeMaxSec=<timeout_secs>`. On OpenRC, the daemon `fork+exec`s with `setresgid/setresuid` plus a manual timeout.
+6. stdout and stderr are captured and truncated at 64 KiB each.
+7. Failures (non-zero exit, timeout) are logged at `warn` but never block delivery.
 
-1. The email is parsed/saved as a `.md` file (ingest) or the outbound MX result is known (send).
-2. aimx walks the mailbox's `hooks` array, picking entries whose `event` matches.
-3. For `on_receive`, the trust gate is applied: the hook fires iff `trusted == "true"` on the email, OR the hook sets `fire_on_untrusted = true`.
-4. The argv `cmd` is exec'd directly via `spawn_sandboxed`. The daemon `setuid`s to `mailbox.owner_uid()` before `exec`. `cmd` is not interpreted by a shell — wrap in `["/bin/sh", "-c", "..."]` explicitly when shell expansion is required.
-5. On systemd the subprocess runs under `systemd-run` with `--uid=<owner>`, `ProtectSystem=strict`, `PrivateDevices=yes`, `NoNewPrivileges=yes`, `MemoryMax=256M`, and `RuntimeMaxSec=<timeout_secs>`. On OpenRC the daemon `fork+exec`s with `setresgid/setresuid` to `<owner>` plus a manual timeout.
-6. stdout and stderr are captured and truncated at 64 KiB each; the daemon awaits the subprocess for predictable timing.
-7. Hook failures (non-zero exit, timeout) are logged at `warn` but **never block delivery**.
-
-Email is always stored (inbound) or attempted (outbound) regardless of whether hooks succeed or fire.
+Email is always stored (inbound) or attempted (outbound) regardless of hook outcome.
 
 ## Hook context: env vars and stdin
 
@@ -144,9 +140,9 @@ Rejected requests return an `AIMX/1 ERR` response with `code = "EACCES"` and the
 
 ## Trust gate (`on_receive` only)
 
-> An `on_receive` hook fires iff `email.trusted == "true"` OR the hook sets `fire_on_untrusted = true`.
+An `on_receive` hook fires iff `email.trusted == "true"` OR the hook sets `fire_on_untrusted = true`.
 
-`fire_on_untrusted` is the per-hook escape hatch. Setting it via MCP is the owner's choice — mailbox isolation (uid-scoped storage + uid-scoped exec) is the relevant defense, so an agent opting into untrusted mail on its own mailbox cannot escalate beyond what the owner already has. The flag is illegal on `after_send` hooks; `Config::load` rejects it with `ERR fire_on_untrusted is on_receive only`.
+`fire_on_untrusted` is the per-hook escape hatch. Mailbox isolation (uid-scoped storage and exec) is the relevant defense — an agent opting into untrusted mail on its own mailbox cannot escalate beyond what the owner already has. The flag is illegal on `after_send` hooks; `Config::load` rejects it with `ERR fire_on_untrusted is on_receive only`.
 
 `email.trusted` is computed from the mailbox's `trust` + `trusted_senders` policy and written to frontmatter at ingest:
 
@@ -184,32 +180,11 @@ Per-mailbox `trusted_senders` fully **replaces** the global list (no merging).
 
 ### DKIM/SPF verification
 
-During email ingest, aimx verifies DKIM, SPF, and DMARC. Results are stored in the email frontmatter (`dkim`, `spf`, `dmarc` as `"pass" | "fail" | "none"`, with SPF additionally allowing `"softfail"` / `"neutral"`). The `verified` trust mode requires a DKIM pass specifically, combined with an allowlist match on `trusted_senders`.
+During email ingest, AIMX verifies DKIM, SPF, and DMARC. Results are stored in the email frontmatter (`dkim`, `spf`, `dmarc` as `"pass" | "fail" | "none"`, with SPF additionally allowing `"softfail"` / `"neutral"`). The `verified` trust mode requires a DKIM pass specifically, combined with an allowlist match on `trusted_senders`.
 
 ## Managing hooks via CLI
 
-All three `aimx hooks` subcommands (list/create/delete) route through the daemon's UDS socket so newly-created hooks take effect on the very next event. **No restart required** while `aimx serve` is running. If the daemon is stopped, root falls back to editing `config.toml` directly and prints a restart hint; non-root callers error out (they cannot edit the root-owned config).
-
-### List hooks
-
-```bash
-aimx hooks list                  # mailboxes you own
-aimx hooks list --mailbox support # single mailbox you own
-sudo aimx hooks list --all       # every mailbox, root only
-```
-
-For non-root callers, output is filtered to mailboxes whose owner matches your euid. `--all` is rejected for non-root with `--all requires root`.
-
-Prints a table (`NAME`, `MAILBOX`, `EVENT`, `CMD`). The `CMD` column is truncated to 60 chars with a `…` suffix when longer.
-
-### Delete a hook
-
-```bash
-aimx hooks delete support_notify         # interactive prompt
-aimx hooks delete support_notify --yes   # scripted
-```
-
-`delete` accepts either an explicit name or a derived one. Authorization is the same as `create`: caller must own the target mailbox, or be root.
+`aimx hooks list / create / delete` route through the daemon's UDS so changes hot-swap into the live config — no restart while `aimx serve` is running. See [CLI Reference: Hook management](cli.md#hook-management) for every flag.
 
 ## Structured hook-fire logs
 
@@ -280,7 +255,3 @@ cmd = ["/usr/bin/curl", "-sS", "-X", "POST", "-H", "Content-Type: application/js
 ```
 
 `--data-binary @-` posts whatever lands on curl's stdin verbatim, which is the raw `.md` (frontmatter + body) — the daemon always pipes the email to a hook's stdin.
-
----
-
-Next: [Hook Recipes](hook-recipes.md) | [MCP Server](mcp.md) | [Configuration](configuration.md) | [Troubleshooting](troubleshooting.md)
