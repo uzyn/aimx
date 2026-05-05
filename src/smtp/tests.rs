@@ -87,6 +87,7 @@ fn test_config(data_dir: &std::path::Path) -> Config {
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
+        signature: None,
         upgrade: None,
     }
 }
@@ -848,6 +849,7 @@ async fn test_ingest_failure_returns_451() {
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
+        signature: None,
         upgrade: None,
     };
     let (port, _shutdown) = start_server(config).await;
@@ -1310,6 +1312,7 @@ fn test_config_no_catchall(data_dir: &std::path::Path) -> Config {
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
+        signature: None,
         upgrade: None,
     }
 }
@@ -1400,6 +1403,7 @@ fn test_config_two_mailboxes(data_dir: &std::path::Path) -> Config {
         mailboxes,
         verify_host: None,
         enable_ipv6: false,
+        signature: None,
         upgrade: None,
     }
 }

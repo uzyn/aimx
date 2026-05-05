@@ -3,15 +3,39 @@ use clap::{Parser, Subcommand};
 #[allow(unused_imports)]
 pub use crate::version::{build_date, git_hash, release_tag, target_triple, version_string};
 
+/// Hand-rolled subcommand listing, grouped by audience (per-user vs
+/// server-wide). Clap 4 does not support `help_heading` on subcommand
+/// variants, so the parent's `help_template` omits `{subcommands}` and
+/// injects this string via `{after-help}` instead. Keep the entries in
+/// sync with the `Command` enum below.
+const SUBCOMMAND_HELP: &str = "Operations (as current user):
+  send         Send an email
+  mailboxes    Manage mailboxes
+  hooks        Manage hooks
+  agents       Manage AI agent MCP wiring
+  mcp          Start the stdio MCP server (for AI agents)
+
+Server administration:
+  setup        Run the interactive setup wizard
+  serve        Start the SMTP daemon
+  doctor       Show server health, DNS, and recent logs
+  logs         Tail the aimx service log
+  dkim-keygen  Generate a DKIM keypair
+  portcheck    Check port 25 connectivity (inbound, outbound)
+  uninstall    Uninstall the aimx service (config and data retained)
+  upgrade      Fetch the latest release and swap the installed binary
+
+  help         Print help for a subcommand";
+
 #[derive(Parser)]
 #[command(
     name = "aimx",
-    about = "Self-hosted SMTP and MCP server for AI agents.",
-    long_about = "AIMX (AI Mail Exchange). The internet's oldest protocol, rebuilt for AI agents.\n\n\
-                One command gives your agents their own email addresses.\n\
-                Inbound mail is parsed to Markdown. Outbound mail is DKIM-signed.\n\
-                MCP is built in. Hooks trigger agent actions on inbound mail.\n\
-                Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and other agent harnesses.",
+    about = "The internet's oldest protocol, rebuilt for AI agents.",
+    after_help = SUBCOMMAND_HELP,
+    help_template = "{about}\n\n\
+                     {usage-heading} {usage}\
+                     {after-help}\n\n\
+                     Options:\n{options}\n",
     // We render `--version` ourselves so the output is exactly the
     // banner produced by `version_string()`. Clap's built-in version flag
     // would prepend the binary name, yielding `aimx aimx <tag> ...`.
@@ -21,6 +45,16 @@ pub struct Cli {
     /// Data directory override (default: /var/lib/aimx)
     #[arg(long, env = "AIMX_DATA_DIR", global = true)]
     pub data_dir: Option<std::path::PathBuf>,
+
+    // Declared so `--help` renders `-V, --version` alongside the other
+    // options. The flag is intercepted by `handle_version_flag` in
+    // `main.rs` before `Cli::parse()` runs, so this field is never read at
+    // runtime; clap's auto-version is disabled (see `disable_version_flag`
+    // above) so this hand-rolled flag is the only one in the parser.
+    /// Print version
+    #[arg(short = 'V', long = "version", action = clap::ArgAction::SetTrue)]
+    #[allow(dead_code)]
+    pub version: bool,
 
     #[command(subcommand)]
     pub command: Command,
@@ -85,12 +119,13 @@ mod tests {
 #[derive(Subcommand)]
 pub enum Command {
     /// Ingest an email from stdin (called by aimx serve or via stdin)
+    #[command(hide = true)]
     Ingest {
         /// Recipient address (e.g. user@domain.com)
         rcpt: String,
     },
 
-    /// Compose and send an email
+    /// Send an email
     Send(SendArgs),
 
     /// Manage mailboxes
@@ -101,10 +136,10 @@ pub enum Command {
     #[command(subcommand, alias = "hook")]
     Hooks(HookCommand),
 
-    /// Start MCP server in stdio mode
+    /// Start the stdio MCP server (for AI agents)
     Mcp,
 
-    /// Run interactive setup wizard
+    /// Run the interactive setup wizard
     Setup {
         /// Domain to configure (e.g. agent.example.com). Hidden from
         /// --help: the wizard prompts for the domain interactively, but
@@ -118,17 +153,17 @@ pub enum Command {
         verify_host: Option<String>,
     },
 
-    /// Uninstall the aimx daemon service (config and data are retained)
+    /// Uninstall the aimx service (config and data retained)
     Uninstall {
         /// Skip the confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
     },
 
-    /// Show server health, mailbox counts, configuration, DNS verification, and recent logs
+    /// Show server health, DNS, and recent logs
     Doctor,
 
-    /// Tail or follow the aimx service log
+    /// Tail the aimx service log
     Logs {
         /// Number of lines to show (default: 50)
         #[arg(long)]
@@ -139,7 +174,7 @@ pub enum Command {
         follow: bool,
     },
 
-    /// Start the embedded SMTP listener daemon
+    /// Start the SMTP daemon
     Serve {
         /// Bind address (default: 0.0.0.0:25)
         #[arg(long, default_value = "0.0.0.0:25")]
@@ -154,18 +189,18 @@ pub enum Command {
         tls_key: Option<String>,
     },
 
-    /// Check port 25 connectivity (outbound, inbound)
+    /// Check port 25 connectivity (inbound, outbound)
     Portcheck {
         /// Override the verify service host (e.g. https://verify.example.com)
         #[arg(long)]
         verify_host: Option<String>,
     },
 
-    /// Manage AI agent MCP wiring (setup / remove / list)
+    /// Manage AI agent MCP wiring
     #[command(subcommand)]
     Agents(AgentsCommand),
 
-    /// Generate DKIM keypair for email signing
+    /// Generate a DKIM keypair
     DkimKeygen {
         /// DKIM selector name
         #[arg(long, default_value = "aimx")]

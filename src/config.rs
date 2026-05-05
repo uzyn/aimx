@@ -39,6 +39,12 @@ const DEFAULT_DATA_DIR: &str = "/var/lib/aimx";
 const DEFAULT_CONFIG_DIR: &str = "/etc/aimx";
 const CONFIG_DIR_ENV: &str = "AIMX_CONFIG_DIR";
 
+/// Default outbound signature appended to every email when
+/// [`Config::signature`] is `None`. Operators override by setting
+/// `signature = "..."` in `config.toml`; an empty string disables the
+/// signature entirely.
+pub const DEFAULT_SIGNATURE: &str = "Sent from AIMX.\nhttps://aimx.email";
+
 /// Resolve the configuration directory.
 ///
 /// Precedence:
@@ -145,11 +151,28 @@ pub struct Config {
     #[serde(default)]
     pub enable_ipv6: bool,
 
+    /// Outbound signature appended to the body of every email sent
+    /// through this daemon. `None` (field omitted) uses
+    /// [`DEFAULT_SIGNATURE`]. `Some("")` disables the signature
+    /// entirely. `Some(s)` replaces the default with `s`. Resolved
+    /// via [`Config::effective_signature`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+
     /// Optional `[upgrade]` section. Overrides the release-manifest URL used
     /// by `aimx upgrade`. The `AIMX_RELEASE_MANIFEST_URL` env
     /// var takes precedence over this value when both are set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upgrade: Option<UpgradeConfig>,
+}
+
+impl Config {
+    /// Resolve the effective outbound signature. `None` falls back to
+    /// [`DEFAULT_SIGNATURE`]; `Some(s)` is returned as-is (an empty
+    /// string disables the signature).
+    pub fn effective_signature(&self) -> &str {
+        self.signature.as_deref().unwrap_or(DEFAULT_SIGNATURE)
+    }
 }
 
 /// Operator-overridable knobs for `aimx upgrade`. Today only the manifest URL
