@@ -699,7 +699,7 @@ _out="$(
     sh "${INSTALL_SH}" --port-check-only --help 2>&1
 )" || _rc=$?
 assert_zero "--port-check-only --help exits 0" "${_rc}"
-assert_contains "--port-check-only --help prints help" "${_out}" "aimx install script"
+assert_contains "--port-check-only --help prints help" "${_out}" "AIMX install script"
 
 # `install.sh --help` mentions port-check-only.
 _rc=0
@@ -730,7 +730,7 @@ _out="$(
         print_port_check_banner
     ' 2>&1
 )"
-assert_contains "port-check banner shows connectivity title" "${_out}" "aimx port 25 connectivity check"
+assert_contains "port-check banner shows connectivity title" "${_out}" "AIMX port 25 connectivity check"
 assert_contains "port-check banner notes no install" "${_out}" "no install will be performed"
 
 # ---------------------------------------------------------------------------
@@ -1180,8 +1180,91 @@ assert_not_contains "shell does not print checklist" "${_out}" "Preflight checks
 assert_not_contains "shell does not print step 6 title" "${_out}" "Set up MCP for agent"
 
 # Dry-run must NOT run a port check (no port-check banner emitted).
-assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "aimx port 25 connectivity check"
+assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "AIMX port 25 connectivity check"
 assert_not_contains "dry-run does not show outbound check line" "${_out}" "Outbound port 25"
+
+# ---------------------------------------------------------------------------
+# 9. prompt_reinstall — equal-version re-run flow
+# ---------------------------------------------------------------------------
+#
+# When `install.sh` finds the binary already at the target tag and --force
+# was not passed, it asks the operator whether to re-run `aimx setup`.
+# The helper is structured around an overridable `_prompt_read` so tests
+# can stub the answer without faking /dev/tty.
+
+echo "# prompt_reinstall"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans="y"; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall returns 0 on y" "${_out}" "YES"
+assert_contains "prompt_reinstall prints the prompt to stderr" "${_out}" "AIMX is already installed"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans="Yes"; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall accepts Yes" "${_out}" "YES"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans="n"; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall returns 1 on n" "${_out}" "NO"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans=""; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall defaults to no on empty input" "${_out}" "NO"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { return 1; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall returns 1 when no TTY" "${_out}" "NO"
+
+# ---------------------------------------------------------------------------
+# 10. AIMX branding sweep — no lowercase brand-as-noun in install.sh prose
+# ---------------------------------------------------------------------------
+#
+# Lowercase `aimx` is fine for command literals (`aimx setup`), service
+# unit names (`aimx.service`), paths (`/etc/aimx/...`), and the GitHub
+# repo identifier (`uzyn/aimx`). It is NOT fine when the brand is the
+# subject/object of an English sentence in operator-facing strings.
+# Catch the canonical regressions: "installing aimx", "aimx is", and
+# "aimx <ver> installed/upgraded".
+
+echo "# branding"
+
+_brand_hits="$(grep -nE '(installing|installed|upgraded) aimx\b' "${INSTALL_SH}" || true)"
+assert_eq "no 'installing/installed/upgraded aimx' in install.sh" "" "${_brand_hits}"
+
+_brand_hits="$(grep -nE '\baimx is\b' "${INSTALL_SH}" || true)"
+assert_eq "no 'aimx is' prose in install.sh" "" "${_brand_hits}"
+
+# `aimx <SEMVER>` prose ("aimx 0.0.7 is already installed"). Allow path
+# fragments like `aimx-0.0.7-...` (the hyphen separates them) and shell
+# redirects like `aimx 2>/dev/null` (the `>` does). The regex requires
+# the digit-dot-digit shape that real version tokens always have.
+_brand_hits="$(grep -nE 'aimx [0-9]+\.[0-9]' "${INSTALL_SH}" || true)"
+assert_eq "no 'aimx <semver>' prose in install.sh" "" "${_brand_hits}"
 
 # ---------------------------------------------------------------------------
 # Report
