@@ -1,16 +1,18 @@
-// aimx theme toggle — three states: auto (system), light, dark.
+// aimx theme toggle — two states: dark (default) and light.
+// Dark is the brand default for this dev-first tool; light is opt-in.
 // Persisted under localStorage["aimx-theme"], distinct from mdBook's key.
 (function () {
   var KEY = 'aimx-theme';
 
   function setMode(mode) {
-    if (mode === 'auto' || !mode) {
+    if (mode === 'light') {
+      document.documentElement.setAttribute('data-theme', 'light');
+      try { localStorage.setItem(KEY, 'light'); } catch (e) {}
+      mode = 'light';
+    } else {
       document.documentElement.removeAttribute('data-theme');
       try { localStorage.removeItem(KEY); } catch (e) {}
-      mode = 'auto';
-    } else {
-      document.documentElement.setAttribute('data-theme', mode);
-      try { localStorage.setItem(KEY, mode); } catch (e) {}
+      mode = 'dark';
     }
     var btns = document.querySelectorAll('.theme-toggle button');
     for (var i = 0; i < btns.length; i++) {
@@ -21,7 +23,7 @@
   function init() {
     var stored = null;
     try { stored = localStorage.getItem(KEY); } catch (e) {}
-    setMode(stored || 'auto');
+    setMode(stored === 'light' ? 'light' : 'dark');
     var btns = document.querySelectorAll('.theme-toggle button');
     for (var i = 0; i < btns.length; i++) {
       (function (btn) {

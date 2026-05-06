@@ -23,8 +23,7 @@
 <link rel="canonical" href="https://aimx.email/">
 <link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">
 
-<meta name="theme-color" content="#F4EEE3" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#1A1612" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#0D1117">
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
@@ -93,7 +92,24 @@
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
 
 <style>
-:root {
+/* Slate dark by default — aimx is a dev-first tool. Cool blue-gray
+   cohesive with terminal mockup. Light is opt-in via the toggle. */
+:root,
+:root[data-theme="dark"] {
+  --paper: #0D1117;
+  --paper-2: #161B22;
+  --ink: #E6EDF3;
+  --ink-soft: #C9D1D9;
+  --ink-faded: #8B949E;
+  --accent: #58A6FF;
+  --accent-dark: #79C0FF;
+  --rule: #21262D;
+  --grain-blend: screen;
+  --grain-opacity: 0.12;
+  --icon-card-bg: rgba(201, 209, 217, 0.06);
+}
+
+:root[data-theme="light"] {
   --paper: #F4EEE3;
   --paper-2: #EBE3D4;
   --ink: #151310;
@@ -104,34 +120,7 @@
   --rule: #D8CFBE;
   --grain-blend: multiply;
   --grain-opacity: 0.35;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --paper: #1A1612;
-    --paper-2: #231D17;
-    --ink: #EDE4D3;
-    --ink-soft: #D6CBB5;
-    --ink-faded: #8C8270;
-    --accent: #D06B2E;
-    --accent-dark: #E6873F;
-    --rule: #2F2821;
-    --grain-blend: screen;
-    --grain-opacity: 0.18;
-  }
-}
-
-:root[data-theme="dark"] {
-  --paper: #1A1612;
-  --paper-2: #231D17;
-  --ink: #EDE4D3;
-  --ink-soft: #D6CBB5;
-  --ink-faded: #8C8270;
-  --accent: #D06B2E;
-  --accent-dark: #E6873F;
-  --rule: #2F2821;
-  --grain-blend: screen;
-  --grain-opacity: 0.18;
+  --icon-card-bg: rgba(21, 19, 16, 0.04);
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -308,7 +297,7 @@ h1 em {
   font-size: 0.4em;
   line-height: 1.8;
   color: var(--ink-soft);
-  max-width: 56ch;
+  max-width: 60ch;
   margin: 0 auto;
   text-align: center;
 }
@@ -327,21 +316,22 @@ h1 em {
 }
 
 .block {
-  margin-top: 56px;
+  margin: 56px auto 0;
   padding-top: 28px;
   border-top: 1px solid var(--rule);
+  max-width: 720px;
 }
 
 .section-label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.29em;
-  line-height: 1.2;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
-  margin: 0 auto 20px;
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 60;
+  font-size: 0.72em;
+  line-height: 1.15;
+  letter-spacing: -0.012em;
+  text-transform: none;
+  color: var(--ink);
+  margin: 0 0 28px;
   font-weight: 500;
-  max-width: 60ch;
 }
 
 .prose {
@@ -349,8 +339,6 @@ h1 em {
   line-height: 1.75;
   color: var(--ink-soft);
   max-width: 60ch;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 .prose + .prose { margin-top: 0.85em; }
@@ -374,8 +362,6 @@ h1 em {
   overflow-x: auto;
   white-space: pre;
   max-width: 60ch;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 .features {
@@ -384,8 +370,6 @@ h1 em {
   color: var(--ink-soft);
   list-style: none;
   max-width: 60ch;
-  margin-left: auto;
-  margin-right: auto;
 }
 
 .features li {
@@ -415,6 +399,7 @@ h1 em {
   letter-spacing: 0.01em;
   padding: 0.7em 1.3em;
   border: 1px solid var(--rule);
+  border-radius: 8px;
   color: var(--ink);
   background: var(--paper);
   text-decoration: none;
@@ -451,6 +436,16 @@ h1 em {
 
 .btn.primary:hover::after { color: var(--paper); }
 
+.demo-video {
+  display: block;
+  width: 100%;
+  margin: 18px 0 0;
+  border: 1px solid var(--rule);
+  background: var(--paper-2);
+  aspect-ratio: 31 / 18;
+  border-radius: 12px;
+}
+
 /* Terminal mockup — used for the hero "demo" and Quick start. Dark slate
    on cream paper produces a deliberate moment of contrast that reads
    instantly as "this is a terminal". The traffic-light dots and label
@@ -463,8 +458,14 @@ h1 em {
   margin: 0 auto;
   overflow: hidden;
   box-shadow:
-    0 1px 2px rgba(21, 19, 16, 0.08),
-    0 14px 36px rgba(21, 19, 16, 0.07);
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 14px 36px rgba(0, 0, 0, 0.22);
+}
+
+.block .terminal {
+  max-width: none;
+  margin-left: 0;
+  margin-right: 0;
 }
 
 .terminal + .terminal {
@@ -531,34 +532,38 @@ h1 em {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
   grid-auto-rows: 1fr;       /* every row matches the tallest row's height */
-  gap: 10px;
-  margin: 8px auto 0;
-  max-width: 880px;
+  gap: 16px;
+  margin: 12px 0 0;
 }
-@media (min-width: 600px) {
-  .harness-grid { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 480px) {
+  .harness-grid { grid-template-columns: 1fr; }
 }
 .harness-tile {
   border: 1px solid var(--rule);
-  padding: 14px 14px 12px;
+  border-radius: 14px;
+  padding: 22px 20px 20px;
   text-decoration: none;
   display: flex;
-  flex-direction: column;    /* icon on top, text below — text gets full tile width */
-  gap: 10px;
+  flex-direction: column;
+  gap: 14px;
   color: var(--ink);
-  transition: border-color 0.15s, color 0.15s;
+  background: var(--paper-2);
+  transition: border-color 0.15s, color 0.15s, transform 0.15s, background-color 0.15s;
 }
 .harness-tile:hover {
   border-color: var(--accent);
   color: var(--accent);
+  transform: translateY(-2px);
 }
 .harness-tile-icon {
-  width: 28px;
-  height: 28px;
+  width: 56px;
+  height: 56px;
+  padding: 8px;
+  background: var(--icon-card-bg);
+  border-radius: 10px;
   flex-shrink: 0;
   display: block;
-  object-fit: contain;        /* keep aspect for the non-square Hermes PNG */
-  /* no hover recolor — preserves each brand's identity */
+  object-fit: contain;
 }
 .harness-tile-text {
   width: 100%;
@@ -583,9 +588,8 @@ h1 em {
 .harness-tile:hover .harness-tile-cmd { color: var(--accent); }
 
 .compare-wrap {
-  margin: 14px auto 0;
+  margin: 14px 0 0;
   overflow-x: auto;
-  max-width: 720px;
 }
 .compare {
   font-family: 'IBM Plex Mono', monospace;
@@ -620,8 +624,6 @@ h1 em {
   border-bottom: 1px solid var(--rule);
   padding: 0.85em 0;
   max-width: 60ch;
-  margin-left: auto;
-  margin-right: auto;
 }
 .faq details:first-of-type { padding-top: 0.4em; }
 .faq summary {
@@ -661,27 +663,13 @@ h1 em {
   text-decoration: none;
 }
 
-.detail {
-  margin: 56px auto 0;
-  padding-top: 24px;
-  border-top: 1px solid var(--rule);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.29em;
-  color: var(--ink-faded);
-  line-height: 1.9;
-  max-width: 60ch;
-  text-align: center;
-}
-
-.detail .k { color: var(--ink); }
-.detail .c { color: var(--accent); }
-
 .caution {
   margin: 28px auto 0;
   padding: 0.75em 1em;
   border: 1px solid var(--accent);
   border-left-width: 4px;
-  background: rgba(185, 83, 28, 0.06);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
   font-size: 0.4em;
   line-height: 1.6;
   color: var(--ink-soft);
@@ -778,9 +766,8 @@ footer a:hover {
     </div>
     <div class="header-right fade d1">
       <div class="theme-toggle" role="group" aria-label="Color theme">
-        <button type="button" data-mode="auto" aria-pressed="true" title="Match system preference">auto</button>
+        <button type="button" data-mode="dark" aria-pressed="true" title="Dark mode">dark</button>
         <button type="button" data-mode="light" aria-pressed="false" title="Light mode">light</button>
-        <button type="button" data-mode="dark" aria-pressed="false" title="Dark mode">dark</button>
       </div>
     </div>
   </header>
@@ -1029,6 +1016,19 @@ Body, exactly as the sender wrote it.</pre>
       </div>
     </section>
 
+    <section class="block fade d8">
+      <h2 class="section-label">A 60-second tour</h2>
+      <p class="prose">
+        Setup, inbound, hooks, MCP read, reply. Captioned. No narration.
+      </p>
+      <video class="demo-video" controls preload="metadata"
+             poster="/media/tour-60s-poster.png">
+        <source src="/media/tour-60s.webm" type="video/webm">
+        <source src="/media/tour-60s.mp4" type="video/mp4">
+        <track kind="captions" src="/media/tour-60s.vtt" srclang="en" label="English" default>
+      </video>
+    </section>
+
     <section class="block fade d8 faq">
       <h2 class="section-label">FAQ</h2>
       <details>
@@ -1053,11 +1053,6 @@ Body, exactly as the sender wrote it.</pre>
       </details>
     </section>
 
-    <div class="detail fade d8">
-      <div>$ <span class="c">dig</span> aimx.email <span class="k">MX</span></div>
-      <div>;; <span class="k">ANSWER SECTION:</span></div>
-      <div>aimx.email.&nbsp;&nbsp;300&nbsp;&nbsp;IN&nbsp;&nbsp;MX&nbsp;&nbsp;10&nbsp;&nbsp;<span class="c">// alpha</span></div>
-    </div>
   </main>
 
   <footer>
