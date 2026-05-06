@@ -1,5 +1,5 @@
 [book]
-title = "aimx — user guide"
+title = "AIMX — user guide"
 authors = ["U-Zyn Chua"]
 description = "Self-hosted SMTP for AI agents. The user guide."
 src = "../book"

@@ -1,0 +1,34 @@
+# AIMX
+
+> Self-hosted SMTP server for AI agents. The internet's oldest protocol, rebuilt for AI agents. Inbound mail is parsed into Markdown with TOML frontmatter and written to disk. Outbound mail is DKIM-signed and delivered direct to the recipient's MX. A built-in MCP stdio server exposes twelve tools for mailbox CRUD, read, list, send, reply, and mark-read.
+
+AIMX is a single Rust binary. `aimx serve` is the SMTP daemon; every other subcommand is short-lived. No database, no relay, no SaaS. MIT licensed. Runs on a Linux VPS with port 25 open.
+
+## Get started
+
+- [Homepage](https://aimx.email): pitch, install one-liner, what it is, demo media, FAQ.
+- [Getting Started](https://aimx.email/book/getting-started.html): requirements, compatible VPS providers, first steps.
+- [Installation](https://aimx.email/book/installation.html): installer mechanics, platform targets, flags, environment variables, examples.
+- [Setup](https://aimx.email/book/setup.html): DNS records (MX, SPF, DKIM, DMARC), domain verification, production hardening.
+
+## Configuration & operations
+
+- [Configuration](https://aimx.email/book/configuration.html): `config.toml` field reference, environment variables, data + config directory layout.
+- [Security](https://aimx.email/book/security.html): threat model, trust boundaries, what aimx does and does not defend.
+- [Mailboxes & Email](https://aimx.email/book/mailboxes.html): mailbox CRUD, email frontmatter format, attachments, sending, threading.
+- [Hooks & Trust](https://aimx.email/book/hooks.html): `on_receive` and `after_send` event handlers, ownership-as-auth, the trust gate.
+- [Hook Recipes](https://aimx.email/book/hook-recipes.html): copy-paste webhook snippets per agent harness.
+
+## Agent integration
+
+- [MCP Server](https://aimx.email/book/mcp.html): MCP server spec, twelve tools, parameters, frontmatter contract, workflow examples.
+- [Agent Integration](https://aimx.email/book/agent-integration.html): the `aimx agents setup` installer, per-agent config, manual wiring instructions for Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, NanoClaw.
+- [CLI Reference](https://aimx.email/book/cli.html): every `aimx` subcommand with flags and options.
+
+## Reference
+
+- [Troubleshooting](https://aimx.email/book/troubleshooting.html): diagnostics, common issues, useful commands.
+- [FAQ](https://aimx.email/book/faq.html): deployment, DNS, storage, MCP, operations questions.
+- [Release Notes](https://aimx.email/book/release-notes.html): version-by-version changelog.
+- [Source](https://github.com/uzyn/aimx): GitHub repository (Rust, MIT licensed).
+- [llms-full.txt](https://aimx.email/llms-full.txt): the full corpus of all sixteen book chapters concatenated for direct LLM ingest.

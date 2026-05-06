@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://aimx.email/</loc><priority>1.0</priority></url>
+  <url><loc>https://aimx.email/book/</loc><priority>0.8</priority></url>
+  <url><loc>https://aimx.email/book/getting-started.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/installation.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/setup.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/configuration.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/security.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/mailboxes.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/hooks.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/hook-recipes.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/mcp.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/agent-integration.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/cli.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/troubleshooting.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/faq.html</loc><priority>0.7</priority></url>
+  <url><loc>https://aimx.email/book/release-notes.html</loc><priority>0.7</priority></url>
+</urlset>
