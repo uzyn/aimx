@@ -1,6 +1,6 @@
 # CLI Reference
 
-Every `aimx` subcommand with its flags. `aimx <command> --help` is authoritative; this page summarises.
+Every `aimx` subcommand and its flags. `aimx <command> --help` is authoritative; this page summarises.
 
 ## Global flags
 
@@ -28,7 +28,7 @@ See [Setup](setup.md) for service installation and [Configuration](configuration
 
 ### `aimx setup [domain]`
 
-Interactive setup wizard. Requires root. Generates TLS cert and DKIM keys, writes `/etc/aimx/config.toml`, installs a systemd (or OpenRC) unit for `aimx serve`, and drives DNS verification. Re-entrant: running it on an existing install skips install and jumps to DNS verification.
+Interactive setup wizard. Requires root. Generates STARTTLS cert and DKIM keys, writes `/etc/aimx/config.toml`, installs a systemd (or OpenRC) unit for `aimx serve`, and drives DNS verification. Re-entrant: running it on an existing install skips install and jumps to DNS verification.
 
 | Flag | Description |
 |------|-------------|
@@ -59,13 +59,11 @@ See [Setup: End-to-end verification](setup.md#end-to-end-verification).
 
 ### `aimx doctor`
 
-Print server health: configuration path, mailbox counts and unread counts, a per-mailbox table (Mailbox, Address, Total, Unread, Trust, Senders, Hooks), an Ownership section listing each mailbox's `owner` and whether the owner uid resolves on the host, DKIM key presence, SMTP service state, DNS record verification, and a pointer to `aimx logs` for recent service logs. Exits non-zero when any mailbox has an unresolvable owner so monitoring can detect orphans.
+Print server health: config path, per-mailbox totals and unread counts, ownership status, DKIM key presence, SMTP service state, DNS record verification, and a pointer to `aimx logs`. Exits non-zero when any mailbox has an unresolvable owner so monitoring can detect orphans.
 
-The Service section includes `Client version:` (the CLI binary you just invoked) and `Server version:` (probed from the running daemon over the UDS socket). Compare them at a glance to see whether the running daemon is still on an older build than the binary on disk — when they differ, restart the service (`systemctl restart aimx` or `rc-service aimx restart` on OpenRC) so the daemon picks up the new binary. The version lines are informational only and do not change the doctor exit code.
+The Service section also prints `Client version:` (the CLI binary you just invoked) and `Server version:` (probed from the running daemon). When they differ, the on-disk binary is newer than the daemon — restart the service so it picks up the new build. See [Troubleshooting: Version drift](troubleshooting.md#version-drift-between-client-and-daemon).
 
 No flags.
-
-See [Troubleshooting](troubleshooting.md).
 
 ### `aimx logs`
 
@@ -82,7 +80,7 @@ Tail or follow the `aimx serve` service log. Wraps `journalctl -u aimx` on syste
 
 Compose an RFC 5322 message and submit it to `aimx serve` via `/run/aimx/aimx.sock`. Refuses root. The daemon handles DKIM signing and MX delivery.
 
-The caller's euid must own the mailbox resolved from the `From:` local part. The daemon parses `From:` from the submitted body itself (no client-supplied `From-Mailbox:` header) and rejects sends whose mailbox owner does not match the caller with `not authorized: <local_part>@<domain>` (exit code 1). The catchall (`*@domain`) is inbound-only and is never accepted as an outbound sender.
+The caller's euid must own the mailbox resolved from the `From:` local part; sends from another owner's mailbox are rejected with `not authorized: <local_part>@<domain>`. The catchall (`*@domain`) is inbound-only and is never accepted as an outbound sender. See [Security: Per-action authorization](security.md#per-action-authorization).
 
 | Flag | Description |
 |------|-------------|
@@ -110,9 +108,9 @@ Alias: `aimx mailbox` works identically to `aimx mailboxes`.
 
 ### `aimx mailboxes create <name>`
 
-Create a mailbox registering `<name>@<domain>` and directories under `inbox/<name>/` and `sent/<name>/` chowned `<owner>:<owner> 0700`. **Owner-gated, not root-gated.** A non-root caller always creates a mailbox owned by their own uid — the daemon synthesizes the owner from `SO_PEERCRED` and ignores any client-supplied owner. Root may pass `--owner <user>` to create a mailbox owned by another uid. The reserved literals `catchall` and `aimx-catchall` are rejected with `Validation: reserved`.
+Register `<name>@<domain>` and create `inbox/<name>/` and `sent/<name>/` chowned `<owner>:<owner> 0700`. Owner-gated, not root-gated: non-root callers create mailboxes owned by their own uid, root may pass `--owner <user>` to create one owned by another uid. The reserved literals `catchall` and `aimx-catchall` are rejected.
 
-The CLI prefers the daemon's UDS path for both root and non-root callers when `/run/aimx/aimx.sock` exists, so the daemon hot-reloads the new mailbox with no restart. When the daemon is stopped: root falls back to a direct `config.toml` edit + restart hint; non-root exits with code 2 and the message *"daemon must be running for non-root mailbox CRUD; start `aimx serve` or run with sudo to fall back to direct config edit."*
+When `aimx serve` is running, the change hot-reloads with no restart. When the daemon is stopped, root falls back to a direct `config.toml` edit; non-root exits with code 2. See [Troubleshooting: daemon must be running](troubleshooting.md#aimx-mailboxes-create--delete-exits-with-daemon-must-be-running-for-non-root-mailbox-crud).
 
 | Flag | Description |
 |------|-------------|
@@ -132,9 +130,7 @@ Print a mailbox's address, owner, effective trust policy, `trusted_senders`, con
 
 ### `aimx mailboxes delete <name>`
 
-Delete a mailbox. **Owner-gated.** A non-root caller may only delete a mailbox whose `owner` field matches their uid; the daemon enforces this via `SO_PEERCRED`, returning the canonical `EACCES not authorized` error otherwise (no information leak between "mailbox exists but unowned" and "no such mailbox"). Root passes unconditionally. Refuses non-empty mailboxes with `ERR NONEMPTY` unless `--force` is passed. `catchall` cannot be deleted.
-
-The CLI prefers the daemon's UDS path. When the daemon is stopped: root falls back to a direct `config.toml` edit + restart hint; non-root exits with code 2 and the *"daemon must be running for non-root mailbox CRUD"* message.
+Delete a mailbox. Owner-gated: non-root callers may only delete mailboxes they own. Refuses non-empty mailboxes with `ERR NONEMPTY` unless `--force` is passed. `catchall` cannot be deleted with or without `--force`.
 
 | Flag | Description |
 |------|-------------|
@@ -145,9 +141,7 @@ See [Mailboxes: Managing mailboxes](mailboxes.md#managing-mailboxes).
 
 ## Hook management
 
-Alias: `aimx hook` works identically to `aimx hooks`.
-
-Authorization: caller must own the target mailbox, or be root. Non-root callers operating on mailboxes they own use the daemon's UDS socket so changes hot-swap into the running config; the daemon verifies ownership via `SO_PEERCRED` and rejects with `EACCES not authorized` otherwise. Root with the daemon stopped falls back to a direct `config.toml` edit + restart hint; non-root with the daemon stopped hard-errors (cannot write the root-owned config).
+Alias: `aimx hook` works identically to `aimx hooks`. Authorization: caller must own the target mailbox, or be root. When `aimx serve` is running, hook CRUD hot-swaps into the live config with no restart. See [Security: Per-action authorization](security.md#per-action-authorization).
 
 ### `aimx hooks list`
 
@@ -216,7 +210,7 @@ When installing for `claude-code`, the installer also removes any pre-existing `
 | `<agent>` (positional) | Short name (e.g. `claude-code`, `codex`, `opencode`, `gemini`, `goose`, `openclaw`, `hermes`). Omit for the interactive TUI. |
 | `--list` | Print the registry: agent name, destination path, activation hint. Same output as `aimx agents list`. |
 | `--no-interactive` | Skip the TUI when no agent is named; print the same plain registry dump. Intended for scripting. |
-| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check and wire aimx into `/root`'s home. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
+| `--dangerously-allow-root` | Bypass the root-refusal check and wire AIMX into `/root`'s home. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print the skill contents and activation hint to stdout instead of writing to disk or invoking any MCP CLI. |
 
@@ -233,7 +227,7 @@ Inverse of `aimx agents setup`. Removes the skill files under `$HOME` and prints
 | Flag | Description |
 |------|-------------|
 | `<agent>` (positional) | Short name; must match the agent previously passed to `aimx agents setup`. |
-| `--dangerously-allow-root` | Footgun. Bypass the root-refusal check. |
+| `--dangerously-allow-root` | Bypass the root-refusal check. |
 
 ## Utilities
 
@@ -248,7 +242,7 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 
 ## UDS protocol verbs
 
-`aimx serve` exposes a small `AIMX/1` request set on `/run/aimx/aimx.sock` (mode `0666`). The CLI subcommands above and the [`aimx mcp`](mcp.md) tools all submit these verbs; the daemon resolves the caller's uid via `SO_PEERCRED` and runs the central `auth::authorize` predicate before any state work. Operators do not normally speak the wire format directly — this table is the source of truth for what the socket accepts.
+`aimx serve` exposes a small `AIMX/1` request set on `/run/aimx/aimx.sock` (mode `0666`). The CLI subcommands above and the [`aimx mcp`](mcp.md) tools all submit these verbs; the daemon resolves the caller's uid via `SO_PEERCRED` and runs `auth::authorize` server-side. Operators do not normally speak the wire format directly.
 
 | Verb | Direction | Authorization | Used by |
 |------|-----------|---------------|---------|
@@ -261,5 +255,3 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 | `HOOK-DELETE` | header (hook name) | caller uid must own the hook's mailbox; operator-origin hooks are CLI-only | `aimx hooks delete` (UDS path), `hook_delete` MCP tool |
 | `HOOK-LIST` | request only | none server-side; the response is filtered to hooks on caller-owned mailboxes (root sees all) | `hook_list` MCP tool |
 | `VERSION` | request only | none — payload is daemon build metadata only | `aimx doctor`'s `Server version:` line |
-
-`HOOK-LIST` mirrors `MAILBOX-LIST`'s frame shape: empty request body, JSON array on the response. Each row is `{name, mailbox, event, cmd, fire_on_untrusted, timeout_secs}` where `event` serializes to `on_receive` / `after_send`. See [MCP Server § hook_list](mcp.md#hook_list) for the agent-facing surface.

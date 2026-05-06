@@ -1,12 +1,12 @@
 # Installation
 
-AIMX ships as a single statically-compiled binary. Install it in one line on any supported Linux box:
+AIMX ships as a single statically-compiled binary. Install in one line:
 
 ```bash
 curl -fsSL https://aimx.email/install.sh | sh
 ```
 
-This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, runs the interactive setup wizard (`sudo aimx setup`), then drops back to your user to wire the MCP server into your LLM agent (`aimx agents setup`). One command, end-to-end. No Rust toolchain, no `cargo build`, no source checkout.
+This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, runs `sudo aimx setup`, then drops back to your user to wire the MCP server into your agent. No Rust toolchain, no `cargo build`, no source checkout.
 
 ## Supported platforms
 
@@ -25,22 +25,19 @@ The install script auto-detects your OS, CPU arch (`uname -m`), and libc flavor 
 
 ## What the installer does
 
-The shell script is intentionally thin: it prints a two-line install banner, fails fast if `sudo` is missing on a non-root box, downloads the binary, and `exec`s `sudo aimx setup` so the binary owns the operator-facing wizard. The full six-step checklist (preflight, domain & DNS, TLS, trust, install, MCP wiring) lives inside `aimx setup` itself, not the shell — so `aimx setup` works the same whether you ran it via the installer or directly.
+The shell script is thin: it acquires `sudo` up front, downloads the binary, and `exec`s `sudo aimx setup` — the binary owns the wizard. The script's job is to put `aimx` on disk, not to know anything about DNS or DKIM.
 
-The installer:
-
-1. Prints a thin two-line "AIMX installer" banner — the six-step wizard checklist is the binary's job.
-2. Detects your platform and picks the matching release asset.
-3. Acquires `sudo` up front (`sudo -v </dev/tty` so `curl | sh` still gets the password prompt). If you are already root, this is a no-op; if `sudo` is missing on a non-root box, the script exits with a clear error **before** any GitHub network call.
-4. Resolves the target version (latest release by default; override with `--tag` or `AIMX_VERSION`).
+1. Prints a two-line install banner.
+2. Detects platform and libc; picks the matching release asset.
+3. Acquires `sudo` (`sudo -v </dev/tty` so `curl | sh` still gets the password prompt). Fails fast if `sudo` is missing on a non-root box, before any network call.
+4. Resolves the target version (latest by default; override with `--tag` or `AIMX_VERSION`).
 5. Downloads the tarball over HTTPS from GitHub Releases.
-6. Extracts it into a temp directory that is cleaned up on every exit path (success, error, or interrupt).
-7. Installs the binary with `install -m 0755` into `/usr/local/bin/aimx` (override with `--to` or `AIMX_PREFIX`).
-8. On a fresh box, backs up any pre-existing `/etc/aimx/config.toml` to `config.toml.bak-YYYYMMDD-HHMMSS` (DKIM keys and TLS certs are left in place so deliverability survives re-runs), then `exec`s `sudo aimx setup </dev/tty`. The binary takes over from there.
-9. `aimx setup` runs the six-step wizard end-to-end: preflight on port 25, domain & DNS, TLS certificate, trust policy, install + service unit, and MCP wiring (the wizard re-execs `aimx agents setup` as `$SUDO_USER`). The wizard owns the welcome banner, the checklist's `☐ → ☑/☒` ticking, and the closing message with `@<your-domain>` substituted.
-10. If an older `aimx` is already installed, the upgrade path kicks in instead: stops the service, swaps the binary atomically, and restarts — no wizard re-run. If the same version is already installed, exits without touching anything (pass `--force` to reinstall).
+6. Extracts into a temp directory cleaned up on every exit path.
+7. Installs the binary as `install -m 0755 /usr/local/bin/aimx` (override with `--to` / `AIMX_PREFIX`).
+8. On a fresh box, backs up any pre-existing `/etc/aimx/config.toml` to `config.toml.bak-YYYYMMDD-HHMMSS`, then `exec`s `sudo aimx setup </dev/tty`. DKIM keys and STARTTLS certs are preserved across re-runs.
+9. If an older `aimx` is already installed, the upgrade path runs instead: stop the service, swap the binary atomically, restart. No wizard re-run. If the running version matches the target, it exits without touching anything (pass `--force` to reinstall).
 
-If no TTY is available (CI, fully-scripted contexts), the setup step will error unless you also supply `AIMX_NONINTERACTIVE=1` with the required defaults — see [Setup](setup.md) for the non-interactive contract. Pre-existing `/etc/aimx/config.toml` is backed up to a timestamped `.bak-*` sibling before setup runs; DKIM keys and TLS certs are preserved.
+In CI / non-TTY contexts, set `AIMX_NONINTERACTIVE=1` and supply defaults — see [Setup](setup.md).
 
 ## Flags and environment variables
 
@@ -84,9 +81,9 @@ sudo /opt/aimx/bin/aimx setup
 
 The drop-through to `aimx agents setup` also uses `/proc/self/exe`, so a non-default prefix works end-to-end without extra configuration.
 
-## Verification (skeptical operator path)
+## Manual verification
 
-If you would rather not pipe a remote script into `sh`, every tarball is published with an accompanying `.sha256` file and a release-wide `SHA256SUMS` aggregate. Verify manually before extracting anything:
+Every tarball is published with an accompanying `.sha256` file and a release-wide `SHA256SUMS` aggregate. To skip `curl | sh` and verify by hand:
 
 ```bash
 # Tags are bare SemVer (no `v` prefix). Tarball filenames drop the
@@ -114,15 +111,13 @@ curl -fsSL https://aimx.email/install.sh | less
 
 The script is plain POSIX `sh` (Dash- and BusyBox-compatible), roughly 500 lines, and follows the same shape as [`just.systems/install.sh`](https://just.systems/install.sh).
 
-## Trust model (v1)
+## Trust model
 
-aimx v1's trust anchor is **HTTPS on the GitHub Releases domain**. The install script enforces HTTPS-only downloads; it does not verify tarball signatures. Skeptical operators can verify SHA-256 manually against the published `SHA256SUMS` file as shown above.
+The install script's trust anchor is HTTPS on the GitHub Releases domain. Downloads are HTTPS-only; tarball signatures are not verified. Skeptical operators verify SHA-256 manually against `SHA256SUMS` as shown above.
 
-Signed releases (minisign, cosign, GPG, OIDC) are **deferred to v2** — adding a signing story requires release-team coordination (key custody, rotation, verifier tooling in every surface that fetches a binary) that is out of proportion for a solo-maintainer v1. The honest limitation is documented here rather than glossed over.
+Signed releases (minisign, cosign, GPG, OIDC) are deferred. To get supply-chain integrity today, pin a specific tag and verify SHA-256 before every install or upgrade.
 
-If you want supply-chain integrity today, pin a specific release tag and verify SHA-256 against `SHA256SUMS` before every install / upgrade.
-
-> **Note on `Content-Type`:** the landing page at `aimx.email/install.sh` is served by GitHub Pages, which does not expose a header-customization API. The raw bytes are served as `application/x-sh` rather than `text/x-sh; charset=utf-8`. Operator-visible `curl | sh` behavior is unaffected.
+The landing page at `aimx.email/install.sh` is served by GitHub Pages, which does not expose a header-customization API; the raw bytes carry `Content-Type: application/x-sh` rather than `text/x-sh`. `curl | sh` behavior is unaffected.
 
 ## Upgrading
 
@@ -199,9 +194,9 @@ Then file an issue with the service log.
 
 **Binary installs but `aimx --version` prints the wrong tag.**  `--version` is baked at build time from `git describe --tags`. If you built from source and the working tree is dirty or ahead of the last tag, the output will reflect that (e.g. `0.1.0-12-gabcdef1-dirty`). Released tarballs always print the exact tag.
 
-## Building from source (contributors)
+## Building from source
 
-Source builds are supported for contributors and air-gapped environments. Everyone else should use the one-line installer — it is faster, pins a tested release, and requires no Rust toolchain.
+Source builds are for contributors and air-gapped environments. Everyone else should use the one-line installer.
 
 ```bash
 # Prereqs: rustup, a recent stable toolchain, and git.
@@ -216,7 +211,3 @@ aimx --version
 ```
 
 See the top-level `CLAUDE.md` for the full developer workflow (lint, format, tests, verifier service).
-
----
-
-Next: [Setup](setup.md) to run the interactive wizard, generate DKIM keys, and add DNS records.

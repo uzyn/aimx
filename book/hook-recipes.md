@@ -1,31 +1,23 @@
 # Hook Recipes
 
-> **Note on log paths.** The `/var/log/aimx/<agent>.log` paths in the recipes below are user-chosen destinations for hook script output. They are NOT aimx's own logs. aimx itself logs to journald (systemd) or the system logger (OpenRC). See [Troubleshooting: Where are the logs?](troubleshooting.md#where-are-the-logs) for details.
+Copy-paste `aimx hooks create` invocations for every supported AI agent. For the underlying mechanics, see [Hooks & Trust](hooks.md); for installing an agent's plugin so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
 
-This chapter is the canonical cookbook for wiring aimx hooks to every supported AI agent. Each section shows a copy-paste `aimx hooks create` invocation with the verified `cmd` argv for that agent.
-
-For the underlying mechanics (ownership, env vars, trust policies, structured logs), see [Hooks & Trust](hooks.md). For installing the aimx plugin/skill into an agent so its MCP tools are discoverable, see [Agent Integration](agent-integration.md).
+The `/var/log/aimx/<agent>.log` paths below are user-chosen destinations for hook script output. They are not AIMX's own logs — AIMX logs to journald (systemd) or the system logger (OpenRC). See [Troubleshooting: Logs](troubleshooting.md#logs).
 
 ## What counts as a hook recipe?
 
-A hook recipe is a `[[mailboxes.<name>.hooks]]` block (or the equivalent `aimx hooks create` invocation) whose `cmd` invokes an AI agent or HTTP endpoint non-interactively against an incoming email. The recipe pattern is always:
+A hook recipe is a `[[mailboxes.<name>.hooks]]` block (or equivalent `aimx hooks create` invocation) whose `cmd` invokes an AI agent or HTTP endpoint non-interactively against an incoming email. AIMX writes the `.md` file, evaluates the trust gate, then `execvp`s the argv as the mailbox owner with the raw `.md` piped to stdin and `$AIMX_FILEPATH` set. The agent reads the email and takes action (reply, file a ticket, update a calendar). Exit code is logged but never blocks delivery.
 
-1. Email lands in the mailbox, aimx writes the `.md` file to disk.
-2. aimx evaluates the trust gate. A hook fires iff `trusted == "true"` on the email OR the hook sets `fire_on_untrusted = true`.
-3. aimx exec's the argv directly as the mailbox's owner. There is no `/bin/sh` between aimx and the agent. The raw `.md` is always piped to the child's stdin and the same path is exposed as `$AIMX_FILEPATH`.
-4. The agent reads the email — either off stdin or by opening `$AIMX_FILEPATH` — and takes action: replying, filing a ticket, updating a calendar, whatever.
-5. Exit code is logged (one structured line per fire) but does not block delivery.
-
-> **Why argv and not shell?** User-controlled fields like `From:` and `Subject:` can contain arbitrary bytes, including shell metacharacters (`$()`, backticks, `;`, quotes). Splicing them into a shell command, even with shell-escape quoting, is fragile. Delivering them as env vars and `exec`'ing argv directly avoids the shell parser entirely. When you do need shell expansion, spell out `cmd = ["/bin/sh", "-c", "..."]` explicitly so it's visible at the call site.
+`cmd` is `execvp`'d directly: there is no `/bin/sh` between AIMX and the agent. User-controlled header fields like `From:` and `Subject:` can contain shell metacharacters (`$()`, backticks, `;`, quotes), so AIMX delivers them as env vars and avoids the shell parser entirely. When you need shell expansion, spell out `["/bin/sh", "-c", "..."]` so it is visible at the call site.
 
 ## Two consumption shapes
 
-The daemon always pipes the raw `.md` to a hook's stdin, but recipes still split into two camps depending on whether the agent reads stdin in headless mode:
+The daemon always pipes the `.md` to stdin, but recipes split into two camps based on whether the agent reads stdin in headless mode:
 
-- **Native-stdin** (Claude Code, Codex, Gemini, Goose, webhook): the agent reads the piped email straight off its stdin; the prompt only tells it what to do with the content.
-- **Filepath-only** (OpenCode, Hermes): the agent does not read stdin in headless mode, so the `cmd` carries a fixed prompt that instructs it to read `$AIMX_FILEPATH` (env var set by the daemon) using its filesystem tool. argv is not shell-expanded — the literal `$AIMX_FILEPATH` token reaches the agent, which expands it via Bash/Read tooling at run time.
+- **Native stdin** (Claude Code, Codex, Gemini, Goose, webhook): the agent reads the piped email off stdin; the prompt only tells it what to do.
+- **Filepath only** (OpenCode, Hermes): the agent does not read stdin in headless mode, so the prompt instructs it to read `$AIMX_FILEPATH` via its filesystem tool. argv is not shell-expanded — the literal `$AIMX_FILEPATH` token reaches the agent, which expands it at run time.
 
-If your hook only needs the subject or sender, read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin — the daemon writes the full email but does not require the child to consume it.
+Hooks that only need the subject or sender can read `$AIMX_SUBJECT` / `$AIMX_FROM` and ignore stdin.
 
 ## Absolute paths
 
@@ -33,12 +25,7 @@ Every recipe uses `/usr/local/bin/<agent>` for `cmd[0]`. `Config::load` rejects 
 
 ## Self-loop reminder
 
-The headless agent process runs as the **mailbox owner's uid** (the daemon `setuid`s to `mailbox.owner_uid()` before `exec`). That user must have:
-
-1. The agent binary installed and reachable at the path you reference in `cmd[0]`.
-2. The aimx skill installed (`aimx agents setup <agent>` was run as that user) so the agent loads the aimx MCP server when it starts.
-
-Without both, the headless invocation will start without the skill loaded and the agent won't know what to do with the email. `aimx doctor` could flag this gap in a future release; for now, run `aimx agents setup` as the mailbox owner before creating the hook.
+The headless agent process runs as the mailbox owner's uid. That user must have the agent binary installed at the `cmd[0]` path AND the AIMX skill installed (run `aimx agents setup <agent>` as that user). Without both, the agent starts without the skill loaded and does not know what to do with the email.
 
 ## Claude Code
 
@@ -180,7 +167,7 @@ aimx hooks create \
 
 ## `after_send` recipes
 
-Send-side hooks run after aimx resolves the MX delivery attempt. They cannot affect the send result (hooks are observability-only) but are ideal for audit logs, outbound notifications, or post-send bookkeeping.
+Send-side hooks run after AIMX resolves the MX delivery attempt. They cannot affect the send result (hooks are observability-only) but are ideal for audit logs, outbound notifications, or post-send bookkeeping.
 
 ### Append to an audit log
 
@@ -218,7 +205,7 @@ aimx hooks create \
 
 ### Logging
 
-aimx itself emits one structured log line per hook fire to journald:
+AIMX itself emits one structured log line per hook fire to journald:
 
 ```text
 hook_name=<name> event=<on_receive|after_send> mailbox=<m> owner=<u> exit_code=<n> duration_ms=<n>
@@ -254,7 +241,3 @@ sudo aimx --data-dir /tmp/aimx-test ingest catchall@agent.example.com \
 ```
 
 Watch journald (`aimx logs --follow`) and confirm the agent ran with the expected env vars.
-
----
-
-Next: [Hooks & Trust](hooks.md) | [Agent Integration](agent-integration.md) | [MCP Server](mcp.md)

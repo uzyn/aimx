@@ -79,15 +79,7 @@ Check in this order:
 
 ### What does mailbox ownership mean for security?
 
-Every mailbox declares a single Linux `owner` (a user on the host). Ownership is the authorization predicate for everything that touches the mailbox, and it directly constrains what hooks can do:
-
-- **Storage.** `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` are `<owner>:<owner> 0700`. Only the owner — and root — can read or list the contents. Other Linux users cannot even traverse the directory.
-- **Hook execution.** The daemon `setuid`s to `mailbox.owner_uid()` before `exec`'ing the hook's `cmd` argv. There is no per-hook `run_as` override.
-- **CRUD authorization.** Creating, listing, and deleting hooks (and reading mail, sending mail) requires the caller to either be root or own the target mailbox. The CLI checks euid; the UDS checks `SO_PEERCRED` — the same predicate.
-
-The "no escalation" property: a hook can do anything the mailbox owner could already do (cron, `~/.bashrc`, systemd `--user`, etc.). It cannot escalate privilege, and it cannot read `bob`'s mail when `alice` owns the mailbox the hook is wired to. A prompt-injected agent running under `alice`'s uid stays scoped to `alice`'s data and `alice`'s file permissions — adding hooks does not widen that scope, because hooks always exec as `alice`.
-
-The previous template-sandbox design was scaffolding around a different question ("how do we let an agent create hooks without giving it shell?"). With mailbox-ownership-as-authorization, the answer is simpler: the agent already has shell as `alice` (it's running under `alice`'s uid); hooks are just one more thing `alice` can do, and the daemon enforces that the hook runs as `alice` regardless of what the agent asked for. To run a hook as root, an operator must hand-edit `/etc/aimx/config.toml` to set `mailbox.owner = "root"` — a path that requires root in the first place.
+Every mailbox declares a single Linux `owner`. Storage is chowned `<owner>:<owner> 0700`. Hooks always exec as the owner uid (the daemon `setuid`s before `exec`). CRUD over the UDS is gated on `SO_PEERCRED` matching the mailbox's `owner_uid`, or root. A hook can do anything the owner could already do as that user — no more, no less. To run a hook as root, set `mailbox.owner = "root"` in `/etc/aimx/config.toml` (which already requires root). See [Security: Per-action authorization](security.md#per-action-authorization).
 
 ### Env var expansion: how does it work?
 
@@ -119,23 +111,23 @@ When the hook's side effect is safe regardless of sender. A logger, a metric cou
 
 ## Security model
 
-> The canonical write-up lives at [Security](security.md). The entries below are the common questions; that page has the full model.
+The full write-up lives at [Security](security.md). The entries below cover the common questions.
 
 ### Can I use AIMX in place of Postfix or Stalwart?
 
-No, and that is intentional. AIMX is a single-domain mail server designed for AI agents on a domain you own, not a general-purpose MTA for human users. It has no IMAP/POP3, no webmail, no per-user authentication on the SMTP submission path, no LMTP, no virtual alias tables, and no submission port on 587. Each mailbox is owned by exactly one Linux user, and hooks always run as that user — the boundary is per-mailbox, not per-server.
+No. AIMX is a single-domain server for AI agents on a host you own, not a general-purpose MTA. It has no IMAP/POP3, no webmail, no SMTP AUTH, no LMTP, no virtual alias tables, and no submission port on 587. Each mailbox has exactly one Linux owner, and hooks always run as that owner — the boundary is per-mailbox, not per-server.
 
 ### `aimx.sock` is mode `0666`, why is that fine?
 
-Any local user can connect to the socket, but the daemon enforces per-verb authorization via `SO_PEERCRED` (kernel-supplied peer uid). `SEND` requires the caller to own the From mailbox; `MARK-*` and `HOOK-*` require ownership of the target mailbox; `MAILBOX-CREATE` / `MAILBOX-DELETE` are root-only. The DKIM private key (`/etc/aimx/dkim/private.key`, mode `0600`, root-only) stays inside `aimx serve`, so the socket is a signing oracle scoped to the caller's owned mailboxes — never a free pass to forge mail for someone else's mailbox.
+Any local user can connect, but the daemon authorizes every verb server-side via `SO_PEERCRED` (kernel-supplied peer uid). The DKIM private key never leaves the daemon. The socket is a signing oracle scoped to the caller's owned mailboxes — never a free pass to forge mail under another mailbox.
 
 ### The mailbox tree is per-owner, what does that buy me?
 
-Each `/var/lib/aimx/inbox/<mailbox>/` and `/var/lib/aimx/sent/<mailbox>/` is `<owner>:<owner> 0700`. On a multi-user host, alice cannot read bob's mail — she cannot even traverse the directory to stat its contents. Hooks on alice's mailbox run as alice, so a prompt-injected agent stays scoped to alice's filesystem perms. The trade-off vs. a single shared mailbox tree is that mailbox provisioning requires picking the right owner; `aimx mailboxes create` defaults the owner to a Linux user named after the mailbox if one exists.
+On a multi-user host, alice cannot read bob's mail — `inbox/<bob>/` is `bob:bob 0700` and she cannot traverse the directory. Hooks on alice's mailbox run as alice, so a prompt-injected agent stays scoped to alice's filesystem perms.
 
 ### Who can read the DKIM private key, and what happens if it leaks?
 
-Only root, via `/etc/aimx/dkim/private.key` (mode `0600`). A leak lets anyone sign mail as your domain until you rotate. Rotate with the selector swap described above; publish a DMARC forensic address if you want to detect abuse.
+Only root, via `/etc/aimx/dkim/private.key` (mode `0600`). A leak lets anyone sign mail as your domain until you rotate. Rotate with the selector swap above.
 
 ## MCP
 
@@ -159,7 +151,7 @@ The unit caps restarts at `StartLimitBurst=5` within `StartLimitIntervalSec=60`.
 
 ### Where do daemon logs go on OpenRC?
 
-OpenRC does not have journald. aimx writes nothing of its own. `aimx logs` tails `/var/log/aimx/*.log` if the init script redirects there, otherwise it falls back to `/var/log/messages`. On systemd, `aimx logs` shells out to `journalctl -u aimx`.
+OpenRC does not have journald. AIMX writes nothing of its own. `aimx logs` tails `/var/log/aimx/*.log` if the init script redirects there, otherwise falls back to `/var/log/messages`. On systemd, `aimx logs` shells out to `journalctl -u aimx`.
 
 ### How do I run a dry-run send without touching real MX servers?
 

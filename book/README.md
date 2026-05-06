@@ -1,18 +1,28 @@
 # aimx user guide
 
-AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their own email addresses on a domain you control. Mail is parsed to Markdown with TOML frontmatter and stored on disk. Agents read and send via the built-in MCP server, the `aimx` CLI, or directly from the filesystem. `aimx serve` is the SMTP daemon. Every other subcommand is a short-lived process.
+AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their own addresses on a domain you control. Mail is parsed into Markdown with TOML frontmatter and written to disk. Agents read and send through the built-in MCP server, the `aimx` CLI, or the filesystem directly. `aimx serve` is the daemon; every other subcommand is short-lived.
 
 ## How it works
 
-```text
-Inbound:
-  Sender -> port 25 -> aimx serve -> ingest -> .md file
-                                             -> hook manager (fires `on_receive` commands)
+```mermaid
+flowchart LR
+    subgraph Inbound
+        direction LR
+        Sender([Remote sender]) --> Port25[port 25]
+        Port25 --> ServeIn[aimx serve]
+        ServeIn --> Ingest[ingest]
+        Ingest --> MD[.md file]
+        Ingest --> Hooks[hook manager<br/>on_receive]
+    end
 
-Outbound:
-  MCP tool call -> aimx send -> UDS (/run/aimx/aimx.sock) -> aimx serve
-                                                          -> DKIM sign
-                                                          -> direct SMTP to recipient MX
+    subgraph Outbound
+        direction LR
+        Agent([MCP tool call]) --> Send[aimx send]
+        Send --> UDS[UDS<br/>/run/aimx/aimx.sock]
+        UDS --> ServeOut[aimx serve]
+        ServeOut --> DKIM[DKIM sign]
+        DKIM --> MX[recipient MX]
+    end
 ```
 
 - **Single binary.** Written in Rust. No runtime dependencies.
@@ -44,12 +54,13 @@ and [Getting Started](getting-started.md) for the full walkthrough.
 | [Installation](installation.md) | One-line installer, flags, verification, `aimx upgrade`, rollback |
 | [Setup](setup.md) | DNS, verification, DKIM key management, production hardening |
 | [Configuration](configuration.md) | `config.toml` field reference, data / config directories, environment variables |
+| [Security](security.md) | Threat model, trust boundaries, what AIMX defends and what it does not |
 | [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
-| [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, match filters, trust gate |
-| [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, Aider) |
-| [Security](security.md) | Threat model, trust boundaries, what aimx defends and what it does not |
-| [MCP Server](mcp.md) | The 9 MCP tools: parameters, frontmatter contract, workflow examples |
+| [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, ownership-as-authorization, trust gate |
+| [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, NanoClaw) |
+| [MCP Server](mcp.md) | The 12 MCP tools: parameters, frontmatter contract, workflow examples |
 | [Agent Integration](agent-integration.md) | `aimx agents setup` installer, per-agent configuration, manual MCP wiring |
 | [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |
 | [FAQ](faq.md) | Deployment, DNS, storage, MCP, and operations questions |
+| [Release Notes](release-notes.md) | Version-by-version operator-visible changes |
