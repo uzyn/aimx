@@ -1,6 +1,10 @@
 (function () {
   function init() {
-    var menuBar = document.getElementById('menu-bar');
+    // mdBook renamed #menu-bar to #mdbook-menu-bar in 0.4.x; fall back through
+    // both so this script keeps working across versions.
+    var menuBar = document.getElementById('mdbook-menu-bar')
+      || document.getElementById('menu-bar')
+      || document.querySelector('.menu-bar');
     if (!menuBar) return;
 
     var title = menuBar.querySelector('.menu-title');

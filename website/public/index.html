@@ -163,7 +163,7 @@ body {
 }
 
 .wrap {
-  max-width: 760px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 32px 28px 40px;
   position: relative;
@@ -281,7 +281,8 @@ main {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--accent);
-  margin-bottom: 24px;
+  margin: 0 auto 24px;
+  text-align: center;
 }
 
 h1 {
@@ -289,9 +290,11 @@ h1 {
   font-variation-settings: 'opsz' 144;
   font-weight: 400;
   font-size: 1.3em;
-  line-height: 1.2;
+  line-height: 1.15;
   letter-spacing: -0.022em;
-  margin-bottom: 40px;
+  margin: 0 auto 40px;
+  max-width: 24ch;
+  text-align: center;
   color: var(--ink);
 }
 
@@ -306,7 +309,8 @@ h1 em {
   line-height: 1.8;
   color: var(--ink-soft);
   max-width: 56ch;
-  margin-bottom: 0;
+  margin: 0 auto;
+  text-align: center;
 }
 
 .pitch code,
@@ -335,8 +339,9 @@ h1 em {
   letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--accent);
-  margin: 0 0 20px 0;
+  margin: 0 auto 20px;
   font-weight: 500;
+  max-width: 60ch;
 }
 
 .prose {
@@ -344,6 +349,8 @@ h1 em {
   line-height: 1.75;
   color: var(--ink-soft);
   max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .prose + .prose { margin-top: 0.85em; }
@@ -366,6 +373,9 @@ h1 em {
   padding: 0.1em 0 0.1em 1.1em;
   overflow-x: auto;
   white-space: pre;
+  max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .features {
@@ -374,6 +384,8 @@ h1 em {
   color: var(--ink-soft);
   list-style: none;
   max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .features li {
@@ -392,7 +404,8 @@ h1 em {
   display: flex;
   flex-wrap: wrap;
   gap: 14px 16px;
-  margin-top: 40px;
+  margin: 40px auto 0;
+  justify-content: center;
 }
 
 .btn {
@@ -438,20 +451,89 @@ h1 em {
 
 .btn.primary:hover::after { color: var(--paper); }
 
-.demo-video {
+/* Terminal mockup — used for the hero "demo" and Quick start. Dark slate
+   on cream paper produces a deliberate moment of contrast that reads
+   instantly as "this is a terminal". The traffic-light dots and label
+   borrow macOS's window chrome; mint $ prompts make commands scannable. */
+.terminal {
+  background: #0F1525;
+  border-radius: 12px;
+  font-family: 'IBM Plex Mono', monospace;
+  max-width: 720px;
+  margin: 0 auto;
+  overflow: hidden;
+  box-shadow:
+    0 1px 2px rgba(21, 19, 16, 0.08),
+    0 14px 36px rgba(21, 19, 16, 0.07);
+}
+
+.terminal + .terminal {
+  margin-top: 18px;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  padding: 13px 18px;
+  border-bottom: 1px solid rgba(237, 228, 211, 0.07);
+}
+
+.terminal-dots {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.terminal-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.terminal-dot.red    { background: #FF5F56; }
+.terminal-dot.yellow { background: #FFBD2E; }
+.terminal-dot.green  { background: #27C93F; }
+
+.terminal-label {
+  margin-left: 16px;
+  color: rgba(237, 228, 211, 0.42);
+  font-size: 0.32em;
+  letter-spacing: 0.04em;
+  font-weight: 400;
+}
+
+.terminal-body {
+  padding: 22px 24px 20px;
+  font-size: 0.36em;
+  line-height: 1.95;
+  color: #EDE4D3;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.terminal-line {
   display: block;
-  width: 100%;
-  margin-top: 32px;
-  border: 1px solid var(--rule);
-  background: var(--paper-2);
-  aspect-ratio: 31 / 18;
+}
+
+.terminal-line + .terminal-line { margin-top: 0; }
+
+.terminal-prompt {
+  color: #4ADE80;
+  margin-right: 12px;
+  user-select: none;
+}
+
+.terminal-out {
+  color: rgba(237, 228, 211, 0.6);
+  padding-left: 22px;
 }
 
 .harness-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
+  grid-auto-rows: 1fr;       /* every row matches the tallest row's height */
   gap: 10px;
-  margin-top: 8px;
+  margin: 8px auto 0;
+  max-width: 880px;
 }
 @media (min-width: 600px) {
   .harness-grid { grid-template-columns: repeat(4, 1fr); }
@@ -460,13 +542,26 @@ h1 em {
   border: 1px solid var(--rule);
   padding: 14px 14px 12px;
   text-decoration: none;
-  display: block;
+  display: flex;
+  flex-direction: column;    /* icon on top, text below — text gets full tile width */
+  gap: 10px;
   color: var(--ink);
   transition: border-color 0.15s, color 0.15s;
 }
 .harness-tile:hover {
   border-color: var(--accent);
   color: var(--accent);
+}
+.harness-tile-icon {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  display: block;
+  object-fit: contain;        /* keep aspect for the non-square Hermes PNG */
+  /* no hover recolor — preserves each brand's identity */
+}
+.harness-tile-text {
+  width: 100%;
 }
 .harness-tile-name {
   font-family: 'Fraunces', serif;
@@ -482,14 +577,15 @@ h1 em {
   color: var(--ink-faded);
   display: block;
   margin-top: 6px;
-  word-break: break-all;
   letter-spacing: 0.01em;
+  /* break only at word boundaries — no more "claude-co / de" mid-word */
 }
 .harness-tile:hover .harness-tile-cmd { color: var(--accent); }
 
 .compare-wrap {
-  margin-top: 14px;
+  margin: 14px auto 0;
   overflow-x: auto;
+  max-width: 720px;
 }
 .compare {
   font-family: 'IBM Plex Mono', monospace;
@@ -523,6 +619,9 @@ h1 em {
 .faq details {
   border-bottom: 1px solid var(--rule);
   padding: 0.85em 0;
+  max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
 }
 .faq details:first-of-type { padding-top: 0.4em; }
 .faq summary {
@@ -563,20 +662,22 @@ h1 em {
 }
 
 .detail {
-  margin-top: 56px;
+  margin: 56px auto 0;
   padding-top: 24px;
   border-top: 1px solid var(--rule);
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.29em;
   color: var(--ink-faded);
   line-height: 1.9;
+  max-width: 60ch;
+  text-align: center;
 }
 
 .detail .k { color: var(--ink); }
 .detail .c { color: var(--accent); }
 
 .caution {
-  margin-top: 28px;
+  margin: 28px auto 0;
   padding: 0.75em 1em;
   border: 1px solid var(--accent);
   border-left-width: 4px;
@@ -639,27 +740,31 @@ footer a:hover {
   .compare { font-size: 0.3em; }
 }
 
-.fade { opacity: 0; transform: translateY(8px); animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
-.fade.d1 { animation-delay: 0.05s; }
-.fade.d2 { animation-delay: 0.14s; }
-.fade.d3 { animation-delay: 0.24s; }
-.fade.d4 { animation-delay: 0.34s; }
-.fade.d5 { animation-delay: 0.44s; }
-.fade.d6 { animation-delay: 0.54s; }
-.fade.d7 { animation-delay: 0.64s; }
-.fade.d8 { animation-delay: 0.74s; }
+/* Animations are progressive enhancement: default state is visible.
+   The .js class is set by an inline script in <body> before paint, so
+   real users see the rise-in animation. Headless / no-JS / no-CSS-anim
+   browsers see fully-rendered content immediately. */
+.js .fade { opacity: 0; transform: translateY(8px); animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
+.js .fade.d1 { animation-delay: 0.05s; }
+.js .fade.d2 { animation-delay: 0.14s; }
+.js .fade.d3 { animation-delay: 0.24s; }
+.js .fade.d4 { animation-delay: 0.34s; }
+.js .fade.d5 { animation-delay: 0.44s; }
+.js .fade.d6 { animation-delay: 0.54s; }
+.js .fade.d7 { animation-delay: 0.64s; }
+.js .fade.d8 { animation-delay: 0.74s; }
 
 @keyframes rise {
   to { opacity: 1; transform: translateY(0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .fade { opacity: 1; transform: none; animation: none; }
-  .demo-video { /* browsers already pause autoplay under reduced-motion */ }
+  .js .fade { opacity: 1; transform: none; animation: none; }
 }
 </style>
 </head>
 <body>
+<script>document.documentElement.classList.add('js');</script>
 <div class="grain"></div>
 <div class="wrap">
   <header>
@@ -702,11 +807,17 @@ footer a:hover {
       <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Get the code</a>
     </div>
 
-    <video class="demo-video fade d4" autoplay muted loop playsinline preload="metadata"
-           poster="/media/hero-loop-poster.png" aria-label="Demo: AIMX CLI sending mail and showing the resulting Markdown file on disk">
-      <source src="/media/hero-loop.webm" type="video/webm">
-      <source src="/media/hero-loop.mp4" type="video/mp4">
-    </video>
+    <div class="terminal fade d4" role="img" aria-label="Demo: AIMX CLI sending mail and showing the resulting Markdown file on disk">
+      <div class="terminal-header" aria-hidden="true">
+        <span class="terminal-dots">
+          <span class="terminal-dot red"></span>
+          <span class="terminal-dot yellow"></span>
+          <span class="terminal-dot green"></span>
+        </span>
+        <span class="terminal-label">aimx</span>
+      </div>
+      <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>aimx send alpha@friend.com --subject 'the report' --body 'See attached.'</span><span class="terminal-line terminal-out">delivered. message-id queued.</span><span class="terminal-line"><span class="terminal-prompt">$</span>ls /var/lib/aimx/sent/alpha/ | tail -1</span><span class="terminal-line terminal-out">2026-05-06-1430-3f9a-alpha-the-report.md</span></div>
+    </div>
 
     <aside class="caution fade d4" role="note">
       <span class="label">Caution</span>
@@ -766,49 +877,92 @@ Body, exactly as the sender wrote it.</pre>
       </p>
       <div class="harness-grid" style="margin-top: 18px;">
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">Claude Code</span>
-          <span class="harness-tile-cmd">aimx agents setup claude-code</span>
+          <img class="harness-tile-icon" src="/icons/claude-code.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">Claude Code</span>
+            <span class="harness-tile-cmd">aimx agents setup claude-code</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">Codex CLI</span>
-          <span class="harness-tile-cmd">aimx agents setup codex</span>
+          <img class="harness-tile-icon" src="/icons/codex.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">Codex CLI</span>
+            <span class="harness-tile-cmd">aimx agents setup codex</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">OpenCode</span>
-          <span class="harness-tile-cmd">aimx agents setup opencode</span>
+          <img class="harness-tile-icon" src="/icons/opencode.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">OpenCode</span>
+            <span class="harness-tile-cmd">aimx agents setup opencode</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">Gemini CLI</span>
-          <span class="harness-tile-cmd">aimx agents setup gemini</span>
+          <img class="harness-tile-icon" src="/icons/gemini.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">Gemini CLI</span>
+            <span class="harness-tile-cmd">aimx agents setup gemini</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">Goose</span>
-          <span class="harness-tile-cmd">aimx agents setup goose</span>
+          <img class="harness-tile-icon" src="/icons/goose.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">Goose</span>
+            <span class="harness-tile-cmd">aimx agents setup goose</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">OpenClaw</span>
-          <span class="harness-tile-cmd">aimx agents setup openclaw</span>
+          <img class="harness-tile-icon" src="/icons/openclaw.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">OpenClaw</span>
+            <span class="harness-tile-cmd">aimx agents setup openclaw</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">Hermes</span>
-          <span class="harness-tile-cmd">aimx agents setup hermes</span>
+          <img class="harness-tile-icon" src="/icons/hermes.png" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">Hermes</span>
+            <span class="harness-tile-cmd">aimx agents setup hermes</span>
+          </div>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
-          <span class="harness-tile-name">NanoClaw</span>
-          <span class="harness-tile-cmd">aimx agents setup nanoclaw</span>
+          <img class="harness-tile-icon" src="/icons/nanoclaw.svg" alt="" width="32" height="32" loading="lazy">
+          <div class="harness-tile-text">
+            <span class="harness-tile-name">NanoClaw</span>
+            <span class="harness-tile-cmd">aimx agents setup nanoclaw</span>
+          </div>
         </a>
       </div>
     </section>
 
     <section class="block fade d7">
       <h2 class="section-label">Quick start</h2>
-<pre class="code">curl -fsSL https://aimx.email/install.sh | sh
-sudo aimx setup</pre>
-      <p class="prose" style="margin-top: 1.1em;">
+      <div class="terminal">
+        <div class="terminal-header" aria-hidden="true">
+          <span class="terminal-dots">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+          </span>
+          <span class="terminal-label">Terminal</span>
+        </div>
+        <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/install.sh | sh</span><span class="terminal-line"><span class="terminal-prompt">$</span>sudo aimx setup</span></div>
+      </div>
+      <p class="prose" style="margin-top: 1.5em;">
         You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Not sure your VPS allows port 25? Check first, no install:
       </p>
-<pre class="code">curl -fsSL https://aimx.email/portcheck.sh | sh</pre>
-      <p class="prose" style="margin-top: 1.1em;">
+      <div class="terminal">
+        <div class="terminal-header" aria-hidden="true">
+          <span class="terminal-dots">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+          </span>
+          <span class="terminal-label">Terminal</span>
+        </div>
+        <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/portcheck.sh | sh</span></div>
+      </div>
+      <p class="prose" style="margin-top: 1.5em;">
         <code>portcheck.sh</code> is a thin alias for <code>install.sh --port-check-only</code>; both URLs run the same checks. Want to see the scripts before running them? <a href="/install.sh">Read <code>install.sh</code></a> or <a href="/portcheck.sh">Read <code>portcheck.sh</code></a>.
       </p>
     </section>
@@ -873,19 +1027,6 @@ sudo aimx setup</pre>
           </tbody>
         </table>
       </div>
-    </section>
-
-    <section class="block fade d8">
-      <h2 class="section-label">A 60-second tour</h2>
-      <p class="prose">
-        Setup, inbound, hooks, MCP read, reply. Captioned. No narration.
-      </p>
-      <video class="demo-video" controls preload="metadata"
-             poster="/media/tour-60s-poster.png" style="margin-top: 18px;">
-        <source src="/media/tour-60s.webm" type="video/webm">
-        <source src="/media/tour-60s.mp4" type="video/mp4">
-        <track kind="captions" src="/media/tour-60s.vtt" srclang="en" label="English" default>
-      </video>
     </section>
 
     <section class="block fade d8 faq">
