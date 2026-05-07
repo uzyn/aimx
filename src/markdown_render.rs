@@ -67,6 +67,17 @@ fn comrak_options() -> &'static Options<'static> {
     })
 }
 
+/// Test-only counter incremented immediately before each `comrak` call.
+/// Lets the body-cap test prove comrak never runs on oversize input.
+/// Paired with `COMRAK_PROBE_LOCK` so the observing test can take an
+/// exclusive write-lock that blocks any concurrent renderer thread from
+/// touching the counter mid-measurement.
+#[cfg(test)]
+static COMRAK_INVOCATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static COMRAK_PROBE_LOCK: std::sync::RwLock<()> = std::sync::RwLock::new(());
+
 /// Render a Markdown source to email-ready HTML with inlined per-element
 /// styles. Returns `BodyTooLarge` when the source exceeds the configured
 /// byte cap; comrak is **not** invoked in that case.
@@ -74,6 +85,10 @@ pub fn render_markdown_to_email_html(markdown: &str) -> Result<String, MarkdownR
     if markdown.len() > MAX_MARKDOWN_BODY_BYTES {
         return Err(MarkdownRenderError::BodyTooLarge);
     }
+    #[cfg(test)]
+    let _probe = COMRAK_PROBE_LOCK.read().expect("probe lock poisoned");
+    #[cfg(test)]
+    COMRAK_INVOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let raw_html = markdown_to_html(markdown, comrak_options());
     Ok(inline_email_styles(&raw_html))
 }
@@ -131,7 +146,6 @@ const STYLED_TAGS: &[(&str, &str)] = &[
 /// (the renderer's defaults are appended to the end so inline overrides
 /// keep precedence). Unsupported tags are left untouched.
 pub fn inline_email_styles(html: &str) -> String {
-    use lol_html::html_content::ContentType;
     use lol_html::{HtmlRewriter, Settings, element};
 
     let mut output: Vec<u8> = Vec::with_capacity(html.len() + 1024);
@@ -165,11 +179,20 @@ pub fn inline_email_styles(html: &str) -> String {
         // The rewriter only fails on internal-state issues we don't expect
         // for our well-formed comrak output; fall back to the un-rewritten
         // HTML so a render still produces a usable message.
-        let _ = ContentType::Html;
         return html.to_string();
     }
 
-    String::from_utf8(output).unwrap_or_else(|_| html.to_string())
+    String::from_utf8(output).unwrap_or_else(|_| {
+        // Unreachable today: input is comrak-produced HTML which is always
+        // valid UTF-8, and lol_html only emits the bytes the handlers
+        // produce (also UTF-8 here). Surface a future regression in debug
+        // builds; release builds degrade gracefully to un-styled HTML.
+        debug_assert!(
+            false,
+            "rewriter produced invalid UTF-8 — silent degrade to un-styled HTML",
+        );
+        html.to_string()
+    })
 }
 
 #[cfg(test)]
@@ -190,13 +213,12 @@ mod tests {
 
     #[test]
     fn raw_html_in_markdown_is_neutralised() {
-        // The PRD intent (FR-A2) is that raw HTML embedded in Markdown
-        // never reaches the recipient as an executable element. With
-        // `unsafe = false` plus the GFM tagfilter, comrak strips
-        // disallowed tags (`<script>`, `<iframe>`, …) entirely; for
-        // arbitrary raw HTML it emits the input as a stripped /
-        // escaped form. Both shapes satisfy the security invariant —
-        // assert that, not the exact rendering.
+        // Raw HTML embedded in Markdown must never reach the recipient
+        // as an executable element. With `unsafe = false` plus the GFM
+        // tagfilter, comrak strips disallowed tags (`<script>`,
+        // `<iframe>`, …) entirely; for arbitrary raw HTML it emits the
+        // input as a stripped / escaped form. Both shapes satisfy the
+        // security invariant — assert that, not the exact rendering.
         let out = render_markdown_to_email_html("<script>alert(1)</script>").unwrap();
         assert!(
             !out.contains("<script>"),
@@ -339,14 +361,44 @@ mod tests {
 
     #[test]
     fn oversize_body_does_not_invoke_comrak() {
-        // We can't observe comrak directly, but we can assert that the
-        // returned error is BodyTooLarge for a body that — if comrak ran
-        // — would otherwise produce some HTML output. A body of all `>`
-        // characters would yield blockquote nodes in comrak; here, the
-        // size cap fires first and we get no rendered HTML at all.
+        // The renderer increments `COMRAK_INVOCATIONS` immediately before
+        // each comrak call (test-only) under a shared read-lock on
+        // `COMRAK_PROBE_LOCK`. Taking the write-lock here blocks every
+        // other concurrent renderer thread from touching the counter for
+        // the duration of the measurement, so a stable snapshot proves
+        // the early-return ran before comrak — not just that the error
+        // type matches.
+        use std::sync::atomic::Ordering;
+        let _probe = COMRAK_PROBE_LOCK.write().expect("probe lock poisoned");
+
+        let before = COMRAK_INVOCATIONS.load(Ordering::Relaxed);
         let body = ">".repeat(MAX_MARKDOWN_BODY_BYTES + 1);
         let err = render_markdown_to_email_html(&body).expect_err("expected BodyTooLarge");
+        let after_oversize = COMRAK_INVOCATIONS.load(Ordering::Relaxed);
+
         assert!(matches!(err, MarkdownRenderError::BodyTooLarge));
+        assert_eq!(
+            before, after_oversize,
+            "comrak must not be invoked for an oversize body (before={before}, after={after_oversize})",
+        );
+
+        // Sanity check: an under-cap call DOES tick the counter under the
+        // same write-lock window, so the counter is wired correctly and
+        // the equality above is meaningful rather than vacuous. The
+        // renderer's own read-lock acquisition is reentrant-safe here
+        // because `RwLock::read` from the writer thread on a write-held
+        // lock would deadlock — so we drop the write-lock first, take
+        // the read-lock implicitly via the renderer call, and re-take
+        // the write-lock after to read the counter.
+        drop(_probe);
+        let pre_tick = COMRAK_INVOCATIONS.load(Ordering::Relaxed);
+        let _ = render_markdown_to_email_html("# tick\n").unwrap();
+        let _probe2 = COMRAK_PROBE_LOCK.write().expect("probe lock poisoned");
+        let post_tick = COMRAK_INVOCATIONS.load(Ordering::Relaxed);
+        assert!(
+            post_tick > pre_tick,
+            "under-cap render should tick the counter (pre_tick={pre_tick}, post_tick={post_tick})",
+        );
     }
 
     #[test]
