@@ -15,7 +15,7 @@ AIMX/1 ERR <CODE> <reason>
 |-----------|---------|--------------|----------|
 | `MAILBOX` | From-mailbox not found | The `from_mailbox` does not exist in `config.toml` or is not owned by you | Provision a mailbox owned by your uid via `mailbox_create(name)` over MCP. Cross-uid creates remain operator-only — `sudo aimx mailboxes create <name> --owner <other>`. |
 | `EACCES`  | Not authorized | Caller uid does not own the target mailbox | Confirm via `mailbox_list` that you own the mailbox you are targeting |
-| `DOMAIN`  | Sender domain mismatch | The sender domain does not match the configured primary domain | Use the correct domain; check `/etc/aimx/config.toml` |
+| `DOMAIN`  | Sender domain mismatch | The sender domain does not match the configured primary domain. **Through `email_send` over MCP this is unreachable** — the daemon derives the domain from `mailbox_list().address` automatically | If you saw this, you took the CLI path with a hand-typed `--from <addr>`. Switch to `email_send(from_mailbox: "<local-part>", ...)` |
 | `SIGN`    | DKIM signing failed | DKIM private key missing or corrupted | Re-run `aimx setup` to regenerate keys |
 | `DELIVERY`| Remote MX rejected mail | Recipient server refused the message (permanent) | Check the reason: invalid recipient, blocked sender, policy rejection |
 | `TEMP`    | Temporary delivery failure | Recipient server unavailable or rate-limiting | Retry later. Transient network or server issue |
@@ -49,14 +49,18 @@ sudo aimx serve
 
 ### "sender domain does not match aimx domain"
 
-The `From:` address domain does not match the primary domain configured in
-`/etc/aimx/config.toml`.
+The `From:` address domain does not match the configured primary domain.
 
-**Cause:** Sending from a domain aimx is not configured for.
+**Through `email_send` over MCP this error cannot occur** — the daemon
+resolves the full From address from `mailbox_list().address` for the
+mailbox you named. If you hit this, you took the CLI path with a
+hand-typed `--from <addr>`.
 
-**Recovery:** Verify the `domain` field in `config.toml`. aimx only allows
-sending from the configured primary domain. Any local part is accepted, but
-the domain must match exactly (case-insensitive).
+**Recovery:** Switch to MCP. Call
+`email_send(from_mailbox: "<local-part>", ...)` and let the daemon
+construct the full address. If you genuinely need the domain string
+for some other reason, call `mailbox_list()` and use the substring
+after `@` in any `address` field — there is no other API for it.
 
 ### Mailbox not found
 

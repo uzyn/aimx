@@ -46,15 +46,16 @@ counts.
 **Returns:** JSON array. One row per visible mailbox with these
 fields:
 
-| Field         | Type   | Description                                                                  |
-|---------------|--------|------------------------------------------------------------------------------|
-| `name`        | string | Mailbox name (the local part).                                               |
-| `inbox_path`  | string | Absolute path to the inbox directory (`/var/lib/aimx/inbox/<name>`).         |
-| `sent_path`   | string | Absolute path to the sent directory (`/var/lib/aimx/sent/<name>`).           |
-| `total`       | number | Total emails in the inbox.                                                   |
-| `unread`      | number | Number of inbox emails with `read = false` in the frontmatter.               |
-| `sent_count`  | number | Total emails in the sent folder.                                             |
-| `registered`  | bool   | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
+| Field         | Type            | Description                                                                  |
+|---------------|-----------------|------------------------------------------------------------------------------|
+| `name`        | string          | Mailbox name (the local part).                                               |
+| `address`     | string \| null  | Full address `<name>@<domain>` for registered mailboxes; `null` for unregistered stray on-disk dirs. **The substring after `@` is the daemon's primary domain — there is no other API for this.** |
+| `inbox_path`  | string          | Absolute path to the inbox directory (`/var/lib/aimx/inbox/<name>`).         |
+| `sent_path`   | string          | Absolute path to the sent directory (`/var/lib/aimx/sent/<name>`).           |
+| `total`       | number          | Total emails in the inbox.                                                   |
+| `unread`      | number          | Number of inbox emails with `read = false` in the frontmatter.               |
+| `sent_count`  | number          | Total emails in the sent folder.                                             |
+| `registered`  | bool            | `true` for mailboxes in `config.toml`; `false` for stray on-disk dirs only.  |
 
 The empty case returns `[]` (a JSON empty array), never a "no
 mailboxes" string. Mailboxes you do not own are simply absent from
@@ -69,6 +70,7 @@ mailbox_list()
 → [
     {
       "name": "agent",
+      "address": "agent@your.tld",
       "inbox_path": "/var/lib/aimx/inbox/agent",
       "sent_path": "/var/lib/aimx/sent/agent",
       "total": 12,
@@ -289,6 +291,9 @@ custom threading chain.
 
 **Example, default Markdown:**
 ```
+# `from_mailbox` is the local part only. The daemon derives the
+# full From address from mailbox_list().address — you do not
+# need to know the configured domain.
 email_send(
   from_mailbox: "agent",
   to: "alice@example.com",
