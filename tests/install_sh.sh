@@ -8,6 +8,14 @@
 # real filesystem or network. Sourcing install.sh under INSTALL_SH_TEST=1
 # skips the auto-invocation of `main` at the bottom of the script.
 
+# This file deliberately uses single-quoted strings for printf literals
+# (containing backticks and ${...} for human-facing display) and grep
+# patterns (containing escaped \${...} that must stay literal). Expanding
+# any of them would corrupt either the test output or the regex match,
+# so SC2016 is suppressed file-wide rather than per-line on each of the
+# ~20 sites where the idiom appears.
+# shellcheck disable=SC2016
+
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -207,16 +215,35 @@ else
 fi
 
 # (c) The redirected `exec ${SUDO} aimx setup </dev/tty` form must appear
-#     exactly once and its preceding line must be an `elif [ -e /dev/tty`
-#     guard (i.e., reached only when [ -t 0 ] was already false).
+#     exactly once and the nearest preceding code line must be an
+#     `elif [ -e /dev/tty` guard (i.e., reached only when [ -t 0 ] was
+#     already false). We walk back over comments and blank lines so
+#     intervening shellcheck directives or clarifying comments don't
+#     break the structural assertion.
+_nearest_code_line() {
+    # Print the nearest preceding non-comment, non-blank line of $1's
+    # parent file, where $1 is a 1-based line number. Returns empty
+    # string when no such line exists within 10 lines above.
+    _bound=$(($1 - 10))
+    [ "${_bound}" -lt 1 ] && _bound=1
+    _i=$(($1 - 1))
+    while [ "${_i}" -ge "${_bound}" ]; do
+        _t="$(sed -n "${_i}p" "$2")"
+        case "${_t}" in
+            ''|[[:space:]]*'#'*|'#'*) _i=$((_i - 1)); continue ;;
+            *) printf '%s' "${_t}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 _redirected_line="$(grep -n 'exec \${SUDO} aimx setup </dev/tty' "${INSTALL_SH}" || true)"
 _redirected_count="$(printf '%s\n' "${_redirected_line}" | grep -c . || true)"
 if [ "${_redirected_count:-0}" -eq 1 ]; then
     PASS=$((PASS + 1))
     printf '  ok  redirected handoff appears exactly once\n'
     _ln="$(printf '%s' "${_redirected_line}" | cut -d: -f1)"
-    _prev_ln=$((_ln - 1))
-    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    _prev_text="$(_nearest_code_line "${_ln}" "${INSTALL_SH}" || true)"
     case "${_prev_text}" in
         *"elif [ -e /dev/tty ]"*)
             PASS=$((PASS + 1))
@@ -225,7 +252,7 @@ if [ "${_redirected_count:-0}" -eq 1 ]; then
         *)
             FAIL=$((FAIL + 1))
             FAILED_NAMES="${FAILED_NAMES} tty-stdin-redirect-gate"
-            printf '  FAIL redirected handoff not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            printf '  FAIL redirected handoff not gated by elif [ -e /dev/tty ] (nearest code: %s)\n' "${_prev_text}" >&2
             ;;
     esac
 else
@@ -239,8 +266,7 @@ fi
 _sudov_line="$(grep -n 'sudo -v </dev/tty' "${INSTALL_SH}" || true)"
 if [ -n "${_sudov_line}" ]; then
     _ln="$(printf '%s' "${_sudov_line}" | head -n1 | cut -d: -f1)"
-    _prev_ln=$((_ln - 1))
-    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    _prev_text="$(_nearest_code_line "${_ln}" "${INSTALL_SH}" || true)"
     case "${_prev_text}" in
         *"elif [ -e /dev/tty ]"*)
             PASS=$((PASS + 1))
@@ -249,7 +275,7 @@ if [ -n "${_sudov_line}" ]; then
         *)
             FAIL=$((FAIL + 1))
             FAILED_NAMES="${FAILED_NAMES} sudo-v-redirect-gate"
-            printf '  FAIL sudo -v </dev/tty not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            printf '  FAIL sudo -v </dev/tty not gated by elif [ -e /dev/tty ] (nearest code: %s)\n' "${_prev_text}" >&2
             ;;
     esac
 else
@@ -354,6 +380,7 @@ else
     printf '  FAIL original config.toml still present\n' >&2
 fi
 # Some config.toml.bak-* must exist.
+# shellcheck disable=SC2010 # tmpdir filenames are test-controlled (config.toml.bak-<utc>-<pid>)
 _bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
 assert_contains "backup file created" "${_bak}" "config.toml.bak-"
 
@@ -699,7 +726,7 @@ _out="$(
     sh "${INSTALL_SH}" --port-check-only --help 2>&1
 )" || _rc=$?
 assert_zero "--port-check-only --help exits 0" "${_rc}"
-assert_contains "--port-check-only --help prints help" "${_out}" "aimx install script"
+assert_contains "--port-check-only --help prints help" "${_out}" "AIMX install script"
 
 # `install.sh --help` mentions port-check-only.
 _rc=0
@@ -730,7 +757,7 @@ _out="$(
         print_port_check_banner
     ' 2>&1
 )"
-assert_contains "port-check banner shows connectivity title" "${_out}" "aimx port 25 connectivity check"
+assert_contains "port-check banner shows connectivity title" "${_out}" "AIMX port 25 connectivity check"
 assert_contains "port-check banner notes no install" "${_out}" "no install will be performed"
 
 # ---------------------------------------------------------------------------
@@ -1134,6 +1161,7 @@ _out="$(
 assert_zero "backup_existing_config succeeds with empty SUDO (root, no sudo)" "${_rc}"
 assert_contains "SUDO is empty on root" "${_out}" "SUDO=[]"
 # The backup file should exist even though sudo was never called.
+# shellcheck disable=SC2010 # tmpdir filenames are test-controlled (config.toml.bak-<utc>-<pid>)
 _bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
 assert_contains "backup created via empty SUDO" "${_bak}" "config.toml.bak-"
 
@@ -1180,8 +1208,119 @@ assert_not_contains "shell does not print checklist" "${_out}" "Preflight checks
 assert_not_contains "shell does not print step 6 title" "${_out}" "Set up MCP for agent"
 
 # Dry-run must NOT run a port check (no port-check banner emitted).
-assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "aimx port 25 connectivity check"
+assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "AIMX port 25 connectivity check"
 assert_not_contains "dry-run does not show outbound check line" "${_out}" "Outbound port 25"
+
+# Dry-run + equal-version + no-force must stay non-interactive: the
+# prompt_reinstall recovery prompt is for live re-runs only. Auditing
+# the script with AIMX_DRY_RUN=1 must never block on operator input,
+# matching pre-PR behavior on this branch.
+cat > "${_tmp}/bin/aimx" <<'AIMXEOF'
+#!/bin/sh
+# Fake aimx that only knows how to satisfy parse_installed_tag.
+case "$1" in
+    --version) echo "aimx 0.1.0 (deadbeef) x86_64-unknown-linux-gnu built 2026-01-01" ;;
+    *) exit 0 ;;
+esac
+AIMXEOF
+chmod +x "${_tmp}/bin/aimx"
+
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_PREFIX="${_tmp}/bin" \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)"
+assert_contains "dry-run+equal-version reports already-installed" "${_out}" "AIMX 0.1.0 is already installed"
+assert_not_contains "dry-run+equal-version does not invoke prompt_reinstall" "${_out}" "Re-run setup to (re)configure"
+
+rm -f "${_tmp}/bin/aimx"
+
+# ---------------------------------------------------------------------------
+# 9. prompt_reinstall — equal-version re-run flow
+# ---------------------------------------------------------------------------
+#
+# When `install.sh` finds the binary already at the target tag and --force
+# was not passed, it asks the operator whether to re-run `aimx setup`.
+# The helper is structured around an overridable `_prompt_read` so tests
+# can stub the answer without faking /dev/tty. The real `_prompt_read`
+# owns the prompt printf and gates it on TTY availability — that's why
+# stubbing `_prompt_read` here also bypasses the prompt printing.
+
+echo "# prompt_reinstall"
+
+# Cover every accept-list value (y, Y, yes, YES, Yes) so a future
+# contributor cannot quietly narrow the case match in prompt_reinstall.
+for _accept in y Y yes YES Yes; do
+    _out="$(
+        INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+            . "'"${INSTALL_SH}"'"
+            _prompt_read() { _ans="'"${_accept}"'"; }
+            if prompt_reinstall; then echo YES; else echo NO; fi
+        ' 2>&1
+    )"
+    assert_contains "prompt_reinstall accepts ${_accept}" "${_out}" "YES"
+done
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans="n"; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall returns 1 on n" "${_out}" "NO"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { _ans=""; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall defaults to no on empty input" "${_out}" "NO"
+
+_out="$(
+    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        _prompt_read() { return 1; }
+        if prompt_reinstall; then echo YES; else echo NO; fi
+    ' 2>&1
+)"
+assert_contains "prompt_reinstall returns 1 when no TTY" "${_out}" "NO"
+# Regression guard: when _prompt_read signals no-TTY, the prompt question
+# itself must not have been printed. Pre-fix the printf lived in
+# prompt_reinstall and fired before the TTY check, leaving a stray
+# "AIMX is already installed..." question in `curl | sh </dev/null`
+# / CI logs even though the script exited 0 cleanly.
+assert_not_contains "prompt_reinstall stays quiet on no TTY" "${_out}" "Re-run setup to (re)configure"
+
+# ---------------------------------------------------------------------------
+# 10. AIMX branding sweep — no lowercase brand-as-noun in install.sh prose
+# ---------------------------------------------------------------------------
+#
+# Lowercase `aimx` is fine for command literals (`aimx setup`), service
+# unit names (`aimx.service`), paths (`/etc/aimx/...`), and the GitHub
+# repo identifier (`uzyn/aimx`). It is NOT fine when the brand is the
+# subject/object of an English sentence in operator-facing strings.
+# Catch the canonical regressions: "installing aimx", "aimx is", and
+# "aimx <ver> installed/upgraded".
+
+echo "# branding"
+
+_brand_hits="$(grep -nE '(installing|installed|upgraded) aimx\b' "${INSTALL_SH}" || true)"
+assert_eq "no 'installing/installed/upgraded aimx' in install.sh" "" "${_brand_hits}"
+
+_brand_hits="$(grep -nE '\baimx is\b' "${INSTALL_SH}" || true)"
+assert_eq "no 'aimx is' prose in install.sh" "" "${_brand_hits}"
+
+# `aimx <SEMVER>` prose ("aimx 0.0.7 is already installed"). Allow path
+# fragments like `aimx-0.0.7-...` (the hyphen separates them) and shell
+# redirects like `aimx 2>/dev/null` (the `>` does). The regex requires
+# the digit-dot-digit shape that real version tokens always have.
+_brand_hits="$(grep -nE 'aimx [0-9]+\.[0-9]' "${INSTALL_SH}" || true)"
+assert_eq "no 'aimx <semver>' prose in install.sh" "" "${_brand_hits}"
 
 # ---------------------------------------------------------------------------
 # Report

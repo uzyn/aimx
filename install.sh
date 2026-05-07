@@ -114,7 +114,7 @@ ui_success() {
 print_install_banner() {
     printf '\n' >&2
     printf '%s\n' "$(_ui_paint '1;35' 'AIMX installer')" >&2
-    printf '%s\n' "$(_ui_paint 2 '  downloading and installing aimx...')" >&2
+    printf '%s\n' "$(_ui_paint 2 '  downloading and installing AIMX...')" >&2
     printf '\n' >&2
 }
 
@@ -122,7 +122,7 @@ print_install_banner() {
 # is set, so it is visually obvious nothing is installing.
 print_port_check_banner() {
     printf '\n' >&2
-    printf '%s\n' "$(_ui_paint '1;35' 'aimx port 25 connectivity check')" >&2
+    printf '%s\n' "$(_ui_paint '1;35' 'AIMX port 25 connectivity check')" >&2
     printf '%s\n' "$(_ui_paint 2 '  no install will be performed')" >&2
     printf '\n' >&2
 }
@@ -167,7 +167,7 @@ download() {
 
 help() {
     cat <<'EOF'
-aimx install script
+AIMX install script
 
 USAGE:
     install.sh [FLAGS]
@@ -247,6 +247,37 @@ resolve_sudo_prefix() {
     fi
 }
 
+# prompt_reinstall — ask the operator whether to re-run `aimx setup`
+# when the binary is already at the target version. Returns 0 on yes,
+# 1 on no / no usable TTY. Default is no (Enter = no), so non-interactive
+# callers (CI, fully-scripted) keep today's exit-0 semantics.
+#
+# _prompt_read prints the prompt only when a TTY is available for the
+# answer. Same TTY logic as ensure_sudo and the post-install handoff:
+# prefer the script's own stdin if it's already a terminal; fall back
+# to /dev/tty when it's a pipe (curl | sh); otherwise no prompt at all
+# (so `curl | sh </dev/null` stays quiet — no stray question in CI logs).
+_prompt_read() {
+    if [ -t 0 ]; then
+        printf '%s' "$1" >&2
+        read -r _ans
+    elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        printf '%s' "$1" >&2
+        read -r _ans </dev/tty
+    else
+        return 1
+    fi
+}
+
+prompt_reinstall() {
+    _ans=""
+    _prompt_read 'AIMX is already installed. Re-run setup to (re)configure it? [y/N] ' || return 1
+    case "${_ans}" in
+        y | Y | yes | YES | Yes) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 ensure_sudo() {
     _euid="$(id -u 2>/dev/null || echo 0)"
     if [ "${_euid}" -eq 0 ]; then
@@ -267,6 +298,7 @@ ensure_sudo() {
             if [ -t 0 ]; then
                 sudo -v || _sudo_rc=$?
             elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+                # shellcheck disable=SC2024 # /dev/tty feeds sudo's password prompt under curl|sh, not a privileged file through sudo
                 (sudo -v </dev/tty) || _sudo_rc=$?
             else
                 sudo -v || _sudo_rc=$?
@@ -331,7 +363,7 @@ detect_os() {
     case "${_os}" in
         Linux) printf 'linux' ;;
         *)
-            err "aimx is Linux-only; detected ${_os}. See ${UNSUPPORTED_DOC}"
+            err "AIMX is Linux-only; detected ${_os}. See ${UNSUPPORTED_DOC}"
             ;;
     esac
 }
@@ -750,6 +782,7 @@ port_check_ensure_inbound_privilege() {
         if [ -t 0 ]; then
             sudo -v || _sudo_rc=$?
         elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+            # shellcheck disable=SC2024 # /dev/tty feeds sudo's password prompt under curl|sh, not a privileged file through sudo
             (sudo -v </dev/tty) || _sudo_rc=$?
         else
             sudo -v || _sudo_rc=$?
@@ -888,7 +921,7 @@ port_check_inbound() {
         # /probe can't tell aimx apart from Postfix/Sendmail/Exim, so a
         # green [ok] here is only meaningful if the holder is aimx.
         # Mirrors `aimx portcheck`'s Port25Status::OtherProcess handling.
-        ui_warn "port 25 is held by another process; verify it's aimx before running setup"
+        ui_warn "port 25 is held by another process; verify it's AIMX before running setup"
     else
         # Free or unknown: spawn a temp Python listener if available.
         if ! port_check_have_python3; then
@@ -1225,12 +1258,22 @@ main() {
             _cmp="$(compare_tags "${_installed_tag}" "${TAG}")"
             case "${_cmp}" in
                 equal)
-                    if [ "${FORCE}" -ne 1 ]; then
-                        say "aimx ${_installed_tag} is already installed (pass --force to re-install)"
+                    if [ "${FORCE}" -eq 1 ]; then
+                        say "re-installing ${TAG} (--force)"
+                        _is_upgrade=1
+                    elif [ "${DRY_RUN}" != "1" ] && prompt_reinstall; then
+                        # Binary is already correct; skip the swap and
+                        # jump straight to the wizard. backup_existing_config
+                        # below covers any partial config from an aborted run.
+                        # Dry-run never prompts — auditing the script must
+                        # stay non-interactive, matching pre-PR behavior on
+                        # the equal-version branch.
+                        _skip_swap=1
+                        _is_upgrade=0
+                    else
+                        say "AIMX ${_installed_tag} is already installed (pass --force to re-install)"
                         exit 0
                     fi
-                    say "re-installing ${TAG} (--force)"
-                    _is_upgrade=1
                     ;;
                 newer)
                     err "installed ${_installed_tag} is newer than target ${TAG}; run 'aimx upgrade --version ${TAG} --force' to downgrade explicitly"
@@ -1265,15 +1308,19 @@ main() {
         fi
     fi
 
-    # Download + extract.
-    _tarball="${_td}/${_asset}"
-    say "downloading ${_asset}"
-    download "${_url}" "${_tarball}"
-    verbose "extracting ${_tarball}"
-    (cd "${_td}" && tar -xzf "${_asset}") || err "tar extract failed"
-    _staged="${_td}/aimx-${_version}-${_artifact_target}/aimx"
-    if [ ! -x "${_staged}" ]; then
-        err "extracted tarball missing executable aimx at expected path"
+    # Download + extract. Skipped on the equal-version re-run path
+    # (operator answered "y" to prompt_reinstall) — the binary on disk
+    # already matches the target tag, so we have nothing to download.
+    if [ "${_skip_swap:-0}" -ne 1 ]; then
+        _tarball="${_td}/${_asset}"
+        say "downloading ${_asset}"
+        download "${_url}" "${_tarball}"
+        verbose "extracting ${_tarball}"
+        (cd "${_td}" && tar -xzf "${_asset}") || err "tar extract failed"
+        _staged="${_td}/aimx-${_version}-${_artifact_target}/aimx"
+        if [ ! -x "${_staged}" ]; then
+            err "extracted tarball missing executable aimx at expected path"
+        fi
     fi
 
     if [ "${_is_upgrade}" -eq 1 ]; then
@@ -1324,18 +1371,24 @@ main() {
         fi
 
         if [ -n "${_installed_tag}" ]; then
-            ui_success "aimx upgraded from ${_installed_tag} to ${TAG}"
+            ui_success "AIMX upgraded from ${_installed_tag} to ${TAG}"
         else
-            ui_success "aimx installed at ${TAG}"
+            ui_success "AIMX installed at ${TAG}"
         fi
-        say "upgrade complete. Run 'aimx doctor' for health."
+        say "Upgrade complete. Run 'aimx doctor' for health."
         exit 0
     fi
 
-    # Fresh install path.
-    ${SUDO} install -m 0755 "${_staged}" "${_install_path}" \
-        || err "install failed writing ${_install_path}"
-    ui_success "aimx ${TAG} installed to ${_install_path}"
+    # Fresh install path. On the equal-version re-run path we skip the
+    # binary swap entirely (already at target tag) and fall through to
+    # backup_existing_config + `exec aimx setup` below.
+    if [ "${_skip_swap:-0}" -ne 1 ]; then
+        ${SUDO} install -m 0755 "${_staged}" "${_install_path}" \
+            || err "install failed writing ${_install_path}"
+        ui_success "AIMX ${TAG} installed to ${_install_path}"
+    else
+        ui_info "Re-running AIMX setup (binary unchanged)"
+    fi
 
     # Hand off to the binary. `aimx setup` owns the welcome banner, the
     # six-step checklist, the agents setup drop-through, and the closing
