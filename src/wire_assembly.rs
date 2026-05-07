@@ -338,23 +338,42 @@ fn extract_name_param(content_type: &str) -> Option<String> {
     extract_quoted_param(content_type, "name")
 }
 
+/// Extract a parameter value from a structured header value (e.g.
+/// `Content-Type` / `Content-Disposition`). Parameter name lookup is
+/// delimiter-aware: matches happen only against tokens that follow the
+/// header value's primary value or another `;`-separated segment, so
+/// asking for `name` will NOT spuriously match the `name=` substring
+/// inside `filename=`. Parameter name comparison is case-insensitive.
+/// Quoted values strip the surrounding `"` and stop at the closing `"`;
+/// unquoted values run until the next `;` or whitespace.
 fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
-    let lower = s.to_ascii_lowercase();
-    let key = format!("{name}=");
-    let pos = lower.find(&key)?;
-    let rest = &s[pos + key.len()..];
-    if let Some(stripped) = rest.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        Some(stripped[..end].to_string())
-    } else {
-        let end = rest
+    let lower_name = name.to_ascii_lowercase();
+    // Skip the primary value (everything before the first `;`); parameters
+    // start after that. If there is no `;`, there are no parameters.
+    let after_primary = s.split_once(';')?.1;
+    for segment in after_primary.split(';') {
+        let segment = segment.trim();
+        let (raw_name, raw_value) = match segment.split_once('=') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        if !raw_name.trim().eq_ignore_ascii_case(&lower_name) {
+            continue;
+        }
+        let value = raw_value.trim_start();
+        if let Some(stripped) = value.strip_prefix('"') {
+            let end = stripped.find('"')?;
+            return Some(stripped[..end].to_string());
+        }
+        let end = value
             .find(|c: char| c == ';' || c.is_whitespace())
-            .unwrap_or(rest.len());
+            .unwrap_or(value.len());
         if end == 0 {
             return None;
         }
-        Some(rest[..end].to_string())
+        return Some(value[..end].to_string());
     }
+    None
 }
 
 fn decode_base64(bytes: &[u8]) -> Option<Vec<u8>> {
@@ -1005,5 +1024,98 @@ mod tests {
         let out = assemble_wire_message(&req, "").unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Content-Transfer-Encoding: 7bit"));
+    }
+
+    #[test]
+    fn extract_quoted_param_does_not_match_name_inside_filename() {
+        // Regression: `name=` is a substring of `filename=`. A plain
+        // `find()` lookup would incorrectly return `"doc.pdf"` here.
+        let header = "application/pdf; filename=\"doc.pdf\"";
+        assert_eq!(extract_quoted_param(header, "name"), None);
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("doc.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_param_finds_explicit_name_alongside_filename() {
+        // When both params are present each lookup returns its own value.
+        let header = "application/pdf; name=\"display.pdf\"; filename=\"stored.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "name"),
+            Some("display.pdf".to_string())
+        );
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("stored.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_param_handles_unquoted_values() {
+        // The `else` arm of the parser: unquoted values (RFC 2045 token).
+        let header = "text/plain; charset=utf-8";
+        assert_eq!(
+            extract_quoted_param(header, "charset"),
+            Some("utf-8".to_string())
+        );
+        // Unquoted with a trailing parameter — value stops at `;`.
+        let header = "text/plain; charset=utf-8; format=flowed";
+        assert_eq!(
+            extract_quoted_param(header, "charset"),
+            Some("utf-8".to_string())
+        );
+        assert_eq!(
+            extract_quoted_param(header, "format"),
+            Some("flowed".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_quoted_param_is_case_insensitive_on_param_name() {
+        let header = "application/pdf; FileName=\"doc.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("doc.pdf".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_name_from_content_type_with_only_filename_returns_none() {
+        // End-to-end sanity for the bug the reviewer flagged: if a future
+        // caller asks `extract_name_param` on a Content-Type that carries
+        // only a filename-like param, it must return None — not the
+        // filename value.
+        let ct = "application/pdf; filename=\"doc.pdf\"";
+        assert_eq!(extract_name_param(ct), None);
+    }
+
+    #[test]
+    fn body_too_large_propagates_canonical_message_through_assembler() {
+        // The renderer caps the Markdown source at MAX_MARKDOWN_BODY_BYTES
+        // (5MB). When `assemble_wire_message` hands the body to the
+        // renderer the `BodyTooLarge` error must propagate as
+        // `AssembleError::Render(...)` and its `Display` output must
+        // carry the canonical actionable message verbatim, so the wire
+        // `ERR MALFORMED <reason>` (and any future dedicated code) reaches
+        // the operator with the actionable hint intact.
+        use crate::markdown_render::{MAX_MARKDOWN_BODY_BYTES, MarkdownRenderError};
+        let oversize = "a".repeat(MAX_MARKDOWN_BODY_BYTES + 1);
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", &oversize);
+        let err = assemble_wire_message(&req, "").expect_err("expected BodyTooLarge");
+        assert!(
+            matches!(
+                err,
+                AssembleError::Render(MarkdownRenderError::BodyTooLarge)
+            ),
+            "expected AssembleError::Render(BodyTooLarge), got {err:?}"
+        );
+        let rendered = err.to_string();
+        assert_eq!(
+            rendered,
+            "markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
+            "canonical BodyTooLarge message must reach the wire reason field verbatim"
+        );
     }
 }
