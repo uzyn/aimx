@@ -298,6 +298,7 @@ ensure_sudo() {
             if [ -t 0 ]; then
                 sudo -v || _sudo_rc=$?
             elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+                # shellcheck disable=SC2024 # /dev/tty feeds sudo's password prompt under curl|sh, not a privileged file through sudo
                 (sudo -v </dev/tty) || _sudo_rc=$?
             else
                 sudo -v || _sudo_rc=$?
@@ -781,6 +782,7 @@ port_check_ensure_inbound_privilege() {
         if [ -t 0 ]; then
             sudo -v || _sudo_rc=$?
         elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+            # shellcheck disable=SC2024 # /dev/tty feeds sudo's password prompt under curl|sh, not a privileged file through sudo
             (sudo -v </dev/tty) || _sudo_rc=$?
         else
             sudo -v || _sudo_rc=$?

@@ -8,6 +8,14 @@
 # real filesystem or network. Sourcing install.sh under INSTALL_SH_TEST=1
 # skips the auto-invocation of `main` at the bottom of the script.
 
+# This file deliberately uses single-quoted strings for printf literals
+# (containing backticks and ${...} for human-facing display) and grep
+# patterns (containing escaped \${...} that must stay literal). Expanding
+# any of them would corrupt either the test output or the regex match,
+# so SC2016 is suppressed file-wide rather than per-line on each of the
+# ~20 sites where the idiom appears.
+# shellcheck disable=SC2016
+
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -207,16 +215,35 @@ else
 fi
 
 # (c) The redirected `exec ${SUDO} aimx setup </dev/tty` form must appear
-#     exactly once and its preceding line must be an `elif [ -e /dev/tty`
-#     guard (i.e., reached only when [ -t 0 ] was already false).
+#     exactly once and the nearest preceding code line must be an
+#     `elif [ -e /dev/tty` guard (i.e., reached only when [ -t 0 ] was
+#     already false). We walk back over comments and blank lines so
+#     intervening shellcheck directives or clarifying comments don't
+#     break the structural assertion.
+_nearest_code_line() {
+    # Print the nearest preceding non-comment, non-blank line of $1's
+    # parent file, where $1 is a 1-based line number. Returns empty
+    # string when no such line exists within 10 lines above.
+    _bound=$(($1 - 10))
+    [ "${_bound}" -lt 1 ] && _bound=1
+    _i=$(($1 - 1))
+    while [ "${_i}" -ge "${_bound}" ]; do
+        _t="$(sed -n "${_i}p" "$2")"
+        case "${_t}" in
+            ''|[[:space:]]*'#'*|'#'*) _i=$((_i - 1)); continue ;;
+            *) printf '%s' "${_t}"; return 0 ;;
+        esac
+    done
+    return 1
+}
+
 _redirected_line="$(grep -n 'exec \${SUDO} aimx setup </dev/tty' "${INSTALL_SH}" || true)"
 _redirected_count="$(printf '%s\n' "${_redirected_line}" | grep -c . || true)"
 if [ "${_redirected_count:-0}" -eq 1 ]; then
     PASS=$((PASS + 1))
     printf '  ok  redirected handoff appears exactly once\n'
     _ln="$(printf '%s' "${_redirected_line}" | cut -d: -f1)"
-    _prev_ln=$((_ln - 1))
-    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    _prev_text="$(_nearest_code_line "${_ln}" "${INSTALL_SH}" || true)"
     case "${_prev_text}" in
         *"elif [ -e /dev/tty ]"*)
             PASS=$((PASS + 1))
@@ -225,7 +252,7 @@ if [ "${_redirected_count:-0}" -eq 1 ]; then
         *)
             FAIL=$((FAIL + 1))
             FAILED_NAMES="${FAILED_NAMES} tty-stdin-redirect-gate"
-            printf '  FAIL redirected handoff not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            printf '  FAIL redirected handoff not gated by elif [ -e /dev/tty ] (nearest code: %s)\n' "${_prev_text}" >&2
             ;;
     esac
 else
@@ -239,8 +266,7 @@ fi
 _sudov_line="$(grep -n 'sudo -v </dev/tty' "${INSTALL_SH}" || true)"
 if [ -n "${_sudov_line}" ]; then
     _ln="$(printf '%s' "${_sudov_line}" | head -n1 | cut -d: -f1)"
-    _prev_ln=$((_ln - 1))
-    _prev_text="$(sed -n "${_prev_ln}p" "${INSTALL_SH}")"
+    _prev_text="$(_nearest_code_line "${_ln}" "${INSTALL_SH}" || true)"
     case "${_prev_text}" in
         *"elif [ -e /dev/tty ]"*)
             PASS=$((PASS + 1))
@@ -249,7 +275,7 @@ if [ -n "${_sudov_line}" ]; then
         *)
             FAIL=$((FAIL + 1))
             FAILED_NAMES="${FAILED_NAMES} sudo-v-redirect-gate"
-            printf '  FAIL sudo -v </dev/tty not gated by elif [ -e /dev/tty ] (prev line: %s)\n' "${_prev_text}" >&2
+            printf '  FAIL sudo -v </dev/tty not gated by elif [ -e /dev/tty ] (nearest code: %s)\n' "${_prev_text}" >&2
             ;;
     esac
 else
@@ -354,6 +380,7 @@ else
     printf '  FAIL original config.toml still present\n' >&2
 fi
 # Some config.toml.bak-* must exist.
+# shellcheck disable=SC2010 # tmpdir filenames are test-controlled (config.toml.bak-<utc>-<pid>)
 _bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
 assert_contains "backup file created" "${_bak}" "config.toml.bak-"
 
@@ -1134,6 +1161,7 @@ _out="$(
 assert_zero "backup_existing_config succeeds with empty SUDO (root, no sudo)" "${_rc}"
 assert_contains "SUDO is empty on root" "${_out}" "SUDO=[]"
 # The backup file should exist even though sudo was never called.
+# shellcheck disable=SC2010 # tmpdir filenames are test-controlled (config.toml.bak-<utc>-<pid>)
 _bak="$(ls "${_tmp}/etc/aimx/" 2>/dev/null | grep '^config.toml.bak-' || true)"
 assert_contains "backup created via empty SUDO" "${_bak}" "config.toml.bak-"
 
