@@ -750,35 +750,13 @@ footer a:hover {
   .compare { font-size: 0.3em; }
 }
 
-/* Animations are progressive enhancement: default state is visible.
-   The .js class is set by an inline script in <body> before paint, so
-   real users see the rise-in animation. Headless / no-JS / no-CSS-anim
-   browsers see fully-rendered content immediately. */
-.js .fade { opacity: 0; transform: translateY(8px); animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
-.js .fade.d1 { animation-delay: 0.05s; }
-.js .fade.d2 { animation-delay: 0.14s; }
-.js .fade.d3 { animation-delay: 0.24s; }
-.js .fade.d4 { animation-delay: 0.34s; }
-.js .fade.d5 { animation-delay: 0.44s; }
-.js .fade.d6 { animation-delay: 0.54s; }
-.js .fade.d7 { animation-delay: 0.64s; }
-.js .fade.d8 { animation-delay: 0.74s; }
-
-@keyframes rise {
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .js .fade { opacity: 1; transform: none; animation: none; }
-}
 </style>
 </head>
 <body>
-<script>document.documentElement.classList.add('js');</script>
 <div class="grain"></div>
 <div class="wrap">
   <header>
-    <div class="header-left fade d1">
+    <div class="header-left">
       <a class="brand" href="/">AIMX<span class="dot">.</span></a>
       <nav class="topnav" aria-label="Primary">
         <a href="/" class="active">home</a>
@@ -786,7 +764,7 @@ footer a:hover {
         <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
       </nav>
     </div>
-    <div class="header-right fade d1">
+    <div class="header-right">
       <div class="theme-toggle" role="group" aria-label="Color theme">
         <button type="button" data-mode="dark" aria-pressed="true" title="Dark mode">dark</button>
         <button type="button" data-mode="light" aria-pressed="false" title="Light mode">light</button>
@@ -795,28 +773,28 @@ footer a:hover {
   </header>
 
   <main>
-    <img class="mascot fade d2" src="/assets/aimx-pigeon.svg" alt="aimx mechanical pigeon mascot" width="260" height="260">
+    <img class="mascot" src="/assets/aimx-pigeon.svg" alt="aimx mechanical pigeon mascot" width="260" height="260">
 
-    <div class="eyebrow fade d3">AI Mail Exchange</div>
+    <div class="eyebrow">AI Mail Exchange</div>
 
-    <h1 class="fade d3">
-      You give your AI agent a server.
+    <h1 >
+      You give your AI agent a server.<br>
       <em>Why borrow someone else's inbox?</em>
     </h1>
 
-    <p class="pitch fade d4">
+    <p class="pitch d4">
       The internet's oldest protocol, <strong>rebuilt for AI agents.</strong><br>
       Your mail, your machine, end to end. No third parties.<br>
       Human-friendly setup. LLM-friendly everything else.<br>
       Free and open source.
     </p>
 
-    <div class="hero-ctas fade d4">
+    <div class="hero-ctas">
       <a class="btn primary" href="/book/">Read the book</a>
       <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Get the code</a>
     </div>
 
-    <div class="terminal fade d4" role="img" aria-label="Demo: AIMX CLI sending mail and showing the resulting Markdown file on disk">
+    <div class="terminal" role="img" aria-label="Demo: AIMX CLI sending mail and showing the resulting Markdown file on disk">
       <div class="terminal-header" aria-hidden="true">
         <span class="terminal-dots">
           <span class="terminal-dot red"></span>
@@ -828,12 +806,12 @@ footer a:hover {
       <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>aimx send alpha@friend.com --subject 'the report' --body 'See attached.'</span><span class="terminal-line terminal-out">delivered. message-id queued.</span><span class="terminal-line"><span class="terminal-prompt">$</span>ls /var/lib/aimx/sent/alpha/ | tail -1</span><span class="terminal-line terminal-out">2026-05-06-1430-3f9a-alpha-the-report.md</span></div>
     </div>
 
-    <aside class="caution fade d4" role="note">
+    <aside class="caution" role="note">
       <span class="label">Caution</span>
       <strong>This is a prerelease software</strong>. Expect breaking changes and unstable operations. Follow or contribute at <a href="https://github.com/uzyn/aimx" target="_blank">GitHub</a>.
     </aside>
 
-    <section class="block fade d5">
+    <section class="block">
       <h2 class="section-label">Why an inbox of its own</h2>
       <p class="prose">
         <em>An agent that lives behind your Gmail account is a tenant in someone else's tenant in someone else's house.</em> Every reply, every attachment, every check-in goes through three layers of OAuth and rate-limiting before it reaches your code. With its own MX record, the agent has an address you point to, an inbox it owns, and a delivery path it controls.
@@ -846,7 +824,7 @@ footer a:hover {
       </p>
     </section>
 
-    <section class="block fade d5">
+    <section class="block">
       <h2 class="section-label">What it is</h2>
       <p class="prose">
         AIMX is a self-hosted mail server for AI agents. One binary. One <code>aimx setup</code> command and your agents have their own email addresses on a domain you control. No Gmail, no OAuth, no SaaS.
@@ -859,7 +837,7 @@ footer a:hover {
       </p>
     </section>
 
-    <section class="block fade d6">
+    <section class="block">
       <h2 class="section-label">Where mail lives</h2>
       <p class="prose">
         Every message — inbound and outbound — is a Markdown file on your disk. Frontmatter is TOML. The body is the body. No <code>.eml</code>, no MIME parser, no database to back up.
@@ -879,7 +857,7 @@ Body, exactly as the sender wrote it.</pre>
       </p>
     </section>
 
-    <section class="block fade d6">
+    <section class="block">
       <h2 class="section-label">Works with</h2>
       <p class="prose">
         Eight harnesses out of the box. One command — <code>aimx agents setup</code> — wires the MCP server into whichever you use.
@@ -944,7 +922,7 @@ Body, exactly as the sender wrote it.</pre>
       </div>
     </section>
 
-    <section class="block fade d7">
+    <section class="block">
       <h2 class="section-label">Quick start</h2>
       <div class="terminal">
         <div class="terminal-header" aria-hidden="true">
@@ -976,7 +954,7 @@ Body, exactly as the sender wrote it.</pre>
       </p>
     </section>
 
-    <section class="block fade d7">
+    <section class="block">
       <h2 class="section-label">What&rsquo;s in the box</h2>
       <ul class="features">
         <li><strong>Single binary.</strong> Written in Rust. No runtime dependencies, no database, no relay.</li>
@@ -988,7 +966,7 @@ Body, exactly as the sender wrote it.</pre>
       </ul>
     </section>
 
-    <section class="block fade d8">
+    <section class="block">
       <h2 class="section-label">Why AIMX?</h2>
       <p class="prose">
         Sending mail through someone else's API is fine until your agent needs to receive a reply, run a hook on it, and own the audit trail. The trade-offs, side by side:
@@ -1059,7 +1037,7 @@ Body, exactly as the sender wrote it.</pre>
       </div>
     </section>
 
-    <section class="block fade d8 faq">
+    <section class="block faq">
       <h2 class="section-label">FAQ</h2>
       <details>
         <summary>Do I need a VPS for this?</summary>
