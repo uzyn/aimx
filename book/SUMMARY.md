@@ -8,6 +8,7 @@
 - [Configuration](configuration.md)
 - [Security](security.md)
 - [Mailboxes & Email](mailboxes.md)
+- [Markdown Email](markdown-email.md)
 - [Hooks & Trust](hooks.md)
 - [Hook Recipes](hook-recipes.md)
 - [MCP Server](mcp.md)

@@ -1,6 +1,6 @@
 [package]
 name = "aimx"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88.0"
 authors = ["U-Zyn Chua <chua@uzyn.com>"]

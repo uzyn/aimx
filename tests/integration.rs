@@ -2918,6 +2918,12 @@ fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
         sent_content.contains("# Hello"),
         "sent record body should preserve the Markdown source verbatim"
     );
+    // The audit-trail field declares the wire shape: default Markdown
+    // path stamps `outbound_format = "markdown"` (FR-F3).
+    assert!(
+        sent_content.contains("outbound_format = \"markdown\""),
+        "sent record must declare outbound_format = \"markdown\":\n{sent_content}"
+    );
     // No `.html` sibling appears.
     let any_html_sibling = std::fs::read_dir(&sent_dir)
         .unwrap()
@@ -3089,9 +3095,10 @@ fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
         "DKIM body hash must verify on text-only wire: signed={signed_header}, computed={computed}"
     );
 
-    // Sent record exists and carries the body verbatim. The
-    // `outbound_format = "text"` frontmatter field lands in a follow-on
-    // sprint; here we only assert the body content.
+    // Sent record exists and carries the body verbatim. The audit
+    // trail declares `outbound_format = "text"` so an operator
+    // browsing `sent/` can tell at a glance the recipient saw plain
+    // text — distinct from a default Markdown send (`"markdown"`).
     let sent_dir = tmp.path().join("sent").join("alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
@@ -3102,6 +3109,10 @@ fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
     assert!(
         sent_content.contains("Your code: 9999"),
         "sent record body must carry the plain text verbatim"
+    );
+    assert!(
+        sent_content.contains("outbound_format = \"text\""),
+        "sent record must declare outbound_format = \"text\" on --text-only path:\n{sent_content}"
     );
 
     stop_serve(child);
@@ -3216,12 +3227,15 @@ fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
         sent_content.contains("fallback text"),
         "sent record body must carry the --body text"
     );
-    // The custom HTML is part of the signed wire bytes (which the sent
-    // record persists in full), so we cannot assert its absence
-    // verbatim — but the .md body section that comes from `--body`
-    // must NOT be the custom HTML. A future `outbound_format = "html"`
-    // field plus single-source-of-truth body persistence will tighten
-    // this further.
+    // Audit-trail field declares the wire shape: `--html-body` path
+    // stamps `outbound_format = "html"` so an operator browsing
+    // `sent/` knows the recipient saw an operator-supplied HTML
+    // template (and that re-rendering the stored Markdown body would
+    // NOT reproduce the recipient's view).
+    assert!(
+        sent_content.contains("outbound_format = \"html\""),
+        "sent record must declare outbound_format = \"html\" on --html-body path:\n{sent_content}"
+    );
 
     // No `.html` sibling appears next to the sent record.
     let any_html_sibling = std::fs::read_dir(&sent_dir)
@@ -3238,6 +3252,228 @@ fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
     );
 
     stop_serve(child);
+}
+
+/// MCP `email_send` with `text_only=true` ships a single-part
+/// `text/plain` message verbatim — no Markdown rendering, no
+/// multipart wrapper. End-to-end: MCP stdio client → daemon UDS →
+/// file-drop transport → captured wire bytes. Mirrors the CLI-side
+/// `send_uds_end_to_end_text_only_emits_single_part_text_plain` so a
+/// regression in either layer surfaces independently.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_text_only_emits_single_part_text_plain() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "OTP delivery",
+            "body": "Your code: 9999",
+            "text_only": true,
+        }),
+    );
+    assert!(!is_tool_error(&resp), "email_send should succeed: {resp:?}");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "MCP text_only must produce text/plain wire: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("multipart/"),
+        "MCP text_only must produce single-part wire: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("Content-Type: text/html"),
+        "MCP text_only must not produce a text/html part: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Your code: 9999"),
+        "body must reach the wire verbatim: {payload_str}"
+    );
+
+    client.shutdown();
+    stop_serve(child);
+}
+
+/// MCP `email_send` with `html_body` produces a `multipart/alternative`
+/// where the operator's HTML appears in the `text/html` part verbatim
+/// (no inline `style="..."` attributes the renderer would have added).
+/// The custom HTML is NOT persisted to the sent record (FR-F5: only the
+/// `body` text part is stored; the operator's template is the source of
+/// truth elsewhere).
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_html_body_uses_supplied_html_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "Custom HTML layout",
+            "body": "fallback text",
+            "html_body": "<p>custom <b>html</b></p>",
+        }),
+    );
+    assert!(!is_tool_error(&resp), "email_send should succeed: {resp:?}");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "html_body wire must be multipart/alternative: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    assert!(
+        payload_str.contains("fallback text"),
+        "text part must carry body verbatim: {payload_str}"
+    );
+    let html_idx = payload_str
+        .find("Content-Type: text/html")
+        .expect("text/html part missing");
+    let html_section = &payload_str[html_idx..];
+    assert!(
+        html_section.contains("<p>custom <b>html</b></p>"),
+        "html part must carry html_body verbatim: {html_section}"
+    );
+    assert!(
+        !html_section.contains("style=\""),
+        "renderer must not be invoked on html_body MCP path: {html_section}"
+    );
+
+    client.shutdown();
+    stop_serve(child);
+}
+
+/// MCP `email_send` with both `text_only=true` and `html_body` set is
+/// rejected server-side before the UDS is opened. The error wording
+/// matches the codec's canonical message so operators see the same
+/// string regardless of which layer (clap, MCP, codec) fired the check.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_text_only_plus_html_body_rejected() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "conflict",
+            "body": "fallback",
+            "text_only": true,
+            "html_body": "<p>x</p>",
+        }),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "MCP must reject text_only + html_body before opening UDS: {resp:?}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("--text-only") && text.contains("--html-body"),
+        "MCP rejection must name both flags (matching the codec wording): {text}"
+    );
+    assert!(
+        text.contains("mutually exclusive"),
+        "MCP rejection must use the canonical 'mutually exclusive' wording: {text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// MCP `email_reply` with both `text_only=true` and `html_body` set is
+/// rejected server-side with the same canonical wording as
+/// `email_send`. The reply path has its own validation call site so a
+/// regression on one tool does not silently fix itself by leaning on
+/// the other tool's check.
+#[cfg(unix)]
+#[test]
+fn mcp_email_reply_text_only_plus_html_body_rejected() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    // The id need not exist — mutual-exclusion fires before the
+    // `validate_email_id` / `lookup_mailbox_row` walk would have
+    // returned a different error. The response wording proves the
+    // check fired in the right order (no UDS open, no parent-message
+    // read).
+    let resp = client.call_tool(
+        "email_reply",
+        serde_json::json!({
+            "mailbox": "alice",
+            "id": "2099-12-31-235959-nope",
+            "body": "fallback",
+            "text_only": true,
+            "html_body": "<p>x</p>",
+        }),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "email_reply must reject text_only + html_body: {resp:?}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("mutually exclusive"),
+        "reply rejection must use the canonical 'mutually exclusive' wording: {text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
 }
 
 /// `aimx send --text-only --html-body ...` is rejected at the CLI
