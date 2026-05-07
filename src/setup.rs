@@ -2407,7 +2407,17 @@ pub fn run_setup(
     // from the `/var/lib/aimx` default resolved below) so the `runuser`
     // re-exec passes `--data-dir <path>` through only when the operator
     // named a path on the command line.
-    let explicit_data_dir: Option<PathBuf> = data_dir.map(|p| p.to_path_buf());
+    //
+    // Canonicalize the path so the dropped-through child resolves it
+    // the same way regardless of cwd. Under `runuser -l` the child's
+    // cwd switches to the user's HOME, so a relative `--data-dir
+    // ./foo` would otherwise resolve against `$HOME` instead of root's
+    // cwd. `canonicalize` requires the path to exist; if it does not
+    // (e.g. operator passed `--data-dir /opt/new` for a fresh install)
+    // we fall back to the original `PathBuf` so the child still gets
+    // the operator's intended absolute path.
+    let explicit_data_dir: Option<PathBuf> =
+        data_dir.map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
     // Install the shared tracing subscriber up front so structured
     // warnings emitted from this path (notably the
     // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
@@ -2723,7 +2733,8 @@ fn print_closing_message(domain: &str) {
     println!();
 }
 
-/// Build the argv we'd hand to `runuser -u <sudo_user> --` so the drop-
+/// Build the argv we'd shell-quote and hand to
+/// `runuser -l <sudo_user> -s /bin/bash -- -ic "<...>"` so the drop-
 /// through re-execs `aimx agents setup` as the invoking user. Pure helper
 /// — no syscalls — so unit tests can assert on the exact argv without
 /// spinning up a process.
@@ -2762,13 +2773,26 @@ pub(crate) fn build_agents_setup_argv(
 /// Drive the drop-through to `aimx agents setup` and return an outcome
 /// the caller maps onto step 6's checklist state.
 ///
-/// 1. If `$SUDO_USER` is set and non-empty → `runuser -u $SUDO_USER --
-///    /proc/self/exe agents setup [--data-dir …]` via `Command::status()`
-///    so the parent `aimx setup` regains control after the TUI exits.
-///    The closing message is printed AFTER this call returns.
+/// 1. If `$SUDO_USER` is set and non-empty → re-exec the resolved aimx
+///    binary as the invoking user via
+///    `runuser -l $SUDO_USER -s /bin/bash -- -ic "<shell-quoted argv>"`.
+///    Control returns here once the child TUI exits so the closing
+///    message can print after `aimx agents setup` finishes.
 /// 2. If `$SUDO_USER` is unset → print the guidance message (naming
 ///    `--dangerously-allow-root` as the root-login option) and return
 ///    [`AgentsSetupOutcome::Skipped`].
+///
+/// We deliberately invoke bash with `-i` (interactive) so that
+/// `~/.bashrc` runs in full. Stock Ubuntu's `~/.bashrc` (seeded from
+/// `/etc/skel/.bashrc`) opens with a non-interactive guard that
+/// `return`s immediately when `$-` does not contain `i` — and any PATH
+/// edits below that guard are skipped. The canonical placements for
+/// `claude` (`~/.npm-global/bin` after `npm config set prefix
+/// '~/.npm-global'`) and the NVM loader both live below the guard, so
+/// without `-i` the dropped-through process can't find `claude` and
+/// MCP auto-registration silently lands in the `CliMissing` fallback.
+/// Forcing `-i` makes `$-` contain `i`, the guard falls through, and
+/// the PATH edits actually run.
 ///
 /// On spawn failure (e.g. `runuser` not installed on a stripped
 /// container image) print the same guidance and return
@@ -2833,11 +2857,38 @@ fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetup
 
     // Hand off via `Command::status()` so control returns here once the
     // TUI exits, allowing the closing message to print AFTER agents setup.
+    //
+    // Shape:
+    //   runuser -l <user> -s /bin/bash -- -ic "<shell-quoted argv>"
+    //
+    // The login flag (`-l`) initialises HOME, SHELL, USER, LOGNAME, and
+    // a baseline PATH from the user's profile chain. The interactive
+    // flag (`-i`) is what actually pulls `claude` into PATH on stock
+    // Ubuntu — see the function-level doc above for why a
+    // non-interactive shell skips the `~/.bashrc` body that exports
+    // `~/.npm-global/bin` (and seeds NVM).
+    //
+    // Pinning the shell to `/bin/bash` (rather than the user's login
+    // shell from `/etc/passwd`) keeps the `-i` flag meaningful: a user
+    // on zsh/fish would not source `~/.bashrc` and would re-introduce
+    // the original PATH gap. Bash is a stock package on every supported
+    // distro, so this is a safe assumption.
+    //
+    // The argv must be shell-quoted because the bash invocation reads
+    // the command from a single string passed after `-c` (here `-ic`).
+    let cmd = argv
+        .iter()
+        .map(|a| crate::agents_setup::posix_single_quote(&a.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
     match std::process::Command::new("runuser")
-        .arg("-u")
+        .arg("-l")
         .arg(&sudo_user)
+        .arg("-s")
+        .arg("/bin/bash")
         .arg("--")
-        .args(&argv)
+        .arg("-ic")
+        .arg(&cmd)
         .status()
     {
         Ok(status) if status.success() => AgentsSetupOutcome::Done,
@@ -6311,6 +6362,94 @@ owner = "aimx-catchall"
              string \"/proc/self/exe\" to runuser — runuser would \
              re-exec itself in its own /proc context"
         );
+    }
+
+    #[test]
+    fn drop_through_uses_interactive_bash_login_shell() {
+        // Regression guard for the runuser invocation shape. Stock
+        // Ubuntu's `~/.bashrc` (seeded from `/etc/skel/.bashrc`) opens
+        // with a non-interactive guard:
+        //
+        //   case $- in *i*) ;; *) return;; esac
+        //
+        // `runuser -l USER -c CMD` runs the user's login shell
+        // non-interactively, the guard returns, and the PATH edits
+        // below it (notably `~/.npm-global/bin` and the NVM loader)
+        // never execute. The drop-through MUST instead invoke an
+        // interactive bash to load `~/.bashrc` in full so `claude` is
+        // reachable when `aimx agents setup` re-execs.
+        //
+        // Lock the new shape (`-l`, `-s /bin/bash`, `--`, `-ic`) and
+        // forbid the old shape (`-u <user> --`, `/proc/self/exe`) by
+        // source-grepping the function body.
+        let source = include_str!("setup.rs");
+        let start = source
+            .find("fn drop_through_to_agents_setup(")
+            .expect("drop_through_to_agents_setup must exist");
+        let end = source[start..]
+            .find("\nfn ")
+            .map(|off| start + off)
+            .unwrap_or(source.len());
+        let body = &source[start..end];
+
+        // New shape: `runuser -l <user> -s /bin/bash -- -ic <cmd>`.
+        assert!(
+            body.contains(".arg(\"-l\")"),
+            "drop_through must use `runuser -l` (login shell) so the \
+             user's profile chain is sourced; got body without `-l`"
+        );
+        assert!(
+            body.contains(".arg(\"-s\")") && body.contains("/bin/bash"),
+            "drop_through must pin the shell to `/bin/bash` via `-s` so \
+             `-i` actually sources `~/.bashrc` regardless of the user's \
+             login-shell setting in /etc/passwd"
+        );
+        assert!(
+            body.contains(".arg(\"-ic\")"),
+            "drop_through must pass `-ic` to bash so `$-` contains `i` \
+             and stock Ubuntu's `~/.bashrc` non-interactive guard does \
+             NOT early-return — otherwise `~/.npm-global/bin` is missing \
+             from PATH and `claude` is unreachable"
+        );
+
+        // Old shape: must NOT call runuser via the non-login `-u` form
+        // that inherits sudo's scrubbed PATH.
+        assert!(
+            !(body.contains(".arg(\"-u\")")
+                && body.contains(".arg(&sudo_user)")
+                && body.contains(".arg(\"--\")")
+                && body.contains(".args(&argv)")),
+            "drop_through must NOT use the non-login `runuser -u USER -- argv` \
+             shape — it inherits sudo's scrubbed PATH and `claude` is \
+             unreachable on stock Ubuntu"
+        );
+
+        // The literal `/proc/self/exe` string must not be handed to
+        // `runuser` as argv[0]; the companion test
+        // `build_agents_setup_argv_uses_resolved_exe_path` already
+        // checks the `PathBuf::from(...)` shape. We add coverage for
+        // shell-quoted forms (`.arg("/proc/self/exe")`,
+        // `Path::new("/proc/self/exe")`, `PathBuf::from(...)`) so a
+        // future refactor that bypasses the helper still trips. Doc
+        // comments inside the function body that *explain* the trap
+        // are allowed; we filter those out before the search.
+        let code_only: String = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        for forbidden in [
+            ".arg(\"/proc/self/exe\")",
+            "Path::new(\"/proc/self/exe\")",
+            "PathBuf::from(\"/proc/self/exe\")",
+        ] {
+            assert!(
+                !code_only.contains(forbidden),
+                "drop_through must NOT hand the literal string \
+                 `/proc/self/exe` to runuser ({forbidden}); resolve via \
+                 `std::env::current_exe()` instead"
+            );
+        }
     }
 
     #[test]
