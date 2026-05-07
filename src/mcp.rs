@@ -666,7 +666,7 @@ fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
 /// `From:` out of the composed body itself and resolves the sender
 /// mailbox against its in-memory Config.
 fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
-    let composed = send::compose_message(args).map_err(|e| e.to_string())?;
+    let composed = send::compose_request(args).map_err(|e| e.to_string())?;
     let request = SendRequest {
         body: composed.message,
     };
