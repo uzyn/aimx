@@ -254,15 +254,34 @@ where
     // assemble the multipart/alternative (or nested multipart/mixed when
     // the client packed attachments) shape daemon-side. The signature is
     // appended to the Markdown source before rendering so a Markdown
-    // link in the signature renders as a clickable HTML anchor.
+    // link in the signature renders as a clickable HTML anchor. The two
+    // escape-hatch fields on the SEND frame select an alternate wire
+    // shape: `text_only=true` ships single-part text/plain, and
+    // `html_body=Some(..)` ships multipart/alternative whose HTML part
+    // is the operator-supplied bytes verbatim. The signature is
+    // appended ONLY on the default Markdown path — escape hatches use
+    // the body verbatim because the operator already chose the
+    // rendering.
     let body_bytes = match crate::wire_assembly::assemble_wire_message(
         &body_with_id,
         config.effective_signature(),
+        req.text_only,
+        req.html_body.as_deref(),
     ) {
         Ok(bytes) => bytes,
         Err(e) => {
+            // Surface the renderer's size-cap rejection on a dedicated
+            // wire code so scripts can branch on the failure without
+            // parsing the reason string. The canonical message stays in
+            // the reason field for human readers.
+            let code = match &e {
+                crate::wire_assembly::AssembleError::Render(
+                    crate::markdown_render::MarkdownRenderError::BodyTooLarge,
+                ) => ErrCode::BodyTooLarge,
+                _ => ErrCode::Malformed,
+            };
             return SendResponse::Err {
-                code: ErrCode::Malformed,
+                code,
                 reason: e.to_string(),
             };
         }
@@ -809,6 +828,7 @@ mod tests {
         let ctx = test_ctx(mock.clone());
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -839,6 +859,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("bogus@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -865,6 +886,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("catchall@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -882,6 +904,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@other.org"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -902,6 +925,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@EXAMPLE.COM"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -918,6 +942,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -934,6 +959,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("Alice <alice@example.com>"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -952,7 +978,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Malformed),
@@ -971,6 +1000,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -993,6 +1023,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -1109,7 +1140,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
@@ -1128,7 +1162,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Ok { message_id } => {
@@ -1161,6 +1198,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         // Inject a signer that always fails, to exercise the `ERR SIGN`
         // branch without needing a malformed RSA key.
@@ -1195,6 +1233,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1228,6 +1267,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
@@ -1257,6 +1297,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
@@ -1281,6 +1322,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
@@ -1384,6 +1426,7 @@ mod tests {
 
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
@@ -1466,6 +1509,7 @@ mod tests {
         let ctx = ctx_with_signature(mock.clone(), data_dir.path().to_path_buf(), None);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1496,6 +1540,7 @@ mod tests {
         );
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1522,6 +1567,7 @@ mod tests {
         );
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1570,6 +1616,7 @@ mod tests {
             --BND--\r\n";
         let req = SendRequest {
             body: multipart_body.to_vec(),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1595,6 +1642,100 @@ mod tests {
         assert!(
             delivered.contains("filename=\"x.bin\""),
             "attachment must survive the daemon-side reassembly: {delivered}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Escape-hatch branches end-to-end through `handle_send`.
+    // ------------------------------------------------------------------
+
+    /// `text_only=true` skips rendering and ships single-part text/plain.
+    /// The signature is NOT auto-appended on this branch (operator-supplied
+    /// content principle).
+    #[tokio::test]
+    async fn text_only_send_emits_single_part_text_plain() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: true,
+            html_body: None,
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        // Single-part: no multipart wrapping at all.
+        assert!(
+            !delivered.contains("multipart/"),
+            "text-only must not produce a multipart wire: {delivered}"
+        );
+        // No HTML part.
+        assert!(
+            !delivered.contains("Content-Type: text/html"),
+            "text-only must not include a text/html part: {delivered}"
+        );
+        // text/plain present, body verbatim.
+        assert!(delivered.contains("Content-Type: text/plain"));
+        assert!(delivered.contains("hello"));
+        // Signature is NOT appended (default ctx config has no signature
+        // set, so `effective_signature` returns the AIMX default — we
+        // confirm it is *absent* on the text-only path).
+        assert!(
+            !delivered.contains("Sent from AIMX."),
+            "text-only must not append the default signature: {delivered}"
+        );
+    }
+
+    /// `html_body=Some(html)` skips rendering and uses the operator's
+    /// HTML verbatim. Same operator-content principle: no signature
+    /// appended.
+    #[tokio::test]
+    async fn html_body_send_uses_supplied_html_verbatim() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        let custom_html = b"<h1>x</h1>";
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: false,
+            html_body: Some(custom_html.to_vec()),
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(delivered.contains("Content-Type: multipart/alternative"));
+        assert!(delivered.contains("Content-Type: text/plain"));
+        assert!(delivered.contains("Content-Type: text/html"));
+        // The operator's HTML appears verbatim — not the renderer's
+        // styled output. The renderer would have added `style="..."`
+        // attributes and inlined CSS; we assert their absence in the
+        // html portion of the wire as a "no rendering happened" check.
+        assert!(
+            delivered.contains("<h1>x</h1>"),
+            "verbatim HTML missing: {delivered}"
+        );
+        let html_idx = delivered
+            .find("Content-Type: text/html")
+            .expect("text/html part missing");
+        let html_section = &delivered[html_idx..];
+        assert!(
+            !html_section.contains("style=\""),
+            "renderer must not be invoked on --html-body path: {html_section}"
+        );
+        // Default signature is not appended.
+        assert!(
+            !delivered.contains("Sent from AIMX."),
+            "--html-body must not append the default signature: {delivered}"
         );
     }
 }

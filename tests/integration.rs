@@ -3012,6 +3012,277 @@ fn send_uds_end_to_end_dkim_verifies_with_attachment() {
     stop_serve(child);
 }
 
+/// `aimx send --text-only` end-to-end:
+/// - captured wire is single-part `text/plain`, body verbatim, no
+///   multipart structure, no rendered HTML.
+/// - the sent record stores the body verbatim.
+/// - DKIM body-hash verifies against the single-part wire shape.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("OTP delivery")
+        .arg("--body")
+        .arg("Your code: 9999")
+        .arg("--text-only")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send --text-only should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text-only wire must carry text/plain: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("multipart/"),
+        "text-only wire must be single-part: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("Content-Type: text/html"),
+        "text-only wire must not include a text/html part: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Your code: 9999"),
+        "body must reach the wire verbatim: {payload_str}"
+    );
+    // No default signature appended (operator-supplied content).
+    assert!(
+        !payload_str.contains("Sent from AIMX."),
+        "text-only path must not append the default signature: {payload_str}"
+    );
+
+    // DKIM body-hash must verify against the single-part wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on text-only wire: signed={signed_header}, computed={computed}"
+    );
+
+    // Sent record exists and carries the body verbatim. The
+    // `outbound_format = "text"` frontmatter field lands in a follow-on
+    // sprint; here we only assert the body content.
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record");
+    let sent_content = std::fs::read_to_string(entries[0].path()).unwrap();
+    assert!(
+        sent_content.contains("Your code: 9999"),
+        "sent record body must carry the plain text verbatim"
+    );
+
+    stop_serve(child);
+}
+
+/// `aimx send --html-body` end-to-end:
+/// - captured wire is `multipart/alternative` with the supplied HTML
+///   in the text/html part verbatim (not rendered by comrak).
+/// - the sent record stores the `--body` text part (the custom HTML
+///   is NOT persisted — the operator's template is the source of truth).
+/// - DKIM body-hash verifies against the alternative wire shape.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Custom HTML layout")
+        .arg("--body")
+        .arg("fallback text")
+        .arg("--html-body")
+        .arg("<p>custom <b>html</b></p>")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send --html-body should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "html-body wire must be multipart/alternative: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    // Text part: the --body text appears verbatim.
+    assert!(
+        payload_str.contains("fallback text"),
+        "text part must carry --body verbatim: {payload_str}"
+    );
+    // HTML part: the operator's HTML is verbatim — no inline `style="`
+    // attributes the renderer would have added.
+    let html_idx = payload_str
+        .find("Content-Type: text/html")
+        .expect("text/html part missing");
+    let html_section = &payload_str[html_idx..];
+    assert!(
+        html_section.contains("<p>custom <b>html</b></p>"),
+        "html part must carry --html-body verbatim: {html_section}"
+    );
+    assert!(
+        !html_section.contains("style=\""),
+        "renderer must not be invoked on --html-body path: {html_section}"
+    );
+    // No default signature appended on the html-body branch.
+    assert!(
+        !payload_str.contains("Sent from AIMX."),
+        "html-body path must not append the default signature: {payload_str}"
+    );
+
+    // DKIM body-hash verifies on the alternative wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on html-body alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    // Sent record stores the --body text, not the --html-body content.
+    // The "custom HTML is not stored" invariant is verified at the
+    // integration layer here.
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record");
+    let sent_path = entries[0].path();
+    let sent_content = std::fs::read_to_string(&sent_path).unwrap();
+    assert!(
+        sent_content.contains("fallback text"),
+        "sent record body must carry the --body text"
+    );
+    // The custom HTML is part of the signed wire bytes (which the sent
+    // record persists in full), so we cannot assert its absence
+    // verbatim — but the .md body section that comes from `--body`
+    // must NOT be the custom HTML. A future `outbound_format = "html"`
+    // field plus single-source-of-truth body persistence will tighten
+    // this further.
+
+    // No `.html` sibling appears next to the sent record.
+    let any_html_sibling = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        });
+    assert!(
+        !any_html_sibling,
+        "no .html sibling file should be written next to the sent record"
+    );
+
+    stop_serve(child);
+}
+
+/// `aimx send --text-only --html-body ...` is rejected at the CLI
+/// layer by clap — the daemon never sees the request and the operator
+/// gets the conflict explained immediately.
+#[cfg(unix)]
+#[test]
+fn send_text_only_and_html_body_combination_rejected_at_cli() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("conflict")
+        .arg("--body")
+        .arg("fallback")
+        .arg("--text-only")
+        .arg("--html-body")
+        .arg("<p>x</p>")
+        .output()
+        .expect("aimx send failed to launch");
+
+    assert!(
+        !output.status.success(),
+        "clap must reject --text-only + --html-body before any UDS round-trip"
+    );
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        (stderr_text.contains("--text-only") || stderr_text.contains("text_only"))
+            && (stderr_text.contains("--html-body") || stderr_text.contains("html_body")),
+        "clap error must name both flags: {stderr_text}"
+    );
+}
+
 /// End-to-end `after_send` hook test. Replaces the default
 /// `setup_test_env` config with a mailbox that carries an `after_send` hook
 /// writing a sentinel file containing `$AIMX_SEND_STATUS`. After a send

@@ -439,6 +439,8 @@ impl AimxMcpServer {
             reply_to: reply_to_id,
             references,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         submit_via_daemon(&args)
@@ -656,6 +658,8 @@ fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
         reply_to: params.reply_to,
         references: params.references,
         attachments: params.attachments.unwrap_or_default(),
+        text_only: false,
+        html_body: None,
     }
 }
 
@@ -669,6 +673,11 @@ fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
     let composed = send::compose_request(args).map_err(|e| e.to_string())?;
     let request = SendRequest {
         body: composed.message,
+        // The MCP `text_only` / `html_body` parameter surface lands in
+        // a follow-on sprint. For now MCP submissions take the default
+        // Markdown render path, mirroring today's behaviour.
+        text_only: false,
+        html_body: None,
     };
     let socket = crate::serve::aimx_socket_path();
 

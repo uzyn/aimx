@@ -114,6 +114,124 @@ mod tests {
     fn handle_version_flag_ignores_absent() {
         assert!(!handle_version_flag(["aimx", "doctor"]));
     }
+
+    /// `--text-only` and `--html-body` are clap-level mutually
+    /// exclusive: parsing rejects the combination at the CLI boundary
+    /// rather than at the codec, so the operator sees the conflict
+    /// before any UDS round-trip.
+    #[test]
+    fn send_args_text_only_and_html_body_are_mutually_exclusive() {
+        let result = Cli::try_parse_from([
+            "aimx",
+            "send",
+            "--from",
+            "a@b.com",
+            "--to",
+            "c@d.com",
+            "--subject",
+            "x",
+            "--body",
+            "fallback",
+            "--text-only",
+            "--html-body",
+            "<p>html</p>",
+        ]);
+        let err = match result {
+            Ok(_) => panic!("clap must reject conflicting flags but parse succeeded"),
+            Err(e) => e,
+        };
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("--text-only") || rendered.contains("text_only"),
+            "error must name --text-only: {rendered}"
+        );
+        assert!(
+            rendered.contains("--html-body") || rendered.contains("html_body"),
+            "error must name --html-body: {rendered}"
+        );
+    }
+
+    /// `--text-only` alone parses cleanly and the parsed args carry the
+    /// flag set without an html_body.
+    #[test]
+    fn send_args_text_only_alone_parses() {
+        let cli = Cli::try_parse_from([
+            "aimx",
+            "send",
+            "--from",
+            "a@b.com",
+            "--to",
+            "c@d.com",
+            "--subject",
+            "x",
+            "--body",
+            "Your code: 1234",
+            "--text-only",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send(args) => {
+                assert!(args.text_only);
+                assert!(args.html_body.is_none());
+            }
+            _ => panic!("expected Send"),
+        }
+    }
+
+    /// `--html-body` alone parses cleanly and the parsed args carry the
+    /// HTML payload without text_only.
+    #[test]
+    fn send_args_html_body_alone_parses() {
+        let cli = Cli::try_parse_from([
+            "aimx",
+            "send",
+            "--from",
+            "a@b.com",
+            "--to",
+            "c@d.com",
+            "--subject",
+            "x",
+            "--body",
+            "fallback",
+            "--html-body",
+            "<p>html</p>",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send(args) => {
+                assert!(!args.text_only);
+                assert_eq!(args.html_body.as_deref(), Some("<p>html</p>"));
+            }
+            _ => panic!("expected Send"),
+        }
+    }
+
+    /// `aimx send` with neither escape-hatch flag parses cleanly and
+    /// both new fields default to off — that's today's default Markdown
+    /// render path, unchanged.
+    #[test]
+    fn send_args_defaults_off_for_both_flags() {
+        let cli = Cli::try_parse_from([
+            "aimx",
+            "send",
+            "--from",
+            "a@b.com",
+            "--to",
+            "c@d.com",
+            "--subject",
+            "x",
+            "--body",
+            "# Hello",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Send(args) => {
+                assert!(!args.text_only);
+                assert!(args.html_body.is_none());
+            }
+            _ => panic!("expected Send"),
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -298,7 +416,7 @@ mod upgrade_args_tests {
     }
 }
 
-#[derive(clap::Args, Clone)]
+#[derive(clap::Args, Clone, Default)]
 pub struct SendArgs {
     /// Sender address
     #[arg(long)]
@@ -312,7 +430,10 @@ pub struct SendArgs {
     #[arg(long)]
     pub subject: String,
 
-    /// Email body
+    /// Email body. Interpreted as Markdown by default; AIMX renders to
+    /// HTML and sends as multipart/alternative. Pass --text-only to ship
+    /// the body verbatim as text/plain (no rendering). Pass --html-body
+    /// to override the auto-rendered HTML with your own template.
     #[arg(long)]
     pub body: String,
 
@@ -327,6 +448,18 @@ pub struct SendArgs {
     /// File paths to attach
     #[arg(long = "attachment")]
     pub attachments: Vec<String>,
+
+    /// Send the body verbatim as text/plain. Skips Markdown rendering
+    /// and the HTML alternative part. Mutually exclusive with --html-body.
+    #[arg(long = "text-only", conflicts_with = "html_body")]
+    pub text_only: bool,
+
+    /// Custom HTML body to ship verbatim as the text/html part of a
+    /// multipart/alternative. Use --body for the text/plain fallback so
+    /// text-only clients still see something readable. Mutually exclusive
+    /// with --text-only.
+    #[arg(long = "html-body", conflicts_with = "text_only")]
+    pub html_body: Option<String>,
 }
 
 #[derive(Subcommand, Clone)]
