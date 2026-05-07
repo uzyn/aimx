@@ -1,0 +1,124 @@
+# Daily Finance Briefing — Thursday 7 May 2026
+
+> Markets opened slightly red across the board after the Fed's softer-than-expected
+> guidance from the previous session. Traders rotated out of high-multiple growth
+> names into defensive sectors as treasury yields ticked higher.
+
+## Headlines
+
+- **S&P 500** finished down 0.42%, snapping a four-day winning streak.
+- **Nasdaq Composite** lost 0.71%, dragged by semiconductors after a downbeat
+  outlook from a major foundry.
+- **Brent crude** rose 1.8% to settle at $84.20 a barrel on supply-side concerns.
+- **Gold** held near $2,395/oz; the dollar index closed marginally weaker at 104.6.
+- **10-year Treasury yield** climbed three basis points to 4.21%.
+
+## Sector Performance
+
+| Sector              | Day  | Week | Month |
+|---------------------|------|------|-------|
+| Energy              | +1.2 | +3.4 | +5.1  |
+| Utilities           | +0.4 | +1.1 | +2.7  |
+| Consumer Staples    | +0.1 | +0.5 | +1.4  |
+| Financials          | -0.2 | +0.9 | +2.0  |
+| Industrials         | -0.5 | +0.2 | +1.1  |
+| Health Care         | -0.6 | -0.4 | +0.8  |
+| Communication Svcs  | -0.7 | -0.1 | +1.5  |
+| Information Tech    | -1.1 | -1.4 | +0.3  |
+| Consumer Discr.     | -1.3 | -1.7 | -0.6  |
+
+## Top Movers
+
+### Gainers
+
+1. ExxonMobil (XOM) — up 3.4% on stronger refining margins and a fresh buyback.
+2. NextEra Energy (NEE) — up 2.9% after raising full-year guidance.
+3. Caterpillar (CAT) — up 2.5% on upbeat construction-equipment demand.
+
+### Decliners
+
+1. Nvidia (NVDA) — down 4.1% as a key supplier flagged inventory headwinds.
+2. Tesla (TSLA) — down 3.6% on a Berlin Gigafactory production-line incident.
+3. Meta Platforms (META) — down 2.8% after a critical regulatory ruling in Europe.
+
+## Macro Watch
+
+The latest *initial-jobless-claims* print of **218,000** came in just below
+consensus, suggesting the labor market remains resilient despite higher rates.
+Eyes now turn to tomorrow's **non-farm payrolls** release; consensus expects
+~165k jobs added with average hourly earnings up 0.3% month-on-month.
+
+Fed funds futures now imply a ~38% chance of a 25 bp cut at the September
+meeting — down from ~52% earlier in the week. The probability of a cut by
+year-end remains above 85%.
+
+## Notable Earnings
+
+- **Disney (DIS)** beat on the top and bottom lines, with streaming subscriber
+  growth coming in slightly ahead of expectations. Shares were modestly higher
+  in after-hours trade.
+- **Shopify (SHOP)** missed on revenue but raised full-year free-cash-flow
+  guidance; the stock fell ~7% after hours.
+- **Lyft (LYFT)** turned its first GAAP-positive quarter on cost discipline;
+  shares popped ~12% in late trading.
+
+## Crypto
+
+| Asset    | Price (USD) | 24h    |
+|----------|-------------|--------|
+| Bitcoin  | 64,820      | -1.4%  |
+| Ethereum | 3,140       | -2.0%  |
+| Solana   | 142         | -3.1%  |
+
+## Reading list
+
+- *FT* — [Fed minutes hint at stickier services inflation](https://www.example.com/fed-minutes)
+- *Bloomberg* — [Why energy is suddenly leading again](https://www.example.com/energy-leadership)
+- *Reuters* — [The case against a September cut](https://www.example.com/no-cut)
+
+## Code snippet of the day
+
+```python
+def position_size(equity, risk_pct, stop_distance):
+    risk_dollars = equity * risk_pct
+    return int(risk_dollars / stop_distance)
+```
+
+## Coming up
+
+- ~~Tomorrow~~ Friday: Non-farm payrolls, U-Mich consumer sentiment.
+- Next Tuesday: April CPI release (consensus +0.3% m/m headline, +0.3% core).
+- Next Wednesday: 30y Treasury auction; FOMC minutes.
+
+## Risk Notes
+
+The cross-asset correlation between equities and bonds remains negative on a
+short-horizon basis, but rolling thirty-day correlations have started to drift
+toward zero again — historically a precursor to **regime change**. Three things
+to watch:
+
+1. **Real yields** — the 10y TIPS yield is back above 2.0%, the highest since
+   the post-COVID re-pricing. A sustained move above 2.25% has historically
+   coincided with multiple compression in long-duration equity sectors.
+2. **Credit spreads** — investment-grade spreads remain tight (~94 bp), but
+   high-yield has widened ~20 bp in the past two weeks. A break above 350 bp
+   in the BAML High Yield Index would be the first textbook risk-off signal.
+3. **Volatility term structure** — the VIX is well-behaved at 14.2, but the
+   3-month / 1-month VIX ratio has flattened, suggesting traders are paying
+   up for near-dated protection ahead of the CPI print.
+
+## Glossary (for new subscribers)
+
+- **Bp (basis point)**: one one-hundredth of a percentage point (0.01%).
+- **Real yield**: the nominal Treasury yield minus the same-tenor breakeven
+  inflation rate; what a bondholder earns above expected inflation.
+- **Multiple compression**: a fall in price-to-earnings ratios; usually driven
+  by rising discount rates rather than falling earnings.
+
+---
+
+*Generated by your daily briefing agent. Reply with `pause` to mute this digest
+for one trading day, or `unsubscribe` to stop entirely.*
+
+[^1]: Sector returns are price-only and exclude dividends.
+
