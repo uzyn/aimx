@@ -387,6 +387,16 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailSendParams>,
     ) -> Result<String, String> {
+        // Mutual-exclusion check runs first so the failure is the
+        // cheapest possible: no daemon round-trip, no mailbox lookup,
+        // no IO. The wording matches the codec's canonical message so
+        // operators see the same string regardless of where validation
+        // tripped.
+        validate_text_only_html_body_exclusion(
+            params.text_only.unwrap_or(false),
+            params.html_body.as_deref(),
+        )?;
+
         // The daemon's MAILBOX-LIST row carries the registered address
         // verbatim. We derive the from-address (and only secondarily
         // the domain) from it without reading root-owned
@@ -405,16 +415,6 @@ impl AimxMcpServer {
             ));
         }
 
-        // Server-side mutual-exclusion check — fires before the UDS is
-        // opened so the agent gets a clean tool error rather than a
-        // codec error percolating back through the rmcp framing. The
-        // wording matches the codec's canonical message so operators
-        // see the same string regardless of where validation tripped.
-        validate_text_only_html_body_exclusion(
-            params.text_only.unwrap_or(false),
-            params.html_body.as_deref(),
-        )?;
-
         let args = build_send_args(params, from_address);
 
         submit_via_daemon(&args)
@@ -432,11 +432,8 @@ impl AimxMcpServer {
         &self,
         Parameters(params): Parameters<EmailReplyParams>,
     ) -> Result<String, String> {
-        validate_email_id(&params.id)?;
-        let row = lookup_mailbox_row(&params.mailbox)?;
-
-        // Mutual-exclusion check fires before any IO so the failure is
-        // cheap and never opens the UDS. Same wording as the codec
+        // Mutual-exclusion check runs first — same fast-fail principle
+        // as `email_send`, and same canonical wording as the codec
         // (`AIMX/1 SEND: --text-only and --html-body are mutually
         // exclusive`) so operators see one consistent string regardless
         // of layer.
@@ -444,6 +441,9 @@ impl AimxMcpServer {
             params.text_only.unwrap_or(false),
             params.html_body.as_deref(),
         )?;
+
+        validate_email_id(&params.id)?;
+        let row = lookup_mailbox_row(&params.mailbox)?;
 
         let mailbox_dir = folder_path_from_row(&row, Folder::Inbox);
         // `email_reply` reads the parent message to inherit threading
@@ -738,8 +738,11 @@ fn validate_text_only_html_body_exclusion(
     text_only: bool,
     html_body: Option<&str>,
 ) -> Result<(), String> {
-    let html_body_present = html_body.map(|s| !s.is_empty()).unwrap_or(false);
-    if text_only && html_body_present {
+    // Treat `Some("")` as supplied. The wire codec carries an empty
+    // `Html-Body-Length: 0` payload through and rejects the conflict;
+    // this pre-flight matches that semantic so the failure is identical
+    // regardless of layer.
+    if text_only && html_body.is_some() {
         // Match the wire-codec phrasing in `src/send_protocol.rs` so
         // the operator sees the same wording regardless of which layer
         // tripped the check.
@@ -2541,14 +2544,28 @@ mod text_only_html_body_tests {
     #[test]
     fn validate_allows_text_only_alone() {
         assert!(validate_text_only_html_body_exclusion(true, None).is_ok());
-        // Empty html_body is treated as "not supplied" — same shape as
-        // an absent field, so the mutual-exclusion check ignores it.
-        assert!(validate_text_only_html_body_exclusion(true, Some("")).is_ok());
     }
 
     #[test]
     fn validate_allows_html_body_alone() {
         assert!(validate_text_only_html_body_exclusion(false, Some("<p>hi</p>")).is_ok());
+        // Empty html_body alone (without text_only) is allowed — only
+        // the conflict between the two flags trips the check.
+        assert!(validate_text_only_html_body_exclusion(false, Some("")).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_text_only_plus_empty_html_body() {
+        // `Some("")` is treated as supplied to match the wire codec,
+        // which carries the empty payload through and rejects the
+        // conflict at the daemon. Pre-flighting here keeps the failure
+        // identical to a non-empty `html_body` so the operator sees the
+        // same wording regardless of which layer tripped.
+        let err = validate_text_only_html_body_exclusion(true, Some("")).unwrap_err();
+        assert_eq!(
+            err,
+            "AIMX/1 SEND: --text-only and --html-body are mutually exclusive"
+        );
     }
 
     #[test]

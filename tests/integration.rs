@@ -3447,11 +3447,11 @@ fn mcp_email_reply_text_only_plus_html_body_rejected() {
     let mut client = McpClient::spawn(tmp.path());
     client.initialize();
 
-    // The id need not exist — mutual-exclusion fires before the
-    // `validate_email_id` / `lookup_mailbox_row` walk would have
-    // returned a different error. The response wording proves the
-    // check fired in the right order (no UDS open, no parent-message
-    // read).
+    // The id and mailbox need not exist — mutual-exclusion is the
+    // very first check in `email_reply`, ahead of `validate_email_id`
+    // and `lookup_mailbox_row`. The "mutually exclusive" wording in
+    // the response proves the check fired first (no UDS open, no
+    // mailbox lookup, no parent-message read).
     let resp = client.call_tool(
         "email_reply",
         serde_json::json!({
