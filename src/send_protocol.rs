@@ -12,9 +12,17 @@
 //! ```text
 //! Client → Server (SEND):
 //!   AIMX/1 SEND\n
+//!   [Text-Only: true\n]
 //!   Content-Length: <n>\n
+//!   [Html-Body-Length: <m>\n]
 //!   \n
 //!   <n bytes of RFC 5322 message, unsigned>
+//!   [<m bytes of custom HTML body, verbatim>]
+//!
+//! `Text-Only: true` ships the body verbatim as text/plain (no Markdown
+//! render). `Html-Body-Length: <m>` ships the main body as text/plain
+//! and the next <m> bytes as text/html verbatim. Setting both is a
+//! parse error: the two flags are mutually exclusive.
 //!
 //! Client → Server (MARK-READ / MARK-UNREAD):
 //!   AIMX/1 MARK-READ\n
@@ -98,9 +106,19 @@ const MAX_HEADER_LINE: usize = 8 * 1024;
 /// Decoded `AIMX/1 SEND` request. There is no `From-Mailbox:` header;
 /// the daemon parses `From:` out of `body` and resolves the sender
 /// mailbox itself against its in-memory Config.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `text_only` and `html_body` are the two escape hatches layered on top
+/// of the default Markdown render path. Default frame (neither header
+/// set) is the Markdown render path. `Text-Only: true` ships `body`
+/// verbatim as `text/plain`. `Html-Body-Length: <n>` ships `body` as the
+/// `text/plain` part and `html_body` (n bytes that follow on the wire)
+/// verbatim as the `text/html` part. The codec rejects frames that set
+/// both at once.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SendRequest {
     pub body: Vec<u8>,
+    pub text_only: bool,
+    pub html_body: Option<Vec<u8>>,
 }
 
 /// Decoded `AIMX/1 MARK-READ` or `AIMX/1 MARK-UNREAD` request. Targets
@@ -262,6 +280,14 @@ pub enum ErrCode {
     /// leaked by the existence-check itself (PRD
     /// §6.5 leak-free shape).
     Enoent,
+    /// The Markdown body submitted on `SEND` exceeded
+    /// `markdown_render::MAX_MARKDOWN_BODY_BYTES` (5 MB). Distinct from
+    /// `Malformed` so scripts can branch on the size-cap failure
+    /// without parsing the reason string. The reason field still
+    /// carries the canonical actionable message ("use --html-body for
+    /// pre-rendered large documents or --attachment for sending the
+    /// document as a file").
+    BodyTooLarge,
 }
 
 impl ErrCode {
@@ -281,6 +307,7 @@ impl ErrCode {
             ErrCode::Conflict => "ECONFLICT",
             ErrCode::Eaccess => "EACCES",
             ErrCode::Enoent => "ENOENT",
+            ErrCode::BodyTooLarge => "BODY_TOO_LARGE",
         }
     }
 
@@ -303,6 +330,7 @@ impl ErrCode {
             "ECONFLICT" => ErrCode::Conflict,
             "EACCES" => ErrCode::Eaccess,
             "ENOENT" => ErrCode::Enoent,
+            "BODY_TOO_LARGE" => ErrCode::BodyTooLarge,
             _ => return None,
         };
         Some(v)
@@ -483,6 +511,9 @@ where
     R: AsyncRead + Unpin,
 {
     let mut content_length: Option<usize> = None;
+    let mut html_body_length: Option<usize> = None;
+    let mut text_only: bool = false;
+    let mut text_only_seen: bool = false;
 
     loop {
         let line = read_line(reader)
@@ -522,6 +553,38 @@ where
                 }
                 content_length = Some(n);
             }
+            "text-only" => {
+                if text_only_seen {
+                    return Err(ParseError::Malformed("duplicate Text-Only header".into()));
+                }
+                let v_lower = value.to_ascii_lowercase();
+                text_only = match v_lower.as_str() {
+                    "true" => true,
+                    "false" => false,
+                    _ => {
+                        return Err(ParseError::Malformed(format!(
+                            "invalid Text-Only value: {value:?} (expected 'true' or 'false')"
+                        )));
+                    }
+                };
+                text_only_seen = true;
+            }
+            "html-body-length" => {
+                if html_body_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Html-Body-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Html-Body-Length: {value:?}"))
+                })?;
+                if n > max_body {
+                    return Err(ParseError::Malformed(format!(
+                        "Html-Body-Length {n} exceeds cap {max_body}"
+                    )));
+                }
+                html_body_length = Some(n);
+            }
             _ => {
                 // Unknown headers are ignored. The daemon re-derives the
                 // mailbox from the message body's `From:` header; no
@@ -533,6 +596,16 @@ where
     let content_length = content_length
         .ok_or_else(|| ParseError::Malformed("missing required header: Content-Length".into()))?;
 
+    // Mutual exclusion: a frame setting both --text-only and --html-body
+    // is the operator asking for two opposite wire shapes at once. Reject
+    // at the codec layer so the canonical error reaches the CLI without
+    // dispatching into the handler.
+    if text_only && html_body_length.is_some() {
+        return Err(ParseError::Malformed(
+            "AIMX/1 SEND: --text-only and --html-body are mutually exclusive".to_string(),
+        ));
+    }
+
     let mut body = vec![0u8; content_length];
     reader.read_exact(&mut body).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -542,7 +615,27 @@ where
         }
     })?;
 
-    Ok(SendRequest { body })
+    let html_body = if let Some(html_len) = html_body_length {
+        let mut buf = vec![0u8; html_len];
+        reader.read_exact(&mut buf).await.map_err(|e| {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                ParseError::Malformed(format!(
+                    "html body truncated: expected {html_len} bytes after main body"
+                ))
+            } else {
+                ParseError::Io(e.to_string())
+            }
+        })?;
+        Some(buf)
+    } else {
+        None
+    };
+
+    Ok(SendRequest {
+        body,
+        text_only,
+        html_body,
+    })
 }
 
 async fn parse_mark_headers<R>(reader: &mut R, read: bool) -> Result<MarkRequest, ParseError>
@@ -1148,13 +1241,31 @@ where
 /// Write an `AIMX/1 SEND` request frame to `writer`. Used by the client
 /// (`aimx send`) and by tests that exercise `parse_request` over a paired
 /// AsyncRead/AsyncWrite harness.
+///
+/// Emits the optional `Text-Only:` / `Html-Body-Length:` headers when
+/// the corresponding fields are set, and appends the second body section
+/// after the main body when `html_body` is `Some(..)`. Setting both
+/// `text_only` and `html_body` at the call site produces a frame the
+/// peer will reject with the canonical mutual-exclusion error; callers
+/// should validate before reaching the codec.
 pub async fn write_request<W>(writer: &mut W, request: &SendRequest) -> Result<(), std::io::Error>
 where
     W: AsyncWrite + Unpin,
 {
-    let header = format!("AIMX/1 SEND\nContent-Length: {}\n\n", request.body.len());
+    let mut header = String::from("AIMX/1 SEND\n");
+    if request.text_only {
+        header.push_str("Text-Only: true\n");
+    }
+    header.push_str(&format!("Content-Length: {}\n", request.body.len()));
+    if let Some(html) = &request.html_body {
+        header.push_str(&format!("Html-Body-Length: {}\n", html.len()));
+    }
+    header.push('\n');
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(&request.body).await?;
+    if let Some(html) = &request.html_body {
+        writer.write_all(html).await?;
+    }
     writer.flush().await?;
     Ok(())
 }
@@ -1604,5 +1715,150 @@ mod mailbox_list_codec_tests {
         .unwrap();
         bare_buf.flush().await.unwrap();
         assert_eq!(json_buf, bare_buf);
+    }
+}
+
+#[cfg(test)]
+mod send_frame_codec_tests {
+    //! Round-trip tests for the `AIMX/1 SEND` codec, with a focus on the
+    //! `Text-Only` and `Html-Body-Length` headers.
+
+    use super::*;
+
+    /// Default frame: no new headers — the encoder emits today's wire
+    /// shape and the decoder reproduces a `SendRequest` with both new
+    /// fields off.
+    #[tokio::test]
+    async fn round_trip_default_send_frame() {
+        let req = SendRequest {
+            body: b"From: alice@example.com\r\n\r\nHello.\r\n".to_vec(),
+            text_only: false,
+            html_body: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.starts_with("AIMX/1 SEND\n"), "{text}");
+        assert!(!text.contains("Text-Only"));
+        assert!(!text.contains("Html-Body-Length"));
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::Send(req));
+    }
+
+    /// `Text-Only: true` frames carry no HTML section. Round-trip must
+    /// preserve both fields and the body bytes byte-for-byte.
+    #[tokio::test]
+    async fn round_trip_text_only_send_frame() {
+        let req = SendRequest {
+            body: b"From: alice@example.com\r\n\r\nYour code: 9999\r\n".to_vec(),
+            text_only: true,
+            html_body: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.contains("Text-Only: true"), "{text}");
+        assert!(!text.contains("Html-Body-Length"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::Send(req));
+    }
+
+    /// `Html-Body-Length: N` frames carry the second body section
+    /// verbatim. The encoder writes the header and the bytes; the
+    /// decoder reads them back into `html_body`.
+    #[tokio::test]
+    async fn round_trip_html_body_send_frame() {
+        let html = b"<p>custom <b>html</b></p>";
+        let req = SendRequest {
+            body: b"From: alice@example.com\r\n\r\nfallback text.\r\n".to_vec(),
+            text_only: false,
+            html_body: Some(html.to_vec()),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(
+            text.contains(&format!("Html-Body-Length: {}", html.len())),
+            "{text}"
+        );
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::Send(req));
+    }
+
+    /// A frame setting both `Text-Only: true` and `Html-Body-Length:` is
+    /// rejected at the codec layer with the canonical mutual-exclusion
+    /// error so the same wording reaches the operator regardless of
+    /// which transport surfaced the conflict.
+    #[tokio::test]
+    async fn mutually_exclusive_headers_rejected_with_canonical_message() {
+        let frame =
+            b"AIMX/1 SEND\nText-Only: true\nContent-Length: 5\nHtml-Body-Length: 3\n\nhellohi!";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert_eq!(
+                    reason, "AIMX/1 SEND: --text-only and --html-body are mutually exclusive",
+                    "canonical mutual-exclusion message must reach the wire reason verbatim"
+                );
+            }
+            other => panic!("expected Malformed mutual-exclusion error, got {other:?}"),
+        }
+    }
+
+    /// A frame whose `Html-Body-Length: N` exceeds the bytes that
+    /// follow surfaces a length-mismatch error so partial sends never
+    /// silently truncate.
+    #[tokio::test]
+    async fn html_body_length_mismatch_is_malformed() {
+        // Main body 5 bytes ("hello") then we promise 100 HTML bytes
+        // but only ship 3 ("hi!"). The decoder must surface a body
+        // truncation error.
+        let frame = b"AIMX/1 SEND\nContent-Length: 5\nHtml-Body-Length: 100\n\nhellohi!";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(
+                    reason.contains("html body truncated") || reason.contains("expected 100"),
+                    "expected html-body length-mismatch error, got {reason:?}"
+                );
+            }
+            other => panic!("expected Malformed length-mismatch, got {other:?}"),
+        }
+    }
+
+    /// `Text-Only:` accepts only `true` / `false`; arbitrary tokens are
+    /// rejected so a future client that emits `yes` / `1` doesn't sneak
+    /// through with the wrong shape.
+    #[tokio::test]
+    async fn text_only_invalid_value_rejected() {
+        let frame = b"AIMX/1 SEND\nText-Only: yes\nContent-Length: 5\n\nhello";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Text-Only"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Duplicate `Text-Only:` headers are rejected — silently dropping
+    /// one would let a future caller smuggle conflicting state past the
+    /// mutual-exclusion check.
+    #[tokio::test]
+    async fn duplicate_text_only_header_rejected() {
+        let frame = b"AIMX/1 SEND\nText-Only: true\nText-Only: false\nContent-Length: 5\n\nhello";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("duplicate Text-Only"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
     }
 }

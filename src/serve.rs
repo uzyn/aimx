@@ -2075,6 +2075,7 @@ mod tests {
                          hello\r\n";
             let req = crate::send_protocol::SendRequest {
                 body: body.to_vec(),
+                ..Default::default()
             };
 
             let mut client = tokio::net::UnixStream::connect(&sock).await.unwrap();

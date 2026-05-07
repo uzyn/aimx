@@ -398,10 +398,18 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
 /// request carries no `From-Mailbox:` header. The daemon parses the
 /// `From:` header out of the body itself and resolves the mailbox
 /// against its in-memory Config.
+///
+/// `--text-only` and `--html-body` (which clap rejects together) flow
+/// through to the codec: the daemon honors both branches.
 pub fn build_request(args: &SendArgs) -> Result<SendRequest, String> {
     let composed = compose_request(args).map_err(|e| e.to_string())?;
     Ok(SendRequest {
         body: composed.message,
+        text_only: args.text_only,
+        html_body: args
+            .html_body
+            .as_ref()
+            .map(|s| normalize_crlf(s).into_bytes()),
     })
 }
 
@@ -476,6 +484,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         }
     }
 
@@ -609,6 +619,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -638,6 +650,8 @@ mod tests {
                 file1.to_string_lossy().to_string(),
                 file2.to_string_lossy().to_string(),
             ],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -670,6 +684,8 @@ mod tests {
                 png.to_string_lossy().to_string(),
                 txt.to_string_lossy().to_string(),
             ],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -690,6 +706,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec!["/nonexistent/file.txt".to_string()],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args);
@@ -726,6 +744,8 @@ mod tests {
             reply_to: Some("<orig@example.com>".to_string()),
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -751,6 +771,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -783,6 +805,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args);
@@ -804,6 +828,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args);
@@ -825,6 +851,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args);
@@ -846,6 +874,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args);
@@ -905,6 +935,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -960,6 +992,8 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
         let result = compose_request(&args).unwrap();
@@ -1212,6 +1246,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();
@@ -1230,6 +1265,7 @@ mod tests {
         let missing = tmp.path().join("does-not-exist.sock");
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let result = submit_request(&missing, &request).await;
         let err = result.unwrap_err();
@@ -1267,6 +1303,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@other.org\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();
@@ -1298,6 +1335,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();

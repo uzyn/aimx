@@ -6,17 +6,27 @@
 //! the attachments). The renderer dependency (`comrak`, `lol_html`) lives
 //! daemon-side so the client startup path stays lean.
 //!
-//! `assemble_wire_message` does the wire shape decision:
+//! `assemble_wire_message` does the wire shape decision in three branches,
+//! selected by the `text_only` / `html_body` arguments (the SEND frame's
+//! `Text-Only:` / `Html-Body-Length:` headers):
 //!
-//! - No attachments → `multipart/alternative` with the Markdown source as
-//!   the `text/plain` part and the rendered HTML as the `text/html` part.
-//! - With attachments → `multipart/mixed` wrapping a `multipart/alternative`
-//!   followed by each attachment as a sibling part.
+//! - **default Markdown** (neither escape hatch set):
+//!   - No attachments → `multipart/alternative` (text/plain + rendered HTML)
+//!   - With attachments → `multipart/mixed` wrapping the alternative
+//! - **`--text-only`** (`text_only=true`):
+//!   - No attachments → single-part `text/plain`, body verbatim, no rendering
+//!   - With attachments → `multipart/mixed` with the body as `text/plain`
+//! - **`--html-body`** (`html_body=Some(..)`):
+//!   - No attachments → `multipart/alternative` (body as text/plain, supplied
+//!     HTML verbatim)
+//!   - With attachments → `multipart/mixed` wrapping the alternative
 //!
-//! Per FR-A5 the per-mailbox signature is appended to the Markdown source
-//! **before** rendering so it participates in the HTML output (a `[link](url)`
+//! The per-mailbox signature is appended to the Markdown source **before**
+//! rendering so it participates in the HTML output (a `[link](url)`
 //! signature renders as a clickable `<a>` in HTML and stays Markdown in the
-//! plain-text part).
+//! plain-text part). The signature is **only** appended on the default
+//! Markdown path — `--text-only` and `--html-body` use the body verbatim
+//! because the operator already chose the final rendering.
 //!
 //! `text/plain` and `text/html` parts use 7bit transfer-encoding when their
 //! bytes are pure ASCII and quoted-printable when they contain non-ASCII —
@@ -80,34 +90,66 @@ impl From<MarkdownRenderError> for AssembleError {
 /// for DKIM signing. The original header block is preserved verbatim
 /// **except** the `Content-Type:` and `Content-Transfer-Encoding:` headers
 /// (and `MIME-Version`, normalized to `1.0`), which are rebuilt to match
-/// the new multipart structure.
+/// the new MIME structure.
 ///
 /// `request_body` is the raw bytes the daemon received over UDS — header
 /// block + blank line + body section. The body section is either:
-/// - bare Markdown (no `Content-Type: multipart/...` in the headers), or
-/// - `multipart/mixed` with the first part `text/plain` (Markdown source)
+/// - bare body text (no `Content-Type: multipart/...` in the headers), or
+/// - `multipart/mixed` with the first part `text/plain` (the body text)
 ///   followed by attachment parts.
 ///
-/// `signature` is appended to the Markdown source before rendering. Pass
-/// an empty string to disable signature appending.
+/// `signature` is appended to the body text before rendering on the
+/// default Markdown path. Pass an empty string to disable. On the
+/// `text_only` and `html_body` paths the signature is **never** appended:
+/// the operator picked the final shape and AIMX must not mutate it.
+///
+/// Branches:
+/// - `text_only=false, html_body=None` → default Markdown render path.
+/// - `text_only=true, html_body=None` → ship body verbatim as text/plain.
+/// - `text_only=false, html_body=Some(html)` → ship body as text/plain
+///   and the supplied HTML verbatim as text/html (multipart/alternative).
+/// - `text_only=true, html_body=Some(_)` is rejected upstream by the
+///   codec (`AIMX/1 SEND: --text-only and --html-body are mutually
+///   exclusive`); this function treats the combination as the
+///   `--html-body` shape but the codec ensures it never reaches us.
 pub fn assemble_wire_message(
     request_body: &[u8],
     signature: &str,
+    text_only: bool,
+    html_body: Option<&[u8]>,
 ) -> Result<Vec<u8>, AssembleError> {
     let split = split_headers_body(request_body)?;
     let original_headers = split.headers;
     let body_section = split.body;
 
-    let (markdown_source, attachments) =
+    let (body_text, attachments) =
         extract_markdown_and_attachments(&original_headers, body_section);
-    let markdown_with_sig = append_signature_to_markdown(&markdown_source, signature);
-    let html = render_markdown_to_email_html(&markdown_with_sig)?;
 
     let preserved_headers = strip_outgoing_content_headers(&original_headers);
     let outer = make_boundary();
     let inner = make_boundary();
-    let content_headers = build_outgoing_content_headers(&attachments, &outer);
-    let body_bytes = build_multipart_body(&markdown_with_sig, &html, &attachments, &outer, &inner);
+
+    let body_bytes = if text_only {
+        // Plain-text path: ship the body verbatim. With attachments,
+        // wrap in multipart/mixed so the text part and attachments are
+        // siblings (no inner alternative — there's no rich part).
+        build_text_only_body(&body_text, &attachments, &outer)
+    } else if let Some(html) = html_body {
+        // Custom-HTML path: text/plain + supplied HTML verbatim. With
+        // attachments, the alternative becomes the first child of an
+        // outer multipart/mixed.
+        let html_str = String::from_utf8_lossy(html).into_owned();
+        build_multipart_body(&body_text, &html_str, &attachments, &outer, &inner)
+    } else {
+        // Default Markdown path: append signature, render to HTML,
+        // then assemble multipart/alternative.
+        let markdown_with_sig = append_signature_to_markdown(&body_text, signature);
+        let html = render_markdown_to_email_html(&markdown_with_sig)?;
+        build_multipart_body(&markdown_with_sig, &html, &attachments, &outer, &inner)
+    };
+
+    let content_headers =
+        build_outgoing_content_headers_for(text_only, html_body.is_some(), &attachments, &outer);
 
     let mut out =
         Vec::with_capacity(preserved_headers.len() + content_headers.len() + body_bytes.len() + 4);
@@ -485,17 +527,44 @@ fn strip_outgoing_content_headers(headers: &str) -> String {
     out
 }
 
-/// Build the new outbound `Content-Type` (and `MIME-Version`) header lines.
-/// Caller passes in the outer boundary so the Content-Type header agrees
-/// with the body's boundary markers. For the no-attachments path the
-/// "outer" boundary IS the alternative boundary.
+/// Build the outbound `Content-Type` (and `MIME-Version`) header lines
+/// for the wire shape that matches `text_only` / `html_body` /
+/// `attachments`. Includes the trailing CRLF on each line — caller
+/// appends a final blank CRLF to terminate the header block.
 ///
-/// Includes the trailing CRLF on each line — caller appends a final blank
-/// CRLF to terminate the header block.
-fn build_outgoing_content_headers(attachments: &[AttachmentPart], outer_boundary: &str) -> String {
+/// Shape table:
+///
+/// | text_only | html_body | attachments | Content-Type                |
+/// |-----------|-----------|-------------|-----------------------------|
+/// | false     | false     | none        | multipart/alternative       |
+/// | false     | false     | some        | multipart/mixed             |
+/// | false     | true      | none        | multipart/alternative       |
+/// | false     | true      | some        | multipart/mixed             |
+/// | true      | (n/a)     | none        | text/plain (single-part)    |
+/// | true      | (n/a)     | some        | multipart/mixed             |
+fn build_outgoing_content_headers_for(
+    text_only: bool,
+    has_html_body: bool,
+    attachments: &[AttachmentPart],
+    outer_boundary: &str,
+) -> String {
     let mut out = String::new();
     out.push_str("MIME-Version: 1.0\r\n");
+    if text_only && attachments.is_empty() {
+        // Single-part: pick the encoding the body actually needs so
+        // SMTP servers don't re-wrap the part in transit.
+        out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
+        // The transfer-encoding header for the single-part path is
+        // emitted alongside the body inside `build_text_only_body` so
+        // we don't have to know the body bytes here. Skip the header
+        // line so we don't double-emit.
+        return out;
+    }
     if attachments.is_empty() {
+        // text_only=false here (text_only with no attachments is the
+        // single-part branch above). Both the default Markdown path
+        // and the html_body path share the alternative shape.
+        let _ = has_html_body;
         out.push_str(&format!(
             "Content-Type: multipart/alternative; boundary=\"{outer_boundary}\"\r\n"
         ));
@@ -504,6 +573,67 @@ fn build_outgoing_content_headers(attachments: &[AttachmentPart], outer_boundary
             "Content-Type: multipart/mixed; boundary=\"{outer_boundary}\"\r\n"
         ));
     }
+    out
+}
+
+/// Build the wire body for the `--text-only` path. Two shapes:
+/// - No attachments: single-part `text/plain` with body verbatim. The
+///   transfer-encoding header is emitted as part of the body bytes so
+///   the parent header-block builder doesn't have to inspect the body.
+/// - With attachments: `multipart/mixed` whose first child is a
+///   `text/plain` part carrying the body verbatim, and remaining children
+///   are the attachments. There is no inner alternative — text-only
+///   means there is no rich part.
+fn build_text_only_body(body_text: &str, attachments: &[AttachmentPart], outer: &str) -> Vec<u8> {
+    let normalized = normalize_text_to_crlf(body_text);
+    let encoding = pick_transfer_encoding(normalized.as_bytes());
+    let encoded = encode_text_body(&normalized, encoding);
+
+    if attachments.is_empty() {
+        // Single-part: the parent header builder already emitted
+        // `Content-Type: text/plain; charset=utf-8`. We add the
+        // transfer-encoding header here, then a blank line, then the
+        // body. The blank line that separates the message header
+        // block from the body comes from the parent.
+        let mut out = Vec::new();
+        out.extend_from_slice(
+            format!("Content-Transfer-Encoding: {}\r\n\r\n", encoding.label()).as_bytes(),
+        );
+        out.extend_from_slice(encoded.as_bytes());
+        if !encoded.ends_with('\n') {
+            out.extend_from_slice(b"\r\n");
+        }
+        return out;
+    }
+
+    let mut out = Vec::new();
+    out.extend_from_slice(format!("--{outer}\r\n").as_bytes());
+    out.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n");
+    out.extend_from_slice(
+        format!("Content-Transfer-Encoding: {}\r\n\r\n", encoding.label()).as_bytes(),
+    );
+    out.extend_from_slice(encoded.as_bytes());
+    out.extend_from_slice(b"\r\n");
+
+    for att in attachments {
+        out.extend_from_slice(format!("--{outer}\r\n").as_bytes());
+        let safe_name = escape_filename(&att.filename);
+        out.extend_from_slice(
+            format!(
+                "Content-Type: {}; name=\"{safe_name}\"\r\n",
+                att.content_type
+            )
+            .as_bytes(),
+        );
+        out.extend_from_slice(
+            format!("Content-Disposition: attachment; filename=\"{safe_name}\"\r\n").as_bytes(),
+        );
+        out.extend_from_slice(b"Content-Transfer-Encoding: base64\r\n\r\n");
+        let encoded_att = base64_encode_wrapped(&att.data, 76);
+        out.extend_from_slice(encoded_att.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out.extend_from_slice(format!("--{outer}--\r\n").as_bytes());
     out
 }
 
@@ -753,7 +883,8 @@ mod tests {
 
     #[test]
     fn header_separator_required() {
-        let err = assemble_wire_message(b"From: a@b.com\r\nNo separator", "").unwrap_err();
+        let err =
+            assemble_wire_message(b"From: a@b.com\r\nNo separator", "", false, None).unwrap_err();
         assert!(matches!(err, AssembleError::MissingHeaderSeparator));
     }
 
@@ -763,7 +894,7 @@ mod tests {
             "From: alice@example.com\nTo: bob@x.com\nSubject: Hi\n",
             "# Hello\n\nWorld\n",
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("MIME-Version: 1.0\r\n"));
         assert!(text.contains("Content-Type: multipart/alternative; boundary=\"aimx-"));
@@ -783,7 +914,7 @@ mod tests {
     #[test]
     fn boundary_is_aimx_uuid() {
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "hi");
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let ct = parse_content_type(&out);
         assert!(ct.starts_with("multipart/alternative"), "{ct}");
         let boundary = extract_boundary_from_ct(&ct);
@@ -796,7 +927,8 @@ mod tests {
         // assertion can match the literal bytes. The non-ASCII case is
         // covered by `quoted_printable_encodes_non_ascii_text`.
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "Body line.");
-        let out = assemble_wire_message(&req, "-- [aimx](https://aimx.email)").unwrap();
+        let out =
+            assemble_wire_message(&req, "-- [aimx](https://aimx.email)", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         // text part contains the literal Markdown signature
         assert!(
@@ -814,7 +946,7 @@ mod tests {
     fn empty_signature_appends_nothing() {
         let body = "User body.\n";
         let req = build_request("From: a@b.com\nTo: c@d.com\n", body);
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         // The text part should be exactly the user body (modulo CRLF).
         // No "— " or extra trailing lines.
@@ -842,7 +974,7 @@ mod tests {
             "From: a@b.com\nTo: c@d.com\nSubject: T\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
             body,
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         // Outer is multipart/mixed
         assert!(text.contains("Content-Type: multipart/mixed; boundary=\"aimx-"));
@@ -876,7 +1008,7 @@ mod tests {
             "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
             body,
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         let outer_ct = text
             .lines()
@@ -922,7 +1054,7 @@ mod tests {
             "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
             body,
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("filename=\"a.pdf\""));
         assert!(text.contains("filename=\"b.png\""));
@@ -944,7 +1076,7 @@ mod tests {
             "From: alice@example.com\nTo: bob@x.com\nSubject: Hi\n",
             "# Heading\n\nbody\n",
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let parsed = mail_parser::MessageParser::default()
             .parse(&out[..])
             .expect("must parse");
@@ -973,7 +1105,7 @@ mod tests {
             "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
             body,
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let parsed = mail_parser::MessageParser::default()
             .parse(&out[..])
             .expect("must parse");
@@ -989,7 +1121,7 @@ mod tests {
             "From: alice@example.com\nTo: bob@x.com\nSubject: Hi\nMessage-ID: <abc@x>\nDate: Thu, 1 Jan 2026 00:00:00 +0000\n",
             "Hi.",
         );
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("From: alice@example.com\r\n"));
         assert!(text.contains("To: bob@x.com\r\n"));
@@ -1001,7 +1133,8 @@ mod tests {
     #[test]
     fn signature_with_link_renders_clickable_in_html_part() {
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "Body.");
-        let out = assemble_wire_message(&req, "-- [aimx](https://aimx.email)").unwrap();
+        let out =
+            assemble_wire_message(&req, "-- [aimx](https://aimx.email)", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("href=\"https://aimx.email\""));
         // The literal Markdown signature must be visible in the text part.
@@ -1011,7 +1144,7 @@ mod tests {
     #[test]
     fn quoted_printable_encodes_non_ascii_text() {
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "Héllo");
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Content-Transfer-Encoding: quoted-printable"));
         // 0xC3 0xA9 = é
@@ -1021,7 +1154,7 @@ mod tests {
     #[test]
     fn seven_bit_encoding_for_ascii_only() {
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "Plain.");
-        let out = assemble_wire_message(&req, "").unwrap();
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Content-Transfer-Encoding: 7bit"));
     }
@@ -1098,12 +1231,13 @@ mod tests {
         // renderer the `BodyTooLarge` error must propagate as
         // `AssembleError::Render(...)` and its `Display` output must
         // carry the canonical actionable message verbatim, so the wire
-        // `ERR MALFORMED <reason>` (and any future dedicated code) reaches
-        // the operator with the actionable hint intact.
+        // `ERR BODY_TOO_LARGE <reason>` reaches the operator with the
+        // actionable hint intact (the dedicated code is mapped from this
+        // variant in `send_handler::handle_send_with_signer`).
         use crate::markdown_render::{MAX_MARKDOWN_BODY_BYTES, MarkdownRenderError};
         let oversize = "a".repeat(MAX_MARKDOWN_BODY_BYTES + 1);
         let req = build_request("From: a@b.com\nTo: c@d.com\n", &oversize);
-        let err = assemble_wire_message(&req, "").expect_err("expected BodyTooLarge");
+        let err = assemble_wire_message(&req, "", false, None).expect_err("expected BodyTooLarge");
         assert!(
             matches!(
                 err,
@@ -1117,5 +1251,188 @@ mod tests {
             "markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
             "canonical BodyTooLarge message must reach the wire reason field verbatim"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Escape-hatch branches (--text-only and --html-body)
+    // ------------------------------------------------------------------
+
+    /// `--text-only` with no attachments: single-part `text/plain`,
+    /// body verbatim, no boundary markers, no rendered HTML.
+    #[test]
+    fn text_only_no_attachments_emits_single_part_text_plain() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Your code: 9999");
+        let out = assemble_wire_message(&req, "ignored-sig", true, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(text.contains("Content-Transfer-Encoding: 7bit"));
+        // No multipart wrapping of any kind.
+        assert!(!text.contains("multipart/"), "{text}");
+        // No boundary markers (`--aimx-...`).
+        assert!(!text.contains("--aimx-"), "{text}");
+        // No rendered HTML.
+        assert!(!text.contains("<h1"), "{text}");
+        assert!(text.contains("Your code: 9999"));
+        // The signature is NOT appended on the text-only path even when
+        // the caller passed one.
+        assert!(!text.contains("ignored-sig"), "{text}");
+    }
+
+    /// `--text-only` with one attachment: `multipart/mixed` whose first
+    /// child is the text part, second is the attachment. No inner
+    /// alternative — text-only has no rich part.
+    #[test]
+    fn text_only_with_attachment_wraps_in_multipart_mixed() {
+        let body = concat!(
+            "--BND\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Body verbatim.\r\n",
+            "--BND\r\n",
+            "Content-Type: application/pdf; name=\"doc.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"doc.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "UERG\r\n",
+            "--BND--\r\n",
+        );
+        let req = build_request(
+            "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
+            body,
+        );
+        let out = assemble_wire_message(&req, "", true, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        // Outer mixed
+        assert!(text.contains("Content-Type: multipart/mixed; boundary=\"aimx-"));
+        // No multipart/alternative — text-only never wraps an alternative
+        assert!(!text.contains("multipart/alternative"), "{text}");
+        // Text part present
+        assert!(text.contains("Content-Type: text/plain"));
+        assert!(text.contains("Body verbatim."));
+        // Attachment preserved
+        assert!(text.contains("filename=\"doc.pdf\""));
+        // No rendered HTML
+        assert!(!text.contains("<h1"), "{text}");
+    }
+
+    /// `--html-body` with no attachments: `multipart/alternative` with
+    /// the body as text/plain and the supplied HTML verbatim. The
+    /// renderer must NOT touch the HTML — assert no inlined `style="`
+    /// attributes appear that the renderer would have added.
+    #[test]
+    fn html_body_no_attachments_emits_multipart_alternative_with_verbatim_html() {
+        let custom_html = b"<h1>x</h1>";
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "fallback text.");
+        let out = assemble_wire_message(&req, "ignored-sig", false, Some(custom_html)).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("Content-Type: multipart/alternative; boundary=\"aimx-"));
+        assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(text.contains("Content-Type: text/html; charset=utf-8"));
+        // text part = body verbatim
+        assert!(text.contains("fallback text."));
+        // HTML part = supplied bytes verbatim
+        assert!(text.contains("<h1>x</h1>"));
+        // No render styling injected (the renderer would add `style="...`)
+        let html_after = text
+            .find("text/html")
+            .and_then(|i| text.get(i..))
+            .unwrap_or("");
+        assert!(
+            !html_after.contains("style=\""),
+            "renderer must not be invoked on --html-body path: {html_after}"
+        );
+        // Signature is not appended on the html-body path either.
+        assert!(!text.contains("ignored-sig"), "{text}");
+    }
+
+    /// `--html-body` with attachments: outer `multipart/mixed` wrapping
+    /// the alternative + each attachment as a sibling. Same shape as
+    /// the default path with attachments.
+    #[test]
+    fn html_body_with_attachment_wraps_alternative_in_multipart_mixed() {
+        let body = concat!(
+            "--BND\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "fallback text.\r\n",
+            "--BND\r\n",
+            "Content-Type: application/pdf; name=\"a.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"a.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "QQ==\r\n",
+            "--BND--\r\n",
+        );
+        let req = build_request(
+            "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
+            body,
+        );
+        let out = assemble_wire_message(&req, "", false, Some(b"<p>custom</p>")).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("Content-Type: multipart/mixed; boundary=\"aimx-"));
+        assert!(text.contains("Content-Type: multipart/alternative; boundary=\"aimx-"));
+        assert!(text.contains("<p>custom</p>"));
+        assert!(text.contains("filename=\"a.pdf\""));
+        // Outer and inner boundaries differ.
+        let outer_ct = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type: multipart/mixed"))
+            .unwrap();
+        let outer_boundary = extract_quoted_param(outer_ct, "boundary").unwrap();
+        let inner_ct = text
+            .lines()
+            .find(|l| l.contains("multipart/alternative"))
+            .unwrap();
+        let inner_boundary = extract_quoted_param(inner_ct, "boundary").unwrap();
+        assert_ne!(outer_boundary, inner_boundary);
+    }
+
+    /// The default Markdown path still appends the signature; this
+    /// regression-tests that the new branching didn't break the
+    /// existing signature-into-Markdown-before-render contract.
+    #[test]
+    fn default_path_still_appends_signature() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Body.");
+        let out = assemble_wire_message(&req, "MARKER-SIG", false, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(text.contains("MARKER-SIG"));
+    }
+
+    /// mail-parser round-trip on the `--text-only` single-part path:
+    /// the message parses, the body text is preserved verbatim, and
+    /// the wire shape carries no `Content-Type: text/html` header (no
+    /// HTML alternative was emitted). mail-parser's `body_html(0)`
+    /// helper falls back to the text part on a single-part text/plain
+    /// message, so we assert against the wire bytes rather than the
+    /// parser's html-fallback view.
+    #[test]
+    fn mail_parser_roundtrip_text_only_single_part() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Plain body.");
+        let out = assemble_wire_message(&req, "", true, None).unwrap();
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&out[..])
+            .expect("must parse");
+        let body = parsed.body_text(0).expect("text part");
+        assert!(body.contains("Plain body."));
+        let wire = String::from_utf8_lossy(&out);
+        assert!(
+            !wire.contains("Content-Type: text/html"),
+            "text-only wire must not contain a text/html part: {wire}"
+        );
+    }
+
+    /// mail-parser round-trip on the `--html-body` path: both parts
+    /// present, HTML is the operator-supplied bytes.
+    #[test]
+    fn mail_parser_roundtrip_html_body_path() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "fallback.");
+        let out = assemble_wire_message(&req, "", false, Some(b"<p>raw</p>")).unwrap();
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&out[..])
+            .expect("must parse");
+        let text = parsed.body_text(0).expect("text part");
+        let html = parsed.body_html(0).expect("html part");
+        assert!(text.contains("fallback."));
+        assert!(html.contains("<p>raw</p>"));
     }
 }
