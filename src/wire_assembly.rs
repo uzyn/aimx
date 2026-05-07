@@ -110,8 +110,10 @@ impl From<MarkdownRenderError> for AssembleError {
 ///   and the supplied HTML verbatim as text/html (multipart/alternative).
 /// - `text_only=true, html_body=Some(_)` is rejected upstream by the
 ///   codec (`AIMX/1 SEND: --text-only and --html-body are mutually
-///   exclusive`); this function treats the combination as the
-///   `--html-body` shape but the codec ensures it never reaches us.
+///   exclusive`). The codec ensures it never reaches us; if it ever
+///   did, the `if text_only` branch wins and the supplied HTML is
+///   silently dropped — matching the codec's "text-only takes
+///   precedence" semantics rather than the html_body shape.
 pub fn assemble_wire_message(
     request_body: &[u8],
     signature: &str,
@@ -129,11 +131,22 @@ pub fn assemble_wire_message(
     let outer = make_boundary();
     let inner = make_boundary();
 
+    // Single-part `text/plain` is the one branch where the
+    // top-level header block needs `Content-Transfer-Encoding`. Pick
+    // it once here so the header builder and the body builder agree
+    // on the encoding and the CTE lands in the header block (not in
+    // the body, which would be malformed RFC 5322).
+    let text_only_top_cte = if text_only && attachments.is_empty() {
+        Some(pick_text_only_top_level_encoding(&body_text))
+    } else {
+        None
+    };
+
     let body_bytes = if text_only {
         // Plain-text path: ship the body verbatim. With attachments,
         // wrap in multipart/mixed so the text part and attachments are
         // siblings (no inner alternative — there's no rich part).
-        build_text_only_body(&body_text, &attachments, &outer)
+        build_text_only_body(&body_text, &attachments, &outer, text_only_top_cte)
     } else if let Some(html) = html_body {
         // Custom-HTML path: text/plain + supplied HTML verbatim. With
         // attachments, the alternative becomes the first child of an
@@ -148,7 +161,8 @@ pub fn assemble_wire_message(
         build_multipart_body(&markdown_with_sig, &html, &attachments, &outer, &inner)
     };
 
-    let content_headers = build_outgoing_content_headers_for(text_only, &attachments, &outer);
+    let content_headers =
+        build_outgoing_content_headers_for(text_only, &attachments, &outer, text_only_top_cte);
 
     let mut out =
         Vec::with_capacity(preserved_headers.len() + content_headers.len() + body_bytes.len() + 4);
@@ -548,17 +562,21 @@ fn build_outgoing_content_headers_for(
     text_only: bool,
     attachments: &[AttachmentPart],
     outer_boundary: &str,
+    text_only_top_cte: Option<TextTransferEncoding>,
 ) -> String {
     let mut out = String::new();
     out.push_str("MIME-Version: 1.0\r\n");
     if text_only && attachments.is_empty() {
-        // Single-part: pick the encoding the body actually needs so
-        // SMTP servers don't re-wrap the part in transit.
+        // Single-part: emit Content-Type AND Content-Transfer-Encoding
+        // in the top-level header block so a strict RFC 5322 parser
+        // sees both before the blank-line body separator. The caller
+        // (`assemble_wire_message`) computes the encoding via
+        // `pick_text_only_top_level_encoding` and threads it in here so
+        // this function and `build_text_only_body` agree.
         out.push_str("Content-Type: text/plain; charset=utf-8\r\n");
-        // The transfer-encoding header for the single-part path is
-        // emitted alongside the body inside `build_text_only_body` so
-        // we don't have to know the body bytes here. Skip the header
-        // line so we don't double-emit.
+        if let Some(enc) = text_only_top_cte {
+            out.push_str(&format!("Content-Transfer-Encoding: {}\r\n", enc.label()));
+        }
         return out;
     }
     if attachments.is_empty() {
@@ -576,29 +594,49 @@ fn build_outgoing_content_headers_for(
     out
 }
 
+/// Pick the transfer encoding for the single-part `--text-only`
+/// no-attachments path. Pure helper so the top-level header builder
+/// and the body builder agree on what the encoding will be without
+/// double-normalizing the body.
+fn pick_text_only_top_level_encoding(body_text: &str) -> TextTransferEncoding {
+    let normalized = normalize_text_to_crlf(body_text);
+    pick_transfer_encoding(normalized.as_bytes())
+}
+
 /// Build the wire body for the `--text-only` path. Two shapes:
 /// - No attachments: single-part `text/plain` with body verbatim. The
-///   transfer-encoding header is emitted as part of the body bytes so
-///   the parent header-block builder doesn't have to inspect the body.
+///   top-level `Content-Transfer-Encoding` header is emitted by the
+///   parent header builder (`build_outgoing_content_headers_for`) so
+///   it sits in the RFC 5322 header block, not in the body. The
+///   `top_cte` parameter is `Some(...)` on this branch so a release
+///   build cannot drift the encodings used in the header vs. the body.
 /// - With attachments: `multipart/mixed` whose first child is a
 ///   `text/plain` part carrying the body verbatim, and remaining children
 ///   are the attachments. There is no inner alternative — text-only
-///   means there is no rich part.
-fn build_text_only_body(body_text: &str, attachments: &[AttachmentPart], outer: &str) -> Vec<u8> {
+///   means there is no rich part. `top_cte` is `None` on this branch
+///   because each part carries its own per-part CTE inside the body.
+fn build_text_only_body(
+    body_text: &str,
+    attachments: &[AttachmentPart],
+    outer: &str,
+    top_cte: Option<TextTransferEncoding>,
+) -> Vec<u8> {
     let normalized = normalize_text_to_crlf(body_text);
     let encoding = pick_transfer_encoding(normalized.as_bytes());
     let encoded = encode_text_body(&normalized, encoding);
 
     if attachments.is_empty() {
-        // Single-part: the parent header builder already emitted
-        // `Content-Type: text/plain; charset=utf-8`. We add the
-        // transfer-encoding header here, then a blank line, then the
-        // body. The blank line that separates the message header
-        // block from the body comes from the parent.
-        let mut out = Vec::new();
-        out.extend_from_slice(
-            format!("Content-Transfer-Encoding: {}\r\n\r\n", encoding.label()).as_bytes(),
+        // Single-part: the parent header builder emitted both the
+        // Content-Type and the Content-Transfer-Encoding for us.
+        // Defensive sanity check: the encoding the parent committed to
+        // in the header block must match what we just picked here, or
+        // a strict parser would decode the body with the wrong rule.
+        debug_assert!(
+            matches!(top_cte, Some(t) if t.label() == encoding.label()),
+            "build_text_only_body: caller-supplied top-level CTE must match \
+             the encoding picked from the body bytes"
         );
+        let mut out = Vec::new();
         out.extend_from_slice(encoded.as_bytes());
         if !encoded.ends_with('\n') {
             out.extend_from_slice(b"\r\n");
@@ -606,6 +644,9 @@ fn build_text_only_body(body_text: &str, attachments: &[AttachmentPart], outer: 
         return out;
     }
 
+    // Attachments path: per-part CTE lives inside each MIME part, so
+    // `top_cte` is intentionally not consulted here.
+    let _ = top_cte;
     let mut out = Vec::new();
     out.extend_from_slice(format!("--{outer}\r\n").as_bytes());
     out.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n");
@@ -1276,6 +1317,86 @@ mod tests {
         // The signature is NOT appended on the text-only path even when
         // the caller passed one.
         assert!(!text.contains("ignored-sig"), "{text}");
+    }
+
+    /// Regression: the single-part `--text-only` no-attachments wire
+    /// MUST place `Content-Transfer-Encoding` in the RFC 5322 header
+    /// block (before the blank-line separator), not in the body. A
+    /// previous version emitted CTE inside the body bytes which strict
+    /// parsers correctly read as the first line of the body.
+    #[test]
+    fn text_only_no_attachments_places_cte_in_header_block() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Plain ASCII body.");
+        let out = assemble_wire_message(&req, "", true, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let (header_block, body_block) = text
+            .split_once("\r\n\r\n")
+            .expect("wire must have a header/body separator");
+        assert!(
+            header_block.contains("Content-Transfer-Encoding: 7bit"),
+            "CTE must sit in the header block, got headers:\n{header_block}"
+        );
+        assert!(
+            !body_block.contains("Content-Transfer-Encoding:"),
+            "CTE must NOT appear in the body, got body:\n{body_block}"
+        );
+        // Body content survives intact and is not preceded by stray
+        // header-shaped lines.
+        assert_eq!(body_block.trim_end_matches("\r\n"), "Plain ASCII body.");
+    }
+
+    /// Regression companion: non-ASCII body forces quoted-printable.
+    /// The CTE the header builder emits must match what the body
+    /// builder used to encode the bytes — otherwise a parser would
+    /// decode with the wrong rule and corrupt the message.
+    #[test]
+    fn text_only_no_attachments_qp_path_keeps_cte_in_header_block() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "résumé café");
+        let out = assemble_wire_message(&req, "", true, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        let (header_block, body_block) = text
+            .split_once("\r\n\r\n")
+            .expect("wire must have a header/body separator");
+        assert!(
+            header_block.contains("Content-Transfer-Encoding: quoted-printable"),
+            "QP CTE must sit in the header block, got headers:\n{header_block}"
+        );
+        assert!(
+            !body_block.contains("Content-Transfer-Encoding:"),
+            "CTE must NOT appear in the body, got body:\n{body_block}"
+        );
+        // Quoted-printable encodes non-ASCII bytes as `=XX` escapes;
+        // the raw UTF-8 must not survive into the wire body.
+        assert!(
+            !body_block.contains("résumé"),
+            "raw non-ASCII must be QP-encoded, got body:\n{body_block}"
+        );
+    }
+
+    /// mail-parser sees the top-level CTE on the parsed root part
+    /// (not on a synthetic body part), confirming the header/body
+    /// separator falls in the right place.
+    #[test]
+    fn text_only_no_attachments_mail_parser_sees_cte_at_top_level() {
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Plain ASCII body.");
+        let out = assemble_wire_message(&req, "", true, None).unwrap();
+        let parsed = mail_parser::MessageParser::default()
+            .parse(&out[..])
+            .expect("must parse");
+        // The parsed body is the verbatim text — no leftover header
+        // line leaking in.
+        let body = parsed.body_text(0).expect("text part");
+        assert_eq!(body.trim_end(), "Plain ASCII body.");
+        // The transfer-encoding header is visible to the parser at
+        // the message root (it would be missing if it had been
+        // misclassified as body content).
+        let cte = parsed
+            .header("Content-Transfer-Encoding")
+            .expect("Content-Transfer-Encoding must be a top-level header");
+        assert!(
+            format!("{cte:?}").contains("7bit"),
+            "expected 7bit CTE on root, got {cte:?}"
+        );
     }
 
     /// `--text-only` with one attachment: `multipart/mixed` whose first
