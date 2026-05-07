@@ -307,6 +307,21 @@ where
     let references_val = headers.get("References").cloned();
     let date_header = headers.get("Date").cloned();
 
+    // Audit-trail field for the sent record. Mirrors the wire-shape
+    // branch picked in `assemble_wire_message` above:
+    //   - `text_only=true`            → `"text"`  (single-part text/plain)
+    //   - `html_body=Some(...)`       → `"html"`  (custom HTML alternative)
+    //   - default                     → `"markdown"` (rendered alternative)
+    // The two escape hatches are mutually exclusive at the codec layer,
+    // so this match is exhaustive without a tie-breaker.
+    let outbound_format = if req.text_only {
+        "text"
+    } else if req.html_body.is_some() {
+        "html"
+    } else {
+        "markdown"
+    };
+
     let send_result = ctx.transport.send(&from_header, &recipient_bare, &signed);
 
     let (send_status, persisted_path, response) = match send_result {
@@ -327,6 +342,7 @@ where
                 DeliveryStatus::Delivered,
                 Some(&delivered_at),
                 None,
+                outbound_format,
             );
             (
                 SendStatus::Delivered,
@@ -362,6 +378,7 @@ where
                     DeliveryStatus::Failed,
                     None,
                     Some(&msg),
+                    outbound_format,
                 )
             } else {
                 None
@@ -574,6 +591,7 @@ fn persist_sent_file(
     delivery_status: DeliveryStatus,
     delivered_at: Option<&str>,
     delivery_details: Option<&str>,
+    outbound_format: &str,
 ) -> Option<PathBuf> {
     let sent_dir = ctx.data_dir.join("sent").join(from_mailbox);
     if let Err(e) = std::fs::create_dir_all(&sent_dir) {
@@ -637,6 +655,7 @@ fn persist_sent_file(
         read: false,
         labels: vec![],
         outbound: true,
+        outbound_format: outbound_format.to_string(),
         delivery_status,
         bcc: None,
         delivered_at: delivered_at.map(|s| s.to_string()),
@@ -1737,5 +1756,129 @@ mod tests {
             !delivered.contains("Sent from AIMX."),
             "--html-body must not append the default signature: {delivered}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // `outbound_format` audit-trail field on the persisted sent record.
+    // Asserts each of the three wire-shape branches stamps the correct
+    // value into the `OutboundFrontmatter`. Sent body content + the
+    // "no .html sibling" invariant land in the integration suite; here
+    // we just pin the frontmatter contract.
+    // ------------------------------------------------------------------
+
+    fn read_sent_outbound_format(data_dir: &std::path::Path) -> String {
+        let sent_dir = data_dir.join("sent").join("alice");
+        let entry = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("sent record must exist");
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: crate::frontmatter::OutboundFrontmatter =
+            toml::from_str(toml_str).expect("frontmatter must parse");
+        parsed.outbound_format
+    }
+
+    #[tokio::test]
+    async fn default_markdown_send_persists_outbound_format_markdown() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "markdown");
+    }
+
+    #[tokio::test]
+    async fn text_only_send_persists_outbound_format_text() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: true,
+            html_body: None,
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "text");
+    }
+
+    #[tokio::test]
+    async fn html_body_send_persists_outbound_format_html() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: false,
+            html_body: Some(b"<p>custom</p>".to_vec()),
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "html");
+    }
+
+    /// No `.html` sibling file is written next to the sent record on
+    /// any of the three send paths. Pin the FR-F2 invariant at the
+    /// unit-test level so a future change to the persistence path that
+    /// introduces an HTML twin file is caught immediately.
+    #[tokio::test]
+    async fn sent_record_never_writes_html_sibling() {
+        for req in [
+            SendRequest {
+                body: body("alice@example.com"),
+                ..Default::default()
+            },
+            SendRequest {
+                body: body("alice@example.com"),
+                text_only: true,
+                html_body: None,
+            },
+            SendRequest {
+                body: body("alice@example.com"),
+                text_only: false,
+                html_body: Some(b"<p>custom</p>".to_vec()),
+            },
+        ] {
+            let data_dir = tempfile::TempDir::new().unwrap();
+            let mock = Arc::new(MockTransport {
+                captured: Mutex::new(vec![]),
+                behavior: Behavior::Ok,
+            });
+            let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+            let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+            assert!(matches!(resp, SendResponse::Ok { .. }));
+
+            let sent_dir = data_dir.path().join("sent").join("alice");
+            let any_html = std::fs::read_dir(&sent_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+                });
+            assert!(
+                !any_html,
+                "no .html sibling file should appear under {}",
+                sent_dir.display()
+            );
+        }
     }
 }

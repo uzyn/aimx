@@ -78,7 +78,14 @@ Tail or follow the `aimx serve` service log. Wraps `journalctl -u aimx` on syste
 
 ### `aimx send`
 
-Compose an RFC 5322 message and submit it to `aimx serve` via `/run/aimx/aimx.sock`. Refuses root. The daemon handles DKIM signing and MX delivery.
+Compose a message and submit it to `aimx serve` via `/run/aimx/aimx.sock`. Refuses root. The daemon handles Markdown rendering, DKIM signing, and MX delivery.
+
+`--body` is interpreted as **Markdown** (CommonMark + GFM extensions: tables, strikethrough, autolinks, task lists, footnotes). The daemon renders it to HTML with an inlined stylesheet and ships a `multipart/alternative` message — the recipient sees rich text on Gmail / Outlook / Apple Mail and the Markdown source on text-only clients. Two escape hatches are available:
+
+- **`--text-only`** — ship the body verbatim as `text/plain`. No rendering. Use for OTPs, transactional one-liners, and existing scripts that must not change shape.
+- **`--html-body <html>`** — supply a custom HTML template for the `text/html` part. AIMX uses your HTML verbatim and uses `--body` as the `text/plain` fallback. Mutually exclusive with `--text-only`.
+
+For an in-depth tour of the rendering pipeline and the inlined stylesheet, see [Markdown Email](markdown-email.md).
 
 The caller's euid must own the mailbox resolved from the `From:` local part; sends from another owner's mailbox are rejected with `not authorized: <local_part>@<domain>`. The catchall (`*@domain`) is inbound-only and is never accepted as an outbound sender. See [Security: Per-action authorization](security.md#per-action-authorization).
 
@@ -87,10 +94,38 @@ The caller's euid must own the mailbox resolved from the `From:` local part; sen
 | `--from <addr>` | Sender address. Must resolve to an explicitly configured (non-wildcard) mailbox owned by the caller. |
 | `--to <addr>` | Recipient address. |
 | `--subject <text>` | Subject line. |
-| `--body <text>` | Plain-text body. |
+| `--body <text>` | Body content. Interpreted as Markdown by default. With `--text-only`, shipped verbatim as `text/plain`. With `--html-body`, used as the `text/plain` fallback. |
+| `--text-only` | Ship `--body` verbatim as `text/plain`. Skips Markdown rendering and the HTML alternative part. Mutually exclusive with `--html-body`. |
+| `--html-body <html>` | Custom HTML for the `text/html` part. Operator-supplied; bypasses the renderer. Use the shell pattern `--html-body "$(cat template.html)"` for templates that don't fit on one command line. Mutually exclusive with `--text-only`. |
 | `--reply-to <msg-id>` | Sets the `In-Reply-To` header for threading. |
 | `--references <chain>` | Sets the full `References` header. Needed only for multi-step threads where `In-Reply-To` alone is insufficient. |
-| `--attachment <path>` | Attach a file. Repeatable for multiple attachments. |
+| `--attachment <path>` | Attach a file. Repeatable. With Markdown / `--html-body`, attachments wrap the alternative part in a `multipart/mixed`. |
+
+Examples:
+
+```bash
+# Default: Markdown body → recipient sees rendered HTML inline.
+aimx send --from alice@example.com --to bob@example.com \
+  --subject "Daily briefing" \
+  --body "# Daily briefing\n\n- item one\n- item two"
+
+# Plain-text only (e.g. OTPs, scripts that must not change shape).
+aimx send --from alice@example.com --to bob@example.com \
+  --subject "Verification code" --body "Your code: 184293" --text-only
+
+# Custom branded HTML layout — operator owns the rendering.
+aimx send --from alice@example.com --to bob@example.com \
+  --subject "Newsletter" --body "Plain-text fallback for text-only clients." \
+  --html-body "$(cat newsletter.html)"
+
+# Markdown body + attachment.
+aimx send --from alice@example.com --to bob@example.com \
+  --subject "Q4 report" --body "See attached PDF." --attachment ./report.pdf
+```
+
+If both `--text-only` and `--html-body` are supplied, clap rejects the invocation before any UDS round-trip. The same canonical error fires server-side on the MCP `email_send` / `email_reply` tools so operators see one consistent message regardless of the surface.
+
+The sent record under `sent/<mailbox>/` always stores the **Markdown source** (or, for `--text-only`, the literal text — or for `--html-body`, the `--body` text part). The recipient's HTML view is recoverable by re-running the same renderer; AIMX does not duplicate the rendered HTML alongside the source. See [Markdown Email: Sent storage](markdown-email.md#sent-storage).
 
 See [Mailboxes: Sending email](mailboxes.md#sending-email).
 

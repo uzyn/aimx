@@ -267,30 +267,46 @@ The `email_list` MCP tool returns the `read` flag on every inbox row. Agents pag
 
 ## Sending email
 
+`--body` is interpreted as **Markdown** by default — recipients on rich-capable clients see styled HTML, recipients on text-only clients see the Markdown source. Two escape hatches cover the edge cases: `--text-only` for plain-text-only sends, `--html-body` for custom HTML templates. See [Markdown Email](markdown-email.md) for a full tour of the rendering pipeline and the inlined stylesheet.
+
 ### Via CLI
 
 ```bash
-# Basic send
+# Basic send: --body is Markdown by default.
 aimx send --from support@agent.yourdomain.com \
           --to recipient@gmail.com \
           --subject "Hello" \
-          --body "Message body"
+          --body "# Hello\n\nThanks for reaching out — happy to help!"
 
-# With attachments
+# Plain text only (e.g. OTPs, transactional one-liners).
+aimx send --from support@agent.yourdomain.com \
+          --to recipient@gmail.com \
+          --subject "Verification code" \
+          --body "Your code: 184293" \
+          --text-only
+
+# Custom HTML layout (operator-supplied template).
+aimx send --from support@agent.yourdomain.com \
+          --to recipient@gmail.com \
+          --subject "Newsletter" \
+          --body "Plain-text fallback for text-only clients." \
+          --html-body "$(cat newsletter.html)"
+
+# With attachments (Markdown body + PDF).
 aimx send --from support@agent.yourdomain.com \
           --to recipient@gmail.com \
           --subject "Report" \
-          --body "See attached." \
+          --body "See the attached PDF." \
           --attachment /path/to/report.pdf
 
-# Reply to a message (preserves threading)
+# Reply to a message (preserves threading).
 aimx send --from support@agent.yourdomain.com \
           --to recipient@gmail.com \
           --subject "Re: Hello" \
           --body "Reply body" \
           --reply-to "<original-message-id@example.com>"
 
-# Advanced: supply the full References header for deep threading
+# Advanced: supply the full References header for deep threading.
 aimx send --from support@agent.yourdomain.com \
           --to recipient@gmail.com \
           --subject "Re: Hello" \

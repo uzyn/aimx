@@ -103,15 +103,23 @@ surface.
   metadata, sorted descending by filename (newest first). `folder` is
   `"inbox"` (default) or `"sent"`. `limit` defaults to 50, max 200; values
   above 200 are silently clamped. Returns a JSON array — agents
-  filter client-side (e.g. `read == false` for triage). aimx never
+  filter client-side (e.g. `read == false` for triage). AIMX never
   scans on your behalf; pass `offset` to page deeper.
 - `email_read(mailbox, id, folder?)`: return the full Markdown file
   (frontmatter + body) for one email.
-- `email_send(from_mailbox, to, subject, body, attachments?)`: compose,
-  DKIM-sign, and deliver an email. `from_mailbox` must be a mailbox you
-  own.
-- `email_reply(mailbox, id, body)`: reply to an existing email. aimx sets
-  `In-Reply-To`, `References`, and `Re:` subject automatically.
+- `email_send(from_mailbox, to, subject, body, attachments?, text_only?, html_body?)`:
+  compose, DKIM-sign, and deliver an email. **`body` is interpreted as
+  Markdown** (CommonMark + GFM extensions). AIMX renders it to HTML and
+  sends as `multipart/alternative` — recipients on rich-capable clients
+  see styled HTML; recipients on text-only clients see the Markdown
+  source. Set `text_only: true` for plain-text-only sends (e.g. OTPs,
+  transactional one-liners). Set `html_body` to override the
+  auto-rendered HTML with your own template. `text_only` and `html_body`
+  are mutually exclusive. `from_mailbox` must be a mailbox you own.
+- `email_reply(mailbox, id, body, text_only?, html_body?)`: reply to an
+  existing email. `body` is Markdown by default with the same `text_only` /
+  `html_body` escape hatches as `email_send`. AIMX sets `In-Reply-To`,
+  `References`, and `Re:` subject automatically.
 - `email_mark_read(mailbox, id)`: mark a single inbox email as read.
 - `email_mark_unread(mailbox, id)`: mark a single inbox email as unread.
 
@@ -247,22 +255,30 @@ tools (or call `email_read` if you prefer the daemon-mediated path), then
 
 ### 2. Send an email
 
+`body` is **Markdown by default** — AIMX renders it to HTML and sends
+as `multipart/alternative`, so recipients on rich clients see styled
+HTML and text-only clients see the Markdown source. Use Markdown for
+headings, tables, links, code blocks, and lists.
+
 ```
 email_send(
   from_mailbox: "agent",
   to: "alice@example.com",
   subject: "Weekly report",
-  body: "Here is the summary..."
+  body: "# Weekly report\n\n- Highlight one\n- Highlight two\n\nDetails: [dashboard](https://example.com/dash)."
 )
 ```
 
+For plain-text sends (OTPs, transactional one-liners) pass
+`text_only: true` to ship `body` verbatim as `text/plain`. For custom
+branded HTML layouts, pass `html_body` (used verbatim as the HTML part)
+and keep `body` as the plain-text fallback. `text_only` and `html_body`
+are mutually exclusive.
+
 The mailbox must exist and you must own it. Provision new mailboxes
-via `mailbox_create(name)` (owned by your uid) or, when the operator
-needs to create one owned by a different user, via
-`sudo aimx mailboxes create <name> --owner <user>` on the host.
-`from_mailbox` is the local part only (e.g. `"agent"`, not
-`"agent@example.com"`). aimx DKIM-signs the message and delivers it via
-direct SMTP to the recipient's MX server.
+via `mailbox_create(name)` (owned by your uid). `from_mailbox` is the
+local part only (e.g. `"agent"`, not `"agent@example.com"`). AIMX
+DKIM-signs the message and delivers it via direct SMTP.
 
 ### 3. Reply to a message
 

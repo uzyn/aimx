@@ -211,6 +211,17 @@ pub struct OutboundFrontmatter {
 
     // -- Outbound block --
     pub outbound: bool,
+    /// Wire shape used by the daemon when assembling the outbound
+    /// message. One of `"markdown"` (default — body rendered as
+    /// CommonMark+GFM into a `multipart/alternative`), `"text"`
+    /// (`--text-only` / MCP `text_only=true` — single-part `text/plain`),
+    /// or `"html"` (`--html-body` / MCP `html_body=...` — operator-supplied
+    /// HTML in the alternative part). Pre-feature sent records lack the
+    /// field; on read those default to `"text"` (the old `text/plain`-only
+    /// behavior) so the audit trail is honest about what the recipient
+    /// actually saw.
+    #[serde(default = "default_outbound_format")]
+    pub outbound_format: String,
     pub delivery_status: DeliveryStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bcc: Option<Vec<String>>,
@@ -218,6 +229,15 @@ pub struct OutboundFrontmatter {
     pub delivered_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_details: Option<String>,
+}
+
+/// Backward-compatibility default for `OutboundFrontmatter::outbound_format`.
+/// New writes pick a concrete value at the call site (`"markdown"`,
+/// `"text"`, or `"html"`); reads of pre-feature sent records hit this
+/// default — `"text"` matches the historic single-part `text/plain`
+/// shape the daemon used before Markdown rendering shipped.
+fn default_outbound_format() -> String {
+    "text".to_string()
 }
 
 pub fn format_outbound_frontmatter(meta: &OutboundFrontmatter, body: &str) -> String {
@@ -797,6 +817,7 @@ mod tests {
             read: false,
             labels: vec![],
             outbound: true,
+            outbound_format: "markdown".to_string(),
             delivery_status: DeliveryStatus::Delivered,
             bcc: None,
             delivered_at: Some("2025-01-01T12:00:05Z".to_string()),
@@ -839,6 +860,9 @@ mod tests {
         // Inbound block first, then outbound block at the end.
         // `received_at` is omitted because it is empty on outbound messages
         // (skip_serializing_if = "String::is_empty").
+        // `outbound_format` lands immediately after `outbound` so the
+        // wire-shape audit-trail field is colocated with the boolean
+        // that flags the record as outbound in the first place.
         let expected_keys = vec![
             "id",
             "message_id",
@@ -856,6 +880,7 @@ mod tests {
             "mailbox",
             "read",
             "outbound",
+            "outbound_format",
             "delivery_status",
             "delivered_at",
             "delivery_details",
@@ -940,5 +965,84 @@ mod tests {
             !toml_str.contains("received_at"),
             "empty received_at must be omitted on outbound files; got:\n{toml_str}"
         );
+    }
+
+    /// New writes carry an explicit `outbound_format` value so the
+    /// audit trail is honest about the wire shape used. The sample
+    /// fixture exercises the canonical `"markdown"` default that
+    /// `assemble_wire_message` produces for the rendered path.
+    #[test]
+    fn outbound_format_serializes_immediately_after_outbound() {
+        let fm = sample_outbound_frontmatter();
+        let toml_str = toml::to_string(&fm).unwrap();
+        assert!(
+            toml_str.contains("outbound_format = \"markdown\""),
+            "outbound_format must be written verbatim; got:\n{toml_str}"
+        );
+        let outbound_pos = toml_str.find("outbound = ").expect("outbound line missing");
+        let format_pos = toml_str
+            .find("outbound_format = ")
+            .expect("outbound_format line missing");
+        assert!(
+            format_pos > outbound_pos,
+            "outbound_format must follow outbound; got:\n{toml_str}"
+        );
+        // Nothing else may sit between `outbound = ...` and
+        // `outbound_format = ...` — they live as a tightly-coupled pair
+        // per the spec.
+        let between = &toml_str[outbound_pos..format_pos];
+        let line_count = between.lines().count();
+        assert_eq!(
+            line_count, 1,
+            "outbound_format must be the very next line after outbound; got between:\n{between}"
+        );
+    }
+
+    /// Parsing an outbound frontmatter that lacks `outbound_format`
+    /// must succeed and yield `"text"` — the historic single-part
+    /// `text/plain` shape pre-Markdown-rendering. This is the
+    /// backward-compat contract that lets older sent records keep
+    /// rendering correctly through `email_list` / `email_read`.
+    #[test]
+    fn outbound_format_missing_field_defaults_to_text() {
+        let toml_str = r#"
+id = "2025-01-01-120000-hello"
+message_id = "<abc@example.com>"
+thread_id = "a1b2c3d4e5f6a7b8"
+from = "alice@example.com"
+to = "bob@example.com"
+delivered_to = "bob@example.com"
+subject = "Hello"
+date = "2025-01-01T12:00:00Z"
+size_bytes = 256
+dkim = "pass"
+spf = "none"
+dmarc = "none"
+trusted = "none"
+mailbox = "alice"
+read = false
+outbound = true
+delivery_status = "delivered"
+delivered_at = "2025-01-01T12:00:05Z"
+"#;
+        let parsed: OutboundFrontmatter =
+            toml::from_str(toml_str).expect("legacy outbound record must parse");
+        assert_eq!(
+            parsed.outbound_format, "text",
+            "missing outbound_format must default to \"text\" for backward compat",
+        );
+    }
+
+    /// Round-trip: an explicit `outbound_format = "html"` survives
+    /// serialize → parse. Catches a regression where the field is
+    /// silently dropped from the toml output.
+    #[test]
+    fn outbound_format_round_trips_explicit_value() {
+        let mut fm = sample_outbound_frontmatter();
+        fm.outbound_format = "html".to_string();
+        let toml_str = toml::to_string(&fm).unwrap();
+        let parsed: OutboundFrontmatter =
+            toml::from_str(&toml_str).expect("html outbound_format must round-trip");
+        assert_eq!(parsed.outbound_format, "html");
     }
 }
