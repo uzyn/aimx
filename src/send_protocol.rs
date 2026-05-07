@@ -510,6 +510,13 @@ async fn parse_send_headers_and_body<R>(
 where
     R: AsyncRead + Unpin,
 {
+    // AIMX/1 header order is unspecified — the parser accumulates all
+    // header lines into local state in arrival order and only enforces
+    // cross-header invariants (mutual exclusion, required-headers,
+    // duplicates) after the blank-line terminator. The encoder below
+    // emits a canonical order for readability only; conforming clients
+    // must not rely on it. Keep new headers wired into the same
+    // accumulate-then-validate shape rather than positional checks.
     let mut content_length: Option<usize> = None;
     let mut html_body_length: Option<usize> = None;
     let mut text_only: bool = false;

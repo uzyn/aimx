@@ -148,8 +148,7 @@ pub fn assemble_wire_message(
         build_multipart_body(&markdown_with_sig, &html, &attachments, &outer, &inner)
     };
 
-    let content_headers =
-        build_outgoing_content_headers_for(text_only, html_body.is_some(), &attachments, &outer);
+    let content_headers = build_outgoing_content_headers_for(text_only, &attachments, &outer);
 
     let mut out =
         Vec::with_capacity(preserved_headers.len() + content_headers.len() + body_bytes.len() + 4);
@@ -528,23 +527,25 @@ fn strip_outgoing_content_headers(headers: &str) -> String {
 }
 
 /// Build the outbound `Content-Type` (and `MIME-Version`) header lines
-/// for the wire shape that matches `text_only` / `html_body` /
-/// `attachments`. Includes the trailing CRLF on each line — caller
-/// appends a final blank CRLF to terminate the header block.
+/// for the wire shape that matches `text_only` / `attachments`. Includes
+/// the trailing CRLF on each line — caller appends a final blank CRLF
+/// to terminate the header block.
+///
+/// The default Markdown path and the `--html-body` path share the
+/// `multipart/alternative` (or `multipart/mixed` with attachments) shape,
+/// so they collapse into the same branch here; only `text_only` shifts
+/// the outer Content-Type away from `alternative`.
 ///
 /// Shape table:
 ///
-/// | text_only | html_body | attachments | Content-Type                |
-/// |-----------|-----------|-------------|-----------------------------|
-/// | false     | false     | none        | multipart/alternative       |
-/// | false     | false     | some        | multipart/mixed             |
-/// | false     | true      | none        | multipart/alternative       |
-/// | false     | true      | some        | multipart/mixed             |
-/// | true      | (n/a)     | none        | text/plain (single-part)    |
-/// | true      | (n/a)     | some        | multipart/mixed             |
+/// | text_only | attachments | Content-Type                |
+/// |-----------|-------------|-----------------------------|
+/// | false     | none        | multipart/alternative       |
+/// | false     | some        | multipart/mixed             |
+/// | true      | none        | text/plain (single-part)    |
+/// | true      | some        | multipart/mixed             |
 fn build_outgoing_content_headers_for(
     text_only: bool,
-    has_html_body: bool,
     attachments: &[AttachmentPart],
     outer_boundary: &str,
 ) -> String {
@@ -564,7 +565,6 @@ fn build_outgoing_content_headers_for(
         // text_only=false here (text_only with no attachments is the
         // single-part branch above). Both the default Markdown path
         // and the html_body path share the alternative shape.
-        let _ = has_html_body;
         out.push_str(&format!(
             "Content-Type: multipart/alternative; boundary=\"{outer_boundary}\"\r\n"
         ));
@@ -1313,6 +1313,79 @@ mod tests {
         assert!(text.contains("filename=\"doc.pdf\""));
         // No rendered HTML
         assert!(!text.contains("<h1"), "{text}");
+    }
+
+    /// `--text-only` with three attachments: outer `multipart/mixed`
+    /// whose first child is the single text part, then each attachment
+    /// as a sibling. No inner `multipart/alternative` and no rendered
+    /// HTML — text-only never produces a rich part regardless of how
+    /// many attachments ride alongside it. Mirrors the default-path
+    /// `three_attachments_appear_as_siblings` coverage so the
+    /// attachments-loop on the text-only branch is exercised at >1.
+    #[test]
+    fn text_only_with_multiple_attachments_wraps_in_multipart_mixed() {
+        let body = concat!(
+            "--BND\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Body verbatim.\r\n",
+            "--BND\r\n",
+            "Content-Type: application/pdf; name=\"a.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"a.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "QQ==\r\n",
+            "--BND\r\n",
+            "Content-Type: image/png; name=\"b.png\"\r\n",
+            "Content-Disposition: attachment; filename=\"b.png\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "Qg==\r\n",
+            "--BND\r\n",
+            "Content-Type: text/csv; name=\"c.csv\"\r\n",
+            "Content-Disposition: attachment; filename=\"c.csv\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "Qw==\r\n",
+            "--BND--\r\n",
+        );
+        let req = build_request(
+            "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
+            body,
+        );
+        let out = assemble_wire_message(&req, "ignored-sig", true, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+
+        // Outer wrap is multipart/mixed; no inner alternative; no HTML
+        // rendering; signature suppressed.
+        assert!(text.contains("Content-Type: multipart/mixed; boundary=\"aimx-"));
+        assert!(!text.contains("multipart/alternative"), "{text}");
+        assert!(!text.contains("text/html"), "{text}");
+        assert!(!text.contains("<h1"), "{text}");
+        assert!(!text.contains("ignored-sig"), "{text}");
+
+        // Single text part carries the body verbatim.
+        assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
+        assert!(text.contains("Body verbatim."));
+
+        // All three attachments preserved as siblings.
+        assert!(text.contains("filename=\"a.pdf\""));
+        assert!(text.contains("filename=\"b.png\""));
+        assert!(text.contains("filename=\"c.csv\""));
+
+        // Boundary marker count: 1 text part + 3 attachments + 1 close
+        // = 5 occurrences of the outer boundary marker. Same invariant
+        // as `three_attachments_appear_as_siblings` for the default
+        // path; here we additionally know there is no inner boundary
+        // since the alternative is suppressed.
+        let outer_ct = text
+            .lines()
+            .find(|l| l.starts_with("Content-Type: multipart/mixed"))
+            .unwrap();
+        let outer_boundary = extract_quoted_param(outer_ct, "boundary").unwrap();
+        let outer_marker = format!("--{outer_boundary}");
+        let count = text.matches(&outer_marker).count();
+        assert_eq!(count, 5, "expected 5 outer-boundary markers, got {count}");
     }
 
     /// `--html-body` with no attachments: `multipart/alternative` with
