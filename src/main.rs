@@ -21,6 +21,14 @@ mod mailbox;
 mod mailbox_handler;
 mod mailbox_list_handler;
 mod mailbox_locks;
+// `markdown_render` lands the renderer used by the daemon's outbound
+// path. The daemon-side wire-up (`send_handler` calling
+// `render_markdown_to_email_html`) lands in a follow-up commit; until
+// then the public surface is consumed only by the module's own tests.
+// `#[allow(dead_code)]` here is scoped to keep `cargo clippy -D
+// warnings` clean without silencing genuinely-dead items elsewhere.
+#[allow(dead_code)]
+mod markdown_render;
 mod mcp;
 mod mx;
 mod ownership;
