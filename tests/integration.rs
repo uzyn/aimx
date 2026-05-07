@@ -2809,6 +2809,209 @@ fn send_uds_end_to_end_delivers_signed_message() {
     );
 }
 
+#[cfg(unix)]
+fn drop_payload(path: &Path) -> Vec<u8> {
+    let signed = std::fs::read(path).expect("mail drop file missing");
+    let sentinel = b"----- AIMX TEST DROP -----\n";
+    assert!(signed.starts_with(sentinel));
+    signed[sentinel.len()..].to_vec()
+}
+
+/// Bare Markdown send via the CLI client → daemon assembles
+/// multipart/alternative on the wire (text part = Markdown source verbatim,
+/// HTML part = rendered HTML), DKIM body-hash verifies against the new
+/// shape, and the sent record persists the Markdown source as the body
+/// (no `.html` sibling).
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Markdown render check")
+        .arg("--body")
+        .arg("# Hello\n\nWorld")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    // Wire shape: multipart/alternative with text + html parts.
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "wire must be multipart/alternative for the default Markdown path; got:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text/plain part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    // The text part contains the Markdown source verbatim (modulo
+    // CRLF normalization and the appended default signature).
+    assert!(
+        payload_str.contains("# Hello"),
+        "text part must carry the Markdown source verbatim:\n{payload_str}"
+    );
+    // The HTML part contains rendered HTML for `# Hello` and `World`.
+    assert!(
+        payload_str.contains("<h1") && payload_str.contains(">Hello</h1>"),
+        "html part missing rendered <h1>Hello</h1>:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains(">World</p>") || payload_str.contains("World"),
+        "html part must include the body paragraph"
+    );
+
+    // DKIM body-hash verification using the same relaxed-canonicalization
+    // helper as the legacy plain-text end-to-end test. The new multipart
+    // shape must still verify byte-for-byte.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on multipart/alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    // The sent record exists at sent/alice/<stem>.md and its body
+    // contains the Markdown source verbatim (no `.html` sibling, no
+    // rendered HTML in the persisted body).
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record expected");
+    let sent_path = entries[0].path();
+    let sent_content = std::fs::read_to_string(&sent_path).unwrap();
+    // Body equals the Markdown source verbatim.
+    assert!(
+        sent_content.contains("# Hello"),
+        "sent record body should preserve the Markdown source verbatim"
+    );
+    // No `.html` sibling appears.
+    let any_html_sibling = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        });
+    assert!(
+        !any_html_sibling,
+        "no .html sibling file should be written next to the sent record"
+    );
+
+    stop_serve(child);
+}
+
+/// Markdown send with one attachment must emit a nested
+/// multipart/mixed wrapping multipart/alternative, AND the resulting
+/// DKIM-Signature must still verify against the canonical body bytes.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_dkim_verifies_with_attachment() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let attachment = tmp.path().join("note.txt");
+    std::fs::write(&attachment, b"attached payload").unwrap();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Markdown plus attachment")
+        .arg("--body")
+        .arg("## Report\n\nDetails inline.")
+        .arg("--attachment")
+        .arg(&attachment)
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send with attachment should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: multipart/mixed"),
+        "outer Content-Type must be multipart/mixed when attachments are present:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "inner Content-Type must be multipart/alternative:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("filename=\"note.txt\""),
+        "attachment must survive daemon-side reassembly"
+    );
+    assert!(
+        payload_str.contains("<h2") && payload_str.contains(">Report</h2>"),
+        "html part missing rendered heading"
+    );
+
+    // DKIM body-hash must verify against the new nested wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on nested mixed+alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    stop_serve(child);
+}
+
 /// End-to-end `after_send` hook test. Replaces the default
 /// `setup_test_env` config with a mailbox that carries an `after_send` hook
 /// writing a sentinel file containing `$AIMX_SEND_STATUS`. After a send

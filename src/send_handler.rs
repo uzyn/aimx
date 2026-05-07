@@ -250,7 +250,23 @@ where
         }
     };
 
-    let body_bytes = append_signature(&body_with_id, config.effective_signature());
+    // Default Markdown send path: render the Markdown body to HTML and
+    // assemble the multipart/alternative (or nested multipart/mixed when
+    // the client packed attachments) shape daemon-side. The signature is
+    // appended to the Markdown source before rendering so a Markdown
+    // link in the signature renders as a clickable HTML anchor.
+    let body_bytes = match crate::wire_assembly::assemble_wire_message(
+        &body_with_id,
+        config.effective_signature(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            return SendResponse::Err {
+                code: ErrCode::Malformed,
+                reason: e.to_string(),
+            };
+        }
+    };
 
     let signed = match signer(
         &body_bytes,
@@ -418,107 +434,6 @@ fn resolve_concrete_mailbox(
     }
 
     None
-}
-
-/// Append `signature` to the first text body region of an RFC 5322 message.
-///
-/// Returns the body unchanged when `signature` is empty (operator-disabled
-/// signature). Otherwise inserts a blank-line separator followed by the
-/// signature into the message:
-///
-/// - Flat `text/plain` bodies (the no-attachment shape produced by
-///   [`crate::send::compose_message`]): signature is appended at the end of
-///   the body, before the trailing terminator slot.
-/// - `multipart/mixed` bodies: signature is injected at the end of the first
-///   part (which `compose_message` always emits as `text/plain`), just before
-///   the boundary line that opens the next part.
-///
-/// Line endings in `signature` are normalized to match the body's terminator
-/// (CRLF or LF). If the multipart structure can't be parsed, falls back to
-/// the flat append at end-of-body so DKIM signing still produces a
-/// deterministic result.
-fn append_signature(body: &[u8], signature: &str) -> Vec<u8> {
-    if signature.is_empty() {
-        return body.to_vec();
-    }
-
-    let crlf = body.windows(2).take(1024).any(|w| w == b"\r\n");
-    let term: &[u8] = if crlf { b"\r\n" } else { b"\n" };
-
-    let normalized_sig = normalize_signature_line_endings(signature, crlf);
-    let insert_at = find_first_part_terminator(body).unwrap_or(body.len());
-
-    let mut out = Vec::with_capacity(body.len() + normalized_sig.len() + 2 * term.len());
-    out.extend_from_slice(&body[..insert_at]);
-    out.extend_from_slice(term);
-    out.extend_from_slice(normalized_sig.as_bytes());
-    out.extend_from_slice(term);
-    out.extend_from_slice(&body[insert_at..]);
-    out
-}
-
-/// Locate the byte offset where a signature should be injected for a
-/// `multipart/...` body: the start of the second `--<boundary>` line, which
-/// terminates the first part. Returns `None` for non-multipart bodies and
-/// for malformed multipart bodies (caller falls back to end-of-body).
-fn find_first_part_terminator(body: &[u8]) -> Option<usize> {
-    let boundary = extract_multipart_boundary(body)?;
-    let marker = format!("--{boundary}");
-    let marker_bytes = marker.as_bytes();
-
-    let first = find_subslice(body, marker_bytes)?;
-    let after_first = first + marker_bytes.len();
-    let second_rel = find_subslice(&body[after_first..], marker_bytes)?;
-    Some(after_first + second_rel)
-}
-
-/// Extract the `boundary` parameter from the first `Content-Type:
-/// multipart/...` header in the message's header block. Returns `None` for
-/// flat (non-multipart) messages.
-fn extract_multipart_boundary(body: &[u8]) -> Option<String> {
-    let header_end = find_subslice(body, b"\r\n\r\n").or_else(|| find_subslice(body, b"\n\n"))?;
-    let header_text = std::str::from_utf8(&body[..header_end]).ok()?;
-
-    for line in header_text.lines() {
-        let lower = line.to_ascii_lowercase();
-        if !lower.starts_with("content-type:") || !lower.contains("multipart/") {
-            continue;
-        }
-        let pos = lower.find("boundary=")?;
-        let after = &line[pos + "boundary=".len()..];
-        if let Some(stripped) = after.strip_prefix('"') {
-            let end = stripped.find('"')?;
-            return Some(stripped[..end].to_string());
-        }
-        let end = after
-            .find(|c: char| c == ';' || c.is_whitespace())
-            .unwrap_or(after.len());
-        if end == 0 {
-            return None;
-        }
-        return Some(after[..end].to_string());
-    }
-    None
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Convert any mix of CR / LF / CRLF in `signature` to the body's terminator.
-fn normalize_signature_line_endings(signature: &str, crlf: bool) -> String {
-    let lf_only = signature.replace("\r\n", "\n").replace('\r', "\n");
-    if crlf {
-        lf_only.replace('\n', "\r\n")
-    } else {
-        lf_only
-    }
 }
 
 /// Insert a `Message-ID:` header at the top of an RFC 5322 message body. The
@@ -1487,131 +1402,6 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // append_signature unit tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn append_signature_empty_is_noop() {
-        let body = b"From: a@example.com\r\nTo: b@x.com\r\n\r\nhello\r\n";
-        let out = append_signature(body, "");
-        assert_eq!(out, body);
-    }
-
-    #[test]
-    fn append_signature_text_plain_appends_after_body() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: text/plain; charset=utf-8\r\n\
-                     \r\n\
-                     hello\r\n";
-        let out = append_signature(body, "Sig line 1\nSig line 2");
-        let text = std::str::from_utf8(&out).unwrap();
-        let sep = text.find("\r\n\r\n").expect("header separator missing");
-        let body_section = &text[sep + 4..];
-        assert!(
-            body_section.contains("hello\r\n\r\nSig line 1\r\nSig line 2"),
-            "body section was: {body_section:?}"
-        );
-        assert!(text.ends_with("\r\n"));
-    }
-
-    #[test]
-    fn append_signature_multipart_injects_into_text_part() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: multipart/mixed; boundary=\"BND\"\r\n\
-                     \r\n\
-                     --BND\r\n\
-                     Content-Type: text/plain; charset=utf-8\r\n\
-                     \r\n\
-                     user body\r\n\
-                     --BND\r\n\
-                     Content-Type: application/pdf; name=\"x.pdf\"\r\n\
-                     \r\n\
-                     PDFDATA\r\n\
-                     --BND--\r\n";
-        let out = append_signature(body, "Trailer");
-        let text = std::str::from_utf8(&out).unwrap();
-        let sig_pos = text.find("Trailer").expect("signature missing");
-        let first_boundary = text.find("--BND\r\n").expect("first boundary missing");
-        let second_boundary = text[first_boundary + 7..]
-            .find("--BND\r\n")
-            .map(|p| first_boundary + 7 + p)
-            .expect("second boundary missing");
-        assert!(
-            sig_pos > first_boundary && sig_pos < second_boundary,
-            "signature must live inside the first text/plain part"
-        );
-        assert!(text.contains("user body\r\n\r\nTrailer\r\n--BND\r\n"));
-        assert!(text.contains("PDFDATA\r\n"));
-    }
-
-    #[test]
-    fn append_signature_preserves_lf_terminator() {
-        let body = b"From: a@example.com\nContent-Type: text/plain; charset=utf-8\n\nhello\n";
-        let out = append_signature(body, "sig\rline2");
-        let text = std::str::from_utf8(&out).unwrap();
-        assert!(!text.contains('\r'), "LF body must not gain CR bytes");
-        assert!(text.contains("hello\n\nsig\nline2\n"));
-    }
-
-    #[test]
-    fn append_signature_multibyte_signature() {
-        let body = b"From: a@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhi\r\n";
-        let out = append_signature(body, "Héllo — wörld");
-        let text = std::str::from_utf8(&out).expect("must remain valid UTF-8");
-        assert!(text.contains("Héllo — wörld"));
-    }
-
-    #[test]
-    fn append_signature_falls_back_when_multipart_malformed() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: multipart/mixed; boundary=\"BND\"\r\n\
-                     \r\n\
-                     no boundaries follow at all\r\n";
-        let out = append_signature(body, "sig");
-        let text = std::str::from_utf8(&out).unwrap();
-        assert!(text.ends_with("sig\r\n"));
-    }
-
-    #[test]
-    fn extract_multipart_boundary_quoted() {
-        let body = b"Content-Type: multipart/mixed; boundary=\"abc-123\"\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_unquoted() {
-        let body = b"Content-Type: multipart/mixed; boundary=abc-123\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_unquoted_with_trailing_param() {
-        let body = b"Content-Type: multipart/mixed; boundary=abc-123; charset=utf-8\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_returns_none_for_flat() {
-        let body = b"Content-Type: text/plain; charset=utf-8\r\n\r\nbody";
-        assert_eq!(extract_multipart_boundary(body), None);
-    }
-
-    #[test]
-    fn extract_multipart_boundary_case_insensitive() {
-        let body = b"CONTENT-TYPE: Multipart/Mixed; BOUNDARY=\"X\"\r\n\r\nbody";
-        assert_eq!(extract_multipart_boundary(body), Some("X".to_string()));
-    }
-
-    // ------------------------------------------------------------------
     // Daemon-level signature tests (end-to-end through handle_send)
     // ------------------------------------------------------------------
 
@@ -1749,7 +1539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signature_appended_in_multipart_text_part() {
+    async fn signature_renders_in_text_and_html_parts_with_attachment() {
         let data_dir = tempfile::TempDir::new().unwrap();
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
@@ -1786,15 +1576,25 @@ mod tests {
 
         let captured = mock.captured.lock().unwrap();
         let delivered = String::from_utf8_lossy(&captured[0]);
-        let mark_pos = delivered.find("MARK").expect("signature missing");
-        let first_boundary = delivered.find("--BND\r\n").expect("missing");
-        let second_boundary = delivered[first_boundary + 7..]
-            .find("--BND\r\n")
-            .map(|p| first_boundary + 7 + p)
-            .expect("missing");
+        // The signature is appended to the Markdown source before
+        // rendering, so it appears verbatim in the text part and (since
+        // it is plain ASCII) literally in the rendered HTML part too.
         assert!(
-            mark_pos > first_boundary && mark_pos < second_boundary,
-            "signature must sit inside the first text/plain part, not after attachments"
+            delivered.contains("MARK"),
+            "signature must appear in the delivered message: {delivered}"
+        );
+        // The wire shape is multipart/mixed wrapping multipart/alternative.
+        assert!(
+            delivered.contains("Content-Type: multipart/mixed"),
+            "outer content-type must be multipart/mixed: {delivered}"
+        );
+        assert!(
+            delivered.contains("Content-Type: multipart/alternative"),
+            "inner content-type must be multipart/alternative: {delivered}"
+        );
+        assert!(
+            delivered.contains("filename=\"x.bin\""),
+            "attachment must survive the daemon-side reassembly: {delivered}"
         );
     }
 }
