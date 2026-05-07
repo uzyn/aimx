@@ -1183,6 +1183,32 @@ assert_not_contains "shell does not print step 6 title" "${_out}" "Set up MCP fo
 assert_not_contains "dry-run does not switch to port-check banner" "${_out}" "AIMX port 25 connectivity check"
 assert_not_contains "dry-run does not show outbound check line" "${_out}" "Outbound port 25"
 
+# Dry-run + equal-version + no-force must stay non-interactive: the
+# prompt_reinstall recovery prompt is for live re-runs only. Auditing
+# the script with AIMX_DRY_RUN=1 must never block on operator input,
+# matching pre-PR behavior on this branch.
+cat > "${_tmp}/bin/aimx" <<'AIMXEOF'
+#!/bin/sh
+# Fake aimx that only knows how to satisfy parse_installed_tag.
+case "$1" in
+    --version) echo "aimx 0.1.0 (deadbeef) x86_64-unknown-linux-gnu built 2026-01-01" ;;
+    *) exit 0 ;;
+esac
+AIMXEOF
+chmod +x "${_tmp}/bin/aimx"
+
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_PREFIX="${_tmp}/bin" \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)"
+assert_contains "dry-run+equal-version reports already-installed" "${_out}" "AIMX 0.1.0 is already installed"
+assert_not_contains "dry-run+equal-version does not invoke prompt_reinstall" "${_out}" "Re-run setup to (re)configure"
+
+rm -f "${_tmp}/bin/aimx"
+
 # ---------------------------------------------------------------------------
 # 9. prompt_reinstall — equal-version re-run flow
 # ---------------------------------------------------------------------------
@@ -1190,28 +1216,24 @@ assert_not_contains "dry-run does not show outbound check line" "${_out}" "Outbo
 # When `install.sh` finds the binary already at the target tag and --force
 # was not passed, it asks the operator whether to re-run `aimx setup`.
 # The helper is structured around an overridable `_prompt_read` so tests
-# can stub the answer without faking /dev/tty.
+# can stub the answer without faking /dev/tty. The real `_prompt_read`
+# owns the prompt printf and gates it on TTY availability — that's why
+# stubbing `_prompt_read` here also bypasses the prompt printing.
 
 echo "# prompt_reinstall"
 
-_out="$(
-    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        _prompt_read() { _ans="y"; }
-        if prompt_reinstall; then echo YES; else echo NO; fi
-    ' 2>&1
-)"
-assert_contains "prompt_reinstall returns 0 on y" "${_out}" "YES"
-assert_contains "prompt_reinstall prints the prompt to stderr" "${_out}" "AIMX is already installed"
-
-_out="$(
-    INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
-        . "'"${INSTALL_SH}"'"
-        _prompt_read() { _ans="Yes"; }
-        if prompt_reinstall; then echo YES; else echo NO; fi
-    ' 2>&1
-)"
-assert_contains "prompt_reinstall accepts Yes" "${_out}" "YES"
+# Cover every accept-list value (y, Y, yes, YES, Yes) so a future
+# contributor cannot quietly narrow the case match in prompt_reinstall.
+for _accept in y Y yes YES Yes; do
+    _out="$(
+        INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
+            . "'"${INSTALL_SH}"'"
+            _prompt_read() { _ans="'"${_accept}"'"; }
+            if prompt_reinstall; then echo YES; else echo NO; fi
+        ' 2>&1
+    )"
+    assert_contains "prompt_reinstall accepts ${_accept}" "${_out}" "YES"
+done
 
 _out="$(
     INSTALL_SH_TEST=1 NO_COLOR=1 sh -c '
@@ -1239,6 +1261,12 @@ _out="$(
     ' 2>&1
 )"
 assert_contains "prompt_reinstall returns 1 when no TTY" "${_out}" "NO"
+# Regression guard: when _prompt_read signals no-TTY, the prompt question
+# itself must not have been printed. Pre-fix the printf lived in
+# prompt_reinstall and fired before the TTY check, leaving a stray
+# "AIMX is already installed..." question in `curl | sh </dev/null`
+# / CI logs even though the script exited 0 cleanly.
+assert_not_contains "prompt_reinstall stays quiet on no TTY" "${_out}" "Re-run setup to (re)configure"
 
 # ---------------------------------------------------------------------------
 # 10. AIMX branding sweep — no lowercase brand-as-noun in install.sh prose

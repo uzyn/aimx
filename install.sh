@@ -252,13 +252,17 @@ resolve_sudo_prefix() {
 # 1 on no / no usable TTY. Default is no (Enter = no), so non-interactive
 # callers (CI, fully-scripted) keep today's exit-0 semantics.
 #
-# Same TTY logic as ensure_sudo and the post-install handoff: prefer
-# the script's own stdin if it's already a terminal; fall back to
-# /dev/tty when it's a pipe (curl | sh); otherwise no prompt.
+# _prompt_read prints the prompt only when a TTY is available for the
+# answer. Same TTY logic as ensure_sudo and the post-install handoff:
+# prefer the script's own stdin if it's already a terminal; fall back
+# to /dev/tty when it's a pipe (curl | sh); otherwise no prompt at all
+# (so `curl | sh </dev/null` stays quiet — no stray question in CI logs).
 _prompt_read() {
     if [ -t 0 ]; then
+        printf '%s' "$1" >&2
         read -r _ans
     elif [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        printf '%s' "$1" >&2
         read -r _ans </dev/tty
     else
         return 1
@@ -267,8 +271,7 @@ _prompt_read() {
 
 prompt_reinstall() {
     _ans=""
-    printf '%s' 'AIMX is already installed. Re-run setup to (re)configure it? [y/N] ' >&2
-    _prompt_read || return 1
+    _prompt_read 'AIMX is already installed. Re-run setup to (re)configure it? [y/N] ' || return 1
     case "${_ans}" in
         y | Y | yes | YES | Yes) return 0 ;;
         *) return 1 ;;
@@ -1256,10 +1259,13 @@ main() {
                     if [ "${FORCE}" -eq 1 ]; then
                         say "re-installing ${TAG} (--force)"
                         _is_upgrade=1
-                    elif prompt_reinstall; then
+                    elif [ "${DRY_RUN}" != "1" ] && prompt_reinstall; then
                         # Binary is already correct; skip the swap and
                         # jump straight to the wizard. backup_existing_config
                         # below covers any partial config from an aborted run.
+                        # Dry-run never prompts — auditing the script must
+                        # stay non-interactive, matching pre-PR behavior on
+                        # the equal-version branch.
                         _skip_swap=1
                         _is_upgrade=0
                     else

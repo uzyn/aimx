@@ -35,7 +35,7 @@ The shell script is thin: it acquires `sudo` up front, downloads the binary, and
 6. Extracts into a temp directory cleaned up on every exit path.
 7. Installs the binary as `install -m 0755 /usr/local/bin/aimx` (override with `--to` / `AIMX_PREFIX`).
 8. On a fresh box, backs up any pre-existing `/etc/aimx/config.toml` to `config.toml.bak-YYYYMMDD-HHMMSS`, then `exec`s `sudo aimx setup </dev/tty`. DKIM keys and STARTTLS certs are preserved across re-runs.
-9. If an older `aimx` is already installed, the upgrade path runs instead: stop the service, swap the binary atomically, restart. No wizard re-run. If the running version matches the target, it exits without touching anything (pass `--force` to reinstall).
+9. If an older `aimx` is already installed, the upgrade path runs instead: stop the service, swap the binary atomically, restart. No wizard re-run. If the running version matches the target, the script asks `AIMX is already installed. Re-run setup to (re)configure it? [y/N]` — answer `y` to skip the download and re-enter `aimx setup` (handy if you aborted the wizard partway through), or `N` / Enter / no usable TTY (CI, scripted callers) to exit `0` without touching anything. `--force` skips the prompt and reinstalls the binary.
 
 In CI / non-TTY contexts, set `AIMX_NONINTERACTIVE=1` and supply defaults — see [Setup](setup.md).
 

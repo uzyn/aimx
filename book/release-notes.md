@@ -91,6 +91,14 @@ When the tags differ, restart the service (`systemctl restart aimx`, or `rc-serv
 - A new `pgrep`-based detector warns (never signals) when a manually-launched `aimx serve` is running outside systemd / OpenRC.
 - A single post-start `systemctl is-active` check confirms the daemon came up, with a `journalctl -u aimx -n 20` hint on failure.
 
+### `install.sh` recovery prompt when the binary is already at the target version
+
+Re-running `curl -fsSL https://aimx.email/install.sh | sh` on a host whose `aimx` binary already matches the target tag used to hard-exit with `aimx 0.0.7 is already installed (pass --force to re-install)`. That stranded operators who had aborted partway through `aimx setup` (e.g. to grab a different domain) and now wanted to redo configuration — they had to know about `--force`, which implies a binary swap they don't need.
+
+The script now prompts `AIMX is already installed. Re-run setup to (re)configure it? [y/N]` on that branch. Answer `y` to skip the download/extract/install step entirely (binary is already correct) and fall through to `backup_existing_config` + `exec aimx setup`, the same handoff fresh installs use. Answer `N` (default) or run with no usable TTY (CI, fully-scripted callers, `AIMX_DRY_RUN=1`) and the script keeps the existing exit-0 semantics. `--force` continues to bypass the prompt and reinstall the binary.
+
+Operator-facing prose strings in `install.sh` were also capitalized to **AIMX** to match the wizard. Lowercase `aimx` is preserved for command literals (`aimx setup`), service unit references (`aimx.service`), paths (`/etc/aimx/...`), and the GitHub repo identifier (`uzyn/aimx`).
+
 ### `aimx upgrade` confirms the restart
 
 After `wait_for_service_ready` returns true, `aimx upgrade` prints one extra line:
