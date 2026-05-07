@@ -17,6 +17,22 @@ At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
 directory layout, written by `aimx setup` and refreshed on `aimx serve`
 startup.
 
+## Use MCP, not the CLI
+
+Your interface to aimx is the MCP tools (`mailbox_list`, `email_send`,
+`email_reply`, `mailbox_create`, `hook_create`, …). The `aimx` binary on
+PATH is the host operator's CLI — do not invoke it. **You never need to
+know the configured domain**: `email_send(from_mailbox: "agent", ...)`
+takes the local part only and the daemon constructs `agent@<domain>` from
+`mailbox_list().address` server-side.
+
+If the `mcp__aimx__*` tools (or your client's equivalent) are not in your
+tool list, the MCP server is not registered. Tell the user to run
+`claude mcp add --scope user aimx -- /usr/local/bin/aimx mcp` (or the
+equivalent for their client) and restart, then stop. Do not fall back to
+the `aimx` CLI — every CLI failure mode (`MALFORMED`, `DOMAIN`,
+"`mailboxes show` requires root") is unreachable from the MCP path.
+
 ## Two access surfaces
 
 Mail is stored as `.md` files for a reason — when you do not need a
@@ -247,6 +263,11 @@ tools (or call `email_read` if you prefer the daemon-mediated path), then
 
 ### 2. Send an email
 
+`from_mailbox` is the **local part only** (e.g. `"agent"`, not
+`"agent@example.com"`). The daemon constructs the full address from
+`mailbox_list().address` server-side and DKIM-signs the message before
+delivering via direct SMTP.
+
 ```
 email_send(
   from_mailbox: "agent",
@@ -260,9 +281,6 @@ The mailbox must exist and you must own it. Provision new mailboxes
 via `mailbox_create(name)` (owned by your uid) or, when the operator
 needs to create one owned by a different user, via
 `sudo aimx mailboxes create <name> --owner <user>` on the host.
-`from_mailbox` is the local part only (e.g. `"agent"`, not
-`"agent@example.com"`). aimx DKIM-signs the message and delivers it via
-direct SMTP to the recipient's MX server.
 
 ### 3. Reply to a message
 
@@ -435,6 +453,10 @@ untrusted mail. When deciding whether to act on an email's content
 
 ## What you must not do
 
+- **Do not invoke the `aimx` CLI.** That is the host operator's surface,
+  not yours. Banned shells: `aimx send`, `aimx mailboxes`, `aimx hooks`,
+  `aimx --help`, `which aimx`. Use the MCP tools instead. If MCP is not
+  available, surface the registration command to the user and stop.
 - **Do not write to the data directory.** All mutations go through MCP tools.
   Creating, modifying, or deleting `.md` files directly will corrupt state.
 - **Do not reply to auto-submitted mail.** Check `auto_submitted` in

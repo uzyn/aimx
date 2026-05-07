@@ -2833,11 +2833,25 @@ fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetup
 
     // Hand off via `Command::status()` so control returns here once the
     // TUI exits, allowing the closing message to print AFTER agents setup.
+    //
+    // `runuser -l USER -c CMD` (login shell) initialises HOME, SHELL,
+    // USER, LOGNAME, and PATH from the user's profile chain
+    // (`~/.bash_profile` → `~/.profile` → `~/.bashrc` on Ubuntu defaults).
+    // Without `-l`, runuser inherits the sudo-scrubbed PATH from
+    // `/etc/sudoers`'s `secure_path` and `claude` (typically at
+    // `~/.npm-global/bin` or under `~/.nvm/...`) is unreachable, so MCP
+    // auto-registration silently `CliMissing`s. The argv must be
+    // shell-quoted because `-c` takes a single command string.
+    let cmd = argv
+        .iter()
+        .map(|a| crate::agents_setup::posix_single_quote(&a.to_string_lossy()))
+        .collect::<Vec<_>>()
+        .join(" ");
     match std::process::Command::new("runuser")
-        .arg("-u")
+        .arg("-l")
         .arg(&sudo_user)
-        .arg("--")
-        .args(&argv)
+        .arg("-c")
+        .arg(&cmd)
         .status()
     {
         Ok(status) if status.success() => AgentsSetupOutcome::Done,

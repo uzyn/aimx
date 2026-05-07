@@ -427,7 +427,7 @@ fn openclaw_hint(data_dir: Option<&Path>) -> String {
 /// Wrap `s` in POSIX-style single quotes, escaping any embedded `'` via the
 /// standard `'\''` concatenation trick so the result is safe to paste into
 /// a shell as a single word. The input may contain any bytes except NUL.
-fn posix_single_quote(s: &str) -> String {
+pub(crate) fn posix_single_quote(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for ch in s.chars() {
