@@ -10,15 +10,10 @@
 <meta property="og:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for AI agents.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aimx.email">
-<meta property="og:image" content="https://aimx.email/og.png">
-<meta property="og:image:width" content="1200">
-<meta property="og:image:height" content="630">
-<meta property="og:image:alt" content="AIMX — SMTP for AI agents">
 
-<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="AIMX — AI Mail Exchange">
 <meta name="twitter:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for AI agents.">
-<meta name="twitter:image" content="https://aimx.email/og.png">
 
 <link rel="canonical" href="https://aimx.email/">
 <link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">
@@ -43,8 +38,7 @@
   "url": "https://aimx.email",
   "downloadUrl": "https://aimx.email/install.sh",
   "license": "https://opensource.org/licenses/MIT",
-  "author": { "@type": "Person", "name": "U-Zyn Chua", "url": "https://uzyn.com" },
-  "image": "https://aimx.email/og.png"
+  "author": { "@type": "Person", "name": "U-Zyn Chua", "url": "https://uzyn.com" }
 }
 </script>
 
@@ -436,16 +430,6 @@ h1 em {
 
 .btn.primary:hover::after { color: var(--paper); }
 
-.demo-video {
-  display: block;
-  width: 100%;
-  margin: 18px 0 0;
-  border: 1px solid var(--rule);
-  background: var(--paper-2);
-  aspect-ratio: 31 / 18;
-  border-radius: 12px;
-}
-
 /* Terminal mockup — used for the hero "demo" and Quick start. Dark slate
    on cream paper produces a deliberate moment of contrast that reads
    instantly as "this is a terminal". The traffic-light dots and label
@@ -592,32 +576,70 @@ h1 em {
   overflow-x: auto;
 }
 .compare {
-  font-family: 'IBM Plex Mono', monospace;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
   font-size: 0.32em;
   width: 100%;
   border-collapse: collapse;
-  letter-spacing: 0.01em;
 }
 .compare th, .compare td {
-  padding: 0.55em 0.7em;
-  text-align: left;
-  vertical-align: top;
+  padding: 0.7em 0.6em;
+  vertical-align: middle;
   color: var(--ink-soft);
   border: none;
 }
 .compare th {
-  border-bottom: 1px solid var(--accent);
+  border-bottom: 1px solid var(--rule);
   color: var(--ink);
   font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
+  font-size: 0.95em;
+  text-align: center;
+  line-height: 1.25;
+}
+.compare th:first-child { text-align: left; }
+.compare td { text-align: center; }
+.compare td:first-child {
+  text-align: left;
+  font-weight: 500;
+  color: var(--ink);
+  white-space: nowrap;
+}
+.compare .compare-sub {
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.78em;
+  color: var(--ink-faded);
+  font-weight: 400;
+  letter-spacing: 0;
+  margin-top: 2px;
+}
+.compare th.aimx-col,
+.compare td.aimx-col {
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
+  color: var(--ink);
+  font-weight: 500;
+}
+.compare th.aimx-col { color: var(--accent); }
+.compare th.aimx-col:first-of-type,
+.compare tbody tr:first-child td.aimx-col {
+  border-top-left-radius: 8px;
+  border-top-right-radius: 8px;
+}
+.compare tbody tr:last-child td.aimx-col {
+  border-bottom-left-radius: 8px;
+  border-bottom-right-radius: 8px;
+}
+.compare .cell-yes,
+.compare .cell-no,
+.compare .cell-meh {
+  font-size: 1.1em;
+  line-height: 1;
+}
+.compare .cell-meh {
+  font-family: 'IBM Plex Mono', monospace;
   font-size: 0.85em;
+  color: var(--ink-faded);
 }
-.compare td:first-child, .compare th:first-child {
-  font-weight: 500;
-  color: var(--ink);
-}
-.compare tr.aimx td:first-child { color: var(--accent); }
+.compare td.aimx-col.cell-yes { font-size: 1.2em; }
 .compare tr + tr td { border-top: 1px solid var(--rule); }
 
 .faq details {
@@ -967,66 +989,74 @@ Body, exactly as the sender wrote it.</pre>
     </section>
 
     <section class="block fade d8">
-      <h2 class="section-label">Compared to alternatives</h2>
+      <h2 class="section-label">Why AIMX?</h2>
       <p class="prose">
-        Sending mail through someone else's API is fine until your agent needs to receive a reply, run a hook on it, and own the audit trail. The trade-offs, in plain language:
+        Sending mail through someone else's API is fine until your agent needs to receive a reply, run a hook on it, and own the audit trail. The trade-offs, side by side:
       </p>
       <div class="compare-wrap">
         <table class="compare">
           <thead>
             <tr>
               <th></th>
-              <th>Inbound mail</th>
-              <th>Own the data</th>
-              <th>Hooks</th>
-              <th>Cost at idle</th>
+              <th>Gmail / Outlook</th>
+              <th>SaaS relays<br><span class="compare-sub">SendGrid / Postmark</span></th>
+              <th>AgentMail<br><span class="compare-sub">LobsterMail</span></th>
+              <th>Postfix / Stalwart</th>
+              <th class="aimx-col">AIMX</th>
             </tr>
           </thead>
           <tbody>
-            <tr class="aimx">
-              <td>AIMX</td>
-              <td>yes, as files</td>
-              <td>yes</td>
-              <td>on_receive / after_send</td>
-              <td>VPS only</td>
+            <tr>
+              <td>Built for AI agents</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅</td>
             </tr>
             <tr>
-              <td>Gmail API</td>
-              <td>yes (OAuth)</td>
-              <td>no</td>
-              <td>push topics</td>
-              <td>free / SaaS</td>
+              <td>MCP support</td>
+              <td class="cell-meh">via 3rd-party</td>
+              <td class="cell-meh">via 3rd-party</td>
+              <td class="cell-yes">✅ ext server</td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅ local stdio</td>
             </tr>
             <tr>
-              <td>Resend / SendGrid</td>
-              <td>limited / paid</td>
-              <td>no</td>
-              <td>webhooks</td>
-              <td>per-message</td>
+              <td>Self-sovereign</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
             </tr>
             <tr>
-              <td>Postfix / Stalwart</td>
-              <td>yes</td>
-              <td>yes</td>
-              <td>limited</td>
-              <td>ops time</td>
+              <td>Direct delivery</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>Markdown emails</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>Free &amp; open source</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
             </tr>
           </tbody>
         </table>
       </div>
-    </section>
-
-    <section class="block fade d8">
-      <h2 class="section-label">A 60-second tour</h2>
-      <p class="prose">
-        Setup, inbound, hooks, MCP read, reply. Captioned. No narration.
-      </p>
-      <video class="demo-video" controls preload="metadata"
-             poster="/media/tour-60s-poster.png">
-        <source src="/media/tour-60s.webm" type="video/webm">
-        <source src="/media/tour-60s.mp4" type="video/mp4">
-        <track kind="captions" src="/media/tour-60s.vtt" srclang="en" label="English" default>
-      </video>
     </section>
 
     <section class="block fade d8 faq">
@@ -1063,14 +1093,13 @@ Body, exactly as the sender wrote it.</pre>
 
 <script src="/scripts/theme.js"></script>
 
-<!-- Google Analytics 4 — uncomment and replace G-XXXXXXXXXX with the real measurement ID before deploy.
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
+<!-- Google Analytics 4 -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-M0BP0B3856"></script>
 <script>
 window.dataLayer = window.dataLayer || [];
 function gtag(){dataLayer.push(arguments);}
 gtag('js', new Date());
-gtag('config', 'G-XXXXXXXXXX');
+gtag('config', 'G-M0BP0B3856');
 </script>
--->
 </body>
 </html>

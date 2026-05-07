@@ -6,7 +6,7 @@ src = "../book"
 language = "en"
 
 [output.html]
-default-theme = "light"
+default-theme = "coal"
 preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/uzyn/aimx"
 edit-url-template = "https://github.com/uzyn/aimx/edit/main/book/{path}"
