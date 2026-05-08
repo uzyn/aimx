@@ -360,7 +360,7 @@ email_send(
 - Sender domain mismatch.
 - Delivery failure (remote MX rejected).
 - `text_only` and `html_body` both set: `AIMX/1 SEND: --text-only and --html-body are mutually exclusive`.
-- Markdown body exceeds 5MB: `markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file`.
+- Markdown body exceeds 5 MiB: `markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file`.
 
 ---
 

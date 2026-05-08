@@ -61,13 +61,13 @@ If your content uses an HTML element the inlined stylesheet does not cover (e.g.
 
 ## Body size limit
 
-The renderer enforces a **5MB cap** on the Markdown source byte length. Above the cap, the daemon refuses with the canonical error:
+The renderer enforces a **5 MiB cap** on the Markdown source byte length (the constant is `MAX_MARKDOWN_BODY_BYTES = 5 * 1024 * 1024`). Above the cap, the daemon refuses with the canonical error:
 
 ```
-markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file
+markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file
 ```
 
-Rationale: a 5MB Markdown body renders to roughly 15–25MB on the wire (Markdown source + HTML + inlined styles, with ~37% base64 overhead). That sits at the edge of mainstream receiver caps — Gmail 25MB, Outlook.com / iCloud 20MB, Microsoft 365 up to 150MB. Send anything larger as an attachment, not as a body.
+Rationale: a 5 MiB Markdown body renders to roughly 15–25 MiB on the wire (Markdown source + HTML + inlined styles, with ~37% base64 overhead). That sits at the edge of mainstream receiver caps — Gmail 25 MB, Outlook.com / iCloud 20 MB, Microsoft 365 up to 150 MB. Send anything larger as an attachment, not as a body.
 
 The cap is enforced at the renderer entry point so all callers (`aimx send`, MCP `email_send`, future cron jobs) share one limit. Operators on the wire surface that scripts can branch on the failure see the dedicated `ERR BODY_TOO_LARGE` ack code; the canonical reason string survives in the wire response for human readers.
 

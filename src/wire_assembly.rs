@@ -404,12 +404,20 @@ fn extract_name_param(content_type: &str) -> Option<String> {
 /// `"` is the first unescaped one. Unquoted values run until the next
 /// `;` or whitespace. Returns `None` if a quoted value is unterminated
 /// (e.g. a trailing lone `\` consumes the closing `"`).
+///
+/// The `;` separator scan is **quote-aware**: a `;` inside a quoted
+/// parameter value (e.g. `filename="hello;world.pdf"`) is preserved as
+/// part of the value rather than terminating the parameter. This
+/// matches RFC 2045 §5.1 tokenisation, where quoted-strings are
+/// atomic for the purposes of parameter splitting.
 fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
     let lower_name = name.to_ascii_lowercase();
-    // Skip the primary value (everything before the first `;`); parameters
-    // start after that. If there is no `;`, there are no parameters.
-    let after_primary = s.split_once(';')?.1;
-    for segment in after_primary.split(';') {
+    // Quote-aware split on `;`. The first segment is the primary
+    // value (e.g. `application/pdf`) — never a `name=value` pair —
+    // so we skip it. Subsequent segments are the parameters.
+    let mut segments = split_params_quote_aware(s).into_iter();
+    segments.next();
+    for segment in segments {
         let segment = segment.trim();
         let (raw_name, raw_value) = match segment.split_once('=') {
             Some(pair) => pair,
@@ -431,6 +439,47 @@ fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
         return Some(value[..end].to_string());
     }
     None
+}
+
+/// Split a Content-Type / Content-Disposition header value on `;`
+/// **outside of quoted strings**, honouring `\`-escapes inside the
+/// quotes. RFC 2045 §5.1 tokenisation: a quoted-string is atomic for
+/// the purposes of parameter splitting, so a `;` inside `"..."` does
+/// not terminate the parameter.
+///
+/// Returns the raw segments verbatim (with surrounding whitespace
+/// intact); the caller trims each segment before consuming it.
+fn split_params_quote_aware(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut in_quote = false;
+    let mut escape_next = false;
+    for (i, c) in s.char_indices() {
+        if escape_next {
+            // Inside a quoted-pair: this char is consumed literally.
+            // Even an inner `"` here does not close the quoted-string.
+            escape_next = false;
+            continue;
+        }
+        if in_quote {
+            match c {
+                '\\' => escape_next = true,
+                '"' => in_quote = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_quote = true,
+            ';' => {
+                out.push(&s[start..i]);
+                start = i + c.len_utf8(); // ';' is one byte but be explicit.
+            }
+            _ => {}
+        }
+    }
+    out.push(&s[start..]);
+    out
 }
 
 /// Decode the body of an RFC 2822 quoted-string. Input is the substring
@@ -1328,6 +1377,92 @@ mod tests {
         assert_eq!(extract_quoted_param(header, "filename"), None);
     }
 
+    /// `;` inside a quoted parameter value must NOT terminate the
+    /// value — the parser has to recognise quoted strings as atomic
+    /// before splitting on `;` (RFC 2045 §5.1 tokenisation). A
+    /// filename like `hello;world.pdf` lands on the wire as
+    /// `filename="hello;world.pdf"`; the daemon parser must return
+    /// the full `hello;world.pdf` string, not the truncated `hello`
+    /// or `None`.
+    #[test]
+    fn extract_quoted_param_handles_semicolon_inside_quoted_value() {
+        let header = "application/pdf; filename=\"hello;world.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("hello;world.pdf".to_string())
+        );
+    }
+
+    /// Multiple `;` chars inside one quoted value must all be
+    /// preserved, and a subsequent unquoted `;` must still terminate
+    /// the parameter so a following parameter parses correctly.
+    #[test]
+    fn extract_quoted_param_handles_multiple_semicolons_inside_quote_with_trailing_param() {
+        let header = "application/pdf; filename=\"a;b;c.pdf\"; size=42";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("a;b;c.pdf".to_string())
+        );
+        assert_eq!(extract_quoted_param(header, "size"), Some("42".to_string()));
+    }
+
+    /// `=` inside a quoted parameter value must not be misread as a
+    /// parameter separator. Today the inner `;`-aware split runs
+    /// first; this test guards against future refactors that mistake
+    /// the inner `=` for a name/value boundary.
+    #[test]
+    fn extract_quoted_param_handles_equals_inside_quoted_value() {
+        let header = "application/pdf; filename=\"k=v.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("k=v.pdf".to_string())
+        );
+    }
+
+    /// End-to-end: an attachment whose filename contains `;`
+    /// round-trips through `assemble_wire_message` and re-emerges on
+    /// the daemon-emitted wire with the same quoted-string shape.
+    /// Pins the same contract as
+    /// `attachment_filename_with_escaped_quote_round_trips_through_assembler`
+    /// for the `;` case.
+    #[test]
+    fn attachment_filename_with_semicolon_round_trips_through_assembler() {
+        let body = concat!(
+            "--BND\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Body.\r\n",
+            "--BND\r\n",
+            "Content-Type: application/pdf; name=\"hello;world.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"hello;world.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "UERG\r\n",
+            "--BND--\r\n",
+        );
+        let req = build_request(
+            "From: a@b.com\nTo: c@d.com\nSubject: T\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
+            body,
+        );
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("name=\"hello;world.pdf\""),
+            "Content-Type name= must keep semicolon, got:\n{text}"
+        );
+        assert!(
+            text.contains("filename=\"hello;world.pdf\""),
+            "Content-Disposition filename= must keep semicolon, got:\n{text}"
+        );
+        // The truncated form (`hello` with no `;world.pdf`) must not
+        // appear — that was the pre-fix behaviour where the parser
+        // pre-split on the embedded `;`.
+        assert!(
+            !text.contains("filename=\"attachment\""),
+            "filename must not fall back to the literal 'attachment' default, got:\n{text}"
+        );
+    }
+
     /// End-to-end: a multipart request whose attachment filename
     /// contains `"` (escaped on the wire as `\"` by the client's
     /// `escape_filename`) round-trips through `assemble_wire_message`
@@ -1378,7 +1513,7 @@ mod tests {
     #[test]
     fn body_too_large_propagates_canonical_message_through_assembler() {
         // The renderer caps the Markdown source at MAX_MARKDOWN_BODY_BYTES
-        // (5MB). When `assemble_wire_message` hands the body to the
+        // (5 MiB). When `assemble_wire_message` hands the body to the
         // renderer the `BodyTooLarge` error must propagate as
         // `AssembleError::Render(...)` and its `Display` output must
         // carry the canonical actionable message verbatim, so the wire
@@ -1399,7 +1534,7 @@ mod tests {
         let rendered = err.to_string();
         assert_eq!(
             rendered,
-            "markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
+            "markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
             "canonical BodyTooLarge message must reach the wire reason field verbatim"
         );
     }
