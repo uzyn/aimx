@@ -281,7 +281,7 @@ pub enum ErrCode {
     /// §6.5 leak-free shape).
     Enoent,
     /// The Markdown body submitted on `SEND` exceeded
-    /// `markdown_render::MAX_MARKDOWN_BODY_BYTES` (5 MB). Distinct from
+    /// `markdown_render::MAX_MARKDOWN_BODY_BYTES` (5 MiB). Distinct from
     /// `Malformed` so scripts can branch on the size-cap failure
     /// without parsing the reason string. The reason field still
     /// carries the canonical actionable message ("use --html-body for
@@ -1864,6 +1864,25 @@ mod send_frame_codec_tests {
         match parse_request(&mut reader).await {
             Err(ParseError::Malformed(reason)) => {
                 assert!(reason.contains("duplicate Text-Only"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Duplicate `Html-Body-Length:` headers are rejected on the same
+    /// principle as the Text-Only duplicate-header guard: silently
+    /// dropping one would let a future caller smuggle conflicting
+    /// state (a different second-body length) past the codec. Mirrors
+    /// `duplicate_text_only_header_rejected` so a regression on
+    /// either duplicate check surfaces independently.
+    #[tokio::test]
+    async fn duplicate_html_body_length_header_rejected() {
+        let frame =
+            b"AIMX/1 SEND\nHtml-Body-Length: 5\nHtml-Body-Length: 6\nContent-Length: 5\n\nhello";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("duplicate Html-Body-Length"), "{reason}");
             }
             other => panic!("expected Malformed, got {other:?}"),
         }

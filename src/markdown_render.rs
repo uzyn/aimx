@@ -37,7 +37,7 @@ impl fmt::Display for MarkdownRenderError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             MarkdownRenderError::BodyTooLarge => f.write_str(
-                "markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
+                "markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
             ),
         }
     }
@@ -333,7 +333,7 @@ mod tests {
         assert!(out.contains("font-size"), "default style missing: {out}");
     }
 
-    // ---- 5MB body cap ----
+    // ---- 5 MiB body cap ----
 
     #[test]
     fn body_at_exact_cap_succeeds() {
@@ -355,7 +355,7 @@ mod tests {
         assert!(matches!(err, MarkdownRenderError::BodyTooLarge));
         assert_eq!(
             err.to_string(),
-            "markdown body exceeds 5MB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
+            "markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file",
         );
     }
 
