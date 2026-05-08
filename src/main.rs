@@ -21,6 +21,7 @@ mod mailbox;
 mod mailbox_handler;
 mod mailbox_list_handler;
 mod mailbox_locks;
+mod markdown_render;
 mod mcp;
 mod mx;
 mod ownership;
@@ -38,6 +39,7 @@ mod term;
 mod transport;
 mod trust;
 mod uds_authz;
+mod wire_assembly;
 // `release` lands the release-metadata + ReleaseOps used by
 // `aimx upgrade`. Per-item `#[allow(dead_code)]` attributes inside the
 // module scope the lint narrowly so any future genuinely-unused item

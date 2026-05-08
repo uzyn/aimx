@@ -84,7 +84,20 @@ fn write_common_headers(
     Ok(())
 }
 
-pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::error::Error>> {
+/// Package the CLI arguments into the bytes the client ships over UDS:
+/// the RFC 5322 header block plus the Markdown body (no MIME wrapping for
+/// the default no-attachment path). The daemon's `wire_assembly` module
+/// renders the Markdown source and emits the final `multipart/alternative`
+/// (or nested `multipart/mixed` when attachments are present) before DKIM
+/// signing.
+///
+/// When attachments are present the client still pre-packages them as
+/// `multipart/mixed` with the Markdown source as the first `text/plain`
+/// part — that's the most compact way to ship binary attachment bytes
+/// over the existing UDS frame without extending the codec. The daemon
+/// unpacks that structure, renders the Markdown, and re-emits the final
+/// nested `multipart/mixed` + `multipart/alternative` wire shape.
+pub fn compose_request(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::error::Error>> {
     validate_attachments(&args.attachments)?;
 
     let sanitized_from = sanitize_header_value(&args.from);
@@ -94,9 +107,10 @@ pub fn compose_message(args: &SendArgs) -> Result<ComposeResult, Box<dyn std::er
     let normalized_body = normalize_crlf(&args.body);
 
     if args.attachments.is_empty() {
+        // No attachments: ship headers + Markdown body verbatim. The
+        // daemon decides the wire Content-Type after rendering.
         let mut msg = String::new();
         write_common_headers(&mut msg, args, &date, &message_id)?;
-        msg.push_str("Content-Type: text/plain; charset=utf-8\r\n");
         msg.push_str("\r\n");
         msg.push_str(&normalized_body);
         msg.push_str("\r\n");
@@ -384,10 +398,18 @@ pub fn render_outcome<O: io::Write, E: io::Write>(
 /// request carries no `From-Mailbox:` header. The daemon parses the
 /// `From:` header out of the body itself and resolves the mailbox
 /// against its in-memory Config.
+///
+/// `--text-only` and `--html-body` (which clap rejects together) flow
+/// through to the codec: the daemon honors both branches.
 pub fn build_request(args: &SendArgs) -> Result<SendRequest, String> {
-    let composed = compose_message(args).map_err(|e| e.to_string())?;
+    let composed = compose_request(args).map_err(|e| e.to_string())?;
     Ok(SendRequest {
         body: composed.message,
+        text_only: args.text_only,
+        html_body: args
+            .html_body
+            .as_ref()
+            .map(|s| normalize_crlf(s).into_bytes()),
     })
 }
 
@@ -462,13 +484,15 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         }
     }
 
     #[test]
     fn compose_has_required_headers() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("From: agent@example.com\r\n"));
@@ -482,7 +506,7 @@ mod tests {
     #[test]
     fn compose_has_body() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("\r\n\r\nHello, world!\r\n"));
@@ -491,7 +515,7 @@ mod tests {
     #[test]
     fn message_id_format() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         let mid_line = text.lines().find(|l| l.starts_with("Message-ID:")).unwrap();
@@ -505,7 +529,7 @@ mod tests {
         let mut args = test_args();
         args.reply_to = Some("<original123@example.com>".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("In-Reply-To: <original123@example.com>\r\n"));
@@ -516,7 +540,7 @@ mod tests {
         let mut args = test_args();
         args.reply_to = Some("<original123@example.com>".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("References: <original123@example.com>\r\n"));
@@ -528,7 +552,7 @@ mod tests {
         args.reply_to = Some("<reply@example.com>".to_string());
         args.references = Some("<first@example.com> <second@example.com>".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("In-Reply-To: <reply@example.com>\r\n"));
@@ -540,7 +564,7 @@ mod tests {
         let mut args = test_args();
         args.reply_to = Some("original123@example.com".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("In-Reply-To: <original123@example.com>\r\n"));
@@ -550,7 +574,7 @@ mod tests {
     #[test]
     fn no_reply_to_omits_threading_headers() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(!text.contains("In-Reply-To:"));
@@ -595,9 +619,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("multipart/mixed"));
@@ -624,9 +650,11 @@ mod tests {
                 file1.to_string_lossy().to_string(),
                 file2.to_string_lossy().to_string(),
             ],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("filename=\"doc.pdf\""));
@@ -656,9 +684,11 @@ mod tests {
                 png.to_string_lossy().to_string(),
                 txt.to_string_lossy().to_string(),
             ],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("application/pdf"));
@@ -676,9 +706,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec!["/nonexistent/file.txt".to_string()],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args);
+        let result = compose_request(&args);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("not found"));
     }
@@ -686,7 +718,7 @@ mod tests {
     #[test]
     fn compose_returns_message_id() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
         let mid_line = text
             .lines()
@@ -712,9 +744,11 @@ mod tests {
             reply_to: Some("<orig@example.com>".to_string()),
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("In-Reply-To: <orig@example.com>"));
@@ -737,9 +771,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![file_path.to_string_lossy().to_string()],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(text.contains("filename=\"file\\\"name.txt\""));
@@ -769,9 +805,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args);
+        let result = compose_request(&args);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -790,9 +828,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args);
+        let result = compose_request(&args);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -811,9 +851,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args);
+        let result = compose_request(&args);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -832,9 +874,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args);
+        let result = compose_request(&args);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -848,7 +892,7 @@ mod tests {
         let mut args = test_args();
         args.reply_to = Some("<orig@example.com>\r\nBcc: victim@evil.com".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
         for line in text.split("\r\n") {
             assert!(
@@ -871,7 +915,7 @@ mod tests {
         args.reply_to = Some("<orig@example.com>".to_string());
         args.references = Some("<first@example.com>\r\nBcc: victim@evil.com".to_string());
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
         for line in text.split("\r\n") {
             assert!(
@@ -891,9 +935,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
         assert!(text.contains("From: sender@example.com\r\n"));
         assert!(text.contains("To: recipient@example.com\r\n"));
@@ -946,9 +992,11 @@ mod tests {
             reply_to: None,
             references: None,
             attachments: vec![],
+            text_only: false,
+            html_body: None,
         };
 
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let text = String::from_utf8(result.message).unwrap();
 
         assert!(
@@ -962,9 +1010,9 @@ mod tests {
     }
 
     #[test]
-    fn compose_message_all_crlf() {
+    fn compose_request_all_crlf() {
         let args = test_args();
-        let result = compose_message(&args).unwrap();
+        let result = compose_request(&args).unwrap();
         let raw = result.message;
 
         for (i, byte) in raw.iter().enumerate() {
@@ -1198,6 +1246,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();
@@ -1216,6 +1265,7 @@ mod tests {
         let missing = tmp.path().join("does-not-exist.sock");
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let result = submit_request(&missing, &request).await;
         let err = result.unwrap_err();
@@ -1253,6 +1303,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@other.org\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();
@@ -1284,6 +1335,7 @@ mod tests {
 
         let request = SendRequest {
             body: b"From: alice@example.com\r\n\r\nhi\r\n".to_vec(),
+            ..Default::default()
         };
         let outcome = submit_request(&sock, &request).await.unwrap();
         server.await.unwrap();

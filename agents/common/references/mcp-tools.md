@@ -253,6 +253,21 @@ Compose, DKIM-sign, and deliver an email. The message is submitted to
 `aimx serve` via UDS, which signs it with the server's DKIM key and delivers
 directly to the recipient's MX server.
 
+`body` is interpreted as **Markdown by default** (CommonMark + GFM
+extensions: tables, strikethrough, autolinks, task lists, footnotes).
+AIMX renders the Markdown to HTML with an inlined stylesheet and ships
+a `multipart/alternative` — recipients on rich-capable clients see
+styled HTML; recipients on text-only clients see the Markdown source.
+
+Two escape hatches cover the edge cases:
+
+- `text_only: true` — ship `body` verbatim as `text/plain`. No
+  rendering. Use for OTPs, transactional one-liners, and existing
+  scripts that must not change shape.
+- `html_body: "<custom html>"` — supply a custom HTML template that
+  AIMX uses verbatim as the `text/html` part. `body` is the
+  `text/plain` fallback. Mutually exclusive with `text_only`.
+
 **Parameters:**
 | Name           | Type     | Required | Description |
 |---------------|----------|----------|-------------|
@@ -260,9 +275,11 @@ directly to the recipient's MX server.
 | `to`           | string   | yes      | Recipient email address |
 | `subject`      | string   | yes      | Email subject |
 | `reply_to`     | string   | no       | Message-ID of the email being replied to. Sets `In-Reply-To`. When `references` is omitted, `References` is built automatically from this value. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
-| `body`         | string   | yes      | Email body text |
+| `body`         | string   | yes      | Email body. Interpreted as Markdown by default (CommonMark + GFM). Used verbatim as `text/plain` when `text_only: true`; used as the `text/plain` fallback when `html_body` is set |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
 | `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
+| `text_only`    | boolean  | no       | When `true`, ship `body` verbatim as `text/plain` with no Markdown rendering and no HTML alternative part. Mutually exclusive with `html_body` |
+| `html_body`    | string   | no       | Custom HTML for the `text/html` part. Operator-supplied; bypasses the renderer. Mutually exclusive with `text_only` |
 
 For simple replies to a single sender, prefer `email_reply`. It reads the
 original email and fills in threading headers and the `Re:` subject
@@ -272,7 +289,7 @@ custom threading chain.
 
 **Returns:** Confirmation with Message-ID.
 
-**Example, plain text:**
+**Example, default Markdown:**
 ```
 # `from_mailbox` is the local part only. The daemon derives the
 # full From address from mailbox_list().address — you do not
@@ -281,9 +298,31 @@ email_send(
   from_mailbox: "agent",
   to: "alice@example.com",
   subject: "Status Update",
-  body: "All systems operational."
+  body: "# Status\n\n- All systems operational.\n- See [dashboard](https://example.com/dash) for details."
 )
 → "Sent. Message-ID: <abc123@domain.com>"
+```
+
+**Example, plain-text only (OTP):**
+```
+email_send(
+  from_mailbox: "agent",
+  to: "alice@example.com",
+  subject: "Verification code",
+  body: "Your code: 184293",
+  text_only: true
+)
+```
+
+**Example, custom HTML layout:**
+```
+email_send(
+  from_mailbox: "agent",
+  to: "bob@example.com",
+  subject: "Newsletter",
+  body: "Plain-text fallback for text-only clients.",
+  html_body: "<!DOCTYPE html><html><body><h1>Newsletter</h1>...</body></html>"
+)
 ```
 
 **Example, with attachments:**
@@ -292,7 +331,7 @@ email_send(
   from_mailbox: "agent",
   to: "bob@example.com",
   subject: "Report",
-  body: "Please see attached.",
+  body: "# Report\n\nSee the attached files.",
   attachments: ["/tmp/report.csv", "/tmp/chart.png"]
 )
 ```
@@ -320,31 +359,48 @@ email_send(
 - Daemon not running (socket missing).
 - Sender domain mismatch.
 - Delivery failure (remote MX rejected).
+- `text_only` and `html_body` both set: `AIMX/1 SEND: --text-only and --html-body are mutually exclusive`.
+- Markdown body exceeds 5 MiB: `markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file`.
 
 ---
 
 ### `email_reply`
 
-Reply to an existing email. aimx automatically sets `In-Reply-To`,
+Reply to an existing email. AIMX automatically sets `In-Reply-To`,
 `References`, and prepends `Re:` to the subject.
 
+`body` is interpreted as **Markdown by default** with the same
+`text_only` / `html_body` escape hatches as `email_send`.
+
 **Parameters:**
-| Name      | Type   | Required | Description |
-|-----------|--------|----------|-------------|
-| `mailbox` | string | yes      | Mailbox containing the email to reply to (must be owned by you) |
-| `id`      | string | yes      | Email ID to reply to |
-| `body`    | string | yes      | Reply body text |
+| Name        | Type    | Required | Description |
+|-------------|---------|----------|-------------|
+| `mailbox`   | string  | yes      | Mailbox containing the email to reply to (must be owned by you) |
+| `id`        | string  | yes      | Email ID to reply to |
+| `body`      | string  | yes      | Reply body. Interpreted as Markdown by default. With `text_only: true`, shipped verbatim as `text/plain`. With `html_body`, used as the `text/plain` fallback |
+| `text_only` | boolean | no       | When `true`, ship `body` verbatim as `text/plain` with no Markdown rendering. Mutually exclusive with `html_body` |
+| `html_body` | string  | no       | Custom HTML for the `text/html` part. Operator-supplied; bypasses the renderer. Mutually exclusive with `text_only` |
 
 **Returns:** Confirmation with Message-ID.
 
-**Example:**
+**Example, default Markdown reply:**
 ```
 email_reply(
   mailbox: "agent",
   id: "2026-04-15-143022-meeting-notes",
-  body: "Thanks, I'll review the notes."
+  body: "Thanks — I'll review the notes.\n\n- Quick follow-up: meet again Friday?"
 )
 → "Sent. Message-ID: <def456@domain.com>"
+```
+
+**Example, plain-text reply:**
+```
+email_reply(
+  mailbox: "agent",
+  id: "2026-04-15-143022-meeting-notes",
+  body: "Acknowledged.",
+  text_only: true
+)
 ```
 
 ---

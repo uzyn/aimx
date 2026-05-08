@@ -5,7 +5,6 @@ use crate::frontmatter::InboundFrontmatter;
 use crate::send;
 use crate::send_protocol::{
     self, ErrCode, HookCreateRequest, HookDeleteRequest, MailboxLifecycleRequest, MarkRequest,
-    SendRequest,
 };
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -76,7 +75,11 @@ pub struct EmailSendParams {
                        When set, References is built automatically unless overridden by the references field."
     )]
     pub reply_to: Option<String>,
-    #[schemars(description = "Email body text")]
+    #[schemars(description = "Email body. Interpreted as Markdown by default \
+                       (CommonMark + GFM extensions). AIMX renders it to HTML and \
+                       sends as multipart/alternative. Set text_only=true for \
+                       plain-text-only sends. Set html_body to override the \
+                       auto-rendered HTML.")]
     pub body: String,
     #[schemars(description = "File paths to attach")]
     pub attachments: Option<Vec<String>>,
@@ -85,6 +88,18 @@ pub struct EmailSendParams {
                        Only applied when reply_to is also set. Supplied alone, it is silently ignored."
     )]
     pub references: Option<String>,
+    #[schemars(
+        description = "When true, send body verbatim as text/plain (no Markdown \
+                       rendering, no HTML alternative part). Mutually exclusive with html_body."
+    )]
+    pub text_only: Option<bool>,
+    #[schemars(
+        description = "Custom HTML body shipped verbatim as the text/html part of \
+                       a multipart/alternative. Use body for the text/plain fallback. \
+                       Operator-supplied content; bypasses sanitization. Mutually \
+                       exclusive with text_only."
+    )]
+    pub html_body: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -93,8 +108,24 @@ pub struct EmailReplyParams {
     pub mailbox: String,
     #[schemars(description = "Email ID to reply to (e.g. 2025-01-01-001)")]
     pub id: String,
-    #[schemars(description = "Reply body text")]
+    #[schemars(description = "Reply body. Interpreted as Markdown by default \
+                       (CommonMark + GFM extensions). AIMX renders it to HTML and \
+                       sends as multipart/alternative. Set text_only=true for \
+                       plain-text-only sends. Set html_body to override the \
+                       auto-rendered HTML.")]
     pub body: String,
+    #[schemars(
+        description = "When true, send body verbatim as text/plain (no Markdown \
+                       rendering, no HTML alternative part). Mutually exclusive with html_body."
+    )]
+    pub text_only: Option<bool>,
+    #[schemars(
+        description = "Custom HTML body shipped verbatim as the text/html part of \
+                       a multipart/alternative. Use body for the text/plain fallback. \
+                       Operator-supplied content; bypasses sanitization. Mutually \
+                       exclusive with text_only."
+    )]
+    pub html_body: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, schemars::JsonSchema)]
@@ -346,12 +377,26 @@ impl AimxMcpServer {
 
     #[tool(
         name = "email_send",
-        description = "Submit an email for DKIM signing and delivery via the aimx daemon"
+        description = "Submit an email for DKIM signing and delivery via the aimx daemon. \
+                       `body` is interpreted as Markdown (CommonMark + GFM extensions). \
+                       AIMX renders it to HTML and sends as multipart/alternative. \
+                       Set `text_only: true` for plain-text-only sends. \
+                       Set `html_body` to override the auto-rendered HTML with your own template."
     )]
     fn email_send(
         &self,
         Parameters(params): Parameters<EmailSendParams>,
     ) -> Result<String, String> {
+        // Mutual-exclusion check runs first so the failure is the
+        // cheapest possible: no daemon round-trip, no mailbox lookup,
+        // no IO. The wording matches the codec's canonical message so
+        // operators see the same string regardless of where validation
+        // tripped.
+        validate_text_only_html_body_exclusion(
+            params.text_only.unwrap_or(false),
+            params.html_body.as_deref(),
+        )?;
+
         // The daemon's MAILBOX-LIST row carries the registered address
         // verbatim. We derive the from-address (and only secondarily
         // the domain) from it without reading root-owned
@@ -377,12 +422,26 @@ impl AimxMcpServer {
 
     #[tool(
         name = "email_reply",
-        description = "Reply to an email with correct threading headers"
+        description = "Reply to an email with correct threading headers. \
+                       `body` is interpreted as Markdown (CommonMark + GFM extensions). \
+                       AIMX renders it to HTML and sends as multipart/alternative. \
+                       Set `text_only: true` for plain-text-only replies. \
+                       Set `html_body` to override the auto-rendered HTML with your own template."
     )]
     fn email_reply(
         &self,
         Parameters(params): Parameters<EmailReplyParams>,
     ) -> Result<String, String> {
+        // Mutual-exclusion check runs first — same fast-fail principle
+        // as `email_send`, and same canonical wording as the codec
+        // (`AIMX/1 SEND: --text-only and --html-body are mutually
+        // exclusive`) so operators see one consistent string regardless
+        // of layer.
+        validate_text_only_html_body_exclusion(
+            params.text_only.unwrap_or(false),
+            params.html_body.as_deref(),
+        )?;
+
         validate_email_id(&params.id)?;
         let row = lookup_mailbox_row(&params.mailbox)?;
 
@@ -439,6 +498,8 @@ impl AimxMcpServer {
             reply_to: reply_to_id,
             references,
             attachments: vec![],
+            text_only: params.text_only.unwrap_or(false),
+            html_body: params.html_body,
         };
 
         submit_via_daemon(&args)
@@ -647,6 +708,11 @@ impl AimxMcpServer {
 /// address. Pure and side-effect-free so it can be unit-tested without
 /// the daemon; keeps the `params.reply_to` / `params.references`
 /// forwarding explicit (see the deserialization tests below).
+///
+/// The mutual-exclusion check (`text_only` vs `html_body`) is run by
+/// the caller via `validate_text_only_html_body_exclusion` before this
+/// function is invoked, so this builder trusts both fields and forwards
+/// them unchanged.
 fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
     SendArgs {
         from: from_address.to_string(),
@@ -656,7 +722,33 @@ fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
         reply_to: params.reply_to,
         references: params.references,
         attachments: params.attachments.unwrap_or_default(),
+        text_only: params.text_only.unwrap_or(false),
+        html_body: params.html_body,
     }
+}
+
+/// Server-side mutual-exclusion check for the MCP `email_send` /
+/// `email_reply` tools. Mirrors the clap-level `conflicts_with` rule on
+/// the CLI's `SendArgs` and the codec-level rejection in the SEND
+/// frame parser. Returns the canonical error string (matching the
+/// codec) when both inputs would be carried on the wire — the daemon
+/// would refuse such a frame, but firing here keeps the failure cheap
+/// and avoids opening the UDS at all.
+fn validate_text_only_html_body_exclusion(
+    text_only: bool,
+    html_body: Option<&str>,
+) -> Result<(), String> {
+    // Treat `Some("")` as supplied. The wire codec carries an empty
+    // `Html-Body-Length: 0` payload through and rejects the conflict;
+    // this pre-flight matches that semantic so the failure is identical
+    // regardless of layer.
+    if text_only && html_body.is_some() {
+        // Match the wire-codec phrasing in `src/send_protocol.rs` so
+        // the operator sees the same wording regardless of which layer
+        // tripped the check.
+        return Err("AIMX/1 SEND: --text-only and --html-body are mutually exclusive".to_string());
+    }
+    Ok(())
 }
 
 /// Compose `args` into an `AIMX/1 SEND` request and submit it to
@@ -666,10 +758,12 @@ fn build_send_args(params: EmailSendParams, from_address: &str) -> SendArgs {
 /// `From:` out of the composed body itself and resolves the sender
 /// mailbox against its in-memory Config.
 fn submit_via_daemon(args: &SendArgs) -> Result<String, String> {
-    let composed = send::compose_message(args).map_err(|e| e.to_string())?;
-    let request = SendRequest {
-        body: composed.message,
-    };
+    // Build the SEND frame via the shared helper used by `aimx send`
+    // so MCP and CLI submit byte-identical requests for the same
+    // `SendArgs`. `build_request` honors `args.text_only` /
+    // `args.html_body` and applies the same CRLF normalization the CLI
+    // uses for the optional second body section.
+    let request = send::build_request(args)?;
     let socket = crate::serve::aimx_socket_path();
 
     let rt = tokio::runtime::Handle::try_current();
@@ -2332,6 +2426,8 @@ mod schema_order_tests {
                 "body",
                 "attachments",
                 "references",
+                "text_only",
+                "html_body",
             ],
         );
     }
@@ -2340,7 +2436,7 @@ mod schema_order_tests {
     fn email_reply_params_property_order() {
         assert_eq!(
             property_keys::<EmailReplyParams>(),
-            vec!["mailbox", "id", "body"],
+            vec!["mailbox", "id", "body", "text_only", "html_body"],
         );
     }
 
@@ -2426,5 +2522,172 @@ mod socket_missing_tests {
                 "expected {kind:?} to NOT count as socket-missing"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod text_only_html_body_tests {
+    //! Unit coverage for the MCP-side mutual-exclusion check and the
+    //! `build_send_args` plumbing that forwards `text_only` /
+    //! `html_body` from `EmailSendParams` into `SendArgs`. The
+    //! integration suite covers the full UDS round-trip; these tests
+    //! pin the pure plumbing without paying daemon spawn cost.
+
+    use super::*;
+
+    #[test]
+    fn validate_allows_neither_set() {
+        assert!(validate_text_only_html_body_exclusion(false, None).is_ok());
+        assert!(validate_text_only_html_body_exclusion(false, Some("")).is_ok());
+    }
+
+    #[test]
+    fn validate_allows_text_only_alone() {
+        assert!(validate_text_only_html_body_exclusion(true, None).is_ok());
+    }
+
+    #[test]
+    fn validate_allows_html_body_alone() {
+        assert!(validate_text_only_html_body_exclusion(false, Some("<p>hi</p>")).is_ok());
+        // Empty html_body alone (without text_only) is allowed — only
+        // the conflict between the two flags trips the check.
+        assert!(validate_text_only_html_body_exclusion(false, Some("")).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_text_only_plus_empty_html_body() {
+        // `Some("")` is treated as supplied to match the wire codec,
+        // which carries the empty payload through and rejects the
+        // conflict at the daemon. Pre-flighting here keeps the failure
+        // identical to a non-empty `html_body` so the operator sees the
+        // same wording regardless of which layer tripped.
+        let err = validate_text_only_html_body_exclusion(true, Some("")).unwrap_err();
+        assert_eq!(
+            err,
+            "AIMX/1 SEND: --text-only and --html-body are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_both_set_with_canonical_error() {
+        let err = validate_text_only_html_body_exclusion(true, Some("<p>hi</p>")).unwrap_err();
+        // Wording must match the codec's canonical error so operators
+        // see one consistent string regardless of which layer fired.
+        assert_eq!(
+            err,
+            "AIMX/1 SEND: --text-only and --html-body are mutually exclusive"
+        );
+    }
+
+    #[test]
+    fn build_send_args_defaults_when_new_params_absent() {
+        let params = EmailSendParams {
+            from_mailbox: "alice".into(),
+            to: "rcpt@example.com".into(),
+            subject: "S".into(),
+            reply_to: None,
+            body: "hello".into(),
+            attachments: None,
+            references: None,
+            text_only: None,
+            html_body: None,
+        };
+        let args = build_send_args(params, "alice@example.com");
+        assert!(!args.text_only);
+        assert!(args.html_body.is_none());
+    }
+
+    #[test]
+    fn build_send_args_forwards_text_only_true() {
+        let params = EmailSendParams {
+            from_mailbox: "alice".into(),
+            to: "rcpt@example.com".into(),
+            subject: "S".into(),
+            reply_to: None,
+            body: "Your code: 9999".into(),
+            attachments: None,
+            references: None,
+            text_only: Some(true),
+            html_body: None,
+        };
+        let args = build_send_args(params, "alice@example.com");
+        assert!(args.text_only);
+        assert!(args.html_body.is_none());
+    }
+
+    #[test]
+    fn build_send_args_forwards_html_body() {
+        let params = EmailSendParams {
+            from_mailbox: "alice".into(),
+            to: "rcpt@example.com".into(),
+            subject: "S".into(),
+            reply_to: None,
+            body: "fallback".into(),
+            attachments: None,
+            references: None,
+            text_only: None,
+            html_body: Some("<p>custom</p>".into()),
+        };
+        let args = build_send_args(params, "alice@example.com");
+        assert!(!args.text_only);
+        assert_eq!(args.html_body.as_deref(), Some("<p>custom</p>"));
+    }
+
+    #[test]
+    fn email_send_params_omitting_new_fields_parses() {
+        // Backward compat: existing MCP clients that don't know the new
+        // parameters keep working — both fields are `Option<...>` so
+        // omission deserializes cleanly to `None`.
+        let json = serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "rcpt@example.com",
+            "subject": "hi",
+            "body": "hello",
+        });
+        let params: EmailSendParams =
+            serde_json::from_value(json).expect("missing-field params must parse");
+        assert!(params.text_only.is_none());
+        assert!(params.html_body.is_none());
+    }
+
+    #[test]
+    fn email_send_params_accepts_text_only_true() {
+        let json = serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "rcpt@example.com",
+            "subject": "OTP",
+            "body": "Your code: 9999",
+            "text_only": true,
+        });
+        let params: EmailSendParams =
+            serde_json::from_value(json).expect("text_only=true must parse");
+        assert_eq!(params.text_only, Some(true));
+    }
+
+    #[test]
+    fn email_send_params_accepts_html_body() {
+        let json = serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "rcpt@example.com",
+            "subject": "Branded",
+            "body": "fallback",
+            "html_body": "<p>custom</p>",
+        });
+        let params: EmailSendParams = serde_json::from_value(json).expect("html_body must parse");
+        assert_eq!(params.html_body.as_deref(), Some("<p>custom</p>"));
+    }
+
+    #[test]
+    fn email_reply_params_accepts_new_fields() {
+        let json = serde_json::json!({
+            "mailbox": "alice",
+            "id": "2025-06-15-120000-hello",
+            "body": "thanks",
+            "text_only": true,
+        });
+        let params: EmailReplyParams =
+            serde_json::from_value(json).expect("text_only on reply must parse");
+        assert_eq!(params.text_only, Some(true));
+        assert!(params.html_body.is_none());
     }
 }

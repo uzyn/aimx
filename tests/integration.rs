@@ -2809,6 +2809,716 @@ fn send_uds_end_to_end_delivers_signed_message() {
     );
 }
 
+#[cfg(unix)]
+fn drop_payload(path: &Path) -> Vec<u8> {
+    let signed = std::fs::read(path).expect("mail drop file missing");
+    let sentinel = b"----- AIMX TEST DROP -----\n";
+    assert!(signed.starts_with(sentinel));
+    signed[sentinel.len()..].to_vec()
+}
+
+/// Bare Markdown send via the CLI client → daemon assembles
+/// multipart/alternative on the wire (text part = Markdown source verbatim,
+/// HTML part = rendered HTML), DKIM body-hash verifies against the new
+/// shape, and the sent record persists the Markdown source as the body
+/// (no `.html` sibling).
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Markdown render check")
+        .arg("--body")
+        .arg("# Hello\n\nWorld")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    // Wire shape: multipart/alternative with text + html parts.
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "wire must be multipart/alternative for the default Markdown path; got:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text/plain part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    // The text part contains the Markdown source verbatim (modulo
+    // CRLF normalization and the appended default signature).
+    assert!(
+        payload_str.contains("# Hello"),
+        "text part must carry the Markdown source verbatim:\n{payload_str}"
+    );
+    // The HTML part contains rendered HTML for `# Hello` and `World`.
+    assert!(
+        payload_str.contains("<h1") && payload_str.contains(">Hello</h1>"),
+        "html part missing rendered <h1>Hello</h1>:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains(">World</p>") || payload_str.contains("World"),
+        "html part must include the body paragraph"
+    );
+
+    // DKIM body-hash verification using the same relaxed-canonicalization
+    // helper as the legacy plain-text end-to-end test. The new multipart
+    // shape must still verify byte-for-byte.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on multipart/alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    // The sent record exists at sent/alice/<stem>.md and its body
+    // contains the Markdown source verbatim (no `.html` sibling, no
+    // rendered HTML in the persisted body).
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record expected");
+    let sent_path = entries[0].path();
+    let sent_content = std::fs::read_to_string(&sent_path).unwrap();
+    // Body equals the Markdown source verbatim.
+    assert!(
+        sent_content.contains("# Hello"),
+        "sent record body should preserve the Markdown source verbatim"
+    );
+    // The audit-trail field declares the wire shape: default Markdown
+    // path stamps `outbound_format = "markdown"`.
+    assert!(
+        sent_content.contains("outbound_format = \"markdown\""),
+        "sent record must declare outbound_format = \"markdown\":\n{sent_content}"
+    );
+    // No `.html` sibling appears.
+    let any_html_sibling = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        });
+    assert!(
+        !any_html_sibling,
+        "no .html sibling file should be written next to the sent record"
+    );
+
+    stop_serve(child);
+}
+
+/// Markdown send with one attachment must emit a nested
+/// multipart/mixed wrapping multipart/alternative, AND the resulting
+/// DKIM-Signature must still verify against the canonical body bytes.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_dkim_verifies_with_attachment() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let attachment = tmp.path().join("note.txt");
+    std::fs::write(&attachment, b"attached payload").unwrap();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Markdown plus attachment")
+        .arg("--body")
+        .arg("## Report\n\nDetails inline.")
+        .arg("--attachment")
+        .arg(&attachment)
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send with attachment should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: multipart/mixed"),
+        "outer Content-Type must be multipart/mixed when attachments are present:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "inner Content-Type must be multipart/alternative:\n{payload_str}"
+    );
+    assert!(
+        payload_str.contains("filename=\"note.txt\""),
+        "attachment must survive daemon-side reassembly"
+    );
+    assert!(
+        payload_str.contains("<h2") && payload_str.contains(">Report</h2>"),
+        "html part missing rendered heading"
+    );
+
+    // DKIM body-hash must verify against the new nested wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on nested mixed+alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    stop_serve(child);
+}
+
+/// `aimx send --text-only` end-to-end:
+/// - captured wire is single-part `text/plain`, body verbatim, no
+///   multipart structure, no rendered HTML.
+/// - the sent record stores the body verbatim.
+/// - DKIM body-hash verifies against the single-part wire shape.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("OTP delivery")
+        .arg("--body")
+        .arg("Your code: 9999")
+        .arg("--text-only")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send --text-only should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text-only wire must carry text/plain: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("multipart/"),
+        "text-only wire must be single-part: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("Content-Type: text/html"),
+        "text-only wire must not include a text/html part: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Your code: 9999"),
+        "body must reach the wire verbatim: {payload_str}"
+    );
+    // No default signature appended (operator-supplied content).
+    assert!(
+        !payload_str.contains("Sent from AIMX."),
+        "text-only path must not append the default signature: {payload_str}"
+    );
+
+    // DKIM body-hash must verify against the single-part wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on text-only wire: signed={signed_header}, computed={computed}"
+    );
+
+    // Sent record exists and carries the body verbatim. The audit
+    // trail declares `outbound_format = "text"` so an operator
+    // browsing `sent/` can tell at a glance the recipient saw plain
+    // text — distinct from a default Markdown send (`"markdown"`).
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record");
+    let sent_content = std::fs::read_to_string(entries[0].path()).unwrap();
+    assert!(
+        sent_content.contains("Your code: 9999"),
+        "sent record body must carry the plain text verbatim"
+    );
+    assert!(
+        sent_content.contains("outbound_format = \"text\""),
+        "sent record must declare outbound_format = \"text\" on --text-only path:\n{sent_content}"
+    );
+
+    stop_serve(child);
+}
+
+/// `aimx send --html-body` end-to-end:
+/// - captured wire is `multipart/alternative` with the supplied HTML
+///   in the text/html part verbatim (not rendered by comrak).
+/// - the sent record stores the `--body` text part (the custom HTML
+///   is NOT persisted — the operator's template is the source of truth).
+/// - DKIM body-hash verifies against the alternative wire shape.
+#[cfg(unix)]
+#[test]
+fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("Custom HTML layout")
+        .arg("--body")
+        .arg("fallback text")
+        .arg("--html-body")
+        .arg("<p>custom <b>html</b></p>")
+        .output()
+        .expect("aimx send failed to run");
+
+    assert!(
+        output.status.success(),
+        "aimx send --html-body should exit 0: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "html-body wire must be multipart/alternative: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    // Text part: the --body text appears verbatim.
+    assert!(
+        payload_str.contains("fallback text"),
+        "text part must carry --body verbatim: {payload_str}"
+    );
+    // HTML part: the operator's HTML is verbatim — no inline `style="`
+    // attributes the renderer would have added.
+    let html_idx = payload_str
+        .find("Content-Type: text/html")
+        .expect("text/html part missing");
+    let html_section = &payload_str[html_idx..];
+    assert!(
+        html_section.contains("<p>custom <b>html</b></p>"),
+        "html part must carry --html-body verbatim: {html_section}"
+    );
+    assert!(
+        !html_section.contains("style=\""),
+        "renderer must not be invoked on --html-body path: {html_section}"
+    );
+    // No default signature appended on the html-body branch.
+    assert!(
+        !payload_str.contains("Sent from AIMX."),
+        "html-body path must not append the default signature: {payload_str}"
+    );
+
+    // DKIM body-hash verifies on the alternative wire shape.
+    let signed_header = extract_dkim_bh(&payload);
+    let computed = compute_relaxed_body_hash(&payload);
+    assert_eq!(
+        signed_header, computed,
+        "DKIM body hash must verify on html-body alternative wire: signed={signed_header}, computed={computed}"
+    );
+
+    // Sent record stores the --body text, not the --html-body content.
+    // The "custom HTML is not stored" invariant is verified at the
+    // integration layer here.
+    let sent_dir = tmp.path().join("sent").join("alice");
+    let entries: Vec<_> = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one sent record");
+    let sent_path = entries[0].path();
+    let sent_content = std::fs::read_to_string(&sent_path).unwrap();
+    assert!(
+        sent_content.contains("fallback text"),
+        "sent record body must carry the --body text"
+    );
+    // Audit-trail field declares the wire shape: `--html-body` path
+    // stamps `outbound_format = "html"` so an operator browsing
+    // `sent/` knows the recipient saw an operator-supplied HTML
+    // template (and that re-rendering the stored Markdown body would
+    // NOT reproduce the recipient's view).
+    assert!(
+        sent_content.contains("outbound_format = \"html\""),
+        "sent record must declare outbound_format = \"html\" on --html-body path:\n{sent_content}"
+    );
+
+    // No `.html` sibling appears next to the sent record.
+    let any_html_sibling = std::fs::read_dir(&sent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+        });
+    assert!(
+        !any_html_sibling,
+        "no .html sibling file should be written next to the sent record"
+    );
+
+    stop_serve(child);
+}
+
+/// MCP `email_send` with `text_only=true` ships a single-part
+/// `text/plain` message verbatim — no Markdown rendering, no
+/// multipart wrapper. End-to-end: MCP stdio client → daemon UDS →
+/// file-drop transport → captured wire bytes. Mirrors the CLI-side
+/// `send_uds_end_to_end_text_only_emits_single_part_text_plain` so a
+/// regression in either layer surfaces independently.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_text_only_emits_single_part_text_plain() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "OTP delivery",
+            "body": "Your code: 9999",
+            "text_only": true,
+        }),
+    );
+    assert!(!is_tool_error(&resp), "email_send should succeed: {resp:?}");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "MCP text_only must produce text/plain wire: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("multipart/"),
+        "MCP text_only must produce single-part wire: {payload_str}"
+    );
+    assert!(
+        !payload_str.contains("Content-Type: text/html"),
+        "MCP text_only must not produce a text/html part: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Your code: 9999"),
+        "body must reach the wire verbatim: {payload_str}"
+    );
+
+    client.shutdown();
+    stop_serve(child);
+}
+
+/// MCP `email_send` with `html_body` produces a `multipart/alternative`
+/// where the operator's HTML appears in the `text/html` part verbatim
+/// (no inline `style="..."` attributes the renderer would have added).
+/// The custom HTML is NOT persisted to the sent record — only the
+/// `body` text part is stored; the operator's template is the source
+/// of truth elsewhere.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_html_body_uses_supplied_html_verbatim() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let mail_drop = tmp.path().join("outbound.log");
+    let (child, _sock) = start_serve_with_mail_drop(tmp.path(), port, &mail_drop);
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "Custom HTML layout",
+            "body": "fallback text",
+            "html_body": "<p>custom <b>html</b></p>",
+        }),
+    );
+    assert!(!is_tool_error(&resp), "email_send should succeed: {resp:?}");
+
+    std::thread::sleep(std::time::Duration::from_millis(200));
+
+    let payload = drop_payload(&mail_drop);
+    let payload_str = String::from_utf8_lossy(&payload);
+    assert!(
+        payload_str.contains("Content-Type: multipart/alternative"),
+        "html_body wire must be multipart/alternative: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/plain"),
+        "text part missing"
+    );
+    assert!(
+        payload_str.contains("Content-Type: text/html"),
+        "text/html part missing"
+    );
+    assert!(
+        payload_str.contains("fallback text"),
+        "text part must carry body verbatim: {payload_str}"
+    );
+    let html_idx = payload_str
+        .find("Content-Type: text/html")
+        .expect("text/html part missing");
+    let html_section = &payload_str[html_idx..];
+    assert!(
+        html_section.contains("<p>custom <b>html</b></p>"),
+        "html part must carry html_body verbatim: {html_section}"
+    );
+    assert!(
+        !html_section.contains("style=\""),
+        "renderer must not be invoked on html_body MCP path: {html_section}"
+    );
+
+    client.shutdown();
+    stop_serve(child);
+}
+
+/// MCP `email_send` with both `text_only=true` and `html_body` set is
+/// rejected server-side before the UDS is opened. The error wording
+/// matches the codec's canonical message so operators see the same
+/// string regardless of which layer (clap, MCP, codec) fired the check.
+#[cfg(unix)]
+#[test]
+fn mcp_email_send_text_only_plus_html_body_rejected() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    let resp = client.call_tool(
+        "email_send",
+        serde_json::json!({
+            "from_mailbox": "alice",
+            "to": "recipient@example.com",
+            "subject": "conflict",
+            "body": "fallback",
+            "text_only": true,
+            "html_body": "<p>x</p>",
+        }),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "MCP must reject text_only + html_body before opening UDS: {resp:?}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("--text-only") && text.contains("--html-body"),
+        "MCP rejection must name both flags (matching the codec wording): {text}"
+    );
+    assert!(
+        text.contains("mutually exclusive"),
+        "MCP rejection must use the canonical 'mutually exclusive' wording: {text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// MCP `email_reply` with both `text_only=true` and `html_body` set is
+/// rejected server-side with the same canonical wording as
+/// `email_send`. The reply path has its own validation call site so a
+/// regression on one tool does not silently fix itself by leaning on
+/// the other tool's check.
+#[cfg(unix)]
+#[test]
+fn mcp_email_reply_text_only_plus_html_body_rejected() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let port = find_free_port();
+    let daemon = start_serve(tmp.path(), port);
+    let sock = tmp.path().join("run").join("aimx.sock");
+    assert!(
+        wait_for_socket(&sock, std::time::Duration::from_secs(5)),
+        "UDS socket never appeared"
+    );
+
+    let mut client = McpClient::spawn(tmp.path());
+    client.initialize();
+
+    // The id and mailbox need not exist — mutual-exclusion is the
+    // very first check in `email_reply`, ahead of `validate_email_id`
+    // and `lookup_mailbox_row`. The "mutually exclusive" wording in
+    // the response proves the check fired first (no UDS open, no
+    // mailbox lookup, no parent-message read).
+    let resp = client.call_tool(
+        "email_reply",
+        serde_json::json!({
+            "mailbox": "alice",
+            "id": "2099-12-31-235959-nope",
+            "body": "fallback",
+            "text_only": true,
+            "html_body": "<p>x</p>",
+        }),
+    );
+    assert!(
+        is_tool_error(&resp),
+        "email_reply must reject text_only + html_body: {resp:?}"
+    );
+    let text = get_tool_text(&resp);
+    assert!(
+        text.contains("mutually exclusive"),
+        "reply rejection must use the canonical 'mutually exclusive' wording: {text}"
+    );
+
+    client.shutdown();
+    stop_serve(daemon);
+}
+
+/// `aimx send --text-only --html-body ...` is rejected at the CLI
+/// layer by clap — the daemon never sees the request and the operator
+/// gets the conflict explained immediately.
+#[cfg(unix)]
+#[test]
+fn send_text_only_and_html_body_combination_rejected_at_cli() {
+    let tmp = TempDir::new().unwrap();
+    setup_test_env(tmp.path());
+
+    let runtime = tmp.path().join("run");
+    let output = Command::cargo_bin("aimx")
+        .unwrap()
+        .env("AIMX_CONFIG_DIR", tmp.path())
+        .env("AIMX_RUNTIME_DIR", &runtime)
+        .arg("--data-dir")
+        .arg(tmp.path())
+        .arg("send")
+        .arg("--from")
+        .arg("alice@agent.example.com")
+        .arg("--to")
+        .arg("recipient@example.com")
+        .arg("--subject")
+        .arg("conflict")
+        .arg("--body")
+        .arg("fallback")
+        .arg("--text-only")
+        .arg("--html-body")
+        .arg("<p>x</p>")
+        .output()
+        .expect("aimx send failed to launch");
+
+    assert!(
+        !output.status.success(),
+        "clap must reject --text-only + --html-body before any UDS round-trip"
+    );
+    let stderr_text = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        (stderr_text.contains("--text-only") || stderr_text.contains("text_only"))
+            && (stderr_text.contains("--html-body") || stderr_text.contains("html_body")),
+        "clap error must name both flags: {stderr_text}"
+    );
+}
+
 /// End-to-end `after_send` hook test. Replaces the default
 /// `setup_test_env` config with a mailbox that carries an `after_send` hook
 /// writing a sentinel file containing `$AIMX_SEND_STATUS`. After a send

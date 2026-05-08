@@ -117,17 +117,18 @@ surface.
 
 - `email_list(mailbox, folder?, limit?, offset?)`: list a page of email
   metadata, sorted descending by filename (newest first). `folder` is
-  `"inbox"` (default) or `"sent"`. `limit` defaults to 50, max 200; values
-  above 200 are silently clamped. Returns a JSON array — agents
-  filter client-side (e.g. `read == false` for triage). aimx never
-  scans on your behalf; pass `offset` to page deeper.
+  `"inbox"` (default) or `"sent"`. `limit` defaults to 50 (clamped to
+  200). Returns a JSON array — agents filter client-side (e.g.
+  `read == false` for triage); pass `offset` to page deeper.
 - `email_read(mailbox, id, folder?)`: return the full Markdown file
   (frontmatter + body) for one email.
-- `email_send(from_mailbox, to, subject, body, attachments?)`: compose,
-  DKIM-sign, and deliver an email. `from_mailbox` must be a mailbox you
-  own.
-- `email_reply(mailbox, id, body)`: reply to an existing email. aimx sets
-  `In-Reply-To`, `References`, and `Re:` subject automatically.
+- `email_send(from_mailbox, to, subject, body, attachments?, text_only?, html_body?)`:
+  compose, DKIM-sign, and deliver. `body` is Markdown by default;
+  `text_only` / `html_body` are mutually-exclusive escape hatches (see
+  "Send an email" below). `from_mailbox` must be a mailbox you own.
+- `email_reply(mailbox, id, body, text_only?, html_body?)`: reply with the
+  same Markdown semantics; AIMX sets `In-Reply-To`, `References`, and `Re:`
+  automatically.
 - `email_mark_read(mailbox, id)`: mark a single inbox email as read.
 - `email_mark_unread(mailbox, id)`: mark a single inbox email as unread.
 
@@ -263,24 +264,27 @@ tools (or call `email_read` if you prefer the daemon-mediated path), then
 
 ### 2. Send an email
 
-`from_mailbox` is the **local part only** (e.g. `"agent"`, not
-`"agent@example.com"`). The daemon constructs the full address from
-`mailbox_list().address` server-side and DKIM-signs the message before
-delivering via direct SMTP.
+`body` is **Markdown by default** — AIMX renders it to HTML and sends
+as `multipart/alternative`. Use Markdown for headings, tables, links,
+code blocks, and lists. The daemon DKIM-signs and delivers via direct
+SMTP.
 
 ```
 email_send(
   from_mailbox: "agent",
   to: "alice@example.com",
   subject: "Weekly report",
-  body: "Here is the summary..."
+  body: "# Weekly report\n\n- Highlight one\n- Highlight two\n\nDetails: [dashboard](https://example.com/dash)."
 )
 ```
 
-The mailbox must exist and you must own it. Provision new mailboxes
-via `mailbox_create(name)` (owned by your uid) or, when the operator
-needs to create one owned by a different user, via
-`sudo aimx mailboxes create <name> --owner <user>` on the host.
+For OTPs / transactional one-liners pass `text_only: true` to ship
+`body` verbatim as `text/plain`. For branded HTML layouts pass
+`html_body` verbatim as the HTML part with `body` as the plain-text
+fallback. The two flags are mutually exclusive.
+
+The mailbox must exist and you must own it. Provision via
+`mailbox_create(name)`, or `sudo aimx mailboxes create <name> --owner <user>` for cross-user mailboxes.
 
 ### 3. Reply to a message
 

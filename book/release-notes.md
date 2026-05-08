@@ -2,6 +2,33 @@
 
 Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
 
+> **Hard break (Unreleased): `aimx send --body` is now interpreted as Markdown by default.** The daemon renders Markdown to HTML and ships a `multipart/alternative` — recipients on rich-capable clients see styled HTML inline. To preserve the previous plain-text behavior in existing scripts, add `--text-only`. The MCP `email_send` / `email_reply` tools shift in the same way; pass `text_only: true` to keep plain-text output. See [Markdown Email](markdown-email.md) for the full rendering pipeline, supported features, and the inlined stylesheet's element scope.
+
+## Unreleased — Markdown-native outbound (rich-text email)
+
+AIMX now treats Markdown as the canonical send format. The CLI's `--body` flag and the MCP `email_send` / `email_reply` tools interpret their `body` input as CommonMark + GFM Markdown, render it to HTML with an inlined stylesheet, and ship a `multipart/alternative` over the wire. Recipients on Gmail, Outlook, Apple Mail, and other rich-capable clients see styled HTML; recipients on text-only clients see the Markdown source.
+
+### What changed
+
+- **`aimx send --body` is Markdown.** The daemon renders the body using `comrak` (CommonMark + GFM extensions: tables, strikethrough, autolinks, task lists, footnotes, tag filter for unsafe HTML), applies an inlined stylesheet, and assembles a `multipart/alternative` with the Markdown source as the `text/plain` part and the rendered HTML as the `text/html` part. With one or more attachments, the alternative is wrapped in an outer `multipart/mixed` so attachments sit as siblings of the alternative block.
+- **Two CLI escape hatches.** `--text-only` ships `--body` verbatim as `text/plain` with no rendering or HTML alternative — use for OTPs, transactional one-liners, and existing scripts. `--html-body "<custom html>"` supplies an operator-owned HTML template that AIMX uses verbatim as the `text/html` part. The two flags are mutually exclusive at the clap layer.
+- **MCP tools mirror the CLI.** `email_send` and `email_reply` accept optional `text_only: bool` and `html_body: string` parameters with the same semantics. The MCP-side mutual-exclusion check fires server-side before the UDS is opened, returning the canonical wording `AIMX/1 SEND: --text-only and --html-body are mutually exclusive`.
+- **Sent storage stays single-file `.md`.** Sent records under `sent/<mailbox>/` continue to be single-file Markdown (or Zola-style bundles when attachments are present). The body content is the Markdown source for the default path, the literal text for `--text-only`, or the `--body` text part for `--html-body`. The custom HTML supplied via `--html-body` is **not** stored — operators who need a record of the exact HTML sent should keep their template under version control.
+- **`outbound_format` frontmatter field.** The Outbound block in sent records gains an `outbound_format` field (`"markdown"`, `"text"`, or `"html"`) immediately after `outbound = true`. Pre-feature sent records lack the field; on read, those default to `"text"` (the historic single-part `text/plain` shape) so legacy records keep parsing cleanly.
+- **5 MiB body cap.** The renderer rejects Markdown bodies larger than 5 MiB (`MAX_MARKDOWN_BODY_BYTES = 5 * 1024 * 1024`) at the entry point with the canonical error `"markdown body exceeds 5 MiB; use --html-body for pre-rendered large documents or --attachment for sending the document as a file"`. The dedicated `ERR BODY_TOO_LARGE` ack code lets scripts branch on the failure without parsing the reason string.
+- **DKIM verification preserved.** The signed body bytes are the canonical message body; DKIM canonicalization is unaffected by the new MIME shape. CI exercises end-to-end DKIM verification across all three send paths (default Markdown, `--text-only`, `--html-body`).
+
+### Migration
+
+- **Plain-English content with no special chars renders identically.** A body like `"Hello — see you Friday."` produces the same recipient experience as before; the rendered HTML is essentially a styled `<p>` with the same text.
+- **Bodies that contain `*`, `_`, `#`, `[...](...)`, or other Markdown punctuation will render as styled HTML.** If your existing scripts ship that kind of content as opaque plain text, add `--text-only` (CLI) or `text_only: true` (MCP) to preserve the previous behavior exactly.
+- **Bodies that ship raw HTML through `--body`** (treating it as opaque text) will now have the HTML escaped by the renderer. Pass that content through `--html-body` instead, or use `--text-only` if you want it shipped as a literal text/plain part with no rendering.
+- **There is no automatic migration.** The fix is one-flag-per-call-site at the operator's discretion.
+
+### Why now
+
+Outbound rich text was the longest-standing rough edge in AIMX. `--body` always shipped `text/plain`, so agents that wanted styled email had to attach a hand-written `.html` file — Gmail, Outlook, and Apple Mail then rendered it as a downloadable attachment, not as inline content. AIMX is built around Markdown (the LLM's native format) for inbound storage; the send surface now matches that, end-to-end.
+
 ## Unreleased — MCP email and hook tools now work for non-root operators
 
 The mailbox-lifecycle ship below covered the three MCP tools that an agent uses to provision its own mailboxes. A post-ship audit found that the remaining nine tools — every email and hook tool — still failed for the exact persona the design targeted: a non-root operator running an MCP client against a real install with `/etc/aimx/config.toml` at `0600 root:root`. This release closes that gap and adds the regression guard that should have caught it.

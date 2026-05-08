@@ -250,7 +250,42 @@ where
         }
     };
 
-    let body_bytes = append_signature(&body_with_id, config.effective_signature());
+    // Default Markdown send path: render the Markdown body to HTML and
+    // assemble the multipart/alternative (or nested multipart/mixed when
+    // the client packed attachments) shape daemon-side. The signature is
+    // appended to the Markdown source before rendering so a Markdown
+    // link in the signature renders as a clickable HTML anchor. The two
+    // escape-hatch fields on the SEND frame select an alternate wire
+    // shape: `text_only=true` ships single-part text/plain, and
+    // `html_body=Some(..)` ships multipart/alternative whose HTML part
+    // is the operator-supplied bytes verbatim. The signature is
+    // appended ONLY on the default Markdown path — escape hatches use
+    // the body verbatim because the operator already chose the
+    // rendering.
+    let body_bytes = match crate::wire_assembly::assemble_wire_message(
+        &body_with_id,
+        config.effective_signature(),
+        req.text_only,
+        req.html_body.as_deref(),
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // Surface the renderer's size-cap rejection on a dedicated
+            // wire code so scripts can branch on the failure without
+            // parsing the reason string. The canonical message stays in
+            // the reason field for human readers.
+            let code = match &e {
+                crate::wire_assembly::AssembleError::Render(
+                    crate::markdown_render::MarkdownRenderError::BodyTooLarge,
+                ) => ErrCode::BodyTooLarge,
+                _ => ErrCode::Malformed,
+            };
+            return SendResponse::Err {
+                code,
+                reason: e.to_string(),
+            };
+        }
+    };
 
     let signed = match signer(
         &body_bytes,
@@ -272,6 +307,21 @@ where
     let references_val = headers.get("References").cloned();
     let date_header = headers.get("Date").cloned();
 
+    // Audit-trail field for the sent record. Mirrors the wire-shape
+    // branch picked in `assemble_wire_message` above:
+    //   - `text_only=true`            → `"text"`  (single-part text/plain)
+    //   - `html_body=Some(...)`       → `"html"`  (custom HTML alternative)
+    //   - default                     → `"markdown"` (rendered alternative)
+    // The two escape hatches are mutually exclusive at the codec layer,
+    // so this match is exhaustive without a tie-breaker.
+    let outbound_format = if req.text_only {
+        "text"
+    } else if req.html_body.is_some() {
+        "html"
+    } else {
+        "markdown"
+    };
+
     let send_result = ctx.transport.send(&from_header, &recipient_bare, &signed);
 
     let (send_status, persisted_path, response) = match send_result {
@@ -292,6 +342,7 @@ where
                 DeliveryStatus::Delivered,
                 Some(&delivered_at),
                 None,
+                outbound_format,
             );
             (
                 SendStatus::Delivered,
@@ -327,6 +378,7 @@ where
                     DeliveryStatus::Failed,
                     None,
                     Some(&msg),
+                    outbound_format,
                 )
             } else {
                 None
@@ -418,107 +470,6 @@ fn resolve_concrete_mailbox(
     }
 
     None
-}
-
-/// Append `signature` to the first text body region of an RFC 5322 message.
-///
-/// Returns the body unchanged when `signature` is empty (operator-disabled
-/// signature). Otherwise inserts a blank-line separator followed by the
-/// signature into the message:
-///
-/// - Flat `text/plain` bodies (the no-attachment shape produced by
-///   [`crate::send::compose_message`]): signature is appended at the end of
-///   the body, before the trailing terminator slot.
-/// - `multipart/mixed` bodies: signature is injected at the end of the first
-///   part (which `compose_message` always emits as `text/plain`), just before
-///   the boundary line that opens the next part.
-///
-/// Line endings in `signature` are normalized to match the body's terminator
-/// (CRLF or LF). If the multipart structure can't be parsed, falls back to
-/// the flat append at end-of-body so DKIM signing still produces a
-/// deterministic result.
-fn append_signature(body: &[u8], signature: &str) -> Vec<u8> {
-    if signature.is_empty() {
-        return body.to_vec();
-    }
-
-    let crlf = body.windows(2).take(1024).any(|w| w == b"\r\n");
-    let term: &[u8] = if crlf { b"\r\n" } else { b"\n" };
-
-    let normalized_sig = normalize_signature_line_endings(signature, crlf);
-    let insert_at = find_first_part_terminator(body).unwrap_or(body.len());
-
-    let mut out = Vec::with_capacity(body.len() + normalized_sig.len() + 2 * term.len());
-    out.extend_from_slice(&body[..insert_at]);
-    out.extend_from_slice(term);
-    out.extend_from_slice(normalized_sig.as_bytes());
-    out.extend_from_slice(term);
-    out.extend_from_slice(&body[insert_at..]);
-    out
-}
-
-/// Locate the byte offset where a signature should be injected for a
-/// `multipart/...` body: the start of the second `--<boundary>` line, which
-/// terminates the first part. Returns `None` for non-multipart bodies and
-/// for malformed multipart bodies (caller falls back to end-of-body).
-fn find_first_part_terminator(body: &[u8]) -> Option<usize> {
-    let boundary = extract_multipart_boundary(body)?;
-    let marker = format!("--{boundary}");
-    let marker_bytes = marker.as_bytes();
-
-    let first = find_subslice(body, marker_bytes)?;
-    let after_first = first + marker_bytes.len();
-    let second_rel = find_subslice(&body[after_first..], marker_bytes)?;
-    Some(after_first + second_rel)
-}
-
-/// Extract the `boundary` parameter from the first `Content-Type:
-/// multipart/...` header in the message's header block. Returns `None` for
-/// flat (non-multipart) messages.
-fn extract_multipart_boundary(body: &[u8]) -> Option<String> {
-    let header_end = find_subslice(body, b"\r\n\r\n").or_else(|| find_subslice(body, b"\n\n"))?;
-    let header_text = std::str::from_utf8(&body[..header_end]).ok()?;
-
-    for line in header_text.lines() {
-        let lower = line.to_ascii_lowercase();
-        if !lower.starts_with("content-type:") || !lower.contains("multipart/") {
-            continue;
-        }
-        let pos = lower.find("boundary=")?;
-        let after = &line[pos + "boundary=".len()..];
-        if let Some(stripped) = after.strip_prefix('"') {
-            let end = stripped.find('"')?;
-            return Some(stripped[..end].to_string());
-        }
-        let end = after
-            .find(|c: char| c == ';' || c.is_whitespace())
-            .unwrap_or(after.len());
-        if end == 0 {
-            return None;
-        }
-        return Some(after[..end].to_string());
-    }
-    None
-}
-
-fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.is_empty() {
-        return Some(0);
-    }
-    if needle.len() > haystack.len() {
-        return None;
-    }
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Convert any mix of CR / LF / CRLF in `signature` to the body's terminator.
-fn normalize_signature_line_endings(signature: &str, crlf: bool) -> String {
-    let lf_only = signature.replace("\r\n", "\n").replace('\r', "\n");
-    if crlf {
-        lf_only.replace('\n', "\r\n")
-    } else {
-        lf_only
-    }
 }
 
 /// Insert a `Message-ID:` header at the top of an RFC 5322 message body. The
@@ -640,6 +591,7 @@ fn persist_sent_file(
     delivery_status: DeliveryStatus,
     delivered_at: Option<&str>,
     delivery_details: Option<&str>,
+    outbound_format: &str,
 ) -> Option<PathBuf> {
     let sent_dir = ctx.data_dir.join("sent").join(from_mailbox);
     if let Err(e) = std::fs::create_dir_all(&sent_dir) {
@@ -703,6 +655,7 @@ fn persist_sent_file(
         read: false,
         labels: vec![],
         outbound: true,
+        outbound_format: outbound_format.to_string(),
         delivery_status,
         bcc: None,
         delivered_at: delivered_at.map(|s| s.to_string()),
@@ -894,6 +847,7 @@ mod tests {
         let ctx = test_ctx(mock.clone());
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -924,6 +878,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("bogus@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -950,6 +905,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("catchall@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -967,6 +923,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@other.org"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -987,6 +944,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@EXAMPLE.COM"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1003,6 +961,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1019,6 +978,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("Alice <alice@example.com>"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1037,7 +997,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Err { code, .. } => assert_eq!(code, ErrCode::Malformed),
@@ -1056,6 +1019,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -1078,6 +1042,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
@@ -1194,7 +1159,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
     }
@@ -1213,7 +1181,10 @@ mod tests {
                      \r\n\
                      hello\r\n"
             .to_vec();
-        let req = SendRequest { body };
+        let req = SendRequest {
+            body,
+            ..Default::default()
+        };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         match resp {
             SendResponse::Ok { message_id } => {
@@ -1246,6 +1217,7 @@ mod tests {
         let ctx = test_ctx(mock);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         // Inject a signer that always fails, to exercise the `ERR SIGN`
         // branch without needing a malformed RSA key.
@@ -1280,6 +1252,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1313,6 +1286,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
@@ -1342,6 +1316,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Err { .. }), "{resp:?}");
@@ -1366,6 +1341,7 @@ mod tests {
         let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
@@ -1469,6 +1445,7 @@ mod tests {
 
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }));
@@ -1484,131 +1461,6 @@ mod tests {
             0o600,
             "sent file must land 0o600 via post-persist chown"
         );
-    }
-
-    // ------------------------------------------------------------------
-    // append_signature unit tests
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn append_signature_empty_is_noop() {
-        let body = b"From: a@example.com\r\nTo: b@x.com\r\n\r\nhello\r\n";
-        let out = append_signature(body, "");
-        assert_eq!(out, body);
-    }
-
-    #[test]
-    fn append_signature_text_plain_appends_after_body() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: text/plain; charset=utf-8\r\n\
-                     \r\n\
-                     hello\r\n";
-        let out = append_signature(body, "Sig line 1\nSig line 2");
-        let text = std::str::from_utf8(&out).unwrap();
-        let sep = text.find("\r\n\r\n").expect("header separator missing");
-        let body_section = &text[sep + 4..];
-        assert!(
-            body_section.contains("hello\r\n\r\nSig line 1\r\nSig line 2"),
-            "body section was: {body_section:?}"
-        );
-        assert!(text.ends_with("\r\n"));
-    }
-
-    #[test]
-    fn append_signature_multipart_injects_into_text_part() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: multipart/mixed; boundary=\"BND\"\r\n\
-                     \r\n\
-                     --BND\r\n\
-                     Content-Type: text/plain; charset=utf-8\r\n\
-                     \r\n\
-                     user body\r\n\
-                     --BND\r\n\
-                     Content-Type: application/pdf; name=\"x.pdf\"\r\n\
-                     \r\n\
-                     PDFDATA\r\n\
-                     --BND--\r\n";
-        let out = append_signature(body, "Trailer");
-        let text = std::str::from_utf8(&out).unwrap();
-        let sig_pos = text.find("Trailer").expect("signature missing");
-        let first_boundary = text.find("--BND\r\n").expect("first boundary missing");
-        let second_boundary = text[first_boundary + 7..]
-            .find("--BND\r\n")
-            .map(|p| first_boundary + 7 + p)
-            .expect("second boundary missing");
-        assert!(
-            sig_pos > first_boundary && sig_pos < second_boundary,
-            "signature must live inside the first text/plain part"
-        );
-        assert!(text.contains("user body\r\n\r\nTrailer\r\n--BND\r\n"));
-        assert!(text.contains("PDFDATA\r\n"));
-    }
-
-    #[test]
-    fn append_signature_preserves_lf_terminator() {
-        let body = b"From: a@example.com\nContent-Type: text/plain; charset=utf-8\n\nhello\n";
-        let out = append_signature(body, "sig\rline2");
-        let text = std::str::from_utf8(&out).unwrap();
-        assert!(!text.contains('\r'), "LF body must not gain CR bytes");
-        assert!(text.contains("hello\n\nsig\nline2\n"));
-    }
-
-    #[test]
-    fn append_signature_multibyte_signature() {
-        let body = b"From: a@example.com\r\nContent-Type: text/plain; charset=utf-8\r\n\r\nhi\r\n";
-        let out = append_signature(body, "Héllo — wörld");
-        let text = std::str::from_utf8(&out).expect("must remain valid UTF-8");
-        assert!(text.contains("Héllo — wörld"));
-    }
-
-    #[test]
-    fn append_signature_falls_back_when_multipart_malformed() {
-        let body = b"From: a@example.com\r\n\
-                     Content-Type: multipart/mixed; boundary=\"BND\"\r\n\
-                     \r\n\
-                     no boundaries follow at all\r\n";
-        let out = append_signature(body, "sig");
-        let text = std::str::from_utf8(&out).unwrap();
-        assert!(text.ends_with("sig\r\n"));
-    }
-
-    #[test]
-    fn extract_multipart_boundary_quoted() {
-        let body = b"Content-Type: multipart/mixed; boundary=\"abc-123\"\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_unquoted() {
-        let body = b"Content-Type: multipart/mixed; boundary=abc-123\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_unquoted_with_trailing_param() {
-        let body = b"Content-Type: multipart/mixed; boundary=abc-123; charset=utf-8\r\n\r\nbody";
-        assert_eq!(
-            extract_multipart_boundary(body),
-            Some("abc-123".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_multipart_boundary_returns_none_for_flat() {
-        let body = b"Content-Type: text/plain; charset=utf-8\r\n\r\nbody";
-        assert_eq!(extract_multipart_boundary(body), None);
-    }
-
-    #[test]
-    fn extract_multipart_boundary_case_insensitive() {
-        let body = b"CONTENT-TYPE: Multipart/Mixed; BOUNDARY=\"X\"\r\n\r\nbody";
-        assert_eq!(extract_multipart_boundary(body), Some("X".to_string()));
     }
 
     // ------------------------------------------------------------------
@@ -1676,6 +1528,7 @@ mod tests {
         let ctx = ctx_with_signature(mock.clone(), data_dir.path().to_path_buf(), None);
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1706,6 +1559,7 @@ mod tests {
         );
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1732,6 +1586,7 @@ mod tests {
         );
         let req = SendRequest {
             body: body("alice@example.com"),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
@@ -1749,7 +1604,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn signature_appended_in_multipart_text_part() {
+    async fn signature_renders_in_text_and_html_parts_with_attachment() {
         let data_dir = tempfile::TempDir::new().unwrap();
         let mock = Arc::new(MockTransport {
             captured: Mutex::new(vec![]),
@@ -1780,21 +1635,250 @@ mod tests {
             --BND--\r\n";
         let req = SendRequest {
             body: multipart_body.to_vec(),
+            ..Default::default()
         };
         let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
         assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
 
         let captured = mock.captured.lock().unwrap();
         let delivered = String::from_utf8_lossy(&captured[0]);
-        let mark_pos = delivered.find("MARK").expect("signature missing");
-        let first_boundary = delivered.find("--BND\r\n").expect("missing");
-        let second_boundary = delivered[first_boundary + 7..]
-            .find("--BND\r\n")
-            .map(|p| first_boundary + 7 + p)
-            .expect("missing");
+        // The signature is appended to the Markdown source before
+        // rendering, so it appears verbatim in the text part and (since
+        // it is plain ASCII) literally in the rendered HTML part too.
         assert!(
-            mark_pos > first_boundary && mark_pos < second_boundary,
-            "signature must sit inside the first text/plain part, not after attachments"
+            delivered.contains("MARK"),
+            "signature must appear in the delivered message: {delivered}"
         );
+        // The wire shape is multipart/mixed wrapping multipart/alternative.
+        assert!(
+            delivered.contains("Content-Type: multipart/mixed"),
+            "outer content-type must be multipart/mixed: {delivered}"
+        );
+        assert!(
+            delivered.contains("Content-Type: multipart/alternative"),
+            "inner content-type must be multipart/alternative: {delivered}"
+        );
+        assert!(
+            delivered.contains("filename=\"x.bin\""),
+            "attachment must survive the daemon-side reassembly: {delivered}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Escape-hatch branches end-to-end through `handle_send`.
+    // ------------------------------------------------------------------
+
+    /// `text_only=true` skips rendering and ships single-part text/plain.
+    /// The signature is NOT auto-appended on this branch (operator-supplied
+    /// content principle).
+    #[tokio::test]
+    async fn text_only_send_emits_single_part_text_plain() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: true,
+            html_body: None,
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        // Single-part: no multipart wrapping at all.
+        assert!(
+            !delivered.contains("multipart/"),
+            "text-only must not produce a multipart wire: {delivered}"
+        );
+        // No HTML part.
+        assert!(
+            !delivered.contains("Content-Type: text/html"),
+            "text-only must not include a text/html part: {delivered}"
+        );
+        // text/plain present, body verbatim.
+        assert!(delivered.contains("Content-Type: text/plain"));
+        assert!(delivered.contains("hello"));
+        // Signature is NOT appended (default ctx config has no signature
+        // set, so `effective_signature` returns the AIMX default — we
+        // confirm it is *absent* on the text-only path).
+        assert!(
+            !delivered.contains("Sent from AIMX."),
+            "text-only must not append the default signature: {delivered}"
+        );
+    }
+
+    /// `html_body=Some(html)` skips rendering and uses the operator's
+    /// HTML verbatim. Same operator-content principle: no signature
+    /// appended.
+    #[tokio::test]
+    async fn html_body_send_uses_supplied_html_verbatim() {
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx(mock.clone());
+        let custom_html = b"<h1>x</h1>";
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: false,
+            html_body: Some(custom_html.to_vec()),
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(delivered.contains("Content-Type: multipart/alternative"));
+        assert!(delivered.contains("Content-Type: text/plain"));
+        assert!(delivered.contains("Content-Type: text/html"));
+        // The operator's HTML appears verbatim — not the renderer's
+        // styled output. The renderer would have added `style="..."`
+        // attributes and inlined CSS; we assert their absence in the
+        // html portion of the wire as a "no rendering happened" check.
+        assert!(
+            delivered.contains("<h1>x</h1>"),
+            "verbatim HTML missing: {delivered}"
+        );
+        let html_idx = delivered
+            .find("Content-Type: text/html")
+            .expect("text/html part missing");
+        let html_section = &delivered[html_idx..];
+        assert!(
+            !html_section.contains("style=\""),
+            "renderer must not be invoked on --html-body path: {html_section}"
+        );
+        // Default signature is not appended.
+        assert!(
+            !delivered.contains("Sent from AIMX."),
+            "--html-body must not append the default signature: {delivered}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // `outbound_format` audit-trail field on the persisted sent record.
+    // Asserts each of the three wire-shape branches stamps the correct
+    // value into the `OutboundFrontmatter`. Sent body content + the
+    // "no .html sibling" invariant land in the integration suite; here
+    // we just pin the frontmatter contract.
+    // ------------------------------------------------------------------
+
+    fn read_sent_outbound_format(data_dir: &std::path::Path) -> String {
+        let sent_dir = data_dir.join("sent").join("alice");
+        let entry = std::fs::read_dir(&sent_dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .next()
+            .expect("sent record must exist");
+        let content = std::fs::read_to_string(entry.path()).unwrap();
+        let parts: Vec<&str> = content.splitn(3, "+++").collect();
+        let toml_str = parts[1].trim();
+        let parsed: crate::frontmatter::OutboundFrontmatter =
+            toml::from_str(toml_str).expect("frontmatter must parse");
+        parsed.outbound_format
+    }
+
+    #[tokio::test]
+    async fn default_markdown_send_persists_outbound_format_markdown() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "markdown");
+    }
+
+    #[tokio::test]
+    async fn text_only_send_persists_outbound_format_text() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: true,
+            html_body: None,
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "text");
+    }
+
+    #[tokio::test]
+    async fn html_body_send_persists_outbound_format_html() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: false,
+            html_body: Some(b"<p>custom</p>".to_vec()),
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+        assert_eq!(read_sent_outbound_format(data_dir.path()), "html");
+    }
+
+    /// No `.html` sibling file is written next to the sent record on
+    /// any of the three send paths. Pin the single-file-`.md`
+    /// persistence invariant at the unit-test level so a future change
+    /// that introduces an HTML twin file is caught immediately.
+    #[tokio::test]
+    async fn sent_record_never_writes_html_sibling() {
+        for req in [
+            SendRequest {
+                body: body("alice@example.com"),
+                ..Default::default()
+            },
+            SendRequest {
+                body: body("alice@example.com"),
+                text_only: true,
+                html_body: None,
+            },
+            SendRequest {
+                body: body("alice@example.com"),
+                text_only: false,
+                html_body: Some(b"<p>custom</p>".to_vec()),
+            },
+        ] {
+            let data_dir = tempfile::TempDir::new().unwrap();
+            let mock = Arc::new(MockTransport {
+                captured: Mutex::new(vec![]),
+                behavior: Behavior::Ok,
+            });
+            let ctx = test_ctx_with_data_dir(mock, Some(data_dir.path().to_path_buf()));
+            let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+            assert!(matches!(resp, SendResponse::Ok { .. }));
+
+            let sent_dir = data_dir.path().join("sent").join("alice");
+            let any_html = std::fs::read_dir(&sent_dir)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| {
+                    e.path()
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("html"))
+                });
+            assert!(
+                !any_html,
+                "no .html sibling file should appear under {}",
+                sent_dir.display()
+            );
+        }
     }
 }
