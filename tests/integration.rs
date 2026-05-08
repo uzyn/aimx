@@ -2919,7 +2919,7 @@ fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
         "sent record body should preserve the Markdown source verbatim"
     );
     // The audit-trail field declares the wire shape: default Markdown
-    // path stamps `outbound_format = "markdown"` (FR-F3).
+    // path stamps `outbound_format = "markdown"`.
     assert!(
         sent_content.contains("outbound_format = \"markdown\""),
         "sent record must declare outbound_format = \"markdown\":\n{sent_content}"
@@ -3312,9 +3312,9 @@ fn mcp_email_send_text_only_emits_single_part_text_plain() {
 /// MCP `email_send` with `html_body` produces a `multipart/alternative`
 /// where the operator's HTML appears in the `text/html` part verbatim
 /// (no inline `style="..."` attributes the renderer would have added).
-/// The custom HTML is NOT persisted to the sent record (FR-F5: only the
-/// `body` text part is stored; the operator's template is the source of
-/// truth elsewhere).
+/// The custom HTML is NOT persisted to the sent record — only the
+/// `body` text part is stored; the operator's template is the source
+/// of truth elsewhere.
 #[cfg(unix)]
 #[test]
 fn mcp_email_send_html_body_uses_supplied_html_verbatim() {

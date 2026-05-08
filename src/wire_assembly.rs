@@ -399,8 +399,11 @@ fn extract_name_param(content_type: &str) -> Option<String> {
 /// header value's primary value or another `;`-separated segment, so
 /// asking for `name` will NOT spuriously match the `name=` substring
 /// inside `filename=`. Parameter name comparison is case-insensitive.
-/// Quoted values strip the surrounding `"` and stop at the closing `"`;
-/// unquoted values run until the next `;` or whitespace.
+/// Quoted values strip the surrounding `"` and decode RFC 2822
+/// quoted-pair escapes (`\\` → `\`, `\"` → `"`, `\X` → `X`); the closing
+/// `"` is the first unescaped one. Unquoted values run until the next
+/// `;` or whitespace. Returns `None` if a quoted value is unterminated
+/// (e.g. a trailing lone `\` consumes the closing `"`).
 fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
     let lower_name = name.to_ascii_lowercase();
     // Skip the primary value (everything before the first `;`); parameters
@@ -417,8 +420,7 @@ fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
         }
         let value = raw_value.trim_start();
         if let Some(stripped) = value.strip_prefix('"') {
-            let end = stripped.find('"')?;
-            return Some(stripped[..end].to_string());
+            return decode_quoted_value(stripped);
         }
         let end = value
             .find(|c: char| c == ';' || c.is_whitespace())
@@ -427,6 +429,34 @@ fn extract_quoted_param(s: &str, name: &str) -> Option<String> {
             return None;
         }
         return Some(value[..end].to_string());
+    }
+    None
+}
+
+/// Decode the body of an RFC 2822 quoted-string. Input is the substring
+/// **after** the opening `"`. A backslash escapes the next character
+/// (`\\` → `\`, `\"` → `"`, `\X` → `X` for any other X); the value
+/// terminates at the first unescaped `"`. Returns `None` if the value
+/// is unterminated (no closing `"`, possibly because a trailing `\`
+/// consumed it).
+fn decode_quoted_value(stripped: &str) -> Option<String> {
+    let mut out = String::with_capacity(stripped.len());
+    let mut chars = stripped.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                // RFC 2822 §3.2.5 quoted-pair: `\` followed by any
+                // char emits that char literally. A trailing `\` with
+                // no following char is malformed — fall through to
+                // the `None` at the end.
+                let next = chars.next()?;
+                out.push(next);
+            }
+            '"' => {
+                return Some(out);
+            }
+            other => out.push(other),
+        }
     }
     None
 }
@@ -1263,6 +1293,86 @@ mod tests {
         // filename value.
         let ct = "application/pdf; filename=\"doc.pdf\"";
         assert_eq!(extract_name_param(ct), None);
+    }
+
+    /// `escape_filename` on the client side replaces a literal `"` with
+    /// `\"` to keep the wire RFC 2822-clean. The daemon's parser must
+    /// honour the escape and return the original `"` rather than
+    /// terminating the value early at the first `"` it sees.
+    #[test]
+    fn extract_quoted_param_decodes_escaped_quote() {
+        let header = "application/pdf; filename=\"my\\\"file.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("my\"file.pdf".to_string())
+        );
+    }
+
+    /// `escape_filename` doubles a literal `\` to `\\`. The parser must
+    /// collapse it back so the filename round-trips verbatim.
+    #[test]
+    fn extract_quoted_param_decodes_escaped_backslash() {
+        let header = "application/pdf; filename=\"a\\\\b.pdf\"";
+        assert_eq!(
+            extract_quoted_param(header, "filename"),
+            Some("a\\b.pdf".to_string())
+        );
+    }
+
+    /// A trailing lone `\` inside a quoted value (no following char) is
+    /// not a legal RFC 2822 quoted-pair. The parser must reject it
+    /// rather than silently truncating or buffer-overrunning.
+    #[test]
+    fn extract_quoted_param_rejects_unterminated_escape() {
+        let header = "application/pdf; filename=\"trailing\\\"";
+        assert_eq!(extract_quoted_param(header, "filename"), None);
+    }
+
+    /// End-to-end: a multipart request whose attachment filename
+    /// contains `"` (escaped on the wire as `\"` by the client's
+    /// `escape_filename`) round-trips through `assemble_wire_message`
+    /// and re-emerges with the same `\"` escape on the wire — i.e. the
+    /// daemon's reassembly preserves the escape rather than dropping
+    /// or doubling it. Pins the contract between client-side
+    /// `escape_filename` and daemon-side `extract_quoted_param`.
+    #[test]
+    fn attachment_filename_with_escaped_quote_round_trips_through_assembler() {
+        let body = concat!(
+            "--BND\r\n",
+            "Content-Type: text/plain; charset=utf-8\r\n",
+            "\r\n",
+            "Body.\r\n",
+            "--BND\r\n",
+            "Content-Type: application/pdf; name=\"my\\\"file.pdf\"\r\n",
+            "Content-Disposition: attachment; filename=\"my\\\"file.pdf\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "\r\n",
+            "UERG\r\n",
+            "--BND--\r\n",
+        );
+        let req = build_request(
+            "From: a@b.com\nTo: c@d.com\nSubject: T\nMIME-Version: 1.0\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
+            body,
+        );
+        let out = assemble_wire_message(&req, "", false, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        // The escaped quote survives daemon round-trip on both the
+        // Content-Type `name=` and the Content-Disposition `filename=`.
+        assert!(
+            text.contains("name=\"my\\\"file.pdf\""),
+            "Content-Type name= must keep escaped quote, got:\n{text}"
+        );
+        assert!(
+            text.contains("filename=\"my\\\"file.pdf\""),
+            "Content-Disposition filename= must keep escaped quote, got:\n{text}"
+        );
+        // The truncated form (`my\\` with no rest) must not appear —
+        // that was the pre-fix behaviour where the parser stopped at
+        // the embedded `"`.
+        assert!(
+            !text.contains("filename=\"my\\\"\r\n"),
+            "filename must not be truncated at the embedded quote, got:\n{text}"
+        );
     }
 
     #[test]
