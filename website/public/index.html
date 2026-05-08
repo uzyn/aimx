@@ -49,8 +49,13 @@
   "mainEntity": [
     {
       "@type": "Question",
-      "name": "Do I need a VPS for this?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Yes. AIMX binds port 25, which is privileged and almost always blocked on managed PaaS. A small VPS with port 25 unblocked (Hetzner, OVH, others) is the minimum." }
+      "name": "Why does AIMX need port 25 open?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 to contain spam — check the compatible providers list in the book before you sign up." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I run AIMX in Docker or behind NAT?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Docker works if you map port 25 and persist /etc/aimx, /var/lib/aimx, and /run/aimx on the host. Behind NAT, port-forward 25/tcp both ways and make sure the MX record resolves to the public IP." }
     },
     {
       "@type": "Question",
@@ -59,18 +64,13 @@
     },
     {
       "@type": "Question",
-      "name": "Is this safe to run for production agents?",
-      "acceptedAnswer": { "@type": "Answer", "text": "It's prerelease. The format is stable; the surface area is small (single binary, one daemon, no DB). Read the Security chapter before pointing real workloads at it." }
+      "name": "How is mail stored?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Markdown files with TOML frontmatter, one file per message, partitioned by mailbox. cat, grep, rsync, and git all work on it. Attachments are sibling files in a Zola-style bundle directory — no MIME parser required." }
     },
     {
       "@type": "Question",
       "name": "Does AIMX phone home?",
       "acceptedAnswer": { "@type": "Answer", "text": "The binary doesn't. No telemetry, no callouts. The aimx.email site uses Google Analytics for traffic measurement; that's separate from the binary." }
-    },
-    {
-      "@type": "Question",
-      "name": "How is mail stored?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Markdown files with TOML frontmatter, one file per message, partitioned by mailbox. cat, grep, rsync, and git all work on it." }
     }
   ]
 }
@@ -132,8 +132,7 @@
     <p class="pitch d4">
       The internet's oldest protocol, <strong>rebuilt for AI agents.</strong><br>
       Your mail, your machine, end to end. No third parties.<br>
-      Human-friendly setup. LLM-friendly everything else.<br>
-      Free and open source.
+      Human-friendly setup. LLM-friendly everything else.
     </p>
 
     <div class="hero-ctas">
@@ -156,57 +155,20 @@
 
 
     <section class="block">
-      <h2 class="section-label">Why an inbox of its own</h2>
-      <p class="prose">
-        <em>An agent that lives behind your Gmail account is a tenant in someone else's tenant in someone else's house.</em> Every reply, every attachment, every check-in goes through three layers of OAuth and rate-limiting before it reaches your code. With its own MX record, the agent has an address you point to, an inbox it owns, and a delivery path it controls.
-      </p>
-      <p class="prose">
-        <em>Mail on disk is mail you can grep.</em> Markdown with TOML frontmatter is mail an LLM reads without a parser. Six months of correspondence become a <code>find</code> invocation, not an IMAP client. Email is the original cross-org protocol; Markdown is the format LLMs were trained on. Pair them and you have an agent-native medium.
-      </p>
-      <p class="prose">
-        <em>Pushing beats polling.</em> The daemon fires <code>on_receive</code> the moment SMTP <code>DATA</code> completes — no long-poll loops, no glue between SMTP and the agent. The MCP server exposes twelve typed tools the agent calls directly: list, read, send, reply, mark-read, mailbox CRUD.
-      </p>
-    </section>
-
-    <section class="block">
-      <h2 class="section-label">What it is</h2>
-      <p class="prose">
-        AIMX is a self-hosted mail server for AI agents. One binary. One <code>aimx setup</code> command and your agents have their own email addresses on a domain you control. No Gmail, no OAuth, no SaaS.
-      </p>
-      <p class="prose">
-        Mail arrives over SMTP, gets parsed into Markdown with TOML frontmatter, and lands on disk. Outbound mail is DKIM-signed and delivered direct to the recipient's MX. Agents read and send through the built-in stdio MCP server, the <code>aimx</code> CLI, or the filesystem.
-      </p>
-      <p class="prose">
-        Works with any MCP-capable agent — Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes, NanoClaw.
-      </p>
-    </section>
-
-    <section class="block">
-      <h2 class="section-label">Where mail lives</h2>
-      <p class="prose">
-        Every message — inbound and outbound — is a Markdown file on your disk. Frontmatter is TOML. The body is the body. No <code>.eml</code>, no MIME parser, no database to back up.
-      </p>
-<pre class="code">/var/lib/aimx/inbox/alpha/2026-05-06-1430-3f9a.md
-─────────────────────────────────────────────────
-+++
-from    = "human@friend.com"
-to      = ["alpha@yourdomain.com"]
-subject = "the report"
-trusted = "true"
-+++
-
-Body, exactly as the sender wrote it.</pre>
-      <p class="prose" style="margin-top: 1.1em;">
-        Read it with <code>cat</code>. Tail it with an agent. Grep across a year of correspondence in a single command.
-      </p>
+      <h2 class="section-label">What&rsquo;s in the box</h2>
+      <ul class="features">
+        <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. No SaaS relay, no OAuth, no Gmail scanning. MIT licensed.</li>
+        <li><strong>Mail is an event.</strong> Inbound fires <code>on_receive</code> the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves. No cron, no heartbeat — push, not poll.</li>
+        <li><strong>Markdown emails.</strong> No <code>.eml</code>. No database. TOML frontmatter, plain Markdown body. Your LLM reads it without a parser.</li>
+        <li><strong>Direct MTA-to-MTA.</strong> Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.</li>
+        <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Twelve tools — list, read, send, reply, mark-read, mailbox CRUD.</li>
+        <li><strong>Single binary.</strong> Written in Rust. No runtime deps, no database, no relay. One <code>aimx setup</code> command.</li>
+      </ul>
     </section>
 
     <section class="block">
       <h2 class="section-label">Works with</h2>
-      <p class="prose">
-        Eight harnesses out of the box. One command — <code>aimx agents setup</code> — wires the MCP server into whichever you use.
-      </p>
-      <div class="harness-grid" style="margin-top: 18px;">
+      <div class="harness-grid">
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/claude-code.svg" alt="" width="32" height="32" loading="lazy">
           <div class="harness-tile-text">
@@ -267,50 +229,6 @@ Body, exactly as the sender wrote it.</pre>
     </section>
 
     <section class="block">
-      <h2 class="section-label">Quick start</h2>
-      <div class="terminal">
-        <div class="terminal-header" aria-hidden="true">
-          <span class="terminal-dots">
-            <span class="terminal-dot red"></span>
-            <span class="terminal-dot yellow"></span>
-            <span class="terminal-dot green"></span>
-          </span>
-          <span class="terminal-label">Terminal</span>
-        </div>
-        <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/install.sh | sh</span><span class="terminal-line"><span class="terminal-prompt">$</span>sudo aimx setup</span></div>
-      </div>
-      <p class="prose" style="margin-top: 1.5em;">
-        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Not sure your VPS allows port 25? Check first, no install:
-      </p>
-      <div class="terminal">
-        <div class="terminal-header" aria-hidden="true">
-          <span class="terminal-dots">
-            <span class="terminal-dot red"></span>
-            <span class="terminal-dot yellow"></span>
-            <span class="terminal-dot green"></span>
-          </span>
-          <span class="terminal-label">Terminal</span>
-        </div>
-        <div class="terminal-body"><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/portcheck.sh | sh</span></div>
-      </div>
-      <p class="prose" style="margin-top: 1.5em;">
-        <code>portcheck.sh</code> is a thin alias for <code>install.sh --port-check-only</code>; both URLs run the same checks. Want to see the scripts before running them? <a href="/install.sh">Read <code>install.sh</code></a> or <a href="/portcheck.sh">Read <code>portcheck.sh</code></a>.
-      </p>
-    </section>
-
-    <section class="block">
-      <h2 class="section-label">What&rsquo;s in the box</h2>
-      <ul class="features">
-        <li><strong>Single binary.</strong> Written in Rust. No runtime dependencies, no database, no relay.</li>
-        <li><strong>Direct MTA-to-MTA.</strong> Outbound goes straight to the recipient's MX. Inbound hits your server on port 25. Feels like an API call.</li>
-        <li><strong>Push, not poll.</strong> Inbound fires <code>on_receive</code> hooks the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves. No long-poll loops, no glue between SMTP and the agent — just MCP tool calls and event fires.</li>
-        <li><strong>Markdown emails.</strong> No <code>.eml</code>, no database. Just Markdown with TOML frontmatter — LLM- and RAG-friendly without a parser.</li>
-        <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Twelve tools covering mailbox CRUD, read, list, send, reply, mark-read.</li>
-        <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. Nothing phones home. MIT licensed.</li>
-      </ul>
-    </section>
-
-    <section class="block">
       <h2 class="section-label">Why AIMX?</h2>
       <p class="prose">
         Sending mail through someone else's API is fine until your agent needs to receive a reply, run a hook on it, and own the audit trail. The trade-offs, side by side:
@@ -340,9 +258,9 @@ Body, exactly as the sender wrote it.</pre>
               <td>MCP support</td>
               <td class="cell-meh">via 3rd-party</td>
               <td class="cell-meh">via 3rd-party</td>
-              <td class="cell-yes">✅ ext server</td>
+              <td class="cell-yes">✅<br>ext server</td>
               <td class="cell-no">❌</td>
-              <td class="aimx-col cell-yes">✅ local stdio</td>
+              <td class="aimx-col cell-yes">✅<br>local stdio</td>
             </tr>
             <tr>
               <td>Self-sovereign</td>
@@ -381,28 +299,59 @@ Body, exactly as the sender wrote it.</pre>
       </div>
     </section>
 
+    <section class="block">
+      <h2 class="section-label">Design philosophy</h2>
+      <p class="prose">
+        AIMX is a mail server for AI agents, not a Postfix replacement. Three principles drive the design:
+      </p>
+      <p class="prose">
+        <strong>1. One operator, one domain.</strong> No multi-user, multi-domain, or shared hosting. If you need those, run <a href="https://www.postfix.org/" target="_blank" rel="noopener">Postfix</a> or <a href="https://stalw.art/" target="_blank" rel="noopener">Stalwart</a>.
+      </p>
+      <p class="prose">
+        <strong>2. Direct MTA-to-MTA delivery.</strong> No relay, no submission port, no SaaS in the middle.
+      </p>
+      <p class="prose">
+        <strong>3. Markdown on disk.</strong> Mail stored as files for LLM-readability, not <code>.eml</code> or a database. Attachments are sibling files in a bundle directory.
+      </p>
+      <p class="prose" style="margin-top: 1.4em;">By design, currently:</p>
+      <ul class="features">
+        <li>No IMAP or POP3</li>
+        <li>No webmail</li>
+        <li>No SMTP AUTH</li>
+        <li>No retry queues — <code>send</code> either delivers or fails immediately so the agent can react in real time</li>
+        <li>No bounces (no DSNs)</li>
+        <li>No indexing or search — bring your own RAG</li>
+      </ul>
+      <p class="prose" style="margin-top: 1.4em;">
+        Subject to change. For now, intentionally single-operator and single-domain.
+      </p>
+    </section>
+
     <section class="block faq">
       <h2 class="section-label">FAQ</h2>
       <details>
-        <summary>Do I need a VPS for this?</summary>
-        <p class="faq-body">Yes. AIMX binds port 25, which is privileged and almost always blocked on managed PaaS. A small VPS with port 25 unblocked (Hetzner, OVH, others — see the <a href="/book/getting-started.html">Getting Started</a> chapter) is the minimum.</p>
+        <summary>Why does AIMX need port 25 open?</summary>
+        <p class="faq-body">Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient&rsquo;s MX on port 25. Most VPS providers block outbound 25 to contain spam — check the <a href="/book/getting-started.html#compatible-vps-providers">compatible providers</a> before you sign up.</p>
+      </details>
+      <details>
+        <summary>Can I run AIMX in Docker or behind NAT?</summary>
+        <p class="faq-body">Docker works if you map port 25 and persist <code>/etc/aimx</code>, <code>/var/lib/aimx</code>, and <code>/run/aimx</code> on the host. Behind NAT, port-forward 25/tcp both ways and make sure the MX record resolves to the public IP.</p>
       </details>
       <details>
         <summary>Why not just use the Gmail API or SendGrid?</summary>
         <p class="faq-body">Both work for outbound. Neither gives you inbound mail as files on disk for an agent to read, hook on, and reply to. AIMX is symmetric: send and receive are first-class.</p>
       </details>
       <details>
-        <summary>Is this safe to run for production agents?</summary>
-        <p class="faq-body">It&rsquo;s prerelease. The format is stable; the surface area is small (single binary, one daemon, no DB). Read the <a href="/book/security.html">Security</a> chapter before pointing real workloads at it.</p>
+        <summary>How is mail stored?</summary>
+        <p class="faq-body">Markdown files with TOML frontmatter, one file per message, partitioned by mailbox. <code>cat</code>, <code>grep</code>, <code>rsync</code>, and <code>git</code> all work on it. Attachments are sibling files in a Zola-style bundle directory — no MIME parser required.</p>
       </details>
       <details>
         <summary>Does AIMX phone home?</summary>
-        <p class="faq-body">The binary doesn&rsquo;t. No telemetry, no callouts. (This site uses Google Analytics for traffic measurement and Google Fonts for type — that&rsquo;s separate from the binary.)</p>
+        <p class="faq-body">The binary doesn&rsquo;t. No telemetry, no callouts. The aimx.email site uses Google Analytics for traffic measurement; that&rsquo;s separate from the binary.</p>
       </details>
-      <details>
-        <summary>How is mail stored?</summary>
-        <p class="faq-body">Markdown files with TOML frontmatter, one file per message, partitioned by mailbox. <code>cat</code>, <code>grep</code>, <code>rsync</code>, and <code>git</code> all work on it.</p>
-      </details>
+      <p class="prose" style="margin-top: 1.6em;">
+        More? Browse the <a href="/book/faq.html">full FAQ</a> in the book.
+      </p>
     </section>
 
   </main>
