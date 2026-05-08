@@ -1835,9 +1835,9 @@ mod tests {
     }
 
     /// No `.html` sibling file is written next to the sent record on
-    /// any of the three send paths. Pin the FR-F2 invariant at the
-    /// unit-test level so a future change to the persistence path that
-    /// introduces an HTML twin file is caught immediately.
+    /// any of the three send paths. Pin the single-file-`.md`
+    /// persistence invariant at the unit-test level so a future change
+    /// that introduces an HTML twin file is caught immediately.
     #[tokio::test]
     async fn sent_record_never_writes_html_sibling() {
         for req in [
