@@ -88,7 +88,10 @@ header {
   gap: 22px;
   flex-wrap: wrap;
 }
-.header-right { gap: 18px; }
+.header-right {
+  gap: 22px;
+  align-items: center;
+}
 
 .brand {
   font-family: 'Fraunces', serif;
@@ -102,7 +105,13 @@ header {
 }
 
 .brand:hover { color: var(--accent); }
-.brand .dot { color: var(--accent); }
+.brand .dot { color: var(--accent); margin: 0 0.05em 0 0.02em; }
+.brand-sub {
+  font-weight: 400;
+  font-size: 0.72em;
+  color: var(--ink-soft);
+  letter-spacing: 0;
+}
 
 .topnav {
   display: flex;
@@ -132,32 +141,33 @@ header {
 
 .theme-toggle {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
   border: 1px solid var(--rule);
   border-radius: 999px;
-  padding: 2px;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.34em;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-.theme-toggle button {
   background: transparent;
-  border: 0;
   color: var(--ink-faded);
-  padding: 0.45em 0.85em;
   cursor: pointer;
-  font-family: inherit;
-  font-size: inherit;
-  letter-spacing: inherit;
-  text-transform: inherit;
-  border-radius: 999px;
-  transition: color 0.15s, background 0.15s;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
-.theme-toggle button:hover { color: var(--ink); }
-.theme-toggle button[aria-pressed="true"] {
+.theme-toggle:hover {
   color: var(--ink);
+  border-color: var(--ink-faded);
   background: var(--paper-2);
 }
+.theme-toggle svg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+/* Default (dark theme) — show sun ("switch to light") */
+.theme-toggle .icon-moon { display: none; }
+/* Light theme — show moon ("switch to dark") */
+:root[data-theme="light"] .theme-toggle .icon-sun  { display: none; }
+:root[data-theme="light"] .theme-toggle .icon-moon { display: block; }
 
 main {
   padding: 56px 0 40px;
@@ -427,6 +437,12 @@ h1 em {
   padding-left: 22px;
 }
 
+.terminal-comment {
+  color: rgba(237, 228, 211, 0.4);
+  font-style: italic;
+  user-select: none;
+}
+
 .harness-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -594,10 +610,28 @@ h1 em {
   margin-top: 0.7em;
   max-width: 60ch;
 }
-.faq-body a {
+/* Inline links inside content blocks — unified treatment */
+.prose a,
+.features a,
+.faq-body a,
+.caution a {
   color: var(--accent);
-  border-bottom: 1px solid var(--accent);
   text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  transition: color 0.15s, border-color 0.15s;
+}
+.prose a:hover,
+.features a:hover,
+.faq-body a:hover,
+.caution a:hover {
+  color: var(--accent-dark);
+  border-bottom-color: var(--accent);
+}
+.prose a code,
+.features a code,
+.faq-body a code,
+.caution a code {
+  color: inherit;
 }
 
 .caution {
@@ -611,6 +645,11 @@ h1 em {
   line-height: 1.6;
   color: var(--ink-soft);
   max-width: 60ch;
+}
+
+.small {
+  font-size: 0.72em;
+  color: var(--ink-faded);
 }
 
 .caution .label {

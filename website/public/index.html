@@ -92,18 +92,30 @@
 <div class="wrap">
   <header>
     <div class="header-left">
-      <a class="brand" href="/">AIMX<span class="dot">.</span></a>
+      <a class="brand" href="/">AIMX</a> <span class="small">AI Mail Exchange</span>
+    </div>
+    <div class="header-right">
       <nav class="topnav" aria-label="Primary">
         <a href="/" class="active">home</a>
         <a href="/book/">book</a>
         <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
       </nav>
-    </div>
-    <div class="header-right">
-      <div class="theme-toggle" role="group" aria-label="Color theme">
-        <button type="button" data-mode="dark" aria-pressed="true" title="Dark mode">dark</button>
-        <button type="button" data-mode="light" aria-pressed="false" title="Light mode">light</button>
-      </div>
+      <button class="theme-toggle" type="button" aria-label="Toggle light or dark theme" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2"/>
+          <path d="M12 20v2"/>
+          <path d="m4.93 4.93 1.41 1.41"/>
+          <path d="m17.66 17.66 1.41 1.41"/>
+          <path d="M2 12h2"/>
+          <path d="M20 12h2"/>
+          <path d="m6.34 17.66-1.41 1.41"/>
+          <path d="m19.07 4.93-1.41 1.41"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
     </div>
   </header>
 
@@ -139,12 +151,7 @@
           </span>
           <span class="terminal-label">Quick start</span>
         </div>
-        <div class="terminal-body">
-          <span class="terminal-line"><span class="terminal-prompt">            # On VPS with open port 25</span>
-          <span class="terminal-line"><span class="terminal-prompt">
-            $</span>curl -fsSL https://aimx.email/install.sh | sh
-          </span>
-        </div>
+        <div class="terminal-body"><span class="terminal-line"><span class="terminal-comment"># On VPS with open port 25</span></span><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/install.sh | sh</span></div>
       </div>
 
 
