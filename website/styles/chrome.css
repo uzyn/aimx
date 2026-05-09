@@ -245,13 +245,16 @@ mark {
   background: var(--aimx-accent);
 }
 
-.mermaid-zoomable {
+.book-diagram {
+  display: block;
+  margin: 1.2em auto;
+  max-width: 100%;
+  height: auto;
   cursor: zoom-in;
-  transition: outline-color 0.15s;
-  outline: 1px solid transparent;
-  outline-offset: 4px;
-  border-radius: 4px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  transition: border-color 0.15s;
 }
-.mermaid-zoomable:hover {
-  outline-color: var(--aimx-accent);
+.book-diagram:hover {
+  border-color: var(--aimx-accent);
 }

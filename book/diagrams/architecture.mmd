@@ -1,0 +1,18 @@
+flowchart LR
+    subgraph Inbound
+        direction LR
+        Sender([Remote sender]) --> Port25[port 25]
+        Port25 --> ServeIn[aimx serve]
+        ServeIn --> Ingest[ingest]
+        Ingest --> MD[.md file]
+        Ingest --> Hooks[hook manager<br/>on_receive]
+    end
+
+    subgraph Outbound
+        direction LR
+        Agent([MCP tool call]) --> Send[aimx send]
+        Send --> UDS[UDS<br/>/run/aimx/aimx.sock]
+        UDS --> ServeOut[aimx serve]
+        ServeOut --> DKIM[DKIM sign]
+        DKIM --> MX[recipient MX]
+    end
