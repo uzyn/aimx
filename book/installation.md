@@ -15,7 +15,7 @@ AIMX is Linux-only. Every release ships four prebuilt targets:
 | Canonical target triple | Tarball filename target | Typical distros |
 |---|---|---|
 | `x86_64-unknown-linux-gnu`   | `x86_64-linux-gnu`   | Debian, Ubuntu, Fedora, RHEL, Rocky, Arch |
-| `aarch64-unknown-linux-gnu`  | `aarch64-linux-gnu`  | 64-bit ARM on any glibc distro (e.g. Ubuntu on Raspberry Pi 4/5, AWS Graviton, Hetzner CAX) |
+| `aarch64-unknown-linux-gnu`  | `aarch64-linux-gnu`  | 64-bit ARM on any glibc distro |
 | `x86_64-unknown-linux-musl`  | `x86_64-linux-musl`  | Alpine, statically-linked containers |
 | `aarch64-unknown-linux-musl` | `aarch64-linux-musl` | Alpine ARM, statically-linked ARM containers |
 

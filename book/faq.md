@@ -6,7 +6,7 @@
 
 Inbound: every receiving MTA listens on port 25. It is the SMTP port defined by RFC 5321. Your MX record points at your server and delivering MTAs connect on 25 to hand mail over.
 
-Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check the [compatible provider table](getting-started.md#compatible-vps-providers) before you sign up. Ports 465/587 are submission ports used to hand mail to a relay. AIMX *is* the MTA, so they do not apply.
+Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam from compromised instances, so check with your provider before you sign up. Ports 465/587 are submission ports used to hand mail to a relay. AIMX *is* the MTA, so they do not apply.
 
 ### Can I run AIMX in Docker or behind NAT?
 

@@ -27,7 +27,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see [compatible providers](getting-started.md#compatible-vps-providers)) |
+| Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock with your provider |
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` (see [verifying DNS](setup.md#verifying-dns-records)) |
 | `sudo aimx portcheck` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |

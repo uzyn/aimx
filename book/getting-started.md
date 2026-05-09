@@ -5,22 +5,8 @@ Install AIMX and run setup.
 ## Requirements
 
 - **OS:** Linux (x86_64 or aarch64, glibc or musl). CI covers Ubuntu, Alpine, Fedora.
-- **Server:** A VPS with port 25 open both ways.
+- **Server:** A VPS with port 25 open both ways. Many providers block outbound 25 by default — check with yours before signing up, and run the connectivity check below before installing.
 - **Domain:** One you control with DNS access.
-
-### Compatible VPS providers
-
-AIMX needs direct SMTP on port 25; not every cloud provider allows it.
-
-| Provider | Port 25 | Notes |
-|----------|---------|-------|
-| Hetzner Cloud | After unblock request | Request via support after first invoice |
-| OVH / Kimsufi | Open by default | |
-| Vultr | Unblockable on request | |
-| BuyVM (Frantech) | Open by default | |
-| Linode / Akamai | On request | Submit support ticket |
-
-Providers that **block** port 25 permanently (not compatible): DigitalOcean, AWS EC2, Azure VMs, GCP.
 
 ## Pre-install: check port 25
 

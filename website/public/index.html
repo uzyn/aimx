@@ -50,7 +50,7 @@
     {
       "@type": "Question",
       "name": "Why does AIMX need port 25 open?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 to contain spam — check the compatible providers list in the book before you sign up." }
+      "acceptedAnswer": { "@type": "Answer", "text": "Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient's MX on port 25. Most VPS providers block outbound 25 by default to contain spam — check with your provider before you sign up." }
     },
     {
       "@type": "Question",
@@ -367,7 +367,7 @@
       <h2 class="section-label">FAQ</h2>
       <details>
         <summary>Why does AIMX need port 25 open?</summary>
-        <p class="faq-body">Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient&rsquo;s MX on port 25. Most VPS providers block outbound 25 to contain spam — check the <a href="/book/getting-started.html#compatible-vps-providers">compatible providers</a> before you sign up.</p>
+        <p class="faq-body">Port 25 is the SMTP port (RFC 5321). Inbound: every receiving MTA listens on it; your MX record points at your server. Outbound: AIMX delivers directly to each recipient&rsquo;s MX on port 25. Most VPS providers block outbound 25 by default to contain spam — check with your provider before you sign up.</p>
       </details>
       <details>
         <summary>Can I run AIMX in Docker or behind NAT?</summary>
