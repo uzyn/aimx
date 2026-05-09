@@ -157,12 +157,12 @@
     <section class="block">
       <h2 class="section-label">What&rsquo;s in the box</h2>
       <ul class="features">
-        <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. No SaaS relay, no OAuth, no Gmail scanning. MIT licensed.</li>
-        <li><strong>Mail is an event.</strong> Inbound fires <code>on_receive</code> the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves. No cron, no heartbeat — push, not poll.</li>
-        <li><strong>Markdown emails.</strong> No <code>.eml</code>. No database. TOML frontmatter, plain Markdown body. Your LLM reads it without a parser.</li>
-        <li><strong>Direct MTA-to-MTA.</strong> Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.</li>
-        <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Twelve tools — list, read, send, reply, mark-read, mailbox CRUD.</li>
-        <li><strong>Single binary.</strong> Written in Rust. No runtime deps, no database, no relay. One <code>aimx setup</code> command.</li>
+        <li><span class="feature-icon">🔒</span> <strong>You own the inbox.</strong> Mail lives on your disk, under your domain. No SaaS relay, no OAuth, no Gmail scanning. MIT licensed.</li>
+        <li><span class="feature-icon">⚡</span> <strong>Mail is an event.</strong> Inbound fires <code>on_receive</code> the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves. No cron, no heartbeat — push, not poll.</li>
+        <li><span class="feature-icon">📝</span> <strong>Markdown emails.</strong> No <code>.eml</code>. No database. TOML frontmatter, plain Markdown body. Your LLM reads it without a parser.</li>
+        <li><span class="feature-icon">📬</span> <strong>Direct MTA-to-MTA.</strong> Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.</li>
+        <li><span class="feature-icon">🔌</span> <strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Twelve tools — list, read, send, reply, mark-read, mailbox CRUD.</li>
+        <li><span class="feature-icon">🦀</span> <strong>Single binary.</strong> Written in Rust. No runtime deps, no database, no relay. One <code>aimx setup</code> command.</li>
       </ul>
     </section>
 
@@ -242,7 +242,7 @@
               <th>SaaS relays<br><span class="compare-sub">SendGrid / Postmark</span></th>
               <th>AgentMail<br><span class="compare-sub">LobsterMail</span></th>
               <th>Postfix / Stalwart</th>
-              <th class="aimx-col">AIMX</th>
+              <th class="aimx-col">🐦‍⬛&nbsp;AIMX</th>
             </tr>
           </thead>
           <tbody>
@@ -256,11 +256,11 @@
             </tr>
             <tr>
               <td>MCP support</td>
-              <td class="cell-meh">via 3rd-party</td>
-              <td class="cell-meh">via 3rd-party</td>
-              <td class="cell-yes">✅<br>ext server</td>
+              <td class="cell-meh">🟡<span class="compare-note">via 3rd-party</span></td>
+              <td class="cell-meh">🟡<span class="compare-note">via 3rd-party</span></td>
+              <td class="cell-yes">✅<span class="compare-note">ext server</span></td>
               <td class="cell-no">❌</td>
-              <td class="aimx-col cell-yes">✅<br>local stdio</td>
+              <td class="aimx-col cell-yes">✅<span class="compare-note">local stdio</span></td>
             </tr>
             <tr>
               <td>Self-sovereign</td>
@@ -325,6 +325,42 @@
       <p class="prose" style="margin-top: 1.4em;">
         Subject to change. For now, intentionally single-operator and single-domain.
       </p>
+    </section>
+
+    <section class="block">
+      <h2 class="section-label">Use cases</h2>
+      <div class="grid use-cases">
+        <div class="use-case col-6">
+          <p><span class="feature-icon">💼</span> <strong>Finance agent.</strong> Forward invoices, receipts, and statements to <code>finance@…</code>. The agent extracts amounts and vendors, files attachments, and reconciles against your ledger.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">🔐</span> <strong>Privacy-sensitive workflows.</strong> Bank statements, medical records, legal correspondence — mail that shouldn&rsquo;t sit in someone else&rsquo;s datacenter. No SaaS relay, no third-party MCP wrapper, no Gmail scanning the contents.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">🌅</span> <strong>Morning briefing.</strong> A cron job kicks the agent at 7am. It reads overnight mails, researches news, and emails you your daily briefing.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">🎫</span> <strong>Support triage.</strong> <code>support@…</code> drafts replies via MCP, tags by severity, and escalates when confidence is low. Threading is preserved, so customers see a normal Gmail conversation.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">🚨</span> <strong>Monitoring &amp; alerts.</strong> Datadog, GitHub Actions, and cron jobs page <code>alerts@…</code>. The <code>on_receive</code> hook decides whether to wake you, file a ticket, or self-remediate.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">📰</span> <strong>Newsletter digest.</strong> <code>news@…</code> collects Substack, arXiv, and HN digests. A nightly job ships one summary instead of 40 unread threads.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">✈️</span> <strong>Travel concierge.</strong> Forward bookings to <code>travel@…</code>. The agent builds a live itinerary, pushes calendar events, and pings you on gate or check-in changes.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">👥</span> <strong>Personal CRM.</strong> <code>contacts@…</code> ingests intros and follow-ups. The agent extracts who, where, and why, and reminds you before the connection goes cold.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">🔁</span> <strong>Cross-agent message bus.</strong> Two agents on different boxes use email as durable, DKIM-signed transport. Markdown is a payload format both already speak.</p>
+        </div>
+        <div class="use-case col-6">
+          <p><span class="feature-icon">📚</span> <strong>Knowledge-base ingest.</strong> Forward anything to <code>kb@…</code>. Markdown plus TOML frontmatter is RAG-ready the moment it hits disk.</p>
+        </div>
+      </div>
     </section>
 
     <section class="block faq">

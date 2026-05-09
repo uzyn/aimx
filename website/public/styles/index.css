@@ -303,6 +303,54 @@ h1 em {
   color: var(--ink);
 }
 
+.feature-icon {
+  display: inline-block;
+  width: 1.5em;
+  font-size: 1.1em;
+  line-height: 1;
+  margin-right: 0.35em;
+  vertical-align: -0.05em;
+  text-align: center;
+}
+
+.use-cases {
+  margin-top: 12px;
+}
+
+.use-case {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 18px 20px;
+  transition: border-color 0.15s;
+}
+
+.use-case:hover {
+  border-color: var(--ink-faded);
+}
+
+.use-case p {
+  font-size: 0.36em;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  margin: 0;
+}
+
+.use-case strong {
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.use-case code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.9em;
+  background: var(--paper);
+  padding: 1px 5px;
+  border-radius: 3px;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+}
+
 .hero-ctas {
   display: flex;
   flex-wrap: wrap;
@@ -565,10 +613,14 @@ h1 em {
   font-size: 1.1em;
   line-height: 1;
 }
-.compare .cell-meh {
+.compare .compare-note {
+  display: block;
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.85em;
+  font-size: 0.78em;
   color: var(--ink-faded);
+  font-weight: 400;
+  letter-spacing: 0;
+  margin-top: 2px;
 }
 .compare td.aimx-col.cell-yes { font-size: 1.2em; }
 .compare tr + tr td { border-top: 1px solid var(--rule); }
