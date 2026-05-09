@@ -36,7 +36,7 @@ cmd = ["/bin/sh", "-c", 'echo "New mail from $AIMX_FROM: $AIMX_SUBJECT" >> /tmp/
 
 | Property | Type | Required | Description |
 |----------|------|----------|-------------|
-| `name` | string | no | Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
+| `name` | string | no | Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, AIMX derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
 | `event` | string | yes | `"on_receive"` or `"after_send"`. |
 | `type` | string | no | Trigger kind (default `"cmd"`). Only `cmd` is supported today. |
 | `cmd` | array of strings | yes | Argv exec'd directly. Must be non-empty; `cmd[0]` must be an absolute path. No shell wrapping — wrap in `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |

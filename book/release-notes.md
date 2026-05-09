@@ -1,6 +1,6 @@
 # Release Notes
 
-Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between aimx releases; individual book chapters describe the current behavior only.
+Version-by-version changelog of operator-visible behavior changes. Use this as the canonical source for "what changed" between AIMX releases; individual book chapters describe the current behavior only.
 
 ## Unreleased — MCP email and hook tools now work for non-root operators
 
@@ -103,12 +103,12 @@ The line is suppressed on the rollback path so a failed upgrade never claims suc
 
 ## Unreleased — MCP surface cleanup
 
-Three hard breaks tighten the MCP tool surface around aimx's "no index, no scan" design. Canonical tool docs live in [MCP Server](mcp.md); the new hook model lives in [Hooks & Trust](hooks.md).
+Three hard breaks tighten the MCP tool surface around AIMX's "no index, no scan" design. Canonical tool docs live in [MCP Server](mcp.md); the new hook model lives in [Hooks & Trust](hooks.md).
 
 ### Removed `email_list` filters
 
 - **What was removed:** the `unread`, `from`, `since`, and `subject` parameters on `email_list`.
-- **Rationale:** aimx ships no index. Server-side filters silently forced an O(N) scan of every frontmatter block in the mailbox — the opposite of the design intent. The new shape lists a page of metadata (cheap, bounded by `limit`) and the agent filters client-side.
+- **Rationale:** AIMX ships no index. Server-side filters silently forced an O(N) scan of every frontmatter block in the mailbox — the opposite of the design intent. The new shape lists a page of metadata (cheap, bounded by `limit`) and the agent filters client-side.
 - **New call shape:**
 
   ```
@@ -156,7 +156,7 @@ The MCP schema rejects a stale `folder` argument with an `unknown field` parse e
 
 ## 0.1.0 — first public release
 
-aimx ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (canonical Rust target triples; tarball filenames drop the `-unknown-` vendor field, e.g. `aimx-0.1.0-x86_64-linux-gnu.tar.gz`). One-line install:
+AIMX ships as a single prebuilt binary for Linux on four targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, `x86_64-unknown-linux-musl`, `aarch64-unknown-linux-musl` (canonical Rust target triples; tarball filenames drop the `-unknown-` vendor field, e.g. `aimx-0.1.0-x86_64-linux-gnu.tar.gz`). One-line install:
 
 ```bash
 curl -fsSL https://aimx.email/install.sh | sh

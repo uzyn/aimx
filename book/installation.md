@@ -170,7 +170,7 @@ This only covers one generation back. Past that, install a specific older tag wi
 
 ## Troubleshooting
 
-**"aimx is Linux-only" error.**  The install script runs `uname` and refuses anything other than Linux. Run it on a Linux box.
+**"AIMX is Linux-only" error.**  The install script runs `uname` and refuses anything other than Linux. Run it on a Linux box.
 
 **GitHub API rate limits.**  The installer calls `https://api.github.com/repos/uzyn/aimx/releases/latest` for version resolution. Unauthenticated API requests share a per-IP quota. If you hit it, set `GITHUB_TOKEN` to a personal access token with no scopes selected (public-read is implicit):
 

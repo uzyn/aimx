@@ -275,7 +275,7 @@ aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/age
 If outbound emails land in spam:
 
 1. **Check all DNS records.** DKIM, SPF, and DMARC must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
-2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for aimx, but is critical for deliverability with Gmail/Outlook.
+2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for AIMX, but is critical for deliverability with Gmail/Outlook.
 3. **Gmail filter workaround.** In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
 4. **Reply trick.** Reply to one email from the domain. Gmail learns it's not spam.
 

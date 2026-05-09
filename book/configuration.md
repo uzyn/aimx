@@ -38,7 +38,7 @@ This changes where `config.toml` and the DKIM keypair (`dkim/private.key`, `dkim
 | `AIMX_DATA_DIR` | `/var/lib/aimx` | Override the mailbox data directory. Equivalent to `--data-dir`. The flag wins when both are set. |
 | `AIMX_CONFIG_DIR` | `/etc/aimx` | Override the config + DKIM directory. For tests and non-standard installs only. |
 | `AIMX_TEST_MAIL_DROP` | *(unset)* | When set to a directory path, `aimx serve` writes every outbound submission to that directory instead of delivering via SMTP. The daemon logs a startup warning so it cannot be left on in production by accident. |
-| `NO_COLOR` | *(unset)* | Standard convention. When set to any value, aimx CLI output disables ANSI color. |
+| `NO_COLOR` | *(unset)* | Standard convention. When set to any value, AIMX CLI output disables ANSI color. |
 
 Hook commands receive additional `AIMX_*` env vars carrying the triggering email's header fields. See [Hooks & Trust: Hook context](hooks.md#hook-context-env-vars-and-stdin).
 
@@ -109,7 +109,7 @@ Hooks are defined as `[[mailboxes.<name>.hooks]]` arrays. `cmd` is an argv array
 
 | Setting | Type | Description |
 |---------|------|-------------|
-| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, aimx derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
+| `name` | string | Optional. Matches `^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}$`. When omitted, AIMX derives a stable 12-char hex name from `sha256(event + joined_argv + fire_on_untrusted)`. Names must be globally unique across mailboxes — including derived ones. |
 | `event` | string | `"on_receive"` or `"after_send"` |
 | `type` | string | Hook kind, default `"cmd"` (only `cmd` is supported today) |
 | `cmd` | array of strings | Argv exec'd directly. Required and non-empty; `cmd[0]` must be an absolute path. There is no shell wrapping — spell out `["/bin/sh", "-c", "..."]` explicitly when you need shell expansion. |

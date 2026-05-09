@@ -161,8 +161,8 @@ Set `AIMX_TEST_MAIL_DROP=/path/to/dir` before starting `aimx serve`. Every outbo
 
 ### What is `services/verifier`?
 
-A small companion service that exists purely to answer the question "is port 25 actually reachable from the public internet?". `aimx portcheck` and `aimx setup` call it during setup. Nothing in the mail path depends on it. By default aimx points at the hosted instance at `check.aimx.email`, so you do not need to run your own.
+A small companion service that exists purely to answer the question "is port 25 actually reachable from the public internet?". `aimx portcheck` and `aimx setup` call it during setup. Nothing in the mail path depends on it. By default AIMX points at the hosted instance at `check.aimx.email`, so you do not need to run your own.
 
 ### When would I self-host `services/verifier/`?
 
-When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying aimx in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See `services/verifier/README.md` for the Docker Compose deploy. Point aimx at it with `verify_host` in `config.toml` or `--verify-host` at the command line.
+When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying AIMX in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See `services/verifier/README.md` for the Docker Compose deploy. Point AIMX at it with `verify_host` in `config.toml` or `--verify-host` at the command line.

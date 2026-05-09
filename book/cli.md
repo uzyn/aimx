@@ -199,9 +199,9 @@ No flags. See [MCP Server](mcp.md).
 
 ### `aimx agents setup [agent]`
 
-Install the aimx skill for a supported agent into the current user's config directory and (for Claude Code and Codex CLI) auto-register the aimx MCP server via `claude mcp add` / `codex mcp add`. Refuses to run as root. Run with no arguments to launch the interactive checkbox TUI; pass `--list` (or call `aimx agents list`) to print the supported-agent registry and exit without installing.
+Install the AIMX skill for a supported agent into the current user's config directory and (for Claude Code and Codex CLI) auto-register the AIMX MCP server via `claude mcp add` / `codex mcp add`. Refuses to run as root. Run with no arguments to launch the interactive checkbox TUI; pass `--list` (or call `aimx agents list`) to print the supported-agent registry and exit without installing.
 
-The skill bundle teaches the agent how to call aimx's MCP tools and includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with [`aimx hooks create`](#aimx-hooks-create).
+The skill bundle teaches the agent how to call AIMX's MCP tools and includes a "Wiring yourself up as a mailbox hook" section with the verified `cmd` argv to use with [`aimx hooks create`](#aimx-hooks-create).
 
 When installing for `claude-code`, the installer also removes any pre-existing `~/.claude/plugins/aimx/` from the older plugin layout so the new skills install isn't shadowed.
 

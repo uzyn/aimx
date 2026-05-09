@@ -122,7 +122,7 @@ The referenced recipe pre-binds the `aimx mcp` extension and parameterizes the i
 
 OpenClaw does not document a one-shot prompt mode as of Apr 2026. Its surfaces are interactive (chat-channel, Control-UI dashboard) plus admin subcommands; there is no `--prompt`-style entry point that fits the headless hook pattern.
 
-To use OpenClaw with aimx, treat aimx as a read source via the MCP server and trigger the agent through OpenClaw's documented interactive entry points. For shell-side notifications on new mail (so OpenClaw operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
+To use OpenClaw with AIMX, treat AIMX as a read source via the MCP server and trigger the agent through OpenClaw's documented interactive entry points. For shell-side notifications on new mail (so OpenClaw operators know there is mail to look at), wire a simple non-agent `on_receive` hook:
 
 ```bash
 aimx hooks create \
@@ -149,7 +149,7 @@ aimx hooks create \
   --name hermes_chat
 ```
 
-If a future Hermes release confirms that `chat -q` accepts piped stdin, shorten the inline prompt to "Read the piped email and act on it via the aimx MCP server." — the daemon already pipes the email regardless.
+If a future Hermes release confirms that `chat -q` accepts piped stdin, shorten the inline prompt to "Read the piped email and act on it via the AIMX MCP server." — the daemon already pipes the email regardless.
 
 ## Webhook (POST to URL)
 

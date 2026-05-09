@@ -209,7 +209,7 @@ These are not on a roadmap. They are non-goals.
 3. **IMAP / POP3 / webmail.** Agents read `.md` files via MCP or the filesystem. There is no mailbox server protocol.
 4. **Reverse DNS (PTR).** Configured at your VPS provider, not by `aimx setup`. Optional but improves deliverability.
 5. **Socket-mode-based UDS gating.** The socket is `0666` on purpose; per-verb authorization runs server-side on every request via `SO_PEERCRED` + `auth::authorize`. We don't tighten the socket mode itself.
-6. **Spam filtering, greylisting, inbound rate limits.** Front aimx with a firewall or small MTA if you need these.
+6. **Spam filtering, greylisting, inbound rate limits.** Front AIMX with a firewall or small MTA if you need these.
 7. **Retry queues, DSN generation.** Failures are agent-visible in real time, not queued behind the scenes.
 8. **Detailed audit logging.** Every hook fire emits one structured line via `tracing`. That is the log. There is no separate audit file.
 

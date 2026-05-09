@@ -244,3 +244,14 @@ mark {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--aimx-accent);
 }
+
+.mermaid-zoomable {
+  cursor: zoom-in;
+  transition: outline-color 0.15s;
+  outline: 1px solid transparent;
+  outline-offset: 4px;
+  border-radius: 4px;
+}
+.mermaid-zoomable:hover {
+  outline-color: var(--aimx-accent);
+}

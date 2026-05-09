@@ -17,7 +17,7 @@ additional-css = [
     "styles/chrome.css",
 ]
 additional-js = [
-    "scripts/nav.js", "mermaid.min.js", "mermaid-init.js",
+    "scripts/nav.js", "mermaid.min.js", "mermaid-init.js", "scripts/mermaid-zoom.js",
 ]
 
 [output.html.fold]

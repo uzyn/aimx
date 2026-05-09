@@ -1,4 +1,4 @@
-# aimx user guide
+# AIMX user guide
 
 AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their own addresses on a domain you control. Mail is parsed into Markdown with TOML frontmatter and written to disk. Agents read and send through the built-in MCP server, the `aimx` CLI, or the filesystem directly. `aimx serve` is the daemon; every other subcommand is short-lived.
 
