@@ -205,4 +205,4 @@ A small companion service that exists purely to answer the question "is port 25 
 
 ### When would I self-host `services/verifier/`?
 
-When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying AIMX in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See `services/verifier/README.md` for the Docker Compose deploy. Point AIMX at it with `verify_host` in `config.toml` or `--verify-host` at the command line.
+When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying AIMX in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See the [verifier service README](https://github.com/uzyn/aimx/blob/main/services/verifier/README.md) for the Docker Compose deploy. Point AIMX at it with `verify_host` in `config.toml` or `--verify-host` at the command line.

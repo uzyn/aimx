@@ -101,7 +101,7 @@ Shows all mailboxes with their addresses and message counts (total and unread).
 aimx mailboxes show support
 ```
 
-Prints the mailbox's address, effective trust policy, full `trusted_senders` list, configured hooks grouped by event (`on_receive` / `after_send`. Each entry shows the hook id, `cmd` truncated to 60 chars with a `…` suffix when longer, filters in compact form, and the `dangerously_support_untrusted=true` flag where set), and inbox + sent + unread message counts. Example output:
+Prints the mailbox's address, effective trust policy, full `trusted_senders` list, configured hooks grouped by event (`on_receive` / `after_send`. Each entry shows the hook name, `cmd` truncated to 60 chars with a `…` suffix when longer, and the `[fire_on_untrusted=true]` marker where set), and inbox + sent + unread message counts. Example output:
 
 ```text
 Mailbox: support
@@ -113,9 +113,9 @@ Mailbox: support
 
 Hooks
   on_receive
-    - aaaabbbbcccc  cmd: curl -fsS https://hooks.example.com/notify   [from=*@gmail.com subject=urgent]
+    - support_notify  cmd: ["/bin/sh","-c","curl -fsS https://hooks.example.com/no…   [fire_on_untrusted=true]
   after_send
-    - ddddeeeeffff  cmd: /usr/local/bin/notify "$AIMX_TO"             [to=*@client.com]
+    - aaaabbbbcccc    cmd: ["/usr/local/bin/notify","$AIMX_TO"]
 
 Messages
   inbox: 12 (3 unread)

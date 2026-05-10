@@ -419,7 +419,7 @@ only activate when declared in `opencode.json`. Re-run `aimx agents setup
 opencode`, copy the printed JSONC block into the `mcp` object in your
 `opencode.json`, and restart OpenCode.
 
-### Gemini: "unknown MCP server AIMX"
+### Gemini: "unknown MCP server aimx"
 
 Gemini CLI requires the `mcpServers.aimx` block in
 `~/.gemini/settings.json`. Re-run `aimx agents setup gemini` and merge

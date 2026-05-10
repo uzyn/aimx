@@ -309,4 +309,4 @@ The verifier service provides:
 - `GET /probe`: connects back to caller's IP on port 25, performs EHLO handshake
 - Port 25 listener: accepts TCP connections for outbound port 25 testing
 
-See the [verifier service README](../services/verifier/README.md) for full details.
+See the [verifier service README](https://github.com/uzyn/aimx/blob/main/services/verifier/README.md) for full details.
