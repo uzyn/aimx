@@ -112,7 +112,7 @@
 
 <link rel="stylesheet" href="/styles/index.css">
 </head>
-<body>
+<body id="top">
 <div class="grain"></div>
 <div class="wrap">
   <header>
@@ -162,7 +162,7 @@
 
     <div class="hero-ctas">
       <a class="btn primary" href="/book/">Read the book</a>
-      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Check out the code</a>
+      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener"><svg class="btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>Check out the code</a>
     </div>
 
     <div>&nbsp;</div>
@@ -344,7 +344,12 @@
       <div class="usecase-grid">
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">💼</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                <rect width="20" height="14" x="2" y="6" rx="2"/>
+              </svg>
+            </span>
             <h3>Finance agent</h3>
             <code class="mailbox">finance@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -359,7 +364,13 @@
 
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">🔐</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="16" r="1"/>
+                <rect x="3" y="10" width="18" height="12" rx="2"/>
+                <path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+              </svg>
+            </span>
             <h3>Privacy-sensitive</h3>
             <code class="mailbox">private@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -374,7 +385,16 @@
 
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">🎫</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="m4.93 4.93 4.24 4.24"/>
+                <path d="m14.83 9.17 4.24-4.24"/>
+                <path d="m14.83 14.83 4.24 4.24"/>
+                <path d="m9.17 14.83-4.24 4.24"/>
+                <circle cx="12" cy="12" r="4"/>
+              </svg>
+            </span>
             <h3>Support triage</h3>
             <code class="mailbox">support@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -388,7 +408,14 @@
 
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">🚨</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+                <path d="M4 2C2.8 3.7 2 5.7 2 8"/>
+                <path d="M22 8c0-2.3-.8-4.3-2-6"/>
+              </svg>
+            </span>
             <h3>Monitoring &amp; alerts</h3>
             <code class="mailbox">alerts@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -403,7 +430,14 @@
 
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">📰</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/>
+                <path d="M18 14h-8"/>
+                <path d="M15 18h-5"/>
+                <path d="M10 6h8v4h-8V6Z"/>
+              </svg>
+            </span>
             <h3>Newsletter digest</h3>
             <code class="mailbox">news@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -418,7 +452,14 @@
 
         <article class="usecase-card">
           <header class="usecase-card-head">
-            <span class="usecase-card-emoji" aria-hidden="true">📚</span>
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m16 6 4 14"/>
+                <path d="M12 6v14"/>
+                <path d="M8 8v12"/>
+                <path d="M4 4v16"/>
+              </svg>
+            </span>
             <h3>Knowledge-base ingest</h3>
             <code class="mailbox">kb@&lt;YOUR_DOMAIN&gt;</code>
           </header>
@@ -477,6 +518,12 @@
       <p class="prose" style="margin-top: 1.6em;">
         More? Browse the <a href="/book/faq.html">full FAQ</a> in the book.
       </p>
+    </section>
+
+    <section class="block page-cta">
+      <h2 class="cta-heading">Ready to try AIMX?</h2>
+      <p class="cta-sub">One command, one box, one inbox.</p>
+      <a class="btn primary cta-btn" href="#top">Get started</a>
     </section>
 
   </main>

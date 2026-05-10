@@ -381,8 +381,8 @@ h1 em {
   text-align: center;
 }
 
-/* Use-cases — 3x2 grid of self-contained cards. Each card heads with an
-   emoji, the title, and a prominent .mailbox chip so the visitor sees
+/* Use-cases — 3x2 grid of self-contained cards. Each card heads with a
+   line icon, the title, and a prominent .mailbox chip so the visitor sees
    "this is the address AIMX gives you for that workflow" at a glance.
    Layout: 3 columns at lg+, 2 at md, 1 below. */
 .usecase-grid {
@@ -417,13 +417,21 @@ h1 em {
   row-gap: 0.35em;
   align-items: baseline;
 }
-.usecase-card-emoji {
+.usecase-card-icon {
   grid-row: 1 / span 2;
   align-self: center;
-  font-size: 1.25em;
-  line-height: 1;
-  width: 1.2em;
-  text-align: center;
+  width: 0.9em;
+  height: 0.9em;
+  color: var(--ink-faded);
+  transition: color 0.15s;
+}
+.usecase-card-icon svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.usecase-card:hover .usecase-card-icon {
+  color: var(--ink-soft);
 }
 .usecase-card-head h3 {
   grid-column: 2;
@@ -512,15 +520,24 @@ h1 em {
   background: var(--paper);
   text-decoration: none;
   display: inline-flex;
-  align-items: baseline;
-  gap: 0.4em;
+  align-items: center;
+  gap: 0.55em;
   transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.btn-icon {
+  width: 1em;
+  height: 1em;
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.12em;
 }
 
 .btn::after {
   content: "→";
   color: var(--accent);
   font-weight: 500;
+  margin-left: 0.05em;
 }
 
 .btn:hover {
@@ -865,6 +882,34 @@ h1 em {
 }
 
 .caution strong { color: var(--ink); font-weight: 500; }
+
+/* Bottom call-to-action — sits above the footer on every page. Same
+   centered, narrow column that hero uses, so the page closes the way
+   it opened. The button on the homepage scrolls back to #top; on book
+   pages it routes to the homepage hero (set per-page or via theme). */
+.page-cta {
+  text-align: center;
+}
+.page-cta .cta-heading {
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 60;
+  font-weight: 500;
+  font-size: 0.85em;
+  line-height: 1.15;
+  letter-spacing: -0.012em;
+  color: var(--ink);
+  margin: 0 0 0.4em;
+}
+.page-cta .cta-sub {
+  font-size: 0.4em;
+  line-height: 1.6;
+  color: var(--ink-soft);
+  margin: 0 auto 1.6em;
+  max-width: 60ch;
+}
+.page-cta .cta-btn {
+  margin: 0 auto;
+}
 
 footer {
   padding: 24px 0 8px;
