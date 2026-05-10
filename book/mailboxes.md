@@ -24,7 +24,7 @@ A mailbox maps an email address to a directory on disk. `aimx mailbox` is a clap
 ```
 
 Each email is stored as either a flat `YYYY-MM-DD-HHMMSS-<slug>.md` file
-when it has zero attachments, or as a Zola-style bundle directory
+when it has zero attachments, or as a bundle directory
 `YYYY-MM-DD-HHMMSS-<slug>/` containing `<stem>.md` plus every attachment
 as a sibling file when attachments are present.
 
@@ -227,8 +227,8 @@ Deferred (4xx) sends are not persisted. The submitting client is expected to ret
 
 ## Attachments
 
-When an email carries one or more attachments, AIMX writes a Zola-style
-bundle directory whose name matches the `.md` file's stem:
+When an email carries one or more attachments, AIMX writes a bundle
+directory whose name matches the `.md` file's stem:
 
 ```text
 /var/lib/aimx/inbox/support/
@@ -263,7 +263,7 @@ Emails are marked `read = false` on ingest. Use MCP tools or update the frontmat
 - **MCP:** `email_mark_read` and `email_mark_unread` (see [MCP Server](mcp.md#email-tools))
 - **CLI/filesystem:** Edit the `read` field in the `.md` file's frontmatter
 
-The `email_list` MCP tool returns the `read` flag on every inbox row. Agents page through the listing and filter client-side to `read == false`; aimx itself does not scan on the agent's behalf.
+The `email_list` MCP tool returns the `read` flag on every inbox row. Agents page through the listing and filter client-side to `read == false`; AIMX itself does not scan on the agent's behalf.
 
 ## Sending email
 

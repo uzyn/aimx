@@ -27,7 +27,7 @@ The `--verify-host` flag is also accepted by `aimx setup`, and overrides the `ve
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock (see [compatible providers](getting-started.md#compatible-vps-providers)) |
+| Verify: outbound port 25 blocked | VPS provider blocks SMTP | Switch providers or request unblock with your provider |
 | Verify: inbound port 25 not reachable | Firewall or VPS blocks inbound | `sudo ufw allow 25/tcp`, check VPS firewall settings |
 | DNS records not resolving | Propagation delay | Wait (up to 48h), re-check with `dig` (see [verifying DNS](setup.md#verifying-dns-records)) |
 | `sudo aimx portcheck` times out | DNS not propagated or verify service down | Run again later; check `curl https://check.aimx.email/health` |
@@ -275,7 +275,7 @@ aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/age
 If outbound emails land in spam:
 
 1. **Check all DNS records.** DKIM, SPF, and DMARC must all be set correctly. See [DNS configuration](setup.md#dns-configuration).
-2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for aimx, but is critical for deliverability with Gmail/Outlook.
+2. **Configure reverse DNS (PTR)** at your VPS provider's control panel so the PTR for your server IP points to your mail domain. This is the operator's responsibility and is out of scope for AIMX, but is critical for deliverability with Gmail/Outlook.
 3. **Gmail filter workaround.** In Gmail: Settings > Filters > Create filter for `*@agent.yourdomain.com` > Never send to Spam.
 4. **Reply trick.** Reply to one email from the domain. Gmail learns it's not spam.
 

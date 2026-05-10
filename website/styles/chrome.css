@@ -244,3 +244,75 @@ mark {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--aimx-accent);
 }
+
+.book-diagram {
+  display: block;
+  margin: 1.2em auto;
+  max-width: 100%;
+  height: auto;
+  cursor: zoom-in;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  transition: border-color 0.15s;
+}
+.book-diagram:hover {
+  border-color: var(--aimx-accent);
+}
+
+/* Bottom call-to-action — sits below the chapter content on every book
+   page. Routes back to the homepage hero (which has the install one-liner
+   and is "the top" of the funnel). Mirrors the homepage's bottom CTA. */
+.page-cta {
+  margin: 4em auto 1.5em;
+  padding: 2em 1em 1.5em;
+  border-top: 1px solid var(--aimx-rule);
+  text-align: center;
+}
+.page-cta .cta-heading {
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 60;
+  font-weight: 500;
+  font-size: 1.6rem;
+  line-height: 1.2;
+  letter-spacing: -0.012em;
+  color: var(--aimx-ink);
+  margin: 0 0 0.4em;
+  border: none;
+}
+.page-cta .cta-sub {
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--aimx-ink-soft);
+  margin: 0 auto 1.5em;
+  max-width: 60ch;
+}
+.page-cta .cta-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55em;
+  font-family: 'IBM Plex Sans', system-ui, sans-serif;
+  font-size: 0.95rem;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  padding: 0.7em 1.3em;
+  border: 1px solid var(--aimx-ink);
+  border-radius: 8px;
+  color: var(--aimx-paper);
+  background: var(--aimx-ink);
+  text-decoration: none;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.page-cta .cta-btn::after {
+  content: "→";
+  color: var(--aimx-accent);
+  font-weight: 500;
+  margin-left: 0.05em;
+}
+.page-cta .cta-btn:hover {
+  background: var(--aimx-accent);
+  border-color: var(--aimx-accent);
+  color: var(--aimx-paper);
+}
+.page-cta .cta-btn:hover::after {
+  color: var(--aimx-paper);
+}

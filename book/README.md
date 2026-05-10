@@ -1,29 +1,12 @@
-# aimx user guide
+# AIMX user guide
 
 AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their own addresses on a domain you control. Mail is parsed into Markdown with TOML frontmatter and written to disk. Agents read and send through the built-in MCP server, the `aimx` CLI, or the filesystem directly. `aimx serve` is the daemon; every other subcommand is short-lived.
 
 ## How it works
 
-```mermaid
-flowchart LR
-    subgraph Inbound
-        direction LR
-        Sender([Remote sender]) --> Port25[port 25]
-        Port25 --> ServeIn[aimx serve]
-        ServeIn --> Ingest[ingest]
-        Ingest --> MD[.md file]
-        Ingest --> Hooks[hook manager<br/>on_receive]
-    end
-
-    subgraph Outbound
-        direction LR
-        Agent([MCP tool call]) --> Send[aimx send]
-        Send --> UDS[UDS<br/>/run/aimx/aimx.sock]
-        UDS --> ServeOut[aimx serve]
-        ServeOut --> DKIM[DKIM sign]
-        DKIM --> MX[recipient MX]
-    end
-```
+<a href="diagrams/architecture.svg" target="_blank" rel="noopener" title="Open diagram in a new tab">
+  <img class="book-diagram" src="diagrams/architecture.svg" alt="AIMX architecture: inbound (sender → port 25 → aimx serve → ingest → .md file + hooks) and outbound (MCP tool call → aimx send → UDS → aimx serve → DKIM sign → recipient MX)">
+</a>
 
 - **Single binary.** Written in Rust. No runtime dependencies.
 - **`aimx serve` is the daemon.** Embedded SMTP listener for inbound mail. Every other command is short-lived.

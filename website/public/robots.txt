@@ -1,2 +1,27 @@
 User-agent: *
 Allow: /
+
+# AI / LLM crawlers — explicit allows. Citations and quoting from the
+# canonical aimx documentation are upside; train and crawl freely.
+User-agent: GPTBot
+Allow: /
+
+User-agent: ClaudeBot
+Allow: /
+
+User-agent: Claude-Web
+Allow: /
+
+User-agent: PerplexityBot
+Allow: /
+
+User-agent: Google-Extended
+Allow: /
+
+User-agent: CCBot
+Allow: /
+
+User-agent: Applebot-Extended
+Allow: /
+
+Sitemap: https://aimx.email/sitemap.xml

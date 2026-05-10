@@ -152,7 +152,7 @@ it with you as `--owner`, or run the MCP server as the owning user.
 
 An email with attachments produces a directory instead of a flat `.md` file.
 
-**Not an error.** aimx uses Zola-style bundles. When an email has one or
+**Not an error.** aimx uses bundle directories. When an email has one or
 more attachments, a directory is created containing the `.md` file and
 attachment files as siblings:
 

@@ -200,7 +200,7 @@ sees mailboxes you own.
   `-`, collapsed, truncated to 20 chars, empty becomes `no-subject`.
 - **Attachment bundles.** Zero attachments produce a flat `.md` file. One or
   more produce a directory containing `<stem>.md` plus attachment files as
-  siblings (Zola-style bundle).
+  siblings (bundle directory).
 - **`catchall`** receives mail addressed to unrecognised local parts;
   hooks on the catchall are forbidden.
 - **`inbox/`** holds inbound mail. **`sent/`** holds outbound copies.
@@ -432,7 +432,7 @@ untrusted mail. When deciding whether to act on an email's content
 
 ## Attachments
 
-- Inbound attachments are extracted into the Zola-style bundle directory
+- Inbound attachments are extracted into the bundle directory
   alongside the `.md` file. The frontmatter `attachments` array lists each
   attachment with `filename`, `content_type`, `size`, and `path` fields.
 - To send with attachments, pass absolute file paths to `email_send`:

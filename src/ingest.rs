@@ -291,7 +291,7 @@ pub fn ingest_email(
 
     std::fs::create_dir_all(&parent_dir)?;
     // Chown the bundle directory (when `parent_dir != inbox_dir` this
-    // is the Zola-style bundle just created, else the mailbox dir we
+    // is the bundle directory just created, else the mailbox dir we
     // already chowned above). Mode `0o700`.
     let mailbox_cfg_opt: Option<&MailboxConfig> = config.mailboxes.get(&mailbox);
     if let Some(mb_cfg) = mailbox_cfg_opt
@@ -2519,7 +2519,7 @@ mod tests {
     }
 
     /// Bundle-layout chown end-to-end. Ingests an email
-    /// that produces a Zola-style bundle directory and asserts:
+    /// that produces a bundle directory and asserts:
     ///
     ///   - the bundle directory itself is mode `0o700`
     ///   - the bundle `.md` is mode `0o600`

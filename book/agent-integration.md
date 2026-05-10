@@ -72,7 +72,7 @@ Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
 | `--dangerously-allow-root` | Bypass the root-refusal check and wire AIMX into `/root`'s home. Applies to the TUI, per-agent runs, and `--no-interactive`. Prefer `sudo -u <user> aimx agents setup` on any machine with a regular user. |
 | `--force` | Overwrite existing destination files without prompting. |
 | `--print` | Print plugin contents to stdout instead of writing to disk. Useful for CI and dry runs. |
-| `--data-dir <path>` | Global flag. If aimx was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
+| `--data-dir <path>` | Global flag. If AIMX was set up with a non-default data directory, pass this so the plugin's MCP command is rewritten to include `--data-dir`. |
 
 ## Removing an agent: `aimx agents remove`
 
@@ -354,7 +354,7 @@ for the schema reference.
 
 ## Manual MCP wiring
 
-If your agent is not yet supported, wire aimx in manually as a plain MCP
+If your agent is not yet supported, wire AIMX in manually as a plain MCP
 stdio server. Most MCP-compatible agents accept a JSON snippet of this
 form:
 
@@ -385,7 +385,7 @@ tools.
 
 When the agent later fires as a hook, the daemon `exec`s the absolute path you wrote into the hook's `cmd[0]`. If that path doesn't exist, the hook log shows `exit_code = -1` with `spawn-failed`. Run `which <agent>` on the host as the mailbox owner to confirm the binary's path, then re-create the hook with the corrected `cmd[0]` (`aimx hooks delete <name>` followed by `aimx hooks create --cmd ...`).
 
-### The agent does not see aimx after `agents setup` runs
+### The agent does not see AIMX after `agents setup` runs
 
 - Confirm the destination was written: `aimx agents setup --list` shows the
   destination path; check that it exists and contains the expected files.
@@ -408,8 +408,8 @@ configuring.
 
 ### MCP tools appear but calls fail with "Failed to load config"
 
-The plugin's MCP command defaults to `/var/lib/aimx/` for the aimx data
-directory. If you set up aimx with a different path, re-run with
+The plugin's MCP command defaults to `/var/lib/aimx/` for the AIMX data
+directory. If you set up AIMX with a different path, re-run with
 `aimx --data-dir <path> agents setup <agent> --force`.
 
 ### OpenCode: skill loads but MCP tools do not appear
@@ -419,7 +419,7 @@ only activate when declared in `opencode.json`. Re-run `aimx agents setup
 opencode`, copy the printed JSONC block into the `mcp` object in your
 `opencode.json`, and restart OpenCode.
 
-### Gemini: "unknown MCP server aimx"
+### Gemini: "unknown MCP server AIMX"
 
 Gemini CLI requires the `mcpServers.aimx` block in
 `~/.gemini/settings.json`. Re-run `aimx agents setup gemini` and merge
@@ -452,7 +452,7 @@ Alternatively, hand-edit `~/.openclaw/openclaw.json` and add the
 printed object under `mcpServers.aimx`. The JSON5 format accepts
 comments and trailing commas but vanilla JSON works too.
 
-### Hermes: aimx tools missing after editing config.yaml
+### Hermes: AIMX tools missing after editing config.yaml
 
 Hermes does not auto-reload MCP servers when `~/.hermes/config.yaml`
 changes. You must run the in-app `/reload-mcp` slash command (or

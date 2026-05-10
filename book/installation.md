@@ -15,7 +15,7 @@ AIMX is Linux-only. Every release ships four prebuilt targets:
 | Canonical target triple | Tarball filename target | Typical distros |
 |---|---|---|
 | `x86_64-unknown-linux-gnu`   | `x86_64-linux-gnu`   | Debian, Ubuntu, Fedora, RHEL, Rocky, Arch |
-| `aarch64-unknown-linux-gnu`  | `aarch64-linux-gnu`  | 64-bit ARM on any glibc distro (e.g. Ubuntu on Raspberry Pi 4/5, AWS Graviton, Hetzner CAX) |
+| `aarch64-unknown-linux-gnu`  | `aarch64-linux-gnu`  | 64-bit ARM on any glibc distro |
 | `x86_64-unknown-linux-musl`  | `x86_64-linux-musl`  | Alpine, statically-linked containers |
 | `aarch64-unknown-linux-musl` | `aarch64-linux-musl` | Alpine ARM, statically-linked ARM containers |
 
@@ -170,7 +170,7 @@ This only covers one generation back. Past that, install a specific older tag wi
 
 ## Troubleshooting
 
-**"aimx is Linux-only" error.**  The install script runs `uname` and refuses anything other than Linux. Run it on a Linux box.
+**"AIMX is Linux-only" error.**  The install script runs `uname` and refuses anything other than Linux. Run it on a Linux box.
 
 **GitHub API rate limits.**  The installer calls `https://api.github.com/repos/uzyn/aimx/releases/latest` for version resolution. Unauthenticated API requests share a per-IP quota. If you hit it, set `GITHUB_TOKEN` to a personal access token with no scopes selected (public-read is implicit):
 

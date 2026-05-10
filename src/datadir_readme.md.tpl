@@ -64,7 +64,7 @@ etc., to the slug segment until a free name is found.
 ## Attachment bundles
 
 - **Zero attachments:** flat file `<stem>.md`.
-- **One or more attachments:** Zola-style bundle directory `<stem>/`
+- **One or more attachments:** bundle directory `<stem>/`
   containing `<stem>.md` plus each attachment as a sibling file.
 
 The frontmatter `attachments` array lists each attachment with `filename`,

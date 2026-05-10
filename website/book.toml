@@ -1,12 +1,12 @@
 [book]
-title = "aimx — user guide"
+title = "AIMX — user guide"
 authors = ["U-Zyn Chua"]
 description = "Self-hosted SMTP for AI agents. The user guide."
 src = "../book"
 language = "en"
 
 [output.html]
-default-theme = "light"
+default-theme = "coal"
 preferred-dark-theme = "coal"
 git-repository-url = "https://github.com/uzyn/aimx"
 edit-url-template = "https://github.com/uzyn/aimx/edit/main/book/{path}"
@@ -17,7 +17,7 @@ additional-css = [
     "styles/chrome.css",
 ]
 additional-js = [
-    "scripts/nav.js", "mermaid.min.js", "mermaid-init.js",
+    "scripts/nav.js",
 ]
 
 [output.html.fold]
@@ -32,6 +32,3 @@ build-dir = "dist/book"
 create-missing = false
 
 [preprocessor]
-
-[preprocessor.mermaid]
-command = "mdbook-mermaid"

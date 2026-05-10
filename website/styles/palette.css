@@ -60,52 +60,52 @@ html.ayu {
 html.coal,
 html.navy {
   color-scheme: dark;
-  --bg: #1A1612;
-  --fg: #EDE4D3;
+  --bg: #0D1117;
+  --fg: #E6EDF3;
 
-  --sidebar-bg: #231D17;
-  --sidebar-fg: #D6CBB5;
-  --sidebar-non-existant: #8C8270;
-  --sidebar-active: #D06B2E;
-  --sidebar-spacer: #2F2821;
+  --sidebar-bg: #161B22;
+  --sidebar-fg: #C9D1D9;
+  --sidebar-non-existant: #6E7681;
+  --sidebar-active: #58A6FF;
+  --sidebar-spacer: #21262D;
 
-  --scrollbar: #2F2821;
+  --scrollbar: #21262D;
 
-  --icons: #8C8270;
-  --icons-hover: #D06B2E;
+  --icons: #8B949E;
+  --icons-hover: #58A6FF;
 
-  --links: #D06B2E;
+  --links: #58A6FF;
 
-  --inline-code-color: #EDE4D3;
+  --inline-code-color: #E6EDF3;
 
-  --theme-popup-bg: #231D17;
-  --theme-popup-border: #2F2821;
-  --theme-hover: #2F2821;
+  --theme-popup-bg: #161B22;
+  --theme-popup-border: #21262D;
+  --theme-hover: #21262D;
 
-  --quote-bg: #231D17;
-  --quote-border: #D06B2E;
+  --quote-bg: #161B22;
+  --quote-border: #58A6FF;
 
-  --warning-border: #D06B2E;
+  --warning-border: #58A6FF;
 
-  --table-border-color: #2F2821;
+  --table-border-color: #21262D;
   --table-header-bg: transparent;
   --table-alternate-bg: transparent;
 
-  --searchbar-border-color: #2F2821;
-  --searchbar-bg: #231D17;
-  --searchbar-fg: #EDE4D3;
+  --searchbar-border-color: #21262D;
+  --searchbar-bg: #161B22;
+  --searchbar-fg: #E6EDF3;
   --searchbar-shadow-color: rgba(0, 0, 0, 0.4);
-  --searchresults-header-fg: #8C8270;
-  --searchresults-border-color: #2F2821;
-  --searchresults-li-bg: #2F2821;
-  --search-mark-bg: #D06B2E;
+  --searchresults-header-fg: #8B949E;
+  --searchresults-border-color: #21262D;
+  --searchresults-li-bg: #21262D;
+  --search-mark-bg: #58A6FF;
 
-  --aimx-paper: #1A1612;
-  --aimx-paper-2: #231D17;
-  --aimx-ink: #EDE4D3;
-  --aimx-ink-soft: #D6CBB5;
-  --aimx-ink-faded: #8C8270;
-  --aimx-accent: #D06B2E;
-  --aimx-accent-dark: #E6873F;
-  --aimx-rule: #2F2821;
+  --aimx-paper: #0D1117;
+  --aimx-paper-2: #161B22;
+  --aimx-ink: #E6EDF3;
+  --aimx-ink-soft: #C9D1D9;
+  --aimx-ink-faded: #8B949E;
+  --aimx-accent: #58A6FF;
+  --aimx-accent-dark: #79C0FF;
+  --aimx-rule: #21262D;
 }

@@ -3,489 +3,546 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>aimx — AI Mail Exchange · Email for AI agents</title>
+<title>AIMX — AI Mail Exchange · Email for AI agents</title>
 <meta name="description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for AI agents. Your mail, your machine, end to end. No third parties.">
 
-<meta property="og:title" content="aimx — AI Mail Exchange">
+<meta property="og:title" content="AIMX — AI Mail Exchange">
 <meta property="og:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for AI agents.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://aimx.email">
 
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="aimx — AI Mail Exchange">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="AIMX — AI Mail Exchange">
 <meta name="twitter:description" content="Self-hosted SMTP for AI agents. The internet's oldest protocol, rebuilt for AI agents.">
 
-<meta name="theme-color" content="#F4EEE3">
-<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="canonical" href="https://aimx.email/">
+<link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">
+
+<meta name="theme-color" content="#0D1117">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+<link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+<link rel="manifest" href="/site.webmanifest">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "AIMX",
+  "alternateName": "AI Mail Exchange",
+  "description": "Self-hosted SMTP server for AI agents. Inbound mail parsed to Markdown with TOML frontmatter on disk; outbound DKIM-signed and delivered direct to recipient MX. Built-in MCP stdio server with twelve tools.",
+  "applicationCategory": "DeveloperApplication",
+  "operatingSystem": "Linux",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "url": "https://aimx.email",
+  "downloadUrl": "https://aimx.email/install.sh",
+  "license": "https://opensource.org/licenses/MIT",
+  "author": { "@type": "Person", "name": "U-Zyn Chua", "url": "https://uzyn.com" }
+}
+</script>
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Why does AIMX need port 25 open?",
+      "acceptedAnswer": { "@type": "Answer", "text": "AIMX is your mail server. SMTP runs on port 25. It has been defined and set in RFC 821 since 1982. AIMX speaks SMTP directly to other mail servers, no third-party relays involved. Your mail stays truly private and secure." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I run AIMX on my home server?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Usually not. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run: curl -fsSL https://aimx.email/portcheck.sh | sh" }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I switch AIMX to operate on another port?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. SMTP is strictly port 25 as defined and set in RFC 821 since 1982. Other mail servers will only deliver to you on 25." }
+    },
+    {
+      "@type": "Question",
+      "name": "What AI models does AIMX support?",
+      "acceptedAnswer": { "@type": "Answer", "text": "All of them. AIMX does not call AI models directly. It is a mail server with a stdio Model Context Protocol (MCP) server built-in, so your AI harnesses and agents can connect to it easily and effectively." }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I set up email accounts on AIMX?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Once AIMX is set up, mailboxes can be created with the aimx mailboxes CLI, or via the mailbox_create MCP tool by simply instructing your AI harness in plain natural language, such as: Create a receipt@ mailbox and file receipts for me when you receive them." }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I run AIMX without owning a domain name?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. You need a domain to define how emails are delivered to you (MX record) and verified (DKIM TXT record). Email specifications (RFC 5321 §5.1) require the MX record to point to a domain name, not an IP." }
+    },
+    {
+      "@type": "Question",
+      "name": "Why do I need AIMX when I can just use Gmail + MCP?",
+      "acceptedAnswer": { "@type": "Answer", "text": "You can, if you do not mind your emails being stored and accessible on both Gmail servers AND third-party MCP servers. If you are on a free Gmail account, you might also be violating Gmail's ToS. Besides, it is a lot of work to create multiple mailboxes for separate agentic use." }
+    },
+    {
+      "@type": "Question",
+      "name": "Why do I need AIMX when I can just use MCP-enabled AgentMail or LobsterMail?",
+      "acceptedAnswer": { "@type": "Answer", "text": "You can, if you do not mind paying and do not mind your emails being stored and accessible on third-party servers." }
+    },
+    {
+      "@type": "Question",
+      "name": "How are emails stored on AIMX?",
+      "acceptedAnswer": { "@type": "Answer", "text": "AIMX stores all incoming and outgoing emails as Markdown files with TOML frontmatter. This makes them trivially easy for AI agents, RAG pipelines, and LLMs to read and parse, no MIME decoding required. Attachments are extracted and stored on disk in native format." }
+    },
+    {
+      "@type": "Question",
+      "name": "Does AIMX have any automation? How does AIMX prevent prompt injection from incoming emails?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes, AIMX supports hooks that fire on incoming mail, but only from senders you trust. You define the trusted sender list. AIMX verifies every incoming message with DKIM and records the result in the frontmatter, so your agent always knows whether a message is authenticated. Mail that fails DKIM, or arrives from an unverified sender, will not trigger any hooks." }
+    }
+  ]
+}
+</script>
+
+<script>
+// Apply stored theme synchronously before paint to avoid FOUC.
+(function(){try{var t=localStorage.getItem('aimx-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+</script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500&display=swap" rel="stylesheet">
 
-<style>
-:root {
-  --paper: #F4EEE3;
-  --paper-2: #EBE3D4;
-  --ink: #151310;
-  --ink-soft: #2B2620;
-  --ink-faded: #5C5549;
-  --accent: #B9531C;
-  --accent-dark: #8E3E14;
-  --rule: #D8CFBE;
-}
-
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-html, body { background: var(--paper); color: var(--ink); }
-
-body {
-  font-family: 'IBM Plex Sans', system-ui, sans-serif;
-  font-size: 30px;
-  line-height: 1.7;
-  min-height: 100vh;
-  display: flex;
-  flex-direction: column;
-  background-image:
-    radial-gradient(ellipse at 15% 0%, rgba(185, 83, 28, 0.07), transparent 55%),
-    radial-gradient(ellipse at 90% 100%, rgba(185, 83, 28, 0.05), transparent 55%);
-  -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-}
-
-.grain {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.35;
-  mix-blend-mode: multiply;
-  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.4'/%3E%3C/svg%3E");
-  z-index: 1;
-}
-
-.wrap {
-  max-width: 760px;
-  margin: 0 auto;
-  padding: 32px 28px 40px;
-  position: relative;
-  z-index: 2;
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  width: 100%;
-}
-
-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 12px 24px;
-  padding-bottom: 24px;
-  border-bottom: 1px solid var(--rule);
-}
-
-.brand {
-  font-family: 'Fraunces', serif;
-  font-variation-settings: 'opsz' 14;
-  font-weight: 500;
-  font-size: 1.17em;
-  letter-spacing: 0.04em;
-  color: var(--ink);
-  text-decoration: none;
-  transition: color 0.15s;
-}
-
-.brand:hover {
-  color: var(--accent);
-}
-
-.brand .dot { color: var(--accent); }
-
-.topnav {
-  display: flex;
-  gap: 22px;
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.43em;
-  letter-spacing: 0.02em;
-}
-
-.topnav a {
-  color: var(--ink-faded);
-  text-decoration: none;
-  border-bottom: 1px solid transparent;
-  padding-bottom: 2px;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-.topnav a:hover {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-.topnav a.active {
-  color: var(--ink);
-  border-bottom-color: var(--accent);
-}
-
-main {
-  padding: 56px 0 40px;
-  flex: 1;
-  font-size: 1.5em;
-}
-
-.mascot {
-  display: block;
-  margin: 0 auto 32px;
-  width: 260px;
-  max-width: 68%;
-  height: auto;
-}
-
-.eyebrow {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.29em;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
-  margin-bottom: 24px;
-}
-
-h1 {
-  font-family: 'Fraunces', serif;
-  font-variation-settings: 'opsz' 144;
-  font-weight: 400;
-  font-size: 1.3em;
-  line-height: 1.2;
-  letter-spacing: -0.022em;
-  margin-bottom: 40px;
-  color: var(--ink);
-}
-
-h1 em {
-  font-style: italic;
-  font-weight: 400;
-  color: var(--accent-dark);
-}
-
-.pitch {
-  font-size: 0.4em;
-  line-height: 1.8;
-  color: var(--ink-soft);
-  max-width: 56ch;
-  margin-bottom: 0;
-}
-
-.pitch code,
-.prose code,
-.features code {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.88em;
-  background: var(--paper-2);
-  padding: 2px 6px;
-  border-radius: 3px;
-  color: var(--ink);
-  border: 1px solid var(--rule);
-}
-
-.block {
-  margin-top: 56px;
-  padding-top: 28px;
-  border-top: 1px solid var(--rule);
-}
-
-.section-label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.29em;
-  line-height: 1.2;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
-  margin: 0 0 20px 0;
-  font-weight: 500;
-}
-
-.prose {
-  font-size: 0.4em;
-  line-height: 1.75;
-  color: var(--ink-soft);
-  max-width: 60ch;
-}
-
-.prose + .prose {
-  margin-top: 0.85em;
-}
-
-.code {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.34em;
-  line-height: 1.7;
-  color: var(--ink-soft);
-  background: none;
-  border-left: 2px solid var(--accent);
-  padding: 0.1em 0 0.1em 1.1em;
-  overflow-x: auto;
-  white-space: pre;
-}
-
-.features {
-  font-size: 0.4em;
-  line-height: 1.75;
-  color: var(--ink-soft);
-  list-style: none;
-  max-width: 60ch;
-}
-
-.features li {
-  padding: 0.45em 0;
-  border-bottom: 1px solid var(--rule);
-}
-
-.features li:last-child {
-  border-bottom: none;
-}
-
-.features li strong {
-  font-weight: 500;
-  color: var(--ink);
-}
-
-.hero-ctas {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px 16px;
-  margin-top: 40px;
-}
-
-.btn {
-  font-family: 'IBM Plex Sans', system-ui, sans-serif;
-  font-size: 0.4em;
-  font-weight: 500;
-  letter-spacing: 0.01em;
-  padding: 0.7em 1.3em;
-  border: 1px solid var(--rule);
-  color: var(--ink);
-  background: var(--paper);
-  text-decoration: none;
-  display: inline-flex;
-  align-items: baseline;
-  gap: 0.4em;
-  transition: color 0.15s, border-color 0.15s, background 0.15s;
-}
-
-.btn::after {
-  content: "→";
-  color: var(--accent);
-  font-weight: 500;
-}
-
-.btn:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-
-.btn.primary {
-  background: var(--ink);
-  border-color: var(--ink);
-  color: var(--paper);
-}
-
-.btn.primary::after {
-  color: var(--accent);
-}
-
-.btn.primary:hover {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: var(--paper);
-}
-
-.btn.primary:hover::after {
-  color: var(--paper);
-}
-
-.detail {
-  margin-top: 56px;
-  padding-top: 24px;
-  border-top: 1px solid var(--rule);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.29em;
-  color: var(--ink-faded);
-  line-height: 1.9;
-}
-
-.detail .k { color: var(--ink); }
-.detail .c { color: var(--accent); }
-
-.caution {
-  margin-top: 28px;
-  padding: 0.75em 1em;
-  border: 1px solid var(--accent);
-  border-left-width: 4px;
-  background: rgba(185, 83, 28, 0.06);
-  font-size: 0.4em;
-  line-height: 1.6;
-  color: var(--ink-soft);
-  max-width: 60ch;
-}
-
-.caution .label {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.72em;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-  color: var(--accent);
-  font-weight: 500;
-  display: block;
-  margin-bottom: 4px;
-}
-
-.caution strong { color: var(--ink); font-weight: 500; }
-
-footer {
-  padding: 24px 0 8px;
-  border-top: 1px solid var(--rule);
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.4em;
-  color: var(--ink-faded);
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  letter-spacing: 0.02em;
-}
-
-footer a {
-  color: var(--ink-faded);
-  text-decoration: none;
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 1px;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-footer a:hover {
-  color: var(--accent);
-  border-bottom-color: var(--accent);
-}
-
-@media (max-width: 560px) {
-  .wrap { padding: 24px 20px 28px; }
-  main { padding: 40px 0 32px; }
-  h1 { font-size: 1em; }
-  .mascot { width: 200px; margin-bottom: 24px; }
-  .pitch, .prose, .features { font-size: 0.38em; }
-  .block { margin-top: 40px; padding-top: 24px; }
-  .detail { margin-top: 40px; }
-}
-
-.fade { opacity: 0; transform: translateY(8px); animation: rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) forwards; }
-.fade.d1 { animation-delay: 0.05s; }
-.fade.d2 { animation-delay: 0.14s; }
-.fade.d3 { animation-delay: 0.24s; }
-.fade.d4 { animation-delay: 0.34s; }
-.fade.d5 { animation-delay: 0.44s; }
-.fade.d6 { animation-delay: 0.54s; }
-.fade.d7 { animation-delay: 0.64s; }
-.fade.d8 { animation-delay: 0.74s; }
-
-@keyframes rise {
-  to { opacity: 1; transform: translateY(0); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .fade { opacity: 1; transform: none; animation: none; }
-}
-</style>
+<link rel="stylesheet" href="/styles/index.css">
 </head>
-<body>
+<body id="top">
 <div class="grain"></div>
 <div class="wrap">
   <header>
-    <a class="brand fade d1" href="/">aimx<span class="dot">.</span></a>
-    <nav class="topnav fade d1" aria-label="Primary">
-      <a href="/" class="active">home</a>
-      <a href="/book/">book</a>
-      <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
-    </nav>
+    <div class="header-left">
+      <a class="brand" href="/">AIMX</a> <span class="small">AI Mail Exchange</span>
+    </div>
+    <div class="header-right">
+      <nav class="topnav" aria-label="Primary">
+        <a href="/" class="active">home</a>
+        <a href="/book/">book</a>
+        <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">code</a>
+      </nav>
+      <button class="theme-toggle" type="button" aria-label="Toggle light or dark theme" title="Toggle theme">
+        <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <circle cx="12" cy="12" r="4"/>
+          <path d="M12 2v2"/>
+          <path d="M12 20v2"/>
+          <path d="m4.93 4.93 1.41 1.41"/>
+          <path d="m17.66 17.66 1.41 1.41"/>
+          <path d="M2 12h2"/>
+          <path d="M20 12h2"/>
+          <path d="m6.34 17.66-1.41 1.41"/>
+          <path d="m19.07 4.93-1.41 1.41"/>
+        </svg>
+        <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+        </svg>
+      </button>
+    </div>
   </header>
 
   <main>
-    <img class="mascot fade d2" src="/assets/aimx-pigeon.svg" alt="aimx mechanical pigeon mascot" width="260" height="260">
+    <img class="mascot" src="/assets/aimx-pigeon.svg" alt="aimx mechanical pigeon mascot" width="260" height="260">
 
-    <div class="eyebrow fade d3">AI Mail Exchange</div>
+    <div class="eyebrow">AI Mail Exchange</div>
 
-    <h1 class="fade d3">
-      You give your AI agent a server.
+    <h1 >
+      You give your AI agent a server.<br>
       <em>Why borrow someone else's inbox?</em>
     </h1>
 
-    <p class="pitch fade d4">
+    <p class="pitch d4">
       The internet's oldest protocol, <strong>rebuilt for AI agents.</strong><br>
       Your mail, your machine, end to end. No third parties.<br>
-      Human-friendly setup. LLM-friendly everything else.<br>
-      Free and open source.
+      Human-friendly setup. LLM-friendly everything else.
     </p>
 
-    <div class="hero-ctas fade d4">
+    <div class="hero-ctas">
       <a class="btn primary" href="/book/">Read the book</a>
-      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Get the code</a>
+      <a class="btn" href="https://github.com/uzyn/aimx" target="_blank" rel="noopener"><svg class="btn-icon" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>Check out the code</a>
     </div>
 
-    <aside class="caution fade d4" role="note">
-      <span class="label">Caution</span>
-      <strong>This is a prerelease software</strong>. Expect breaking changes and unstable operations. Follow or contribute at <a href="https://github.com/uzyn/aimx" target="_blank">GitHub</a>.
-    </aside>
+    <div>&nbsp;</div>
+      <div class="terminal">
+        <div class="terminal-header" aria-hidden="true">
+          <span class="terminal-dots">
+            <span class="terminal-dot red"></span>
+            <span class="terminal-dot yellow"></span>
+            <span class="terminal-dot green"></span>
+          </span>
+          <span class="terminal-label">Quick start</span>
+        </div>
+        <div class="terminal-body"><span class="terminal-line"><span class="terminal-comment"># On VPS with open port 25</span></span><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/install.sh | sh</span></div>
+      </div>
 
-    <section class="block fade d5">
-      <h2 class="section-label">What it is</h2>
-      <p class="prose">
-        aimx is a self-hosted mail server for AI agents. One binary. One <code>aimx setup</code> command and your agents have their own email addresses on a domain you control. No Gmail, no OAuth, no SaaS.
-      </p>
-      <p class="prose">
-        Mail arrives over SMTP, gets parsed into Markdown with TOML frontmatter, and lands on disk. Outbound mail is DKIM-signed and delivered direct to the recipient's MX. Agents read and send through the built-in stdio MCP server, the <code>aimx</code> CLI, or the filesystem.
-      </p>
-      <p class="prose">
-        Works with any MCP-capable agent — Claude Code, Codex CLI, OpenCode, Gemini CLI, Goose, OpenClaw, Hermes.
-      </p>
-    </section>
+      <p class="terminal-caption">This launches a guided setup with the following steps:</p>
+      <ul class="quickstart-checklist">
+        <li>Preflight checks on port 25</li>
+        <li>Set up domain and DNS</li>
+        <li>Set up STARTTLS certificate</li>
+        <li>Set up trust policy</li>
+        <li>Install AIMX service</li>
+        <li>Optionally, wire up MCP for agent(s)</li>
+      </ul>
 
-    <section class="block fade d6">
-      <h2 class="section-label">Quick start</h2>
-<pre class="code">curl -fsSL https://aimx.email/install.sh | sh
-sudo aimx setup</pre>
-      <p class="prose" style="margin-top: 1.1em;">
-        You need sudo — port 25 is privileged. A VPS with port 25 open (inbound and outbound) and a domain you control are the only requirements. Not sure your VPS allows port 25? Check first, no install:
-      </p>
-<pre class="code">curl -fsSL https://aimx.email/portcheck.sh | sh</pre>
-      <p class="prose" style="margin-top: 1.1em;">
-        <code>portcheck.sh</code> is a thin alias for <code>install.sh --port-check-only</code>; both URLs run the same checks. Want to see the scripts before running them? <a href="/install.sh">Read <code>install.sh</code></a> or <a href="/portcheck.sh">Read <code>portcheck.sh</code></a>.
-      </p>
-    </section>
 
-    <section class="block fade d7">
+    <section class="block">
       <h2 class="section-label">What&rsquo;s in the box</h2>
       <ul class="features">
-        <li><strong>Single binary.</strong> Written in Rust. No runtime dependencies, no database, no relay.</li>
-        <li><strong>Direct MTA-to-MTA.</strong> Outbound goes straight to the recipient's MX. Inbound hits your server on port 25. Feels like an API call.</li>
-        <li><strong>Push, not poll.</strong> Inbound fires <code>on_receive</code> hooks the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves.</li>
-        <li><strong>Markdown emails.</strong> No <code>.eml</code>, no database. Just Markdown with TOML frontmatter — LLM- and RAG-friendly without a parser.</li>
-        <li><strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Nine tools covering mailbox CRUD, read, list, send, reply, mark-read.</li>
-        <li><strong>You own the inbox.</strong> Mail lives on your disk, under your domain. Nothing phones home. MIT licensed.</li>
+        <li><span class="feature-icon">🔒</span> <strong>You own the inbox.</strong> Mail lives on your disk, under your domain. No SaaS relay, no OAuth, no Gmail scanning. MIT licensed.</li>
+        <li><span class="feature-icon">⚡</span> <strong>Mail is an event.</strong> Inbound fires <code>on_receive</code> the moment SMTP <code>DATA</code> completes. Outbound fires <code>after_send</code> when the MX attempt resolves. No cron, no heartbeat — push, not poll.</li>
+        <li><span class="feature-icon">📝</span> <strong>Markdown emails.</strong> No <code>.eml</code>. No database. TOML frontmatter, plain Markdown body. Your LLM reads it without a parser.</li>
+        <li><span class="feature-icon">📬</span> <strong>Direct MTA-to-MTA.</strong> Email has become send-and-pray best-effort. AIMX turns it back into direct server-to-server delivery, like an API call.</li>
+        <li><span class="feature-icon">🔌</span> <strong>Built-in MCP.</strong> Stdio MCP server ships with the binary. Twelve tools — list, read, send, reply, mark-read, mailbox CRUD.</li>
+        <li><span class="feature-icon">🦀</span> <strong>Single binary.</strong> Written in Rust. No runtime deps, no database, no relay. One <code>aimx setup</code> command.</li>
       </ul>
     </section>
 
-    <div class="detail fade d8">
-      <div>$ <span class="c">dig</span> aimx.email <span class="k">MX</span></div>
-      <div>;; <span class="k">ANSWER SECTION:</span></div>
-      <div>aimx.email.&nbsp;&nbsp;300&nbsp;&nbsp;IN&nbsp;&nbsp;MX&nbsp;&nbsp;10&nbsp;&nbsp;<span class="c">// alpha</span></div>
-    </div>
+    <section class="block">
+      <h2 class="section-label">Works with</h2>
+      <div class="harness-grid">
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/claude-code.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">Claude Code</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/codex.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">Codex CLI</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/opencode.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">OpenCode</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/gemini.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">Gemini CLI</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/goose.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">Goose</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/openclaw.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">OpenClaw</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/hermes.png" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">Hermes</span>
+        </a>
+        <a class="harness-tile" href="/book/agent-integration.html">
+          <img class="harness-tile-icon" src="/icons/nanoclaw.svg" alt="" width="32" height="32" loading="lazy">
+          <span class="harness-tile-name">NanoClaw</span>
+        </a>
+      </div>
+      <p class="harness-tagline">Wire up AIMX with your favourite AI harness with a simple command <code>aimx agents setup</code>.</p>
+    </section>
+
+    <section class="block">
+      <h2 class="section-label">Why AIMX?</h2>
+      <p class="prose">
+        Sending mail through someone else's API is fine until your agent needs to receive a reply, run a hook on it, and own the audit trail. The trade-offs, side by side:
+      </p>
+      <div class="compare-wrap">
+        <table class="compare">
+          <thead>
+            <tr>
+              <th></th>
+              <th>Gmail / Outlook</th>
+              <th>SaaS relays<br><span class="compare-sub">SendGrid / Postmark</span></th>
+              <th>AgentMail<br><span class="compare-sub">LobsterMail</span></th>
+              <th>Postfix / Stalwart</th>
+              <th class="aimx-col">🐦‍⬛&nbsp;AIMX</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td>Built for AI agents</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>MCP support</td>
+              <td class="cell-meh">🟡<span class="compare-note">via 3rd-party</span></td>
+              <td class="cell-meh">🟡<span class="compare-note">via 3rd-party</span></td>
+              <td class="cell-yes">✅<span class="compare-note">ext server</span></td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅<span class="compare-note">local stdio</span></td>
+            </tr>
+            <tr>
+              <td>Self-sovereign</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>Direct delivery</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>Markdown emails</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+            <tr>
+              <td>Free &amp; open source</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-no">❌</td>
+              <td class="cell-yes">✅</td>
+              <td class="aimx-col cell-yes">✅</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="block">
+      <h2 class="section-label">Design philosophy</h2>
+      <p class="prose">
+        AIMX is a mail server for AI agents, not a Postfix replacement. Three principles drive the design:
+      </p>
+      <p class="prose">
+        <strong>1. One operator, one domain.</strong> No multi-user, multi-domain, or shared hosting. If you need those, run <a href="https://www.postfix.org/" target="_blank" rel="noopener">Postfix</a> or <a href="https://stalw.art/" target="_blank" rel="noopener">Stalwart</a>.
+      </p>
+      <p class="prose">
+        <strong>2. Direct MTA-to-MTA delivery.</strong> No relay, no submission port, no SaaS in the middle.
+      </p>
+      <p class="prose">
+        <strong>3. Markdown on disk.</strong> Mail stored as files for LLM-readability, not <code>.eml</code> or a database. Attachments are sibling files in a bundle directory.
+      </p>
+      <p class="prose" style="margin-top: 1.4em;">By design:</p>
+      <ul class="no-list">
+        <li>No IMAP or POP3</li>
+        <li>No webmail</li>
+        <li>No SMTP AUTH</li>
+        <li>No retry queues — <code>send</code> either delivers or fails immediately so the agent can react in real time</li>
+        <li>No bounces (no DSNs)</li>
+        <li>No indexing or search — bring your own RAG</li>
+      </ul>
+      <p class="prose" style="margin-top: 1.4em;">
+        Subject to change. For now, intentionally single-operator and single-domain.
+      </p>
+    </section>
+
+    <section class="block">
+      <h2 class="section-label">Use cases</h2>
+      <div class="usecase-grid">
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M16 20V4a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"/>
+                <rect width="20" height="14" x="2" y="6" rx="2"/>
+              </svg>
+            </span>
+            <h3>Finance agent</h3>
+            <code class="mailbox">finance@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Forward invoices, receipts, and statements. The agent extracts amounts and vendors automatically.</p>
+          <ul>
+            <li>Extracts amounts and vendors</li>
+            <li>Files attachments to the right folder</li>
+            <li>Reconciles against your ledger</li>
+            <li>No SaaS scanning your bank data</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="16" r="1"/>
+                <rect x="3" y="10" width="18" height="12" rx="2"/>
+                <path d="M7 10V7a5 5 0 0 1 10 0v3"/>
+              </svg>
+            </span>
+            <h3>Privacy-sensitive</h3>
+            <code class="mailbox">private@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Bank statements, medical records, legal correspondence &mdash; mail that shouldn&rsquo;t sit in someone else&rsquo;s datacenter.</p>
+          <ul>
+            <li>No SaaS relay</li>
+            <li>No third-party MCP wrapper</li>
+            <li>No Gmail scanning the contents</li>
+            <li>Mail lives at your server</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"/>
+                <path d="m4.93 4.93 4.24 4.24"/>
+                <path d="m14.83 9.17 4.24-4.24"/>
+                <path d="m14.83 14.83 4.24 4.24"/>
+                <path d="m9.17 14.83-4.24 4.24"/>
+                <circle cx="12" cy="12" r="4"/>
+              </svg>
+            </span>
+            <h3>Support triage</h3>
+            <code class="mailbox">support@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">The agent drafts replies via MCP and escalates when confidence is low.</p>
+          <ul>
+            <li>Tags by severity, escalates low-confidence cases</li>
+            <li><strong>Threading preserved across replies</strong></li>
+            <li>Trust gate keeps unverified senders out, unless that's what you want</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/>
+                <path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/>
+                <path d="M4 2C2.8 3.7 2 5.7 2 8"/>
+                <path d="M22 8c0-2.3-.8-4.3-2-6"/>
+              </svg>
+            </span>
+            <h3>Monitoring &amp; alerts</h3>
+            <code class="mailbox">alerts@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Datadog, GitHub Actions, and cron jobs page this mailbox; the agent decides what to do.</p>
+          <ul>
+            <li><code>on_receive</code> hook: wake you, file a ticket, or self-remediate, decided by AI</li>
+            <li>Trust gate keeps spoofers out</li>
+            <li>Push, not poll &mdash; fires the moment SMTP <code>DATA</code> completes</li>
+            <li>Markdown body is grep-able for post-mortems</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/>
+                <path d="M18 14h-8"/>
+                <path d="M15 18h-5"/>
+                <path d="M10 6h8v4h-8V6Z"/>
+              </svg>
+            </span>
+            <h3>Newsletter digest</h3>
+            <code class="mailbox">news@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Collect Substack, arXiv, and HN digests; nightly job ships one summary.</p>
+          <ul>
+            <li>One summary instead of 40 unread threads</li>
+            <li>Markdown + frontmatter is RAG-ready out of the box</li>
+            <li>Trust gate filters out spammy lookalikes</li>
+            <li>Attachments (PDFs, papers) saved as sibling files</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="m16 6 4 14"/>
+                <path d="M12 6v14"/>
+                <path d="M8 8v12"/>
+                <path d="M4 4v16"/>
+              </svg>
+            </span>
+            <h3>Knowledge-base ingest</h3>
+            <code class="mailbox">kb@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Forward anything in. AIMX saves them in Markdown + TOML frontmatter and be RAG-ready.</p>
+          <ul>
+            <li>RAG-ready Markdown + TOML on disk</li>
+            <li>Attachments extracted as actual files</li>
+            <li>Per-mailbox ownership keeps multi-agent setups partitioned</li>
+          </ul>
+        </article>
+      </div>
+    </section>
+
+    <section class="block faq">
+      <h2 class="section-label">FAQ</h2>
+      <details>
+        <summary>Why does AIMX need port 25 open?</summary>
+        <p class="faq-body">AIMX is your mail server. SMTP runs on port 25. It has been defined and set in <a href="https://www.rfc-editor.org/rfc/rfc821" target="_blank" rel="noopener">RFC 821</a> since 1982. AIMX speaks SMTP directly to other mail servers, no third-party relays involved. Your mail stays truly private and secure.</p>
+      </details>
+      <details>
+        <summary>Can I run AIMX on my home server?</summary>
+        <p class="faq-body">Usually not. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run <code>curl -fsSL https://aimx.email/portcheck.sh | sh</code>.</p>
+      </details>
+      <details>
+        <summary>Can I switch AIMX to operate on another port?</summary>
+        <p class="faq-body">No. SMTP is strictly port 25 as defined and set in <a href="https://www.rfc-editor.org/rfc/rfc821" target="_blank" rel="noopener">RFC 821</a> since 1982. Other mail servers will only deliver to you on 25.</p>
+      </details>
+      <details>
+        <summary>What AI models does AIMX support?</summary>
+        <p class="faq-body">All of them. AIMX does not call AI models directly. It is a mail server with a stdio Model Context Protocol (MCP) server built-in, so your AI harnesses and agents can connect to it easily and effectively.</p>
+      </details>
+      <details>
+        <summary>How do I set up email accounts on AIMX?</summary>
+        <p class="faq-body">Once AIMX is set up, mailboxes can be created with the <code>aimx mailboxes</code> CLI, or via the <code>mailbox_create</code> MCP tool by simply instructing your AI harness in plain natural language, such as <code>Create a receipt@ mailbox and file receipts for me when you receive them</code>.</p>
+      </details>
+      <details>
+        <summary>Can I run AIMX without owning a domain name?</summary>
+        <p class="faq-body">No. You need a domain to define how emails are delivered to you (<code>MX</code> record) and verified (<code>DKIM</code> TXT record). Email specifications (<a href="https://datatracker.ietf.org/doc/html/rfc5321#section-5.1" target="_blank" rel="noopener">RFC 5321 §5.1</a>) require the MX record to point to a domain name, not an IP.</p>
+      </details>
+      <details>
+        <summary>Why do I need AIMX when I can just use Gmail + MCP?</summary>
+        <p class="faq-body">You can, if you do not mind your emails being stored and accessible on both Gmail servers AND third-party MCP servers. If you are on a free Gmail account, you might also be violating Gmail&rsquo;s ToS. Besides, it is a lot of work to create multiple mailboxes for separate agentic use.</p>
+      </details>
+      <details>
+        <summary>Why do I need AIMX when I can just use MCP-enabled AgentMail or LobsterMail?</summary>
+        <p class="faq-body">You can, if you do not mind paying and do not mind your emails being stored and accessible on third-party servers.</p>
+      </details>
+      <details>
+        <summary>How are emails stored on AIMX?</summary>
+        <p class="faq-body">AIMX stores all incoming and outgoing emails as Markdown files with TOML frontmatter. This makes them trivially easy for AI agents, RAG pipelines, and LLMs to read and parse, no MIME decoding required. Attachments are extracted and stored on disk in native format.</p>
+      </details>
+      <details>
+        <summary>Does AIMX have any automation? How does AIMX prevent prompt injection from incoming emails?</summary>
+        <p class="faq-body">Yes, AIMX supports hooks that fire on incoming mail, but only from senders you trust. You define the trusted sender list. AIMX verifies every incoming message with DKIM and records the result in the frontmatter, so your agent always knows whether a message is authenticated. Mail that fails DKIM, or arrives from an unverified sender, will not trigger any hooks.</p>
+      </details>
+      <p class="prose" style="margin-top: 1.6em;">
+        More? Browse the <a href="/book/faq.html">full FAQ</a> in the book.
+      </p>
+    </section>
+
+    <section class="block page-cta">
+      <h2 class="cta-heading">Ready to try AIMX?</h2>
+      <p class="cta-sub">One command, one box, one inbox.</p>
+      <a class="btn primary cta-btn" href="#top">Get started</a>
+    </section>
+
   </main>
 
   <footer>
-    <div>© 2026 <a href="https://uzyn.com" target="_blank" rel="noopener">U-Zyn Chua</a> · chua@uzyn.com</div>
+    <div>© 2026 <a href="https://uzyn.com" target="_blank" rel="noopener">U-Zyn Chua</a>. MIT Licensed. <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Contributions welcome.</a></div>
     <div>self-hosted mail for self-hosted agents</div>
   </footer>
 </div>
 
+<script src="/scripts/theme.js"></script>
+
+<!-- Google Analytics 4 -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-M0BP0B3856"></script>
+<script>
+window.dataLayer = window.dataLayer || [];
+function gtag(){dataLayer.push(arguments);}
+gtag('js', new Date());
+gtag('config', 'G-M0BP0B3856');
+</script>
 </body>
 </html>

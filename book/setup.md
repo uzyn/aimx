@@ -294,7 +294,7 @@ If you prefer not to use the public instance:
 
 3. Set up a reverse proxy (e.g. Caddy) for HTTPS on the probe endpoint.
 
-4. Point aimx to your instance in `config.toml`:
+4. Point AIMX to your instance in `config.toml`:
    ```toml
    verify_host = "https://verify.yourdomain.com"
    ```
