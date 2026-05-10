@@ -178,6 +178,16 @@
         <div class="terminal-body"><span class="terminal-line"><span class="terminal-comment"># On VPS with open port 25</span></span><span class="terminal-line"><span class="terminal-prompt">$</span>curl -fsSL https://aimx.email/install.sh | sh</span></div>
       </div>
 
+      <p class="terminal-caption">This launches a guided setup with the following steps:</p>
+      <ul class="quickstart-checklist">
+        <li>Preflight checks on port 25</li>
+        <li>Set up domain and DNS</li>
+        <li>Set up STARTTLS certificate</li>
+        <li>Set up trust policy</li>
+        <li>Install AIMX service</li>
+        <li>Optionally, wire up MCP for agent(s)</li>
+      </ul>
+
 
     <section class="block">
       <h2 class="section-label">What&rsquo;s in the box</h2>
@@ -196,61 +206,38 @@
       <div class="harness-grid">
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/claude-code.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">Claude Code</span>
-            <span class="harness-tile-cmd">aimx agents setup claude-code</span>
-          </div>
+          <span class="harness-tile-name">Claude Code</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/codex.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">Codex CLI</span>
-            <span class="harness-tile-cmd">aimx agents setup codex</span>
-          </div>
+          <span class="harness-tile-name">Codex CLI</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/opencode.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">OpenCode</span>
-            <span class="harness-tile-cmd">aimx agents setup opencode</span>
-          </div>
+          <span class="harness-tile-name">OpenCode</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/gemini.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">Gemini CLI</span>
-            <span class="harness-tile-cmd">aimx agents setup gemini</span>
-          </div>
+          <span class="harness-tile-name">Gemini CLI</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/goose.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">Goose</span>
-            <span class="harness-tile-cmd">aimx agents setup goose</span>
-          </div>
+          <span class="harness-tile-name">Goose</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/openclaw.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">OpenClaw</span>
-            <span class="harness-tile-cmd">aimx agents setup openclaw</span>
-          </div>
+          <span class="harness-tile-name">OpenClaw</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/hermes.png" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">Hermes</span>
-            <span class="harness-tile-cmd">aimx agents setup hermes</span>
-          </div>
+          <span class="harness-tile-name">Hermes</span>
         </a>
         <a class="harness-tile" href="/book/agent-integration.html">
           <img class="harness-tile-icon" src="/icons/nanoclaw.svg" alt="" width="32" height="32" loading="lazy">
-          <div class="harness-tile-text">
-            <span class="harness-tile-name">NanoClaw</span>
-            <span class="harness-tile-cmd">aimx agents setup nanoclaw</span>
-          </div>
+          <span class="harness-tile-name">NanoClaw</span>
         </a>
       </div>
+      <p class="harness-tagline">Wire up AIMX with your favourite AI harness with a simple command <code>aimx agents setup</code>.</p>
     </section>
 
     <section class="block">
@@ -338,7 +325,7 @@
       <p class="prose">
         <strong>3. Markdown on disk.</strong> Mail stored as files for LLM-readability, not <code>.eml</code> or a database. Attachments are sibling files in a bundle directory.
       </p>
-      <p class="prose" style="margin-top: 1.4em;">By design, currently:</p>
+      <p class="prose" style="margin-top: 1.4em;">By design:</p>
       <ul class="features">
         <li>No IMAP or POP3</li>
         <li>No webmail</li>
@@ -354,37 +341,94 @@
 
     <section class="block">
       <h2 class="section-label">Use cases</h2>
-      <div class="grid use-cases">
-        <div class="use-case col-6">
-          <p><span class="feature-icon">💼</span> <strong>Finance agent.</strong> Forward invoices, receipts, and statements to <code>finance@…</code>. The agent extracts amounts and vendors, files attachments, and reconciles against your ledger.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">🔐</span> <strong>Privacy-sensitive workflows.</strong> Bank statements, medical records, legal correspondence — mail that shouldn&rsquo;t sit in someone else&rsquo;s datacenter. No SaaS relay, no third-party MCP wrapper, no Gmail scanning the contents.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">🌅</span> <strong>Morning briefing.</strong> A cron job kicks the agent at 7am. It reads overnight mails, researches news, and emails you your daily briefing.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">🎫</span> <strong>Support triage.</strong> <code>support@…</code> drafts replies via MCP, tags by severity, and escalates when confidence is low. Threading is preserved, so customers see a normal Gmail conversation.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">🚨</span> <strong>Monitoring &amp; alerts.</strong> Datadog, GitHub Actions, and cron jobs page <code>alerts@…</code>. The <code>on_receive</code> hook decides whether to wake you, file a ticket, or self-remediate.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">📰</span> <strong>Newsletter digest.</strong> <code>news@…</code> collects Substack, arXiv, and HN digests. A nightly job ships one summary instead of 40 unread threads.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">✈️</span> <strong>Travel concierge.</strong> Forward bookings to <code>travel@…</code>. The agent builds a live itinerary, pushes calendar events, and pings you on gate or check-in changes.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">👥</span> <strong>Personal CRM.</strong> <code>contacts@…</code> ingests intros and follow-ups. The agent extracts who, where, and why, and reminds you before the connection goes cold.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">🔁</span> <strong>Cross-agent message bus.</strong> Two agents on different boxes use email as durable, DKIM-signed transport. Markdown is a payload format both already speak.</p>
-        </div>
-        <div class="use-case col-6">
-          <p><span class="feature-icon">📚</span> <strong>Knowledge-base ingest.</strong> Forward anything to <code>kb@…</code>. Markdown plus TOML frontmatter is RAG-ready the moment it hits disk.</p>
-        </div>
+      <div class="usecase-grid">
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">💼</span>
+            <h3>Finance agent</h3>
+            <code class="mailbox">finance@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Forward invoices, receipts, and statements. The agent extracts amounts and vendors automatically.</p>
+          <ul>
+            <li>Extracts amounts and vendors</li>
+            <li>Files attachments to the right folder</li>
+            <li>Reconciles against your ledger</li>
+            <li>No SaaS scanning your bank data</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">🔐</span>
+            <h3>Privacy-sensitive</h3>
+            <code class="mailbox">private@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Bank statements, medical records, legal correspondence &mdash; mail that shouldn&rsquo;t sit in someone else&rsquo;s datacenter.</p>
+          <ul>
+            <li>No SaaS relay</li>
+            <li>No third-party MCP wrapper</li>
+            <li>No Gmail scanning the contents</li>
+            <li>Mail lives at your server</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">🎫</span>
+            <h3>Support triage</h3>
+            <code class="mailbox">support@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">The agent drafts replies via MCP and escalates when confidence is low.</p>
+          <ul>
+            <li>Tags by severity, escalates low-confidence cases</li>
+            <li><strong>Threading preserved across replies</strong></li>
+            <li>Trust gate keeps unverified senders out, unless that's what you want</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">🚨</span>
+            <h3>Monitoring &amp; alerts</h3>
+            <code class="mailbox">alerts@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Datadog, GitHub Actions, and cron jobs page this mailbox; the agent decides what to do.</p>
+          <ul>
+            <li><code>on_receive</code> hook: wake you, file a ticket, or self-remediate, decided by AI</li>
+            <li>Trust gate keeps spoofers out</li>
+            <li>Push, not poll &mdash; fires the moment SMTP <code>DATA</code> completes</li>
+            <li>Markdown body is grep-able for post-mortems</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">📰</span>
+            <h3>Newsletter digest</h3>
+            <code class="mailbox">news@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Collect Substack, arXiv, and HN digests; nightly job ships one summary.</p>
+          <ul>
+            <li>One summary instead of 40 unread threads</li>
+            <li>Markdown + frontmatter is RAG-ready out of the box</li>
+            <li>Trust gate filters out spammy lookalikes</li>
+            <li>Attachments (PDFs, papers) saved as sibling files</li>
+          </ul>
+        </article>
+
+        <article class="usecase-card">
+          <header class="usecase-card-head">
+            <span class="usecase-card-emoji" aria-hidden="true">📚</span>
+            <h3>Knowledge-base ingest</h3>
+            <code class="mailbox">kb@&lt;YOUR_DOMAIN&gt;</code>
+          </header>
+          <p class="usecase-lede">Forward anything in. AIMX saves them in Markdown + TOML frontmatter and be RAG-ready.</p>
+          <ul>
+            <li>RAG-ready Markdown + TOML on disk</li>
+            <li>Attachments extracted as actual files</li>
+            <li>Per-mailbox ownership keeps multi-agent setups partitioned</li>
+          </ul>
+        </article>
       </div>
     </section>
 
@@ -438,7 +482,7 @@
   </main>
 
   <footer>
-    <div>© 2026 <a href="https://uzyn.com" target="_blank" rel="noopener">U-Zyn Chua</a> · chua@uzyn.com</div>
+    <div>© 2026 <a href="https://uzyn.com" target="_blank" rel="noopener">U-Zyn Chua</a>. MIT Licensed. <a href="https://github.com/uzyn/aimx" target="_blank" rel="noopener">Contributions welcome.</a></div>
     <div>self-hosted mail for self-hosted agents</div>
   </footer>
 </div>

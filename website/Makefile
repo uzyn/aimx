@@ -25,6 +25,16 @@ pages:
 	# Shorter alias for `install.sh --port-check-only` — same trust
 	# anchor, fetches install.sh from the same origin and execs it.
 	cp $(PORTCHECK) $(DIST)/portcheck.sh
+	# Cache-bust local assets on the homepage. Append ?v=<sha-prefix> to
+	# /styles/index.css and /scripts/theme.js so the browser refetches
+	# when content changes (CDN / GitHub Pages still uses long max-age).
+	@HASH_CSS=$$(shasum -a 256 $(DIST)/styles/index.css | cut -c1-8); \
+	HASH_JS=$$(shasum -a 256 $(DIST)/scripts/theme.js  | cut -c1-8); \
+	sed -i.bak \
+	  -e "s|/styles/index\.css\"|/styles/index.css?v=$${HASH_CSS}\"|g" \
+	  -e "s|/scripts/theme\.js\"|/scripts/theme.js?v=$${HASH_JS}\"|g" \
+	  $(DIST)/index.html
+	@rm -f $(DIST)/index.html.bak
 
 # Concatenate every book chapter into a single LLM-ingest file. Order
 # follows shell glob (alphabetical), which matches the SUMMARY.md

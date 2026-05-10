@@ -60,8 +60,11 @@ body {
   z-index: 1;
 }
 
+/* Outer container — Bootstrap-style responsive ladder, capped at xl
+   (1140px). One container width drives every section below; nothing
+   inside .wrap declares its own max-width so the rhythm stays uniform. */
 .wrap {
-  max-width: 960px;
+  max-width: 100%;
   margin: 0 auto;
   padding: 32px 28px 40px;
   position: relative;
@@ -71,6 +74,10 @@ body {
   flex-direction: column;
   width: 100%;
 }
+@media (min-width: 576px)  { .wrap { max-width: 540px;  } }
+@media (min-width: 768px)  { .wrap { max-width: 720px;  } }
+@media (min-width: 992px)  { .wrap { max-width: 960px;  } }
+@media (min-width: 1200px) { .wrap { max-width: 1140px; } }
 
 header {
   display: flex;
@@ -221,6 +228,45 @@ h1 em {
   text-align: center;
 }
 
+/* Sub-caption beneath the install terminal — left-aligned, muted, sized to
+   the terminal so it reads as a footnote on the command above it. */
+.terminal-caption {
+  max-width: 720px;
+  margin: 0.9em auto 0;
+  font-size: 0.36em;
+  line-height: 1.6;
+  color: var(--ink-faded);
+  text-align: left;
+}
+
+/* Guided-setup checklist below the caption. Same 720px column as the
+   terminal so install + caption + checklist read as one tight block. */
+.quickstart-checklist {
+  list-style: none;
+  max-width: 720px;
+  margin: 0.5em auto 0;
+  padding: 0;
+  font-size: 0.36em;
+  line-height: 1.6;
+  color: var(--ink-soft);
+}
+.quickstart-checklist li {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6em;
+  padding: 0.18em 0;
+}
+.quickstart-checklist li::before {
+  content: "";
+  flex-shrink: 0;
+  width: 0.95em;
+  height: 0.95em;
+  border: 1px solid var(--ink-faded);
+  border-radius: 3px;
+  background: transparent;
+  transform: translateY(0.05em);
+}
+
 .pitch code,
 .prose code,
 .features code,
@@ -235,10 +281,9 @@ h1 em {
 }
 
 .block {
-  margin: 56px auto 0;
+  margin: 56px 0 0;
   padding-top: 28px;
   border-top: 1px solid var(--rule);
-  max-width: 720px;
 }
 
 .section-label {
@@ -257,7 +302,6 @@ h1 em {
   font-size: 0.4em;
   line-height: 1.75;
   color: var(--ink-soft);
-  max-width: 60ch;
 }
 
 .prose + .prose { margin-top: 0.85em; }
@@ -288,7 +332,6 @@ h1 em {
   line-height: 1.75;
   color: var(--ink-soft);
   list-style: none;
-  max-width: 60ch;
 }
 
 .features li {
@@ -313,37 +356,110 @@ h1 em {
   text-align: center;
 }
 
-.use-cases {
-  margin-top: 12px;
+/* Use-cases — 3x2 grid of self-contained cards. Each card heads with an
+   emoji, the title, and a prominent .mailbox chip so the visitor sees
+   "this is the address AIMX gives you for that workflow" at a glance.
+   Layout: 3 columns at lg+, 2 at md, 1 below. */
+.usecase-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+  margin-top: 16px;
 }
+@media (min-width: 768px)  { .usecase-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (min-width: 992px)  { .usecase-grid { grid-template-columns: repeat(3, 1fr); } }
 
-.use-case {
+.usecase-card {
   background: var(--paper-2);
   border: 1px solid var(--rule);
-  border-radius: 12px;
-  padding: 18px 20px;
-  transition: border-color 0.15s;
+  border-radius: 14px;
+  padding: 22px 22px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 0.85em;
+  transition: border-color 0.15s, transform 0.15s;
 }
-
-.use-case:hover {
+.usecase-card:hover {
   border-color: var(--ink-faded);
+  transform: translateY(-1px);
 }
 
-.use-case p {
+.usecase-card-head {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  column-gap: 0.6em;
+  row-gap: 0.35em;
+  align-items: baseline;
+}
+.usecase-card-emoji {
+  grid-row: 1 / span 2;
+  align-self: center;
+  font-size: 1.25em;
+  line-height: 1;
+  width: 1.2em;
+  text-align: center;
+}
+.usecase-card-head h3 {
+  grid-column: 2;
+  grid-row: 1;
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 30;
+  font-weight: 500;
+  font-size: 0.5em;
+  line-height: 1.2;
+  color: var(--ink);
+  margin: 0;
+}
+.usecase-card-head .mailbox {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: start;
+}
+
+/* The mailbox chip — the user-facing AIMX address. Bold, accent-tinted,
+   monospaced; visually the "diff" each card argues for. */
+.mailbox {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.34em;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  color: var(--accent-dark);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+  padding: 2px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+
+.usecase-lede {
   font-size: 0.36em;
   line-height: 1.6;
   color: var(--ink-soft);
   margin: 0;
 }
-
-.use-case strong {
-  color: var(--ink);
-  font-weight: 500;
+.usecase-card ul {
+  list-style: none;
+  padding: 0;
+  margin: 0.2em 0 0;
+  font-size: 0.34em;
+  line-height: 1.6;
+  color: var(--ink-soft);
 }
-
-.use-case code {
+.usecase-card li {
+  padding-left: 1.1em;
+  position: relative;
+  padding-bottom: 0.2em;
+}
+.usecase-card li::before {
+  content: "▸";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+.usecase-card code:not(.mailbox) {
   font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.9em;
+  font-size: 0.92em;
   background: var(--paper);
   padding: 1px 5px;
   border-radius: 3px;
@@ -491,6 +607,8 @@ h1 em {
   user-select: none;
 }
 
+/* Harness grid — logo + name only. 4 across at md+, 2 below md.
+   Single command (aimx agents setup) lives in the tagline below the grid. */
 .harness-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
@@ -498,8 +616,8 @@ h1 em {
   gap: 16px;
   margin: 12px 0 0;
 }
-@media (max-width: 480px) {
-  .harness-grid { grid-template-columns: 1fr; }
+@media (min-width: 768px) {
+  .harness-grid { grid-template-columns: repeat(4, 1fr); }
 }
 .harness-tile {
   border: 1px solid var(--rule);
@@ -508,6 +626,8 @@ h1 em {
   text-decoration: none;
   display: flex;
   flex-direction: column;
+  align-items: center;
+  text-align: center;
   gap: 14px;
   color: var(--ink);
   background: var(--paper-2);
@@ -528,9 +648,6 @@ h1 em {
   display: block;
   object-fit: contain;
 }
-.harness-tile-text {
-  width: 100%;
-}
 .harness-tile-name {
   font-family: 'Fraunces', serif;
   font-variation-settings: 'opsz' 24;
@@ -539,16 +656,23 @@ h1 em {
   display: block;
   line-height: 1.2;
 }
-.harness-tile-cmd {
-  font-family: 'IBM Plex Mono', monospace;
-  font-size: 0.27em;
+
+.harness-tagline {
+  margin: 22px 0 0;
+  font-size: 0.36em;
+  line-height: 1.6;
   color: var(--ink-faded);
-  display: block;
-  margin-top: 6px;
-  letter-spacing: 0.01em;
-  /* break only at word boundaries — no more "claude-co / de" mid-word */
+  text-align: left;
 }
-.harness-tile:hover .harness-tile-cmd { color: var(--accent); }
+.harness-tagline code {
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.95em;
+  background: var(--paper-2);
+  padding: 2px 6px;
+  border-radius: 3px;
+  color: var(--ink);
+  border: 1px solid var(--rule);
+}
 
 .compare-wrap {
   margin: 14px 0 0;
@@ -628,7 +752,6 @@ h1 em {
 .faq details {
   border-bottom: 1px solid var(--rule);
   padding: 0.85em 0;
-  max-width: 60ch;
 }
 .faq details:first-of-type { padding-top: 0.4em; }
 .faq summary {
@@ -660,7 +783,6 @@ h1 em {
   line-height: 1.75;
   color: var(--ink-soft);
   margin-top: 0.7em;
-  max-width: 60ch;
 }
 /* Inline links inside content blocks — unified treatment */
 .prose a,
@@ -697,6 +819,8 @@ h1 em {
   line-height: 1.6;
   color: var(--ink-soft);
   max-width: 60ch;
+  margin-left: auto;
+  margin-right: auto;
 }
 
 .small {
@@ -732,15 +856,15 @@ footer {
 }
 
 footer a {
-  color: var(--ink-faded);
+  color: var(--accent);
   text-decoration: none;
-  border-bottom: 1px solid var(--rule);
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
   padding-bottom: 1px;
   transition: color 0.15s, border-color 0.15s;
 }
 
 footer a:hover {
-  color: var(--accent);
+  color: var(--accent-dark);
   border-bottom-color: var(--accent);
 }
 
