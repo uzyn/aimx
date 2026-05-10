@@ -34,7 +34,7 @@ base64 = "0.22"
 mail-auth = "0.8"
 mime_guess = "2"
 rmcp = { version = "1.6.0", features = ["server", "transport-io"] }
-tokio = { version = "1.51.1", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "time", "sync", "signal"] }
+tokio = { version = "1.52.3", features = ["rt-multi-thread", "macros", "io-util", "io-std", "net", "time", "sync", "signal"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", "std"] }
 rustls-pemfile = "2"
