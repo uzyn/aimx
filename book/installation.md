@@ -19,19 +19,14 @@ AIMX is Linux-only. Every release ships four prebuilt targets:
 | `x86_64-unknown-linux-musl`  | `x86_64-linux-musl`  | Alpine, statically-linked containers |
 | `aarch64-unknown-linux-musl` | `aarch64-linux-musl` | Alpine ARM, statically-linked ARM containers |
 
-The canonical Rust target triple (with the `-unknown-` vendor field) is still what `cargo build --target` and `aimx --version` use. Tarball filenames drop `-unknown-` for readability — the installer composes both forms automatically.
-
 The install script auto-detects your OS, CPU arch (`uname -m`), and libc flavor (glibc vs. musl) and picks the matching tarball. Non-Linux platforms are refused with a single-line error — AIMX is Linux-only by policy.
 
 ## What the installer does
 
-The shell script is thin: it acquires `sudo` up front, downloads the binary, and `exec`s `sudo aimx setup` — the binary owns the wizard. The script's job is to put `aimx` on disk, not to know anything about DNS or DKIM.
-
-1. Prints a two-line install banner.
-2. Detects platform and libc; picks the matching release asset.
+1. Detects platform and libc; picks the matching release asset.
 3. Acquires `sudo` (`sudo -v </dev/tty` so `curl | sh` still gets the password prompt). Fails fast if `sudo` is missing on a non-root box, before any network call.
 4. Resolves the target version (latest by default; override with `--tag` or `AIMX_VERSION`).
-5. Downloads the tarball over HTTPS from GitHub Releases.
+5. Downloads the tarball over HTTPS from [GitHub Releases](https://github.com/uzyn/aimx/releases).
 6. Extracts into a temp directory cleaned up on every exit path.
 7. Installs the binary as `install -m 0755 /usr/local/bin/aimx` (override with `--to` / `AIMX_PREFIX`).
 8. On a fresh box, backs up any pre-existing `/etc/aimx/config.toml` to `config.toml.bak-YYYYMMDD-HHMMSS`, then `exec`s `sudo aimx setup </dev/tty`. DKIM keys and STARTTLS certs are preserved across re-runs.
@@ -109,37 +104,20 @@ You can also inspect the install script itself before running it:
 curl -fsSL https://aimx.email/install.sh | less
 ```
 
-The script is plain POSIX `sh` (Dash- and BusyBox-compatible), roughly 500 lines, and follows the same shape as [`just.systems/install.sh`](https://just.systems/install.sh).
-
-## Trust model
-
-The install script's trust anchor is HTTPS on the GitHub Releases domain. Downloads are HTTPS-only; tarball signatures are not verified. Skeptical operators verify SHA-256 manually against `SHA256SUMS` as shown above.
-
-Signed releases (minisign, cosign, GPG, OIDC) are deferred. To get supply-chain integrity today, pin a specific tag and verify SHA-256 before every install or upgrade.
-
-The landing page at `aimx.email/install.sh` is served by GitHub Pages, which does not expose a header-customization API; the raw bytes carry `Content-Type: application/x-sh` rather than `text/x-sh`. `curl | sh` behavior is unaffected.
-
 ## Upgrading
 
-Two equivalent paths: use the installer again, or use `aimx upgrade`.
+Two equivalent paths: use the installer again, or use `aimx upgrade` (recommended).
 
 ```bash
-# Option 1: re-run the installer. Detects an older binary, stops aimx,
+# Option 1: use the upgrade subcommand (preferred on an existing box).
+sudo aimx upgrade
+
+# Option 2: re-run the installer. Detects an older binary, stops aimx,
 # swaps atomically, restarts. No wizard re-run.
 curl -fsSL https://aimx.email/install.sh | sh
-
-# Option 2: use the upgrade subcommand (preferred on an existing box).
-sudo aimx upgrade
 ```
 
 `aimx upgrade` checks `https://api.github.com/repos/uzyn/aimx/releases/latest`, compares the tag against the running binary's version, and if newer:
-
-1. Downloads the target-matching tarball.
-2. Extracts it into `$TMPDIR`.
-3. Stops `aimx.service` (or the OpenRC equivalent).
-4. Renames the current `/usr/local/bin/aimx` to `/usr/local/bin/aimx.prev` and moves the new binary into place — atomic `rename(2)` so a crash cannot leave a half-written binary.
-5. Restarts the service.
-6. Waits for the daemon to come back up, then prints a `✓ aimx serve restarted on <tag>` confirmation line followed by `aimx v<old> → v<new>. Service restarted.`
 
 If any step after the stop fails, the rollback path restores `aimx.prev` and restarts the service. A `✗` line names the failed step. The restart-confirmation line is suppressed on the rollback path.
 
@@ -168,6 +146,24 @@ aimx --version
 
 This only covers one generation back. Past that, install a specific older tag with `sudo aimx upgrade --version <tag>`.
 
+## Building from source
+
+Source builds are for contributors and air-gapped environments. Everyone else should use the one-line installer.
+
+```bash
+# Prereqs: rustup, a recent stable toolchain, and git.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+git clone https://github.com/uzyn/aimx.git
+cd aimx
+cargo build --release
+sudo install -m 0755 target/release/aimx /usr/local/bin/aimx
+aimx --version
+```
+
+See the top-level `CLAUDE.md` for the full developer workflow (lint, format, tests, verifier service).
+
 ## Troubleshooting
 
 **"AIMX is Linux-only" error.**  The install script runs `uname` and refuses anything other than Linux. Run it on a Linux box.
@@ -194,20 +190,4 @@ Then file an issue with the service log.
 
 **Binary installs but `aimx --version` prints the wrong tag.**  `--version` is baked at build time from `git describe --tags`. If you built from source and the working tree is dirty or ahead of the last tag, the output will reflect that (e.g. `0.1.0-12-gabcdef1-dirty`). Released tarballs always print the exact tag.
 
-## Building from source
-
-Source builds are for contributors and air-gapped environments. Everyone else should use the one-line installer.
-
-```bash
-# Prereqs: rustup, a recent stable toolchain, and git.
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-source $HOME/.cargo/env
-
-git clone https://github.com/uzyn/aimx.git
-cd aimx
-cargo build --release
-sudo install -m 0755 target/release/aimx /usr/local/bin/aimx
-aimx --version
-```
-
-See the top-level `CLAUDE.md` for the full developer workflow (lint, format, tests, verifier service).
+## 
