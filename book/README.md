@@ -16,15 +16,17 @@ AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their 
 ## Quick start
 
 ```bash
-# 1. Install (Linux only; x86_64 and aarch64, glibc and musl)
 curl -fsSL https://aimx.email/install.sh | sh
-
-# 2. Run setup (generates service file, DKIM keys, DNS guidance)
-sudo aimx setup agent.yourdomain.com
-
-# 3. Verify
-sudo aimx portcheck
 ```
+
+This launches a guided setup with the following steps:
+
+- [ ] Preflight checks on port 25
+- [ ] Set up domain and DNS
+- [ ] Set up STARTTLS certificate
+- [ ] Set up trust policy
+- [ ] Install AIMX service
+- [ ] Optionally, wire up MCP for agent(s)
 
 See [Installation](installation.md) for install flags, verification, and upgrades,
 and [Getting Started](getting-started.md) for the full walkthrough.
