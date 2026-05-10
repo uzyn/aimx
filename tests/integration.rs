@@ -6668,17 +6668,23 @@ fn uds_version_verb_returns_running_daemon_metadata() {
     // The reported tag must match what the test binary itself prints
     // for `aimx --version` — in test builds this is whatever
     // `crate::version::release_tag()` resolves to. Cross-check by
-    // running the bin and parsing the first space-delimited token
-    // after `aimx`.
+    // running the bin and parsing the token immediately after the
+    // literal "version" keyword in the banner
+    // (`AIMX (AI Mail Exchange) version <tag> (<sha>) <target> built <date>`).
     let v_out = std::process::Command::new(aimx_binary_path())
         .arg("--version")
         .output()
         .expect("aimx --version");
     let v_stdout = String::from_utf8(v_out.stdout).unwrap();
-    let local_tag = v_stdout
-        .split_whitespace()
-        .nth(1)
-        .expect("aimx --version emits a tag");
+    let mut tokens = v_stdout.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "version" {
+            break;
+        }
+    }
+    let local_tag = tokens
+        .next()
+        .expect("aimx --version emits a tag after the \"version\" keyword");
     assert!(
         body_str.contains(local_tag),
         "daemon tag missing local {local_tag:?} in {body_str}",
