@@ -10,9 +10,7 @@ AIMX includes a Model Context Protocol server that gives AI agents programmatic 
 
 ## Running the MCP server
 
-```bash
-aimx mcp
-```
+As this is a `stdio` MCP server, you do not need to "start a listening MCP server". Your AI agents would spawn a server on demand via `aimx mcp` . Just to be clear, you `aimx mcp` is for your AI agents than for you to run.
 
 The server reads from stdin and writes to stdout. To install it into a supported agent, see [Agent Integration](agent-integration.md).
 

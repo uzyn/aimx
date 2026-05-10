@@ -181,7 +181,7 @@ Every MCP tool call is scoped to mailboxes the calling uid owns: `mailbox_list` 
 
 ### How do I update the installed agent plugin after upgrading AIMX?
 
-`aimx agents setup <agent> --force`. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. Re-running with `--force` overwrites whatever is at the destination.
+Re-run `aimx agents setup --force` and re-select the agents you want to update from the picker. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. `--force` overwrites whatever is at the destination.
 
 ## Operations
 
