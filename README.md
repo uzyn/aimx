@@ -200,7 +200,7 @@ See [`book/hooks`](https://aimx.email/book/hooks.html) for the hook model and [`
 
 ## Email format
 
-**No `.eml`. No database.** Mail lands as plain Markdown your agent can `cat`, `grep`, or stream straight into a context window. Frontmatter is TOML between `+++` delimiters. Attachments live as sibling files inside a Zola-style bundle directory — no MIME parser required.
+**No `.eml`. No database.** Mail lands as plain Markdown your agent can `cat`, `grep`, or stream straight into a context window. Frontmatter is TOML between `+++` delimiters. Attachments live as sibling files inside a bundle directory — no MIME parser required.
 
 ```markdown
 +++

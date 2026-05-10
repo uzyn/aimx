@@ -24,7 +24,7 @@ A mailbox maps an email address to a directory on disk. `aimx mailbox` is a clap
 ```
 
 Each email is stored as either a flat `YYYY-MM-DD-HHMMSS-<slug>.md` file
-when it has zero attachments, or as a Zola-style bundle directory
+when it has zero attachments, or as a bundle directory
 `YYYY-MM-DD-HHMMSS-<slug>/` containing `<stem>.md` plus every attachment
 as a sibling file when attachments are present.
 
@@ -227,8 +227,8 @@ Deferred (4xx) sends are not persisted. The submitting client is expected to ret
 
 ## Attachments
 
-When an email carries one or more attachments, AIMX writes a Zola-style
-bundle directory whose name matches the `.md` file's stem:
+When an email carries one or more attachments, AIMX writes a bundle
+directory whose name matches the `.md` file's stem:
 
 ```text
 /var/lib/aimx/inbox/support/

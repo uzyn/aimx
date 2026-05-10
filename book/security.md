@@ -103,7 +103,7 @@ Two choices are load-bearing: per-owner mailbox isolation, and the world-writabl
 
 `/etc/aimx/` holds secrets and policy: the DKIM private key, the mailbox list, the hook config. The whole tree is root-owned, the key is `0600`, the config is `0640`, and the daemon is the only process that reads it.
 
-`/var/lib/aimx/` holds the mailboxes: Markdown files with TOML frontmatter, plus attachments as siblings in Zola-style bundles. Each mailbox is `<owner>:<owner> 0700`. The daemon enforces this on every write. Storage is deliberately flat text so agents can `ls`, `grep`, RAG-index, or read from a shell hook without an IMAP layer. Per-mailbox ownership scopes each agent to its own inbox while preserving flat-corpus ergonomics inside.
+`/var/lib/aimx/` holds the mailboxes: Markdown files with TOML frontmatter, plus attachments as siblings in bundle directories. Each mailbox is `<owner>:<owner> 0700`. The daemon enforces this on every write. Storage is deliberately flat text so agents can `ls`, `grep`, RAG-index, or read from a shell hook without an IMAP layer. Per-mailbox ownership scopes each agent to its own inbox while preserving flat-corpus ergonomics inside.
 
 Secrets never flow outward, mail never flows into the secrets tree.
 

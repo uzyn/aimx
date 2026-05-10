@@ -126,7 +126,7 @@ fn find_md_files(dir: &Path) -> Vec<std::path::PathBuf> {
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_dir() {
-            // Zola-style bundle: `<stem>/<stem>.md`.
+            // Bundle directory: `<stem>/<stem>.md`.
             if let Some(stem) = path.file_name().and_then(|f| f.to_str()) {
                 let md = path.join(format!("{stem}.md"));
                 if md.exists() {

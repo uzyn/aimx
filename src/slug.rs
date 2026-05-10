@@ -3,7 +3,7 @@
 //! `slugify` is a pure transform: MIME-decoded subject → deterministic
 //! filesystem-safe stem. `allocate_filename` picks the final on-disk path,
 //! resolving collisions and deciding between a flat `<stem>.md` layout and
-//! a Zola-style bundle directory (`<stem>/<stem>.md` with attachments as
+//! a bundle directory (`<stem>/<stem>.md` with attachments as
 //! siblings). Both helpers are pure except for the directory check that
 //! `allocate_filename` performs to detect collisions.
 
