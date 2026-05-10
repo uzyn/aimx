@@ -1,6 +1,6 @@
 # Mailboxes & Email
 
-A mailbox maps an email address to a directory on disk. `aimx mailbox` is a clap alias for `aimx mailboxes` and works identically.
+A mailbox maps an email address to a directory on disk. Command starts with `aimx mailboxes`.
 
 ## Concepts
 

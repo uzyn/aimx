@@ -8,9 +8,9 @@ For a condensed walkthrough, see [Getting Started](getting-started.md).
 
 ### Server
 
-- A Linux VPS with port 25 open inbound **and** outbound (CI covers Ubuntu, Alpine, Fedora)
-- A domain you control with access to DNS management
-- Root access (required for service installation and binding port 25)
+- A Linux server with port 25 open inbound **and** outbound
+- A domain (or subdomain) you control with access to DNS management
+- Root access on the server (required for service installation and binding port 25)
 
 ### Firewall
 
@@ -23,31 +23,6 @@ sudo ufw allow 25/tcp
 # If using iptables:
 sudo iptables -A INPUT -p tcp --dport 25 -j ACCEPT
 ```
-
-## Pre-setup verification
-
-Verify port 25 connectivity before running setup:
-
-```bash
-sudo aimx portcheck
-```
-
-`aimx portcheck` requires root. When `aimx serve` is running, it performs an outbound EHLO handshake plus an inbound EHLO handshake probe. When nothing is on port 25 (fresh VPS), it spawns a temporary listener and runs checks. If port 25 is occupied by another process, portcheck tells you to stop it before setup.
-
-If you haven't installed AIMX yet, the same check is available pre-install:
-
-```bash
-curl -fsSL https://aimx.email/portcheck.sh | sudo sh
-```
-
-`portcheck.sh` is a thin alias for `install.sh --port-check-only`; the longer form (`curl -fsSL https://aimx.email/install.sh | sudo sh -s -- --port-check-only`) works too. Either exits without installing. See [Getting Started: Pre-install](getting-started.md#pre-install-check-port-25).
-
-| Check | What it does | Fix if it fails |
-|-------|-------------|-----------------|
-| Outbound port 25 | Performs EHLO handshake to `check.aimx.email` on port 25 | Ask VPS provider to unblock outbound SMTP |
-| Inbound port 25 | Calls the verify service to perform EHLO handshake back to your IP on port 25 | Open firewall, ask VPS provider to unblock inbound SMTP |
-
-Both checks should pass before continuing.
 
 ## Setup wizard
 
@@ -279,7 +254,7 @@ If you prefer not to use the public instance:
    [Unit]
    Description=aimx verifier service
    After=network.target
-
+   
    [Service]
    ExecStart=/usr/local/bin/aimx-verifier
    Environment=BIND_ADDR=127.0.0.1:3025
@@ -287,7 +262,7 @@ If you prefer not to use the public instance:
    Restart=always
    User=aimx-verifier
    AmbientCapabilities=CAP_NET_BIND_SERVICE
-
+   
    [Install]
    WantedBy=multi-user.target
    ```
