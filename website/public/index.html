@@ -18,7 +18,8 @@
 <link rel="canonical" href="https://aimx.email/">
 <link rel="alternate" type="text/plain" title="llms.txt" href="/llms.txt">
 
-<meta name="theme-color" content="#0D1117">
+<meta name="theme-color" content="#F4EEE3" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0D1117" media="(prefers-color-scheme: dark)">
 <link rel="icon" type="image/x-icon" href="/favicon.ico">
 <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
 <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
@@ -102,8 +103,9 @@
 </script>
 
 <script>
-// Apply stored theme synchronously before paint to avoid FOUC.
-(function(){try{var t=localStorage.getItem('aimx-theme');if(t==='light'||t==='dark')document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
+// Apply theme synchronously before paint to avoid FOUC. Stored choice wins;
+// otherwise track the OS preference. Mirrors scripts/theme.js.
+(function(){try{var t=localStorage.getItem('aimx-theme');if(t!=='light'&&t!=='dark'){t=(window.matchMedia&&window.matchMedia('(prefers-color-scheme: light)').matches)?'light':'dark';}document.documentElement.setAttribute('data-theme',t);}catch(e){}})();
 </script>
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
