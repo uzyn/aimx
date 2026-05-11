@@ -6677,7 +6677,7 @@ fn uds_version_verb_returns_running_daemon_metadata() {
         .expect("aimx --version");
     let v_stdout = String::from_utf8(v_out.stdout).unwrap();
     let mut tokens = v_stdout.split_whitespace();
-    while let Some(tok) = tokens.next() {
+    for tok in tokens.by_ref() {
         if tok == "version" {
             break;
         }
