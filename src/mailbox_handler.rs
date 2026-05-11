@@ -148,8 +148,8 @@ pub async fn handle_mailbox_crud(
         None
     };
 
-    let lock = state_ctx.lock_for(&req.name);
-    let _guard = lock.lock().await;
+    let state = state_ctx.lock_for(&req.name);
+    let _guard = state.lock.lock().await;
 
     // Serialize the load → modify → write → store critical section across
     // *all* mailbox names. The per-mailbox lock above keeps MARK-* on the

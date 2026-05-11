@@ -25,11 +25,10 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::Mutex as AsyncMutex;
 
 use crate::config::ConfigHandle;
 use crate::frontmatter::InboundFrontmatter;
-use crate::mailbox_locks::MailboxLocks;
+use crate::mailbox_locks::{MailboxLocks, MailboxState};
 use crate::mcp::resolve_email_path_strict;
 use crate::ownership::chown_as_owner;
 use crate::send_protocol::{AckResponse, ErrCode, MarkRequest};
@@ -83,10 +82,11 @@ impl StateContext {
         }
     }
 
-    /// Acquire (lazy-inserting if needed) the per-mailbox write lock.
-    /// Returned `Arc` owns the lock; callers `.lock().await` (async) or
-    /// `.blocking_lock()` (inside `spawn_blocking`) it.
-    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<AsyncMutex<()>> {
+    /// Acquire (lazy-inserting if needed) the per-mailbox state handle.
+    /// Returned `Arc` owns both the async write lock and the dedup
+    /// cache; callers `.lock.lock().await` (async) or
+    /// `.lock.blocking_lock()` (inside `spawn_blocking`).
+    pub(crate) fn lock_for(&self, mailbox: &str) -> Arc<MailboxState> {
         self.locks.lock_for(mailbox)
     }
 }
@@ -152,8 +152,8 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
         };
     }
 
-    let lock = ctx.lock_for(&req.mailbox);
-    let _guard = lock.lock().await;
+    let state = ctx.lock_for(&req.mailbox);
+    let _guard = state.lock.lock().await;
 
     let mailbox_dir = inbox_dir(&ctx.data_dir, &req.mailbox);
     let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {

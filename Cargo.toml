@@ -90,6 +90,15 @@ lol_html = "2"
 # (not just dev-deps) so `run_upgrade` can call `tempfile::tempdir`
 # directly rather than re-implementing tempdir cleanup by hand.
 tempfile = "3"
+# Per-mailbox Message-Id dedup cache for inbound ingest. SMTP MTAs
+# legitimately retry deliveries when an ACK is delayed or lost; without
+# dedup, every retry would re-fire `on_receive` hooks. SparKV gives us
+# an in-memory KV with per-entry TTL plus auto-eviction, so the cache
+# stays bounded (24h retention window) without us hand-rolling a TTL
+# heap. The cache is rebuilt lazily from disk on first ingest per
+# mailbox; the disk frontmatter (`message_id`, `received_at`) remains
+# the source of truth.
+sparkv = "0.1"
 
 [dev-dependencies]
 assert_cmd = "2"

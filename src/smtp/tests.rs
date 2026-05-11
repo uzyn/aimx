@@ -179,6 +179,20 @@ fn test_email() -> &'static str {
     "From: sender@example.com\r\nTo: alice@test.local\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <test@example.com>\r\n\r\nHello World\r\n"
 }
 
+/// Build a `test_email()`-shaped string with a per-call unique
+/// Message-Id. Inbound Message-Id dedup correctly drops the second
+/// copy of `test_email()` when it appears twice in the same session,
+/// so tests that expect two distinct stored messages need distinct
+/// Message-Ids.
+fn test_email_with_unique_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "From: sender@example.com\r\nTo: alice@test.local\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <test-unique-{n}@example.com>\r\n\r\nHello World\r\n"
+    )
+}
+
 // --- SMTP state machine tests ---
 
 #[tokio::test]
@@ -1008,18 +1022,22 @@ async fn test_multiple_transactions_per_connection() {
     client.send_and_read("EHLO test.com").await;
 
     // First message
+    let email_a = test_email_with_unique_id();
     client.send_and_read("MAIL FROM:<sender@test.com>").await;
     client.send_and_read("RCPT TO:<alice@test.local>").await;
     client.send_and_read("DATA").await;
-    client.send(test_email()).await;
+    client.send(&email_a).await;
     let resp = client.send_and_read(".").await;
     assert!(resp.starts_with("250"));
 
-    // Second message
+    // Second message (distinct Message-Id so inbound dedup treats it
+    // as a separate delivery, matching real-world clients that
+    // generate one Message-Id per email).
+    let email_b = test_email_with_unique_id();
     client.send_and_read("MAIL FROM:<sender2@test.com>").await;
     client.send_and_read("RCPT TO:<alice@test.local>").await;
     client.send_and_read("DATA").await;
-    client.send(test_email()).await;
+    client.send(&email_b).await;
     let resp = client.send_and_read(".").await;
     assert!(resp.starts_with("250"));
 
@@ -1513,4 +1531,160 @@ async fn test_multi_rcpt_all_success_returns_250() {
     let bob_mds = collect_md_files(&inbox(tmp.path(), "bob"));
     assert_eq!(alice_mds.len(), 1);
     assert_eq!(bob_mds.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Async hook detach regression test
+// ---------------------------------------------------------------------------
+//
+// The primary fix in this PR detaches `on_receive` hooks onto a fresh
+// OS thread so the SMTP DATA path returns `250 OK` in seconds rather
+// than after the hook completes. Without this, a multi-minute hook
+// would exceed the remote MTA's DATA-reply timeout, the remote would
+// retry, and aimx would re-ingest and re-fire the hook on every
+// retry. This test pins the timing contract by registering a slow
+// hook (sleep 3s + touch a marker), driving an SMTP DATA transaction,
+// asserting `250 OK` returns well under the hook duration, and then
+// waiting for the marker to confirm the hook eventually runs in the
+// detached thread.
+//
+// Uses the same sandbox-fallback pattern the existing hook unit tests
+// use so it works on a developer workstation without root or
+// `systemd-run`.
+
+fn test_config_with_slow_hook(
+    data_dir: &std::path::Path,
+    marker_path: &std::path::Path,
+    sleep_secs: u32,
+) -> Config {
+    let mut mailboxes = HashMap::new();
+    let hook = crate::hook::Hook {
+        name: Some("slow_test_hook".to_string()),
+        event: crate::hook::HookEvent::OnReceive,
+        r#type: "cmd".to_string(),
+        cmd: vec![
+            "/bin/sh".to_string(),
+            "-c".to_string(),
+            format!("sleep {sleep_secs} && touch {}", marker_path.display()),
+        ],
+        // The test fixture's `From:` has no DKIM/SPF/DMARC, so the
+        // email's effective `trusted` is `none`. `fire_on_untrusted`
+        // lets the hook fire anyway, which is what we want to observe.
+        fire_on_untrusted: true,
+        timeout_secs: crate::hook::DEFAULT_HOOK_TIMEOUT_SECS,
+    };
+    mailboxes.insert(
+        "alice".to_string(),
+        MailboxConfig {
+            // Owner is the current user so post-write chown doesn't
+            // warn-spam on non-root developer workstations.
+            address: "alice@test.local".to_string(),
+            owner: current_user_name_for_test(),
+            hooks: vec![hook],
+            trust: Some("none".to_string()),
+            trusted_senders: Some(vec![]),
+            allow_root_catchall: false,
+        },
+    );
+    Config {
+        domain: "test.local".to_string(),
+        data_dir: data_dir.to_path_buf(),
+        dkim_selector: "aimx".to_string(),
+        trust: "none".to_string(),
+        trusted_senders: vec![],
+        mailboxes,
+        verify_host: None,
+        enable_ipv6: false,
+        signature: None,
+        upgrade: None,
+    }
+}
+
+fn current_user_name_for_test() -> String {
+    let uid = nix::unistd::Uid::current();
+    nix::unistd::User::from_uid(uid)
+        .ok()
+        .flatten()
+        .map(|u| u.name)
+        .unwrap_or_else(|| "nobody".to_string())
+}
+
+/// Regression test for the SMTP-blocking-hook bug.
+///
+/// Registers an `on_receive` hook that sleeps for `HOOK_SLEEP_SECS`
+/// before touching a marker file, drives a single SMTP DATA
+/// transaction, and asserts that:
+///
+/// 1. The `250 OK` response after the dot-terminator returns in less
+///    than half the hook's sleep duration — proving the hook ran
+///    detached, not inline.
+/// 2. The marker file eventually appears, proving the detached hook
+///    actually executed (not just silently dropped on spawn failure).
+///
+/// If `HookMode::Async` is ever changed back to `HookMode::Sync` for
+/// the SMTP DATA path, assertion (1) fails immediately.
+#[tokio::test]
+async fn test_smtp_data_returns_fast_with_slow_on_receive_hook() {
+    // Force the non-systemd-run hook executor so the test works on a
+    // developer workstation without root (mirrors
+    // `force_sandbox_fallback` in `src/hook.rs` tests). SAFETY: this is
+    // a process-wide env var, but the value is invariant across all
+    // tests that set it, so a concurrent test setting the same var to
+    // the same value is benign.
+    unsafe {
+        std::env::set_var("AIMX_SANDBOX_FORCE_FALLBACK", "1");
+    }
+
+    const HOOK_SLEEP_SECS: u32 = 3;
+    let max_response_ms: u128 = (HOOK_SLEEP_SECS as u128) * 1000 / 2;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let marker = tmp.path().join("hook_fired.marker");
+    let config = test_config_with_slow_hook(tmp.path(), &marker, HOOK_SLEEP_SECS);
+    let (port, _shutdown) = start_server(config).await;
+    let mut client = TestClient::connect(port).await;
+    client.read_line().await;
+
+    client.send_and_read("EHLO test.com").await;
+    client.send_and_read("MAIL FROM:<sender@example.com>").await;
+    client.send_and_read("RCPT TO:<alice@test.local>").await;
+    client.send_and_read("DATA").await;
+    client.send(test_email()).await;
+
+    let start = std::time::Instant::now();
+    let resp = client.send_and_read(".").await;
+    let elapsed_ms = start.elapsed().as_millis();
+
+    assert!(resp.starts_with("250"), "Expected 250 OK: {resp}");
+    assert!(
+        elapsed_ms < max_response_ms,
+        "250 OK must return well under the hook's {HOOK_SLEEP_SECS}s sleep \
+         (took {elapsed_ms}ms, limit {max_response_ms}ms). If this fails, \
+         the SMTP DATA path is firing on_receive hooks synchronously \
+         again — the exact bug PR #225 fixes.",
+    );
+
+    client.send_and_read("QUIT").await;
+
+    // Wait for the detached hook to finish. Generous slack on top of
+    // the sleep covers slow CI; if it ever doesn't run, the marker
+    // never appears and the test fails after the timeout.
+    let deadline = std::time::Instant::now() + Duration::from_secs((HOOK_SLEEP_SECS as u64) + 10);
+    while std::time::Instant::now() < deadline {
+        if marker.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(
+        marker.exists(),
+        "detached on_receive hook never ran (marker {} missing); \
+         the spawn path may be silently dropping hooks",
+        marker.display(),
+    );
+
+    // Belt-and-braces: the email itself must still be on disk.
+    let alice_dir = inbox(tmp.path(), "alice");
+    let md_files = collect_md_files(&alice_dir);
+    assert_eq!(md_files.len(), 1, "exactly one .md should be ingested");
 }
