@@ -146,16 +146,20 @@ header {
   border-bottom-color: var(--accent);
 }
 
-.topnav a.discord-pill {
+.topnav a.discord-pill,
+.topnav a.github-pill {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   padding: 5px 11px;
-  border: 1px solid #5865F2;
   border-radius: 999px;
-  background: #5865F2;
-  color: #fff;
   font-weight: 500;
+  color: #fff;
+}
+
+.topnav a.discord-pill {
+  border: 1px solid #5865F2;
+  background: #5865F2;
 }
 
 .topnav a.discord-pill:hover {
@@ -164,7 +168,19 @@ header {
   color: #fff;
 }
 
-.topnav a.discord-pill svg {
+.topnav a.github-pill {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+}
+
+.topnav a.github-pill:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--paper);
+}
+
+.topnav a.discord-pill svg,
+.topnav a.github-pill svg {
   display: block;
   flex-shrink: 0;
 }
