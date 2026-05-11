@@ -20,6 +20,17 @@ Your mail, your machine, end to end.<br>
 Human-friendly setup. LLM-friendly everything else.
 </em></p>
 
+<p align="center">
+  <a href="https://discord.gg/esWwA3YfK8"><img src="https://img.shields.io/badge/Discord-Join%20community-5865F2?logo=discord&logoColor=white&style=flat-square" alt="Discord"></a>
+  <a href="https://github.com/uzyn/aimx/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/uzyn/aimx/ci.yml?branch=main&label=CI&style=flat-square" alt="CI"></a>
+  <a href="https://github.com/uzyn/aimx/releases/latest"><img src="https://img.shields.io/github/v/release/uzyn/aimx?style=flat-square" alt="Latest release"></a>
+  <a href="https://github.com/uzyn/aimx/releases"><img src="https://img.shields.io/github/downloads/uzyn/aimx/total?style=flat-square&label=downloads" alt="GitHub release downloads"></a>
+  <img src="https://img.shields.io/badge/platform-Linux-blue?style=flat-square" alt="Platform: Linux">
+  <a href="https://github.com/uzyn/aimx/blob/main/LICENSE"><img src="https://img.shields.io/github/license/uzyn/aimx?style=flat-square" alt="License: MIT"></a>
+</p>
+
+<p align="center"><strong><a href="https://discord.gg/esWwA3YfK8">Join the AIMX Discord →</a></strong></p>
+
 
 AIMX (AI Mail Exchange) is a self-hosted email server (SMTP) and MCP stdio server that gives AI agents their own email addresses. Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and any other agent harness. No Gmail, no OAuth, no SaaS. Runs on the same VPS you already provisioned for your agents.
 

@@ -146,6 +146,45 @@ header {
   border-bottom-color: var(--accent);
 }
 
+.topnav a.discord-pill,
+.topnav a.github-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border-radius: 999px;
+  font-weight: 500;
+  color: #fff;
+}
+
+.topnav a.discord-pill {
+  border: 1px solid #5865F2;
+  background: #5865F2;
+}
+
+.topnav a.discord-pill:hover {
+  background: #4752C4;
+  border-color: #4752C4;
+  color: #fff;
+}
+
+.topnav a.github-pill {
+  border: 1px solid var(--ink);
+  background: var(--ink);
+}
+
+.topnav a.github-pill:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--paper);
+}
+
+.topnav a.discord-pill svg,
+.topnav a.github-pill svg {
+  display: block;
+  flex-shrink: 0;
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
@@ -560,6 +599,22 @@ h1 em {
 }
 
 .btn.primary:hover::after { color: var(--paper); }
+
+.btn.discord {
+  background: #5865F2;
+  border-color: #5865F2;
+  color: #fff;
+}
+
+.btn.discord::after { color: #fff; }
+
+.btn.discord:hover {
+  background: #4752C4;
+  border-color: #4752C4;
+  color: #fff;
+}
+
+.btn.discord:hover::after { color: #fff; }
 
 /* Terminal mockup — used for the hero "demo" and Quick start. Dark slate
    on cream paper produces a deliberate moment of contrast that reads
