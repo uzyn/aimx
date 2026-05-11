@@ -143,9 +143,20 @@ pub fn warn_mark() -> ColoredString {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepState {
     Pending,
+    /// Reserved for the in-progress glyph (`◐`). No current `aimx setup`
+    /// step uses it — Step 6's earlier interim ◐ rendering went away
+    /// when the wizard stopped spawning a sub-process for agent wiring.
+    /// Future surfaces (e.g. an `aimx upgrade` long-running step) can
+    /// reuse the existing rendering without re-introducing the variant.
+    #[allow(dead_code)]
     Running,
     Done,
     Skipped,
+    /// Step the wizard finished its part of and explicitly handed off
+    /// to the operator (e.g. "now run `aimx agents setup` as your
+    /// regular user"). Distinct from `Skipped` (which means the step
+    /// was bypassed) and `Done` (which means the wizard completed it).
+    Handoff,
     /// Reserved for surfaces that surface a fatal step-level error
     /// without aborting the wizard. The current `aimx setup` flow never
     /// reaches this state because hard errors `return Err(...)` and exit
@@ -155,11 +166,11 @@ pub enum StepState {
     Error,
 }
 
-/// Render the checklist glyph for `state`. Unicode (☐ / ◐ / ☑ / ☒ / ✗)
+/// Render the checklist glyph for `state`. Unicode (☐ / ◐ / ☑ / ☒ / ⎘ / ✗)
 /// on a TTY with color enabled, ASCII fallback (`[ ]` / `[~]` / `[x]` /
-/// `[-]` / `[!]`) when color is disabled (piped, redirected, `NO_COLOR=1`,
-/// or dumb terminal). Color: pending=dim, running=yellow, done=green,
-/// skipped=cyan, error=red.
+/// `[-]` / `[*]` / `[!]`) when color is disabled (piped, redirected,
+/// `NO_COLOR=1`, or dumb terminal). Color: pending=dim, running=yellow,
+/// done=green, skipped=cyan, handoff=copper accent, error=red.
 pub fn step_glyph(state: StepState) -> ColoredString {
     if colorize_active() {
         match state {
@@ -167,6 +178,7 @@ pub fn step_glyph(state: StepState) -> ColoredString {
             StepState::Running => "◐".yellow(),
             StepState::Done => "☑".green(),
             StepState::Skipped => "☒".cyan(),
+            StepState::Handoff => "⎘".truecolor(185, 83, 28),
             StepState::Error => "✗".red(),
         }
     } else {
@@ -175,6 +187,7 @@ pub fn step_glyph(state: StepState) -> ColoredString {
             StepState::Running => "[~]".normal(),
             StepState::Done => "[x]".normal(),
             StepState::Skipped => "[-]".normal(),
+            StepState::Handoff => "[*]".normal(),
             StepState::Error => "[!]".normal(),
         }
     }
@@ -487,6 +500,7 @@ mod tests {
         let running = step_glyph(StepState::Running).to_string();
         let done = step_glyph(StepState::Done).to_string();
         let skipped = step_glyph(StepState::Skipped).to_string();
+        let handoff = step_glyph(StepState::Handoff).to_string();
         let error = step_glyph(StepState::Error).to_string();
         control::unset_override();
         assert!(
@@ -506,6 +520,10 @@ mod tests {
             "expected ☒ in skipped step glyph on TTY, got {skipped:?}"
         );
         assert!(
+            handoff.contains('⎘'),
+            "expected ⎘ in handoff step glyph on TTY, got {handoff:?}"
+        );
+        assert!(
             error.contains('✗'),
             "expected ✗ in error step glyph on TTY, got {error:?}"
         );
@@ -521,12 +539,14 @@ mod tests {
         let running = step_glyph(StepState::Running).to_string();
         let done = step_glyph(StepState::Done).to_string();
         let skipped = step_glyph(StepState::Skipped).to_string();
+        let handoff = step_glyph(StepState::Handoff).to_string();
         let error = step_glyph(StepState::Error).to_string();
         control::unset_override();
         assert_eq!(pending, "[ ]");
         assert_eq!(running, "[~]");
         assert_eq!(done, "[x]");
         assert_eq!(skipped, "[-]");
+        assert_eq!(handoff, "[*]");
         assert_eq!(error, "[!]");
     }
 }
