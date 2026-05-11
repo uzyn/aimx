@@ -3,6 +3,8 @@
 > [!CAUTION]
 > **Under heavy development.** This is a prerelease software. Expect breaking changes and unstable operations.
 
+[![Discord](https://img.shields.io/badge/Discord-Join%20community-5865F2?logo=discord&logoColor=white)](https://discord.gg/esWwA3YfK8)
+
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
@@ -19,6 +21,8 @@ Runs entirely on your box. No third parties.<br>
 Your mail, your machine, end to end.<br>
 Human-friendly setup. LLM-friendly everything else.
 </em></p>
+
+<p align="center"><strong><a href="https://discord.gg/esWwA3YfK8">Join the AIMX Discord →</a></strong></p>
 
 
 AIMX (AI Mail Exchange) is a self-hosted email server (SMTP) and MCP stdio server that gives AI agents their own email addresses. Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and any other agent harness. No Gmail, no OAuth, no SaaS. Runs on the same VPS you already provisioned for your agents.

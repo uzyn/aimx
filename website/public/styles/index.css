@@ -561,6 +561,22 @@ h1 em {
 
 .btn.primary:hover::after { color: var(--paper); }
 
+.btn.discord {
+  background: #5865F2;
+  border-color: #5865F2;
+  color: #fff;
+}
+
+.btn.discord::after { color: #fff; }
+
+.btn.discord:hover {
+  background: #4752C4;
+  border-color: #4752C4;
+  color: #fff;
+}
+
+.btn.discord:hover::after { color: #fff; }
+
 /* Terminal mockup — used for the hero "demo" and Quick start. Dark slate
    on cream paper produces a deliberate moment of contrast that reads
    instantly as "this is a terminal". The traffic-light dots and label
