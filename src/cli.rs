@@ -287,7 +287,7 @@ pub enum Command {
     /// Tail the aimx service log
     Logs {
         /// Number of lines to show (default: 50)
-        #[arg(long)]
+        #[arg(short = 'n', long)]
         lines: Option<usize>,
 
         /// Stream the log live (like `journalctl -f`)

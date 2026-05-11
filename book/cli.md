@@ -71,7 +71,7 @@ Tail or follow the `aimx serve` service log. Wraps `journalctl -u aimx` on syste
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--lines <N>` | 50 | Number of trailing lines to show. |
+| `-n`, `--lines <N>` | 50 | Number of trailing lines to show. |
 | `-f`, `--follow` | off | Stream new lines as they arrive (like `journalctl -f`). |
 
 ## Mail operations

@@ -1600,6 +1600,7 @@ fn logs_help_advertises_lines_and_follow_flags() {
         .args(["logs", "--help"])
         .assert()
         .success()
+        .stdout(predicate::str::contains("-n"))
         .stdout(predicate::str::contains("--lines"))
         .stdout(predicate::str::contains("--follow"));
 }
