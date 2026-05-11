@@ -46,6 +46,19 @@
 //! MTA retry queues. The cache is not the source of truth — it is
 //! rebuilt on demand from the frontmatter of files already on disk.
 //!
+//! **Per-mailbox keying, by design.** The dedup cache is scoped to the
+//! resolving mailbox name, not globally. Consequence: the same
+//! `Message-Id` delivered to two different RCPTs that route to two
+//! different mailboxes (e.g. `alice@` on the first try, then an
+//! unknown local part that falls through to `catchall` on a retry) is
+//! *not* deduped — the two ingests land in independent caches and
+//! both fire `on_receive`. This matches user-facing intent: each
+//! mailbox is its own "inbox" and a delivery to a different recipient
+//! is a different delivery, even if the sending MTA reused the
+//! Message-Id. If a future requirement needs cross-mailbox dedup,
+//! promote the cache out of [`MailboxState`] onto a process-wide
+//! singleton; doing it per-mailbox here is the conservative default.
+//!
 //! # Contention notes
 //!
 //! The map-level `std::sync::Mutex` around the hashmap is held only for

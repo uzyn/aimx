@@ -42,6 +42,14 @@ pub enum HookMode {
 /// older entries are auto-evicted by SparKV. 24h sits comfortably
 /// above any practical SMTP retry window: most retries land within
 /// minutes, and even pathological MTAs give up well before a day.
+///
+/// Tradeoff: RFC 5321 §4.5.4.1 allows MTAs to retry for up to 4-5
+/// days, and Gmail/Postfix defaults sit in that range. A legitimate
+/// retry past the 24h mark — rare but possible during prolonged
+/// inbound outages — will be treated as a fresh delivery and re-fire
+/// `on_receive`. We accept that edge case in exchange for a bounded
+/// cache footprint; raising the TTL is a knob, not an absolute, and
+/// the value is intentionally lower than the RFC retry ceiling.
 const DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// Safety cap on the per-mailbox dedup cache. SparKV's default
@@ -345,6 +353,16 @@ pub fn ingest_email(
     // slow-hook → DATA timeout interaction before this change — would
     // re-fire `on_receive`. The cache is lazily rebuilt from disk on
     // first ingest into the mailbox after daemon startup.
+    //
+    // Empty-`Message-Id` gap: real-world MTAs always emit a
+    // `Message-Id`, so the gate below is a no-op for compliant
+    // senders. A hand-crafted SMTP client (or a buggy custom retry
+    // path) that omits the header would slip past dedup and re-fire
+    // the hook on every retry. We deliberately do not synthesize a
+    // content digest fallback — it would mask broken-sender bugs that
+    // an operator probably wants to see. If "why did this hook fire
+    // N×?" ever surfaces, an absent `Message-Id` is the first thing
+    // to check on the source `.eml`.
     if !message_id.is_empty() {
         let mut cache_guard = state
             .seen_message_ids
@@ -494,6 +512,16 @@ pub fn ingest_email(
                 ""
             };
             if let Err(e) = cache.set_with_ttl(&meta.message_id, value, DEDUP_TTL) {
+                // Failure mode at scale: SparKV returns `Err(MaxItemsExceeded)`
+                // when this mailbox accumulates more than `DEDUP_MAX_ITEMS`
+                // (100k) live entries inside the 24h window — roughly 1.2
+                // sustained inbound messages/second per mailbox, which is
+                // absurd for any realistic aimx deployment. When that
+                // does happen, the next retry of this Message-Id misses
+                // the cache and re-fires the hook (i.e. silently regresses
+                // to the exact bug this dedup layer exists to prevent).
+                // The `tracing::warn!` below is the operator's signal;
+                // raise `DEDUP_MAX_ITEMS` if you ever actually see it.
                 tracing::warn!(
                     target: "aimx::ingest",
                     "dedup cache insert failed mailbox={mailbox} message_id={message_id}: {err:?}",
@@ -517,46 +545,56 @@ pub fn ingest_email(
                 hook::execute_on_receive(config, mailbox_config, &ctx);
             }
             HookMode::Async => {
-                // Detach hook execution onto a fresh OS thread so the
-                // calling SMTP DATA handler can return immediately. We
-                // own all the data the hook needs; clone it into the
-                // closure to give the thread a self-contained snapshot.
-                let config_owned = config.clone();
-                let mailbox_name = mailbox.clone();
-                let mailbox_name_for_log = mailbox_name.clone();
-                let thread_name = format!("aimx-hook-{mailbox_name}");
-                let md_path_owned = md_path.clone();
-                let meta_owned = meta.clone();
-                if let Err(e) = std::thread::Builder::new()
-                    .name(thread_name)
-                    .spawn(move || {
-                        let Some(mb_cfg) = config_owned.mailboxes.get(&mailbox_name) else {
-                            return;
-                        };
-                        let ctx = OnReceiveContext {
-                            filepath: &md_path_owned,
-                            metadata: &meta_owned,
-                        };
-                        hook::execute_on_receive(&config_owned, mb_cfg, &ctx);
-                    })
-                {
-                    // Falling back to a synchronous fire on spawn
-                    // failure would re-introduce the SMTP-blocking bug
-                    // this branch exists to fix; swallow the error and
-                    // log instead. The email is still on disk so the
-                    // operator can re-fire the hook manually if needed.
-                    tracing::warn!(
-                        target: "aimx::hook",
-                        "failed to spawn async hook thread mailbox={mailbox_name}: {err}",
-                        mailbox_name = mailbox_name_for_log,
-                        err = e,
-                    );
-                }
+                spawn_on_receive_async(config, &mailbox, &md_path, &meta);
             }
         }
     }
 
     Ok(())
+}
+
+/// Detach `on_receive` hook execution onto a fresh OS thread so the
+/// calling SMTP DATA handler can return `250 OK` immediately. We own
+/// all the data the hook needs; clone it into the closure to give the
+/// thread a self-contained snapshot.
+///
+/// Spawn-failure policy: falling back to a synchronous fire on spawn
+/// failure would re-introduce the SMTP-blocking bug this branch
+/// exists to fix; swallow the error and log instead. The email is
+/// still on disk so the operator can re-fire the hook manually if
+/// needed.
+fn spawn_on_receive_async(
+    config: &Config,
+    mailbox: &str,
+    md_path: &Path,
+    meta: &InboundFrontmatter,
+) {
+    let config_owned = config.clone();
+    let mailbox_name = mailbox.to_string();
+    let mailbox_name_for_log = mailbox_name.clone();
+    let thread_name = format!("aimx-hook-{mailbox_name}");
+    let md_path_owned = md_path.to_path_buf();
+    let meta_owned = meta.clone();
+    if let Err(e) = std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || {
+            let Some(mb_cfg) = config_owned.mailboxes.get(&mailbox_name) else {
+                return;
+            };
+            let ctx = OnReceiveContext {
+                filepath: &md_path_owned,
+                metadata: &meta_owned,
+            };
+            hook::execute_on_receive(&config_owned, mb_cfg, &ctx);
+        })
+    {
+        tracing::warn!(
+            target: "aimx::hook",
+            "failed to spawn async hook thread mailbox={mailbox_name}: {err}",
+            mailbox_name = mailbox_name_for_log,
+            err = e,
+        );
+    }
 }
 
 fn extract_header_value(message: &mail_parser::Message, name: &str) -> Option<String> {
@@ -627,14 +665,29 @@ fn build_dedup_cache_from_disk(inbox_dir: &Path) -> sparkv::SparKV {
 }
 
 /// Read just the frontmatter `message_id` and `received_at` from a
-/// `.md` file. Opens at most the first 4 KiB so a huge body (rare on
+/// `.md` file. Opens at most the first 16 KiB so a huge body (rare on
 /// inbound, but possible) doesn't cost the dedup-rebuild path. Returns
 /// `None` when the frontmatter is malformed, the keys are missing, or
 /// `received_at` doesn't parse as RFC-3339.
+///
+/// Why 16 KiB: typical inbound frontmatter is well under 1 KiB, but a
+/// long `References` chain combined with many `cc` recipients (common
+/// on busy mailing lists) can push the closing `+++` past the 4 KiB
+/// mark and silently drop the entry from the rebuilt cache. 16 KiB
+/// covers every realistic frontmatter size we expect on inbound.
+///
+/// Parser limitations: this is a hand-rolled subset of TOML that only
+/// understands `key = "value"` double-quoted strings on a single line
+/// (the shape `format_frontmatter` emits). Multi-line strings, TOML
+/// literal strings (single-quoted), or any other TOML feature will
+/// return `None` for the affected key. That's intentional — keeping
+/// the parser tiny avoids pulling `serde`/`toml` into the cold
+/// rebuild path — but it does mean any future schema change in
+/// `frontmatter.rs` needs to touch this parser too.
 fn read_frontmatter_id_pair(md_path: &Path) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
     use std::io::Read as _;
     let mut file = std::fs::File::open(md_path).ok()?;
-    let mut buf = [0u8; 4096];
+    let mut buf = [0u8; 16 * 1024];
     let n = file.read(&mut buf).ok()?;
     let head = std::str::from_utf8(&buf[..n]).ok()?;
 
@@ -682,6 +735,14 @@ fn read_frontmatter_id_pair(md_path: &Path) -> Option<(String, chrono::DateTime<
 /// already stripped the key, so `after_key` looks like ` = "..."`. We
 /// accept double-quoted strings only — TOML literals (single-quoted)
 /// are never emitted by `format_frontmatter`.
+///
+/// Parser limitations: this is the minimal subset of TOML that
+/// matches what `format_frontmatter` emits today. Multi-line strings
+/// (`"""…"""`), TOML literals (`'…'`), and any escape sequence that
+/// embeds an unescaped `"` inside the value will all return the wrong
+/// answer or `None`. If `frontmatter.rs` ever grows a field that
+/// needs multi-line strings or non-trivial escaping, swap this for a
+/// real `toml` crate call rather than expanding the regex-in-disguise.
 fn parse_toml_string_value(after_key: &str) -> Option<String> {
     let rest = after_key.trim_start();
     let rest = rest.strip_prefix('=')?.trim_start();
