@@ -252,16 +252,17 @@ where
 
     // Default Markdown send path: render the Markdown body to HTML and
     // assemble the multipart/alternative (or nested multipart/mixed when
-    // the client packed attachments) shape daemon-side. The signature is
-    // appended to the Markdown source before rendering so a Markdown
-    // link in the signature renders as a clickable HTML anchor. The two
-    // escape-hatch fields on the SEND frame select an alternate wire
-    // shape: `text_only=true` ships single-part text/plain, and
-    // `html_body=Some(..)` ships multipart/alternative whose HTML part
-    // is the operator-supplied bytes verbatim. The signature is
-    // appended ONLY on the default Markdown path — escape hatches use
-    // the body verbatim because the operator already chose the
-    // rendering.
+    // the client packed attachments) shape daemon-side. The signature
+    // is appended to the body on every path so the recipient always
+    // sees it in the text/plain region (Markdown source on the default
+    // path, body verbatim on `--text-only`, text fallback on
+    // `--html-body`). The two escape-hatch fields on the SEND frame
+    // select an alternate wire shape: `text_only=true` ships single-part
+    // text/plain, and `html_body=Some(..)` ships multipart/alternative
+    // whose HTML part is the operator-supplied bytes verbatim. Operators
+    // wanting the signature in the HTML view of an `--html-body` send
+    // put it inside their HTML template — the daemon never modifies the
+    // supplied HTML bytes.
     let body_bytes = match crate::wire_assembly::assemble_wire_message(
         &body_with_id,
         config.effective_signature(),
@@ -1603,6 +1604,53 @@ mod tests {
         );
     }
 
+    /// Daemon-level coverage for the text-only path: a custom signature
+    /// configured via `Config::signature` must land in the single-part
+    /// text/plain body shipped by `text_only=true`. Regression for the
+    /// bug where `wire_assembly` dropped the signature on every escape
+    /// hatch.
+    #[tokio::test]
+    async fn custom_signature_appended_on_text_only_path() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = ctx_with_signature(
+            mock.clone(),
+            data_dir.path().to_path_buf(),
+            Some("-- daemon-sig-marker".to_string()),
+        );
+        let req = SendRequest {
+            body: body("alice@example.com"),
+            text_only: true,
+            html_body: None,
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }), "{resp:?}");
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        // Single-part text/plain: no multipart wrapping.
+        assert!(
+            !delivered.contains("multipart/"),
+            "text-only must not produce a multipart wire: {delivered}"
+        );
+        // Body and signature both present.
+        assert!(delivered.contains("hello"));
+        assert!(
+            delivered.contains("daemon-sig-marker"),
+            "custom signature must be appended on text-only path: {delivered}"
+        );
+        // Persisted sent record carries the signature too (we read the
+        // stored body off the signed wire, so the signature rides along).
+        let persisted = read_sent_body(data_dir.path());
+        assert!(
+            persisted.contains("daemon-sig-marker"),
+            "persisted sent body must carry the signature: {persisted}"
+        );
+    }
+
     #[tokio::test]
     async fn signature_renders_in_text_and_html_parts_with_attachment() {
         let data_dir = tempfile::TempDir::new().unwrap();
@@ -1668,9 +1716,9 @@ mod tests {
     // Escape-hatch branches end-to-end through `handle_send`.
     // ------------------------------------------------------------------
 
-    /// `text_only=true` skips rendering and ships single-part text/plain.
-    /// The signature is NOT auto-appended on this branch (operator-supplied
-    /// content principle).
+    /// `text_only=true` skips Markdown rendering and ships single-part
+    /// text/plain. The signature IS auto-appended on this branch so the
+    /// recipient always sees the configured footer.
     #[tokio::test]
     async fn text_only_send_emits_single_part_text_plain() {
         let mock = Arc::new(MockTransport {
@@ -1702,18 +1750,21 @@ mod tests {
         // text/plain present, body verbatim.
         assert!(delivered.contains("Content-Type: text/plain"));
         assert!(delivered.contains("hello"));
-        // Signature is NOT appended (default ctx config has no signature
-        // set, so `effective_signature` returns the AIMX default — we
-        // confirm it is *absent* on the text-only path).
+        // The default signature IS appended on the text-only path.
         assert!(
-            !delivered.contains("Sent from AIMX."),
-            "text-only must not append the default signature: {delivered}"
+            delivered.contains("Sent from AIMX."),
+            "text-only must append the default signature: {delivered}"
+        );
+        assert!(
+            delivered.contains("https://aimx.email"),
+            "text-only must carry the default signature URL: {delivered}"
         );
     }
 
-    /// `html_body=Some(html)` skips rendering and uses the operator's
-    /// HTML verbatim. Same operator-content principle: no signature
-    /// appended.
+    /// `html_body=Some(html)` skips Markdown rendering and uses the
+    /// operator's HTML verbatim. The signature is appended to the
+    /// text/plain fallback but the supplied HTML stays untouched —
+    /// operators on `--html-body` already own their HTML rendering.
     #[tokio::test]
     async fn html_body_send_uses_supplied_html_verbatim() {
         let mock = Arc::new(MockTransport {
@@ -1751,10 +1802,18 @@ mod tests {
             !html_section.contains("style=\""),
             "renderer must not be invoked on --html-body path: {html_section}"
         );
-        // Default signature is not appended.
+        // Default signature IS appended to the text/plain fallback so
+        // text-only readers still see it; the operator-supplied HTML
+        // remains verbatim (signature must not appear inside the HTML
+        // part).
         assert!(
-            !delivered.contains("Sent from AIMX."),
-            "--html-body must not append the default signature: {delivered}"
+            delivered.contains("Sent from AIMX."),
+            "--html-body must append the default signature to text/plain: {delivered}"
+        );
+        assert!(
+            !html_section.contains("Sent from AIMX."),
+            "operator-supplied HTML must stay verbatim (signature must not leak into HTML): \
+             {html_section}"
         );
     }
 

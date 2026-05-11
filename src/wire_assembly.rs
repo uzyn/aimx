@@ -21,12 +21,17 @@
 //!     HTML verbatim)
 //!   - With attachments → `multipart/mixed` wrapping the alternative
 //!
-//! The per-mailbox signature is appended to the Markdown source **before**
-//! rendering so it participates in the HTML output (a `[link](url)`
-//! signature renders as a clickable `<a>` in HTML and stays Markdown in the
-//! plain-text part). The signature is **only** appended on the default
-//! Markdown path — `--text-only` and `--html-body` use the body verbatim
-//! because the operator already chose the final rendering.
+//! The per-mailbox signature is appended to the body on every path so the
+//! recipient always sees it in the `text/plain` region:
+//!
+//! - default Markdown: appended to the Markdown source **before** rendering,
+//!   so a `[link](url)` signature renders as a clickable `<a>` in HTML and
+//!   stays Markdown in the plain-text part.
+//! - `--text-only`: appended to the body before encoding, so even one-liner
+//!   plain-text sends carry it.
+//! - `--html-body`: appended to the `text/plain` fallback. The supplied HTML
+//!   stays operator-verbatim — operators wanting the signature visible in
+//!   the HTML view put it in their template.
 //!
 //! `text/plain` and `text/html` parts use 7bit transfer-encoding when their
 //! bytes are pure ASCII and quoted-printable when they contain non-ASCII —
@@ -98,10 +103,12 @@ impl From<MarkdownRenderError> for AssembleError {
 /// - `multipart/mixed` with the first part `text/plain` (the body text)
 ///   followed by attachment parts.
 ///
-/// `signature` is appended to the body text before rendering on the
-/// default Markdown path. Pass an empty string to disable. On the
-/// `text_only` and `html_body` paths the signature is **never** appended:
-/// the operator picked the final shape and AIMX must not mutate it.
+/// `signature` is appended to the `text/plain` body region on every path
+/// (Markdown source on the default path; body verbatim on `--text-only`;
+/// text fallback on `--html-body`). Pass an empty string to disable. The
+/// supplied HTML on the `--html-body` path is never modified — operators
+/// own that rendering and put the signature into their template if they
+/// want it visible in the HTML view.
 ///
 /// Branches:
 /// - `text_only=false, html_body=None` → default Markdown render path.
@@ -127,6 +134,12 @@ pub fn assemble_wire_message(
     let (body_text, attachments) =
         extract_markdown_and_attachments(&original_headers, body_section);
 
+    // Append the signature once, up-front, so every branch ships a body
+    // that carries it in the `text/plain` region. The escape hatches
+    // still use the body verbatim from this point on — they just don't
+    // get to skip the signature.
+    let body_text = append_signature_to_body(&body_text, signature);
+
     let preserved_headers = strip_outgoing_content_headers(&original_headers);
     let outer = make_boundary();
     let inner = make_boundary();
@@ -143,22 +156,24 @@ pub fn assemble_wire_message(
     };
 
     let body_bytes = if text_only {
-        // Plain-text path: ship the body verbatim. With attachments,
-        // wrap in multipart/mixed so the text part and attachments are
-        // siblings (no inner alternative — there's no rich part).
+        // Plain-text path: ship the body (with signature appended)
+        // verbatim. With attachments, wrap in multipart/mixed so the
+        // text part and attachments are siblings (no inner alternative
+        // — there's no rich part).
         build_text_only_body(&body_text, &attachments, &outer, text_only_top_cte)
     } else if let Some(html) = html_body {
-        // Custom-HTML path: text/plain + supplied HTML verbatim. With
-        // attachments, the alternative becomes the first child of an
-        // outer multipart/mixed.
+        // Custom-HTML path: text/plain (signature appended) + supplied
+        // HTML verbatim. The supplied HTML is never modified — operators
+        // who want the signature visible in the HTML view put it in
+        // their template. With attachments, the alternative becomes the
+        // first child of an outer multipart/mixed.
         let html_str = String::from_utf8_lossy(html).into_owned();
         build_multipart_body(&body_text, &html_str, &attachments, &outer, &inner)
     } else {
-        // Default Markdown path: append signature, render to HTML,
-        // then assemble multipart/alternative.
-        let markdown_with_sig = append_signature_to_markdown(&body_text, signature);
-        let html = render_markdown_to_email_html(&markdown_with_sig)?;
-        build_multipart_body(&markdown_with_sig, &html, &attachments, &outer, &inner)
+        // Default Markdown path: render the (signature-appended)
+        // Markdown to HTML, then assemble multipart/alternative.
+        let html = render_markdown_to_email_html(&body_text)?;
+        build_multipart_body(&body_text, &html, &attachments, &outer, &inner)
     };
 
     let content_headers =
@@ -952,17 +967,19 @@ fn make_boundary() -> String {
     format!("aimx-{}", Uuid::new_v4().simple())
 }
 
-/// Append `signature` to `markdown` separated by a blank line. Empty
-/// signature returns the markdown verbatim. Any trailing whitespace on
-/// the signature is preserved as-is.
-fn append_signature_to_markdown(markdown: &str, signature: &str) -> String {
+/// Append `signature` to `body` separated by a blank line. Empty
+/// signature returns the body verbatim. Any trailing whitespace on the
+/// signature is preserved as-is. Works for both Markdown bodies (where
+/// the rendered HTML inherits the appended signature) and plain-text
+/// bodies on the `--text-only` / `--html-body` paths.
+fn append_signature_to_body(body: &str, signature: &str) -> String {
     if signature.is_empty() {
-        return markdown.to_string();
+        return body.to_string();
     }
     let normalized_sig = signature.replace("\r\n", "\n").replace('\r', "\n");
-    let trimmed_md = markdown.trim_end_matches(['\r', '\n']);
-    let mut out = String::with_capacity(trimmed_md.len() + normalized_sig.len() + 4);
-    out.push_str(trimmed_md);
+    let trimmed_body = body.trim_end_matches(['\r', '\n']);
+    let mut out = String::with_capacity(trimmed_body.len() + normalized_sig.len() + 4);
+    out.push_str(trimmed_body);
     out.push_str("\n\n");
     out.push_str(&normalized_sig);
     out
@@ -1544,11 +1561,13 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// `--text-only` with no attachments: single-part `text/plain`,
-    /// body verbatim, no boundary markers, no rendered HTML.
+    /// body verbatim, no boundary markers, no rendered HTML. The
+    /// signature IS appended to the body so text-only one-liners still
+    /// carry the configured footer.
     #[test]
     fn text_only_no_attachments_emits_single_part_text_plain() {
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "Your code: 9999");
-        let out = assemble_wire_message(&req, "ignored-sig", true, None).unwrap();
+        let out = assemble_wire_message(&req, "aimx-sig-marker", true, None).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
         assert!(text.contains("Content-Transfer-Encoding: 7bit"));
@@ -1559,9 +1578,11 @@ mod tests {
         // No rendered HTML.
         assert!(!text.contains("<h1"), "{text}");
         assert!(text.contains("Your code: 9999"));
-        // The signature is NOT appended on the text-only path even when
-        // the caller passed one.
-        assert!(!text.contains("ignored-sig"), "{text}");
+        // The signature IS appended on the text-only path.
+        assert!(
+            text.contains("aimx-sig-marker"),
+            "signature must be appended on text-only path: {text}"
+        );
     }
 
     /// Regression: the single-part `--text-only` no-attachments wire
@@ -1719,20 +1740,33 @@ mod tests {
             "From: a@b.com\nTo: c@d.com\nContent-Type: multipart/mixed; boundary=\"BND\"\n",
             body,
         );
-        let out = assemble_wire_message(&req, "ignored-sig", true, None).unwrap();
+        let out = assemble_wire_message(&req, "aimx-sig-marker", true, None).unwrap();
         let text = String::from_utf8_lossy(&out);
 
         // Outer wrap is multipart/mixed; no inner alternative; no HTML
-        // rendering; signature suppressed.
+        // rendering. The signature IS appended to the text part — it
+        // sits inside the first text/plain child, before the first
+        // attachment boundary marker.
         assert!(text.contains("Content-Type: multipart/mixed; boundary=\"aimx-"));
         assert!(!text.contains("multipart/alternative"), "{text}");
         assert!(!text.contains("text/html"), "{text}");
         assert!(!text.contains("<h1"), "{text}");
-        assert!(!text.contains("ignored-sig"), "{text}");
 
-        // Single text part carries the body verbatim.
+        // Single text part carries the body and the signature.
         assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
         assert!(text.contains("Body verbatim."));
+        assert!(
+            text.contains("aimx-sig-marker"),
+            "signature must appear in the text part: {text}"
+        );
+        // Signature sits inside the first text/plain part, before the
+        // first attachment boundary.
+        let sig_pos = text.find("aimx-sig-marker").expect("sig must appear");
+        let pdf_pos = text.find("a.pdf").expect("first attachment must appear");
+        assert!(
+            sig_pos < pdf_pos,
+            "signature must land inside the text part, before the first attachment: {text}"
+        );
 
         // All three attachments preserved as siblings.
         assert!(text.contains("filename=\"a.pdf\""));
@@ -1757,12 +1791,15 @@ mod tests {
     /// `--html-body` with no attachments: `multipart/alternative` with
     /// the body as text/plain and the supplied HTML verbatim. The
     /// renderer must NOT touch the HTML — assert no inlined `style="`
-    /// attributes appear that the renderer would have added.
+    /// attributes appear that the renderer would have added. The
+    /// signature is appended to the text/plain fallback so text-only
+    /// readers still see it; the supplied HTML stays verbatim because
+    /// operators on `--html-body` already own their HTML rendering.
     #[test]
     fn html_body_no_attachments_emits_multipart_alternative_with_verbatim_html() {
         let custom_html = b"<h1>x</h1>";
         let req = build_request("From: a@b.com\nTo: c@d.com\n", "fallback text.");
-        let out = assemble_wire_message(&req, "ignored-sig", false, Some(custom_html)).unwrap();
+        let out = assemble_wire_message(&req, "aimx-sig-marker", false, Some(custom_html)).unwrap();
         let text = String::from_utf8_lossy(&out);
         assert!(text.contains("Content-Type: multipart/alternative; boundary=\"aimx-"));
         assert!(text.contains("Content-Type: text/plain; charset=utf-8"));
@@ -1780,8 +1817,22 @@ mod tests {
             !html_after.contains("style=\""),
             "renderer must not be invoked on --html-body path: {html_after}"
         );
-        // Signature is not appended on the html-body path either.
-        assert!(!text.contains("ignored-sig"), "{text}");
+        // Signature lands in the text/plain part — before the text/html
+        // boundary — and does NOT appear inside the supplied HTML.
+        let sig_pos = text
+            .find("aimx-sig-marker")
+            .expect("signature must appear in the text part");
+        let html_pos = text
+            .find("text/html")
+            .expect("text/html part must exist on html_body path");
+        assert!(
+            sig_pos < html_pos,
+            "signature must sit in the text/plain part, not in the HTML part: {text}"
+        );
+        assert!(
+            !html_after.contains("aimx-sig-marker"),
+            "operator-supplied HTML must stay verbatim (no signature injected): {html_after}"
+        );
     }
 
     /// `--html-body` with attachments: outer `multipart/mixed` wrapping
