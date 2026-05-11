@@ -55,13 +55,13 @@
     },
     {
       "@type": "Question",
-      "name": "Can I run AIMX on my home server?",
-      "acceptedAnswer": { "@type": "Answer", "text": "Usually not. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run: curl -fsSL https://aimx.email/portcheck.sh | sh" }
+      "name": "Can I switch AIMX to operate on another port?",
+      "acceptedAnswer": { "@type": "Answer", "text": "No. SMTP operates strictly on port 25 as defined and set in RFC 821 since 1982. Other mail servers will only deliver to you on 25." }
     },
     {
       "@type": "Question",
-      "name": "Can I switch AIMX to operate on another port?",
-      "acceptedAnswer": { "@type": "Answer", "text": "No. SMTP is strictly port 25 as defined and set in RFC 821 since 1982. Other mail servers will only deliver to you on 25." }
+      "name": "Can I run AIMX on my home server?",
+      "acceptedAnswer": { "@type": "Answer", "text": "Yes, as long as you have globally accessible port 25. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run: curl -fsSL https://aimx.email/portcheck.sh | sh" }
     },
     {
       "@type": "Question",
@@ -519,7 +519,7 @@
       </details>
       <details>
         <summary>Why do I need AIMX when I can just use MCP-enabled AgentMail or LobsterMail?</summary>
-        <p class="faq-body">You can, if you do not mind paying and do not mind your emails being stored and accessible on third-party servers.</p>
+        <p class="faq-body">You can, if you do not mind your emails being stored and accessible on third-party servers. Besides, credit card is required.</p>
       </details>
       <details>
         <summary>How are emails stored on AIMX?</summary>
