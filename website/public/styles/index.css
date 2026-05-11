@@ -146,6 +146,29 @@ header {
   border-bottom-color: var(--accent);
 }
 
+.topnav a.discord-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 11px;
+  border: 1px solid #5865F2;
+  border-radius: 999px;
+  background: #5865F2;
+  color: #fff;
+  font-weight: 500;
+}
+
+.topnav a.discord-pill:hover {
+  background: #4752C4;
+  border-color: #4752C4;
+  color: #fff;
+}
+
+.topnav a.discord-pill svg {
+  display: block;
+  flex-shrink: 0;
+}
+
 .theme-toggle {
   display: inline-flex;
   align-items: center;
