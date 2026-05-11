@@ -160,8 +160,21 @@ pub struct HookCreateParams {
     #[schemars(description = "Hard subprocess timeout in seconds. Default 60, \
                        max 600. SIGTERM at the limit, SIGKILL 5s later.")]
     pub timeout_secs: Option<u32>,
-    #[schemars(description = "Opt into firing on inbound emails the trust gate \
-                       marks as not trusted. Only valid on event = \
+    #[schemars(description = "Default false. DO NOT set true unless the user \
+                       explicitly asks the hook to fire on untrusted senders \
+                       (phrases like \"fire on untrusted\", \"even from \
+                       untrusted senders\", \"regardless of trust\"). Setting \
+                       true lets ANY external sender — including spoofed-From \
+                       spammers — trigger this hook's cmd, which is a real \
+                       cost / RCE-shaped exposure when cmd invokes an LLM or \
+                       shell. Assume the operator has already configured the \
+                       mailbox's trust policy; with false, the hook fires \
+                       only on inbound mail the daemon marks `trusted = \
+                       \"true\"` (sender on the operator's allowlist AND \
+                       DKIM passes). After creating the hook, tell the user \
+                       that the cmd will fire on inbound mail from senders \
+                       the operator has marked trusted, so the user knows \
+                       what triggers it. Only valid on event = \
                        \"on_receive\".")]
     pub fire_on_untrusted: Option<bool>,
 }

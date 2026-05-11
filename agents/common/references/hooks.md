@@ -33,7 +33,7 @@ Attach a hook to a mailbox you own.
 | `cmd`               | string[]          | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
 | `name`              | string            | no       | Explicit hook name. Omitted → daemon derives a 12-hex-char name from `(event, cmd, fire_on_untrusted)` |
 | `timeout_secs`      | u32               | no       | Per-fire timeout in seconds. Default 60, max 600. SIGTERM at expiry, SIGKILL +5s |
-| `fire_on_untrusted` | bool              | no       | Default `false`. Legal only on `on_receive`. When `true`, the hook fires on any inbound mail regardless of `trusted` |
+| `fire_on_untrusted` | bool              | no       | Default `false`. **Keep it false unless the user explicitly asks for untrusted-sender firing.** Setting `true` lets any external sender — including spoofed-From spam — trigger the hook's cmd. Assume the operator has configured the trust policy correctly; with `false`, the hook fires only on mail the daemon marks `trusted = "true"`. Legal only on `on_receive` |
 
 The raw `.md` (frontmatter + body) is always piped on stdin and the
 same path is also exposed as `$AIMX_FILEPATH`. If your hook only needs
@@ -206,6 +206,21 @@ variant.
 the owner's choice — the relevant defense is mailbox isolation
 (your hook runs as you, on your mailbox), not template gating.
 
+**Default off; flip only on explicit user request.** `fire_on_untrusted
+= true` is a deliberate opt-in that says "I accept that any sender on
+the internet can trigger this hook's cmd." Do not set it because you
+inferred the user might want it (e.g. "they said *forwarded* email, the
+original DKIM probably won't pass") — that reasoning is wrong and has
+shipped real exposure in the past. Assume the operator has the
+mailbox's trust policy configured correctly; the trust policy
+(`trusted_senders`, `trust = "verified"`) lives in root-owned
+`/etc/aimx/config.toml` and is not MCP-changeable, so do not propose
+edits to it. Your job is to keep the hook safe; the operator's job is
+to configure trust. After a successful `hook_create`, report back to
+the user that the cmd will fire on inbound mail from senders the
+operator has marked trusted (`trusted = "true"` in frontmatter), so
+they know what triggers it.
+
 If your hook does not fire on inbound mail, check `email_read`
 output for the message:
 
@@ -273,6 +288,18 @@ argument is wrong.
   absolute path. The daemon refuses bare names.
 - **Do not embed shell quoting in argv elements.** argv is not
   shell-expanded; each element is one `argv[N]`.
+- **Do not silently set `fire_on_untrusted = true` on `on_receive`
+  hooks.** Default to `false` / omit it. Only set `true` when the
+  user's request literally calls for untrusted-sender firing
+  ("regardless of trust", "even from untrusted senders", "anyone can
+  trigger it"). Flipping the flag as a convenience because "the user
+  probably wants this to work" is a real cost / security exposure
+  when `cmd` invokes an LLM or shell.
+- **Do not propose edits to `trusted_senders` or the mailbox's trust
+  policy from MCP.** Those live in root-owned `/etc/aimx/config.toml`
+  and there is no MCP tool to mutate them. Assume the operator has
+  configured trust correctly; in your reply, tell the user which mail
+  triggers the cmd (trusted senders only) and stop there.
 - **Do not set `fire_on_untrusted = true` on `after_send` hooks.**
   Config-load rejects it. There is no untrusted gate on outbound.
 - **Do not `hook_create` every time you reply to a user.** Hooks

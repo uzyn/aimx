@@ -477,7 +477,7 @@ Attach a hook to a mailbox you own.
 | `cmd`               | string[] | yes      | argv array. `cmd[0]` must be an absolute path the owning user can execute |
 | `name`              | string   | no       | Optional explicit name; derived from `(event, cmd, fire_on_untrusted)` when omitted |
 | `timeout_secs`      | u32      | no       | Per-fire timeout in seconds. Default 60, max 600 |
-| `fire_on_untrusted` | bool     | no       | Default `false`. Legal only on `on_receive`; when `true`, fires regardless of `trusted` |
+| `fire_on_untrusted` | bool     | no       | Default `false`. **Do not set `true` unless the user explicitly asks for untrusted-sender firing.** Setting `true` lets any external sender trigger the hook's cmd (real cost/security exposure when `cmd` invokes an LLM or shell). Assume the operator has configured the trust policy correctly; with `false`, the hook fires only on inbound mail the daemon marks `trusted = "true"`. Legal only on `on_receive` |
 
 **Returns:** confirmation containing the effective name and the argv
 that will run.

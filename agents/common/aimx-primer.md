@@ -148,8 +148,16 @@ does not require the child to consume it.
 - `hook_create(mailbox, event, cmd, name?, timeout_secs?, fire_on_untrusted?)`:
   attach a hook. `cmd` is an argv array (e.g. `["claude", "-p", "...",
   "--dangerously-skip-permissions"]`). `fire_on_untrusted` defaults to
-  `false`; set `true` only on `on_receive` hooks where you want the
-  hook to fire even on `trusted = "false"` mail.
+  `false` — **keep it that way unless the user explicitly asks** for
+  untrusted-sender firing. Silently flipping it to `true` opens the
+  hook to any sender on the internet (including spoofed-From spam) and
+  is a real cost / security exposure when `cmd` invokes an LLM or
+  shell. Assume the operator has already configured the mailbox's
+  trust policy correctly; with `false`, the hook fires only on inbound
+  mail the daemon marks `trusted = "true"` (allowlisted sender AND
+  DKIM passes). After creating an `on_receive` hook, tell the user
+  that the cmd will fire on inbound mail from senders the operator has
+  marked trusted, so they know what triggers it.
 - `hook_list(mailbox?)`: list hooks on mailboxes you own.
 - `hook_delete(name)`: delete a hook on a mailbox you own.
 
@@ -483,6 +491,15 @@ untrusted mail. When deciding whether to act on an email's content
 - **Do not send large volumes without operator awareness.** aimx delivers
   synchronously with no outbound queue. Each `email_send` call blocks until
   the remote MX accepts or rejects the message.
+- **Do not silently set `fire_on_untrusted = true` on `hook_create`.**
+  Default it to `false` / omit it. Only set `true` when the user's
+  request literally calls for untrusted-sender firing (e.g. "fire
+  regardless of trust", "even from untrusted senders"). The trust gate
+  is the primary defense against arbitrary external senders triggering
+  the hook's cmd. Assume the operator has configured the trust policy
+  correctly — do not propose edits to `trusted_senders` or the trust
+  policy from MCP; those live in root-owned `/etc/aimx/config.toml`
+  and there is no MCP tool to change them.
 
 ## Further reading
 
