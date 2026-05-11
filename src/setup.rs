@@ -1394,39 +1394,39 @@ pub fn display_dns_verification(
     all_pass
 }
 
-pub fn display_mcp_section(data_dir: &Path) {
-    println!("\n{}", term::header("MCP"));
-    for line in mcp_section_lines(data_dir) {
+pub fn display_mcp_section() {
+    println!();
+    for line in mcp_section_lines() {
         println!("{line}");
     }
 }
 
-/// Produce the plain-text body of the `[MCP]` section (without the header
-/// line itself). Returned as a vector of lines so tests can assert on
-/// content without spawning a subprocess.
-pub fn mcp_section_lines(data_dir: &Path) -> Vec<String> {
+/// Produce the plain-text body of the Step 6 MCP section. Returned as a
+/// vector of lines so tests can assert on content without spawning a
+/// subprocess.
+///
+/// Shape: a header sentence, a bullet list of every supported agent's
+/// `display_name` (driven by [`crate::agents_setup::registry`] so adding
+/// a new agent automatically appears here), then a closing instruction
+/// to run `aimx agents setup` as the regular user. No per-agent install
+/// commands — the picker (`aimx agents setup` with no argument) handles
+/// detection and per-agent dispatch.
+pub fn mcp_section_lines() -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("Wire aimx into your AI agent with one command per agent:".to_string());
+    lines.push("AIMX bundles MCP and skill files for the following AI agents:".to_string());
     lines.push(String::new());
 
     for spec in crate::agents_setup::registry() {
-        let cmd = if data_dir == Path::new("/var/lib/aimx") {
-            format!("aimx agents setup {}", spec.name)
-        } else {
-            format!(
-                "aimx --data-dir {} agents setup {}",
-                data_dir.display(),
-                spec.name
-            )
-        };
-        lines.push(format!("  {cmd}"));
+        lines.push(format!("  • {}", spec.display_name));
     }
 
     lines.push(String::new());
-    lines.push("Run `aimx agents list` to see supported agents and destination paths.".to_string());
     lines.push(
-        "See `book/agent-integration.md` for the full list and manual MCP wiring.".to_string(),
+        "Run as your regular user (not root) to wire AIMX into the agents you have installed:"
+            .to_string(),
     );
+    lines.push(String::new());
+    lines.push(format!("  {} aimx agents setup", term::prompt_mark()));
     lines.push(String::new());
     lines
 }
@@ -2403,21 +2403,6 @@ pub fn run_setup(
     sys: &dyn SystemOps,
     net: &dyn NetworkOps,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Capture the operator's *explicit* `--data-dir` choice (distinct
-    // from the `/var/lib/aimx` default resolved below) so the `runuser`
-    // re-exec passes `--data-dir <path>` through only when the operator
-    // named a path on the command line.
-    //
-    // Canonicalize the path so the dropped-through child resolves it
-    // the same way regardless of cwd. Under `runuser -l` the child's
-    // cwd switches to the user's HOME, so a relative `--data-dir
-    // ./foo` would otherwise resolve against `$HOME` instead of root's
-    // cwd. `canonicalize` requires the path to exist; if it does not
-    // (e.g. operator passed `--data-dir /opt/new` for a fresh install)
-    // we fall back to the original `PathBuf` so the child still gets
-    // the operator's intended absolute path.
-    let explicit_data_dir: Option<PathBuf> =
-        data_dir.map(|p| p.canonicalize().unwrap_or_else(|_| p.to_path_buf()));
     // Install the shared tracing subscriber up front so structured
     // warnings emitted from this path (notably the
     // `EMPTY_TRUSTED_SENDERS_WARNING` under `AIMX_NONINTERACTIVE=1`)
@@ -2662,55 +2647,27 @@ pub fn run_setup(
     }
 
     // ---- Step 6: Set up MCP for agent(s) -----------------------------------
+    //
+    // The wizard does NOT auto-wire MCP into the operator's agents.
+    // Setup runs as root (sudo); agent wiring is per-user state that
+    // belongs in the operator's own shell environment, where each
+    // agent's CLI is naturally on PATH and shell init has run normally.
+    //
+    // We list every supported agent inline so the operator sees what
+    // AIMX bundles, then point them at `aimx agents setup` (the
+    // interactive picker) to run as themselves. Step 6 is marked
+    // `Handoff` (⎘) in the closing checklist — distinct from ☑ Done
+    // (the wizard completed it) and ☒ Skipped (the wizard bypassed it).
     section_header(6, SETUP_STEPS[5]);
-    display_mcp_section(data_dir);
+    display_mcp_section();
 
-    // Print the interim banner BEFORE the drop-through so the operator sees
-    // ☑ on 1–5 and ◐ on 6 right before the agents setup TUI takes over.
-    let mut pre_handoff = checklist;
-    pre_handoff.set(6, term::StepState::Running);
-    print_final_banner(&pre_handoff);
-
-    // Drive the drop-through. Returns `Some(true)` on success, `Some(false)`
-    // on agents setup non-zero exit (treated as skipped, not fatal),
-    // `None` when skipped (no SUDO_USER, AIMX_NONINTERACTIVE=1, or
-    // runuser unavailable).
-    let mcp_state = if is_noninteractive_env() {
-        term::StepState::Skipped
-    } else {
-        match drop_through_to_agents_setup(explicit_data_dir.as_deref()) {
-            AgentsSetupOutcome::Done => term::StepState::Done,
-            AgentsSetupOutcome::Skipped => term::StepState::Skipped,
-            AgentsSetupOutcome::Failed => term::StepState::Skipped,
-        }
-    };
-    checklist.set(6, mcp_state);
-
-    // Reprint the final banner with all six step states resolved so the
-    // operator sees step 6 flip from ◐ to ☑ / ☒ before the closing message.
+    checklist.set(6, term::StepState::Handoff);
     print_final_banner(&checklist);
 
     // Closing message — final thing the operator sees.
     print_closing_message(&domain);
 
     Ok(())
-}
-
-/// Outcome of the drop-through to `aimx agents setup`. Maps to the step-6
-/// state in the wizard's checklist so the closing message can render the
-/// right glyph regardless of whether the agents setup TUI ran, was skipped,
-/// or returned non-zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentsSetupOutcome {
-    /// agents setup ran and exited zero — step 6 ☑.
-    Done,
-    /// $SUDO_USER unset, or runuser missing on PATH — step 6 ☒
-    /// (with operator guidance printed).
-    Skipped,
-    /// agents setup ran and exited non-zero — surfaced as step 6 ☒
-    /// rather than a hard error so a TUI quirk doesn't void a successful
-    /// setup. The operator can re-run `aimx agents setup` by hand.
-    Failed,
 }
 
 /// Print the closing message that ends `aimx setup`. Substitutes the
@@ -2731,191 +2688,6 @@ fn print_closing_message(domain: &str) {
         "  claude -p \"Set up agent@{domain} and respond to me via email the moment you receive my instructions via email.\""
     );
     println!();
-}
-
-/// Build the argv we'd shell-quote and hand to
-/// `runuser -l <sudo_user> -s /bin/bash -- -ic "<...>"` so the drop-
-/// through re-execs `aimx agents setup` as the invoking user. Pure helper
-/// — no syscalls — so unit tests can assert on the exact argv without
-/// spinning up a process.
-///
-/// Layout:
-///
-/// ```text
-/// [exe, "agents", "setup",
-///  // --data-dir is only appended when the operator explicitly named a
-///  // path on the `aimx setup` command line. The default
-///  // `/var/lib/aimx` is left implicit so it matches what a standalone
-///  // `aimx agents setup` invocation would resolve.
-///  "--data-dir", <path>]
-/// ```
-///
-/// `--dangerously-allow-root` is *never* appended — the drop-through
-/// fires only when `$SUDO_USER` is set, and implicit
-/// `--dangerously-allow-root` is forbidden (operators must opt in by
-/// hand).
-pub(crate) fn build_agents_setup_argv(
-    exe: &Path,
-    explicit_data_dir: Option<&Path>,
-) -> Vec<std::ffi::OsString> {
-    use std::ffi::OsString;
-    let mut argv: Vec<OsString> = Vec::with_capacity(4);
-    argv.push(exe.as_os_str().to_os_string());
-    argv.push(OsString::from("agents"));
-    argv.push(OsString::from("setup"));
-    if let Some(p) = explicit_data_dir {
-        argv.push(OsString::from("--data-dir"));
-        argv.push(p.as_os_str().to_os_string());
-    }
-    argv
-}
-
-/// Drive the drop-through to `aimx agents setup` and return an outcome
-/// the caller maps onto step 6's checklist state.
-///
-/// 1. If `$SUDO_USER` is set and non-empty → re-exec the resolved aimx
-///    binary as the invoking user via
-///    `runuser -l $SUDO_USER -s /bin/bash -- -ic "<shell-quoted argv>"`.
-///    Control returns here once the child TUI exits so the closing
-///    message can print after `aimx agents setup` finishes.
-/// 2. If `$SUDO_USER` is unset → print the guidance message (naming
-///    `--dangerously-allow-root` as the root-login option) and return
-///    [`AgentsSetupOutcome::Skipped`].
-///
-/// We deliberately invoke bash with `-i` (interactive) so that
-/// `~/.bashrc` runs in full. Stock Ubuntu's `~/.bashrc` (seeded from
-/// `/etc/skel/.bashrc`) opens with a non-interactive guard that
-/// `return`s immediately when `$-` does not contain `i` — and any PATH
-/// edits below that guard are skipped. The canonical placements for
-/// `claude` (`~/.npm-global/bin` after `npm config set prefix
-/// '~/.npm-global'`) and the NVM loader both live below the guard, so
-/// without `-i` the dropped-through process can't find `claude` and
-/// MCP auto-registration silently lands in the `CliMissing` fallback.
-/// Forcing `-i` makes `$-` contain `i`, the guard falls through, and
-/// the PATH edits actually run.
-///
-/// On spawn failure (e.g. `runuser` not installed on a stripped
-/// container image) print the same guidance and return
-/// [`AgentsSetupOutcome::Skipped`].
-///
-/// agents setup non-zero exit returns [`AgentsSetupOutcome::Failed`] so
-/// the caller can render step 6 as ☒ without aborting the wizard.
-fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetupOutcome {
-    let sudo_user = std::env::var("SUDO_USER").unwrap_or_default();
-    if sudo_user.is_empty() {
-        // Direct root login path. Print the guidance and return.
-        println!(
-            "{} Run `{}` as your regular user to wire aimx into Claude Code, Codex, etc.",
-            term::prompt_mark(),
-            term::highlight("aimx agents setup")
-        );
-        println!(
-            "  (On a single-user root-login VPS, pass `{}` to wire aimx into /root's home.)",
-            term::highlight("aimx agents setup --dangerously-allow-root")
-        );
-        return AgentsSetupOutcome::Skipped;
-    }
-
-    // Resolve in OUR context (not runuser's). Passing the literal
-    // string "/proc/self/exe" makes `runuser` `execve` it relative to
-    // its own /proc/self — which points at /usr/sbin/runuser — so the
-    // child re-execs runuser with argv ["exe", "agents", "setup"]; the
-    // second runuser parses "agents" as a username and dies with
-    // `exe: user agents does not exist`. Resolve with
-    // `current_exe()` here so the child receives the actual aimx
-    // binary path. On the rare target where `current_exe()` errors
-    // (chroot / no-procfs container) we surface the failure and treat
-    // step 6 as skipped rather than hardcode an install prefix that
-    // may not exist (regression guard:
-    // `install_service_file_has_no_silent_fallback`).
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!(
-                "{} Could not resolve the running aimx binary path: {}",
-                term::warn("warning:"),
-                e
-            );
-            println!(
-                "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
-                term::prompt_mark(),
-                term::highlight("aimx agents setup"),
-                term::highlight(&sudo_user)
-            );
-            return AgentsSetupOutcome::Skipped;
-        }
-    };
-    let argv = build_agents_setup_argv(&exe, explicit_data_dir);
-
-    println!();
-    println!(
-        "{} Dropping through to `{}` as {}...",
-        term::prompt_mark(),
-        term::highlight("aimx agents setup"),
-        term::highlight(&sudo_user)
-    );
-
-    // Hand off via `Command::status()` so control returns here once the
-    // TUI exits, allowing the closing message to print AFTER agents setup.
-    //
-    // Shape:
-    //   runuser -l <user> -s /bin/bash -- -ic "<shell-quoted argv>"
-    //
-    // The login flag (`-l`) initialises HOME, SHELL, USER, LOGNAME, and
-    // a baseline PATH from the user's profile chain. The interactive
-    // flag (`-i`) is what actually pulls `claude` into PATH on stock
-    // Ubuntu — see the function-level doc above for why a
-    // non-interactive shell skips the `~/.bashrc` body that exports
-    // `~/.npm-global/bin` (and seeds NVM).
-    //
-    // Pinning the shell to `/bin/bash` (rather than the user's login
-    // shell from `/etc/passwd`) keeps the `-i` flag meaningful: a user
-    // on zsh/fish would not source `~/.bashrc` and would re-introduce
-    // the original PATH gap. Bash is a stock package on every supported
-    // distro, so this is a safe assumption.
-    //
-    // The argv must be shell-quoted because the bash invocation reads
-    // the command from a single string passed after `-c` (here `-ic`).
-    let cmd = argv
-        .iter()
-        .map(|a| crate::agents_setup::posix_single_quote(&a.to_string_lossy()))
-        .collect::<Vec<_>>()
-        .join(" ");
-    match std::process::Command::new("runuser")
-        .arg("-l")
-        .arg(&sudo_user)
-        .arg("-s")
-        .arg("/bin/bash")
-        .arg("--")
-        .arg("-ic")
-        .arg(&cmd)
-        .status()
-    {
-        Ok(status) if status.success() => AgentsSetupOutcome::Done,
-        Ok(status) => {
-            eprintln!(
-                "{} `aimx agents setup` exited with {status}. \
-                 Re-run as {} to wire aimx into Claude Code, Codex, etc.",
-                term::warn("warning:"),
-                term::highlight(&sudo_user)
-            );
-            AgentsSetupOutcome::Failed
-        }
-        Err(e) => {
-            eprintln!(
-                "{} Could not drop through to `aimx agents setup` automatically: {}",
-                term::warn("warning:"),
-                e
-            );
-            println!(
-                "{} Run `{}` as `{}` to wire aimx into Claude Code, Codex, etc.",
-                term::prompt_mark(),
-                term::highlight("aimx agents setup"),
-                term::highlight(&sudo_user)
-            );
-            AgentsSetupOutcome::Skipped
-        }
-    }
 }
 
 /// Install the systemd/OpenRC service file, restart the daemon, and poll
@@ -4117,34 +3889,113 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn mcp_section_default_lists_claude_code_install_command() {
-        let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
+    fn mcp_section_recommends_running_aimx_agents_setup() {
+        let lines = mcp_section_lines();
         let joined = lines.join("\n");
         assert!(
-            joined.contains("aimx agents setup claude-code"),
-            "expected claude-code install command in:\n{joined}"
+            joined.contains("aimx agents setup"),
+            "expected operator-action callout `aimx agents setup` in:\n{joined}"
+        );
+        // The picker (`aimx agents setup` with no agent argument) does
+        // detection and per-agent dispatch, so the wizard does NOT need
+        // to print a `aimx agents setup <name>` line per agent.
+        assert!(
+            !joined.contains("aimx agents setup claude-code"),
+            "Step 6 must not enumerate per-agent install commands; \
+             the picker handles it. Got:\n{joined}"
+        );
+        assert!(
+            !joined.contains("aimx agents list"),
+            "Step 6 already prints the supported-agents list inline; \
+             it must not also point at `aimx agents list`. Got:\n{joined}"
         );
         assert!(!joined.contains("mcpServers"));
         assert!(!joined.contains("--data-dir"));
     }
 
     #[test]
-    fn mcp_section_custom_data_dir_threads_override_into_commands() {
-        let lines = mcp_section_lines(Path::new("/custom/data"));
+    fn mcp_section_lists_every_registered_agent() {
+        // The bullet list is driven by `crate::agents_setup::registry()`,
+        // so every agent's `display_name` must appear. Adding a new
+        // agent automatically extends Step 6's output — no change needed
+        // here.
+        let lines = mcp_section_lines();
         let joined = lines.join("\n");
-        assert!(
-            joined.contains("aimx --data-dir /custom/data agents setup claude-code"),
-            "expected --data-dir override in install command:\n{joined}"
-        );
-        assert!(!joined.contains("mcpServers"));
+        for spec in crate::agents_setup::registry() {
+            assert!(
+                joined.contains(spec.display_name),
+                "expected display_name {:?} in Step 6 output:\n{joined}",
+                spec.display_name
+            );
+        }
     }
 
     #[test]
-    fn mcp_section_points_at_agent_integration_doc() {
-        let lines = mcp_section_lines(Path::new("/var/lib/aimx"));
-        let joined = lines.join("\n");
-        assert!(joined.contains("agent-integration.md"));
-        assert!(joined.contains("aimx agents list"));
+    fn mcp_section_lines_are_in_documented_order() {
+        // Pins the line *flow* of `mcp_section_lines`, not just presence.
+        // The contract: header sentence → blank → bullets → blank →
+        // "Run as your regular user..." sentence → blank → callout →
+        // blank. A refactor that scrambles this order (e.g. moves the
+        // bullets below the callout) would still pass the existing
+        // presence-only tests but produce confusing output.
+        let lines = mcp_section_lines();
+        let header_idx = lines
+            .iter()
+            .position(|line| line.starts_with("AIMX bundles MCP"))
+            .expect("header sentence must be present");
+        let first_bullet_idx = lines
+            .iter()
+            .position(|line| line.starts_with("  • "))
+            .expect("at least one bullet must be present");
+        let run_as_user_idx = lines
+            .iter()
+            .position(|line| line.starts_with("Run as your regular user"))
+            .expect("\"Run as your regular user...\" sentence must be present");
+        let callout_idx = lines
+            .iter()
+            .position(|line| line.contains("aimx agents setup") && !line.starts_with("AIMX"))
+            .expect("`aimx agents setup` callout must be present");
+
+        assert!(
+            header_idx < first_bullet_idx,
+            "header must precede bullets (header={header_idx}, bullets={first_bullet_idx})"
+        );
+        assert!(
+            first_bullet_idx < run_as_user_idx,
+            "bullets must precede the run-as-user sentence \
+             (bullets={first_bullet_idx}, run_as_user={run_as_user_idx})"
+        );
+        assert!(
+            run_as_user_idx < callout_idx,
+            "run-as-user sentence must precede callout \
+             (run_as_user={run_as_user_idx}, callout={callout_idx})"
+        );
+
+        // Blank-line separators between each landmark.
+        assert!(
+            lines[header_idx + 1].is_empty(),
+            "expected blank line after header at index {}; got {:?}",
+            header_idx + 1,
+            lines[header_idx + 1]
+        );
+        assert!(
+            lines[run_as_user_idx - 1].is_empty(),
+            "expected blank line before run-as-user sentence at index {}; got {:?}",
+            run_as_user_idx - 1,
+            lines[run_as_user_idx - 1]
+        );
+        assert!(
+            lines[run_as_user_idx + 1].is_empty(),
+            "expected blank line after run-as-user sentence at index {}; got {:?}",
+            run_as_user_idx + 1,
+            lines[run_as_user_idx + 1]
+        );
+        assert!(
+            lines[callout_idx - 1].is_empty(),
+            "expected blank line before callout at index {}; got {:?}",
+            callout_idx - 1,
+            lines[callout_idx - 1]
+        );
     }
 
     #[test]
@@ -6205,44 +6056,6 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn run_setup_reprints_final_banner_after_drop_through() {
-        // Bug #1 from the cycle-3 review: the operator never saw step 6
-        // flip from ◐ to ☑ / ☒ because `print_final_banner` was only
-        // called once — BEFORE the drop-through — and was not reprinted
-        // after `drop_through_to_agents_setup` returned. Lock in the
-        // two-call contract by source-grep so a future refactor can't
-        // silently drop the second call.
-        let source = include_str!("setup.rs");
-        let run_setup_start = source.find("pub fn run_setup(").unwrap();
-        let body_end = source[run_setup_start..]
-            .find("\n}\n")
-            .map(|off| run_setup_start + off)
-            .expect("run_setup body terminator");
-        let body = &source[run_setup_start..body_end];
-
-        let banner_calls = body.matches("print_final_banner(").count();
-        assert!(
-            banner_calls >= 2,
-            "run_setup must call `print_final_banner` at least twice: once \
-             before the drop-through (step 6 = ◐) and once after \
-             (step 6 in its terminal state). Found {banner_calls} call(s)."
-        );
-
-        // The second call must come AFTER the drop-through call site so
-        // the reprinted banner reflects the resolved step-6 state.
-        let drop_through_pos = body
-            .find("drop_through_to_agents_setup(")
-            .expect("drop_through_to_agents_setup call site");
-        let after_drop_through = &body[drop_through_pos..];
-        assert!(
-            after_drop_through.contains("print_final_banner("),
-            "the second `print_final_banner` call must come AFTER \
-             `drop_through_to_agents_setup` so the operator sees step 6 \
-             flip from ◐ to ☑ / ☒ before the closing message."
-        );
-    }
-
-    #[test]
     fn wizard_does_not_display_deliverability_section() {
         // Regression: `display_deliverability_section` and
         // `gmail_whitelist_instructions` must stay deleted from the
@@ -6280,176 +6093,6 @@ owner = "aimx-catchall"
             "Retired helpers must stay gone: {:?}",
             walker.found
         );
-    }
-
-    // ----- drop-through argv construction -----------------------------------
-
-    #[test]
-    fn build_agents_setup_argv_without_data_dir() {
-        let exe = Path::new("/usr/local/bin/aimx");
-        let argv = super::build_agents_setup_argv(exe, None);
-        assert_eq!(argv.len(), 3);
-        assert_eq!(argv[0], std::ffi::OsStr::new("/usr/local/bin/aimx"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
-        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
-    }
-
-    #[test]
-    fn build_agents_setup_argv_appends_explicit_data_dir() {
-        // When the operator passed `--data-dir /custom` to `aimx setup`,
-        // the drop-through must carry it through so `aimx agents setup`
-        // emits activation hints referencing the same path.
-        let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/srv/aimx-data")));
-        assert_eq!(argv.len(), 5);
-        assert_eq!(argv[0], std::ffi::OsStr::new("/proc/self/exe"));
-        assert_eq!(argv[1], std::ffi::OsStr::new("agents"));
-        assert_eq!(argv[2], std::ffi::OsStr::new("setup"));
-        assert_eq!(argv[3], std::ffi::OsStr::new("--data-dir"));
-        assert_eq!(argv[4], std::ffi::OsStr::new("/srv/aimx-data"));
-    }
-
-    #[test]
-    fn build_agents_setup_argv_never_includes_dangerously_allow_root() {
-        // The drop-through MUST NOT pass
-        // `--dangerously-allow-root` implicitly. Regression guard — if
-        // someone adds the flag in the future, this test fails loudly.
-        let exe = Path::new("/proc/self/exe");
-        let argv = super::build_agents_setup_argv(exe, Some(Path::new("/opt/data")));
-        for part in &argv {
-            assert_ne!(
-                part,
-                std::ffi::OsStr::new("--dangerously-allow-root"),
-                "drop-through must never pass --dangerously-allow-root implicitly: {argv:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn build_agents_setup_argv_uses_resolved_exe_path() {
-        // Regression guard for the cycle-5 fix: `runuser` re-execs
-        // `argv[0]` in its own context. Passing the literal string
-        // `/proc/self/exe` makes the child runuser resolve
-        // `/proc/self` → `/usr/sbin/runuser` and treat `agents`
-        // as a username, dying with
-        // `exe: user agents does not exist`. The drop-through
-        // must instead resolve the binary in the parent process via
-        // `std::env::current_exe()`. Lock that invariant in by
-        // source-grep so a future refactor can't silently regress
-        // back to the literal-string shape.
-        let source = include_str!("setup.rs");
-        assert!(
-            source.contains("std::env::current_exe()"),
-            "drop-through must resolve the running binary via \
-             `std::env::current_exe()` so `runuser` receives an \
-             absolute path"
-        );
-        // The literal `"/proc/self/exe"` string is forbidden as the
-        // `runuser` argv[0]. Walk just the `drop_through_to_agents_setup`
-        // body so doc comments / unrelated paths in this file don't
-        // false-positive.
-        let drop_through_start = source
-            .find("fn drop_through_to_agents_setup(")
-            .expect("drop_through_to_agents_setup must exist");
-        let drop_through_end = source[drop_through_start..]
-            .find("\nfn ")
-            .map(|off| drop_through_start + off)
-            .unwrap_or(source.len());
-        let body = &source[drop_through_start..drop_through_end];
-        assert!(
-            !body.contains("PathBuf::from(\"/proc/self/exe\")"),
-            "drop_through_to_agents_setup must NOT pass the literal \
-             string \"/proc/self/exe\" to runuser — runuser would \
-             re-exec itself in its own /proc context"
-        );
-    }
-
-    #[test]
-    fn drop_through_uses_interactive_bash_login_shell() {
-        // Regression guard for the runuser invocation shape. Stock
-        // Ubuntu's `~/.bashrc` (seeded from `/etc/skel/.bashrc`) opens
-        // with a non-interactive guard:
-        //
-        //   case $- in *i*) ;; *) return;; esac
-        //
-        // `runuser -l USER -c CMD` runs the user's login shell
-        // non-interactively, the guard returns, and the PATH edits
-        // below it (notably `~/.npm-global/bin` and the NVM loader)
-        // never execute. The drop-through MUST instead invoke an
-        // interactive bash to load `~/.bashrc` in full so `claude` is
-        // reachable when `aimx agents setup` re-execs.
-        //
-        // Lock the new shape (`-l`, `-s /bin/bash`, `--`, `-ic`) and
-        // forbid the old shape (`-u <user> --`, `/proc/self/exe`) by
-        // source-grepping the function body.
-        let source = include_str!("setup.rs");
-        let start = source
-            .find("fn drop_through_to_agents_setup(")
-            .expect("drop_through_to_agents_setup must exist");
-        let end = source[start..]
-            .find("\nfn ")
-            .map(|off| start + off)
-            .unwrap_or(source.len());
-        let body = &source[start..end];
-
-        // New shape: `runuser -l <user> -s /bin/bash -- -ic <cmd>`.
-        assert!(
-            body.contains(".arg(\"-l\")"),
-            "drop_through must use `runuser -l` (login shell) so the \
-             user's profile chain is sourced; got body without `-l`"
-        );
-        assert!(
-            body.contains(".arg(\"-s\")") && body.contains("/bin/bash"),
-            "drop_through must pin the shell to `/bin/bash` via `-s` so \
-             `-i` actually sources `~/.bashrc` regardless of the user's \
-             login-shell setting in /etc/passwd"
-        );
-        assert!(
-            body.contains(".arg(\"-ic\")"),
-            "drop_through must pass `-ic` to bash so `$-` contains `i` \
-             and stock Ubuntu's `~/.bashrc` non-interactive guard does \
-             NOT early-return — otherwise `~/.npm-global/bin` is missing \
-             from PATH and `claude` is unreachable"
-        );
-
-        // Old shape: must NOT call runuser via the non-login `-u` form
-        // that inherits sudo's scrubbed PATH.
-        assert!(
-            !(body.contains(".arg(\"-u\")")
-                && body.contains(".arg(&sudo_user)")
-                && body.contains(".arg(\"--\")")
-                && body.contains(".args(&argv)")),
-            "drop_through must NOT use the non-login `runuser -u USER -- argv` \
-             shape — it inherits sudo's scrubbed PATH and `claude` is \
-             unreachable on stock Ubuntu"
-        );
-
-        // The literal `/proc/self/exe` string must not be handed to
-        // `runuser` as argv[0]; the companion test
-        // `build_agents_setup_argv_uses_resolved_exe_path` already
-        // checks the `PathBuf::from(...)` shape. We add coverage for
-        // shell-quoted forms (`.arg("/proc/self/exe")`,
-        // `Path::new("/proc/self/exe")`, `PathBuf::from(...)`) so a
-        // future refactor that bypasses the helper still trips. Doc
-        // comments inside the function body that *explain* the trap
-        // are allowed; we filter those out before the search.
-        let code_only: String = body
-            .lines()
-            .filter(|l| !l.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        for forbidden in [
-            ".arg(\"/proc/self/exe\")",
-            "Path::new(\"/proc/self/exe\")",
-            "PathBuf::from(\"/proc/self/exe\")",
-        ] {
-            assert!(
-                !code_only.contains(forbidden),
-                "drop_through must NOT hand the literal string \
-                 `/proc/self/exe` to runuser ({forbidden}); resolve via \
-                 `std::env::current_exe()` instead"
-            );
-        }
     }
 
     #[test]
@@ -6564,28 +6207,42 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn run_setup_marks_step_six_skipped_when_sudo_user_unset() {
-        // The drop-through helper enters its `$SUDO_USER` unset branch and
-        // returns AgentsSetupOutcome::Skipped. `run_setup` then maps that
-        // onto step-6 = Skipped. We assert that the call site exists so
-        // a future refactor that drops the mapping can't sneak past
-        // review.
+    fn run_setup_step_six_uses_handoff_state() {
+        // Step 6 was redesigned away from the drop-through (which spawned
+        // `runuser` and was prone to bash job-control deadlocks). It now
+        // marks step 6 as `Handoff`, prints the supported-agents list,
+        // and exits — the operator runs `aimx agents setup` themselves.
+        // Lock the new shape in by source-grep so a future refactor can't
+        // silently re-introduce a subprocess hop in Step 6.
         let source = include_str!("setup.rs");
-        // The mapping is in run_setup near the drop_through_to_agents_setup
-        // call; it sets `mcp_state` to Skipped on Skipped/Failed outcomes.
         let run_setup_start = source.find("pub fn run_setup(").unwrap();
-        let body = &source[run_setup_start..];
+        let run_setup_end = source[run_setup_start..]
+            .find("\n}\n")
+            .map(|off| run_setup_start + off)
+            .expect("run_setup body terminator");
+        let body = &source[run_setup_start..run_setup_end];
+
         assert!(
-            body.contains("AgentsSetupOutcome::Skipped"),
-            "run_setup must handle the Skipped outcome from the drop-through"
+            body.contains("term::StepState::Handoff"),
+            "run_setup must mark step 6 as Handoff (not Done/Skipped) so \
+             the closing checklist signals the operator-action follow-up. \
+             Body did not contain `term::StepState::Handoff`."
         );
         assert!(
-            body.contains("AgentsSetupOutcome::Failed"),
-            "run_setup must handle the Failed outcome from the drop-through"
+            !body.contains("runuser"),
+            "run_setup must not spawn `runuser` — the drop-through was \
+             removed in favor of operator guidance. If a re-introduction \
+             is genuinely needed, do so deliberately and update this test."
         );
         assert!(
-            body.contains("AgentsSetupOutcome::Done"),
-            "run_setup must handle the Done outcome from the drop-through"
+            !body.contains("AgentsSetupOutcome"),
+            "AgentsSetupOutcome was deleted along with the drop-through; \
+             run_setup must not reference it."
+        );
+        assert!(
+            !body.contains("drop_through_to_agents_setup"),
+            "drop_through_to_agents_setup was deleted; run_setup must not \
+             reference it."
         );
     }
 

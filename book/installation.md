@@ -6,7 +6,7 @@ AIMX ships as a single statically-compiled binary. Install in one line:
 curl -fsSL https://aimx.email/install.sh | sh
 ```
 
-This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, runs `sudo aimx setup`, then drops back to your user to wire the MCP server into your agent. No Rust toolchain, no `cargo build`, no source checkout.
+This downloads the latest release for your platform, installs `aimx` into `/usr/local/bin/`, and runs `sudo aimx setup`. When setup exits, run `aimx agents setup` yourself as your regular user to wire the MCP server into your agent. No Rust toolchain, no `cargo build`, no source checkout.
 
 ## Supported platforms
 
@@ -74,7 +74,7 @@ curl -fsSL https://aimx.email/install.sh | AIMX_PREFIX=/opt/aimx/bin sh
 sudo /opt/aimx/bin/aimx setup
 ```
 
-The drop-through to `aimx agents setup` also uses `/proc/self/exe`, so a non-default prefix works end-to-end without extra configuration.
+When you follow up with `aimx agents setup` as your regular user, it resolves itself from `$PATH`. Make sure the install prefix you chose is on your shell's `PATH`, or invoke the binary by its full path (e.g. `/opt/aimx/bin/aimx agents setup`).
 
 ## Manual verification
 

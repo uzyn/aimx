@@ -319,8 +319,7 @@ ensure_sudo() {
 #   Prints the non-root user that should run `aimx agents setup`.
 #   Returns 0 with stdout set on success, non-zero when no non-root
 #   user can be identified. Kept as a helper for tests + possible future
-#   use; the wizard's drop-through reads $SUDO_USER directly so this is
-#   not on the live install path anymore.
+#   use; nothing in the live install path calls it today.
 detect_invoker() {
     if [ -n "${SUDO_USER:-}" ] && [ "${SUDO_USER}" != "root" ]; then
         printf '%s' "${SUDO_USER}"
@@ -1391,9 +1390,9 @@ main() {
     fi
 
     # Hand off to the binary. `aimx setup` owns the welcome banner, the
-    # six-step checklist, the agents setup drop-through, and the closing
-    # message. Use `exec` so the shell is replaced cleanly. Backup any
-    # pre-existing config first so the wizard's writes don't clobber it.
+    # six-step checklist, and the closing message. Use `exec` so the
+    # shell is replaced cleanly. Backup any pre-existing config first so
+    # the wizard's writes don't clobber it.
     backup_existing_config
     # When stdin is already the terminal (./install.sh from a real shell),
     # leave it alone. Re-pointing it at /dev/tty creates a separate fd
