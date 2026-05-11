@@ -123,9 +123,9 @@ surface.
 - `email_read(mailbox, id, folder?)`: return the full Markdown file
   (frontmatter + body) for one email.
 - `email_send(from_mailbox, to, subject, body, attachments?, text_only?, html_body?)`:
-  compose, DKIM-sign, and deliver. `body` is Markdown by default;
-  `text_only` / `html_body` are mutually-exclusive escape hatches (see
-  "Send an email" below). `from_mailbox` must be a mailbox you own.
+  compose, DKIM-sign, deliver. `body` is Markdown → `multipart/alternative` by default
+  — **do NOT pass `text_only: true`** for formatted content (see "Send an email"
+  below). `from_mailbox` must be a mailbox you own.
 - `email_reply(mailbox, id, body, text_only?, html_body?)`: reply with the
   same Markdown semantics; AIMX sets `In-Reply-To`, `References`, and `Re:`
   automatically.
@@ -278,10 +278,10 @@ email_send(
 )
 ```
 
-For OTPs / transactional one-liners pass `text_only: true` to ship
-`body` verbatim as `text/plain`. For branded HTML layouts pass
-`html_body` verbatim as the HTML part with `body` as the plain-text
-fallback. The two flags are mutually exclusive.
+**Do NOT pass `text_only: true`** for prose, briefs, or any body with Markdown
+syntax — it ships raw markers (`#` / `**bold**` / `-`) as `text/plain`. Reserve
+it for unformatted one-liners (OTPs, verification codes). For branded HTML,
+pass `html_body` as the HTML part with `body` as the plain-text fallback (mutually exclusive with `text_only`).
 
 The mailbox must exist and you must own it. Provision via
 `mailbox_create(name)`, or `sudo aimx mailboxes create <name> --owner <user>` for cross-user mailboxes.
