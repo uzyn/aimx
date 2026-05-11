@@ -1,8 +1,5 @@
 # AIMX — AI Mail Exchange
 
-> [!CAUTION]
-> **Under heavy development.** This is a prerelease software. Expect breaking changes and unstable operations.
-
 <p align="center">
     <picture>
         <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-pigeon.svg">
