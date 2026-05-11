@@ -365,7 +365,7 @@ h1 em {
 .no-list li::before {
   content: "✕";
   flex-shrink: 0;
-  color: var(--ink-faded);
+  color: var(--accent);
   font-size: 0.85em;
   line-height: 1;
   transform: translateY(0.05em);
@@ -615,6 +615,41 @@ h1 em {
   font-size: 0.32em;
   letter-spacing: 0.04em;
   font-weight: 400;
+}
+
+.terminal-copy {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: rgba(237, 228, 211, 0.06);
+  color: rgba(237, 228, 211, 0.6);
+  border: 1px solid rgba(237, 228, 211, 0.12);
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.3em;
+  letter-spacing: 0.04em;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.terminal-copy:hover {
+  color: #EDE4D3;
+  background: rgba(237, 228, 211, 0.1);
+  border-color: rgba(237, 228, 211, 0.22);
+}
+
+.terminal-copy:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.terminal-copy.is-copied {
+  color: #4ADE80;
+  border-color: rgba(74, 222, 128, 0.4);
+  background: rgba(74, 222, 128, 0.1);
 }
 
 .terminal-body {
