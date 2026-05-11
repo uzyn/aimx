@@ -36,14 +36,14 @@ The wizard prompts for the domain interactively and confirms you have DNS access
 
 ### First-time setup flow
 
-The wizard prints a six-line checklist and walks each step, ticking `☐ → ☑` (or `☒` skipped) as it goes. Only the domain and trusted-sender list need operator input; everything else comes from disk and the network.
+The wizard prints a six-line checklist and walks each step, advancing each entry from `☐` pending to one of `☑` done, `☒` skipped, or `⎘` handoff as it goes. Only the domain and trusted-sender list need operator input; everything else comes from disk and the network.
 
 1. **Port 25 preflight.** Verifies outbound and inbound port 25 connectivity, refusing to continue when SMTP is blocked. Runs before any file is written.
 2. **Domain and DNS.** Prompts for the domain (skipped when supplied as an argument), prints the DNS records, and enters the verify loop. Press **Enter** to re-run the checks, **`q`** to skip and defer to `aimx doctor`.
 3. **STARTTLS certificate.** Generates a self-signed cert at `/etc/ssl/aimx/`. Skipped on re-entry.
 4. **Trust policy.** Asks for a comma-separated list of addresses or globs (e.g. `you@example.com, *@company.com`). An empty list sets `trust = "none"` with a loud warning that hooks will not fire for inbound email until trusted senders are added. Skipped on re-entry. Under `AIMX_NONINTERACTIVE=1` the prompt is skipped and the warning is logged.
 5. **Install AIMX.** Generates a 2048-bit DKIM keypair under `/etc/aimx/dkim/`, writes `/etc/aimx/config.toml` with the catchall mailbox, creates the `aimx-catchall` system user, generates the systemd (or OpenRC) service unit, starts `aimx serve`, and waits for port 25 to bind. Skipped on re-entry.
-6. **Wire MCP for agents.** Re-execs `aimx agents setup` as `$SUDO_USER` (via `runuser`) so the agent picker takes over the terminal. Skipped on direct root login or missing `runuser` — pass `--dangerously-allow-root` if you really do want to wire AIMX into root's home. Skipped under `AIMX_NONINTERACTIVE=1`.
+6. **Set up MCP for agent(s).** Prints a guidance section listing every supported AI agent (driven by `agents_setup::registry()` so the list extends automatically) and a `→ aimx agents setup` callout pointing the operator at the per-user agent wiring command. The wizard does not spawn a subprocess — agent wiring is operator-initiated as a separate step (the same idiom as `apt install` / `gh auth login`). Marked `⎘ Handoff` in the closing checklist regardless of `$SUDO_USER` or `AIMX_NONINTERACTIVE`.
 
 After step 6 returns, the wizard prints the final closing message:
 
@@ -83,13 +83,19 @@ Mailbox CRUD is owner-gated. See [Mailboxes § Managing mailboxes](mailboxes.md#
 
 ### Wiring agents
 
-Step 6 runs `aimx agents setup` as your regular user and presents an interactive picker. For each selected agent it writes plugin files under `$HOME` and (for Claude Code and Codex CLI) auto-registers the MCP server. The plugin teaches the agent how to call AIMX's MCP tools and includes a "Wiring yourself up as a mailbox hook" recipe. See [Agent Integration](agent-integration.md).
+Step 6 of `aimx setup` prints the supported-agent list and the `→ aimx agents setup` callout, then exits. It does not spawn the agent picker. To wire AIMX into your agents, run `aimx agents setup` yourself as your regular user after setup exits:
 
-When you logged in directly as root (no `sudo`), step 6 marks ☒ skipped. Either re-run `aimx agents setup` as a regular user, or pass `--dangerously-allow-root` to wire AIMX into root's home on a single-user VPS.
+```bash
+aimx agents setup
+```
+
+This launches the interactive picker. For each selected agent it writes plugin files under `$HOME` and (for Claude Code and Codex CLI) auto-registers the MCP server. The plugin teaches the agent how to call AIMX's MCP tools and includes a "Wiring yourself up as a mailbox hook" recipe. See [Agent Integration](agent-integration.md).
+
+Step 6's terminal state in the checklist is always `⎘ Handoff` — it's a handoff back to the operator, not a wizard-completed step. On a single-user root-login VPS where there is no separate regular user, pass `aimx agents setup --dangerously-allow-root` to wire AIMX into root's home.
 
 ### Non-interactive setup
 
-Setting `AIMX_NONINTERACTIVE=1` skips the trusted-senders prompt (defaults to empty list + logged warning) and skips the agents-setup drop-through (no TTY assumed). Useful for provisioning scripts and CI. The domain still must be supplied as an argument.
+Setting `AIMX_NONINTERACTIVE=1` skips the trusted-senders prompt (defaults to empty list + logged warning) and the mailbox-owner prompt. Useful for provisioning scripts and CI. The domain still must be supplied as an argument. Step 6 is unaffected — it always prints the same `→ aimx agents setup` guidance regardless of `AIMX_NONINTERACTIVE`, because there is no subprocess to skip.
 
 ```bash
 sudo AIMX_NONINTERACTIVE=1 aimx setup agent.example.com
@@ -97,7 +103,7 @@ sudo AIMX_NONINTERACTIVE=1 aimx setup agent.example.com
 
 ### Re-running setup
 
-Re-run `sudo aimx setup` to re-verify DNS or wire another agent. The wizard detects existing config (`aimx serve` running, STARTTLS cert present, DKIM key present) and marks the STARTTLS / trust / install steps as ☒ skipped — only the preflight, DNS verification, and agents-setup steps run. The agent picker shows `(AIMX MCP wired)` next to already-wired agents so re-entry won't double-wire anything.
+Re-run `sudo aimx setup` to re-verify DNS. The wizard detects existing config (`aimx serve` running, STARTTLS cert present, DKIM key present) and marks the STARTTLS / trust / install steps as ☒ skipped — only the preflight and DNS verification steps run, and Step 6 reprints the agent-wiring guidance with the `⎘ Handoff` marker. To (re-)wire an agent after re-entry, run `aimx agents setup` yourself as your regular user; the picker shows `(AIMX MCP wired)` next to already-wired agents so it won't double-wire anything.
 
 ### DNS retry loop
 

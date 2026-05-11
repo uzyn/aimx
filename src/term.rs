@@ -143,11 +143,11 @@ pub fn warn_mark() -> ColoredString {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StepState {
     Pending,
-    /// Reserved for the in-progress glyph (`◐`). No current `aimx setup`
-    /// step uses it — Step 6's earlier interim ◐ rendering went away
-    /// when the wizard stopped spawning a sub-process for agent wiring.
-    /// Future surfaces (e.g. an `aimx upgrade` long-running step) can
-    /// reuse the existing rendering without re-introducing the variant.
+    /// In-progress glyph (`◐`). No production caller — Step 6's interim
+    /// `◐` rendering went away with the agent-wiring sub-process. Kept
+    /// for the `step_glyph` match-arm and the `step_glyphs_*` tests
+    /// (the variant is only constructed in `#[cfg(test)]` code, so
+    /// clippy still flags it as dead).
     #[allow(dead_code)]
     Running,
     Done,

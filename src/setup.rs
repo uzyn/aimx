@@ -3931,6 +3931,74 @@ owner = "aimx-catchall"
     }
 
     #[test]
+    fn mcp_section_lines_are_in_documented_order() {
+        // Pins the line *flow* of `mcp_section_lines`, not just presence.
+        // The contract: header sentence → blank → bullets → blank →
+        // "Run as your regular user..." sentence → blank → callout →
+        // blank. A refactor that scrambles this order (e.g. moves the
+        // bullets below the callout) would still pass the existing
+        // presence-only tests but produce confusing output.
+        let lines = mcp_section_lines();
+        let header_idx = lines
+            .iter()
+            .position(|line| line.starts_with("AIMX bundles MCP"))
+            .expect("header sentence must be present");
+        let first_bullet_idx = lines
+            .iter()
+            .position(|line| line.starts_with("  • "))
+            .expect("at least one bullet must be present");
+        let run_as_user_idx = lines
+            .iter()
+            .position(|line| line.starts_with("Run as your regular user"))
+            .expect("\"Run as your regular user...\" sentence must be present");
+        let callout_idx = lines
+            .iter()
+            .position(|line| line.contains("aimx agents setup") && !line.starts_with("AIMX"))
+            .expect("`aimx agents setup` callout must be present");
+
+        assert!(
+            header_idx < first_bullet_idx,
+            "header must precede bullets (header={header_idx}, bullets={first_bullet_idx})"
+        );
+        assert!(
+            first_bullet_idx < run_as_user_idx,
+            "bullets must precede the run-as-user sentence \
+             (bullets={first_bullet_idx}, run_as_user={run_as_user_idx})"
+        );
+        assert!(
+            run_as_user_idx < callout_idx,
+            "run-as-user sentence must precede callout \
+             (run_as_user={run_as_user_idx}, callout={callout_idx})"
+        );
+
+        // Blank-line separators between each landmark.
+        assert!(
+            lines[header_idx + 1].is_empty(),
+            "expected blank line after header at index {}; got {:?}",
+            header_idx + 1,
+            lines[header_idx + 1]
+        );
+        assert!(
+            lines[run_as_user_idx - 1].is_empty(),
+            "expected blank line before run-as-user sentence at index {}; got {:?}",
+            run_as_user_idx - 1,
+            lines[run_as_user_idx - 1]
+        );
+        assert!(
+            lines[run_as_user_idx + 1].is_empty(),
+            "expected blank line after run-as-user sentence at index {}; got {:?}",
+            run_as_user_idx + 1,
+            lines[run_as_user_idx + 1]
+        );
+        assert!(
+            lines[callout_idx - 1].is_empty(),
+            "expected blank line before callout at index {}; got {:?}",
+            callout_idx - 1,
+            lines[callout_idx - 1]
+        );
+    }
+
+    #[test]
     fn run_setup_skips_install_on_reentrant_path() {
         // When `is_already_configured` returns true, the entire install
         // block is skipped, so `install_service_file` must NOT be called.

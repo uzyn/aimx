@@ -59,15 +59,13 @@ aimx agents setup claude-code
 
 The same `--force`, `--print`, `--data-dir`, and `--dangerously-allow-root` flags apply. `--no-interactive` (with no agent name) prints the registry instead of opening the picker.
 
-## Landing in the TUI from `aimx setup`
+## Following `aimx setup`
 
-When `sudo aimx setup` completes, the wizard drops through to `aimx agents setup` as the invoking user (via `runuser -u $SUDO_USER -- /proc/self/exe agents setup`) so agent wiring is one continuous flow — no second command to type. If `$SUDO_USER` is unset (you logged in directly as root), the wizard prints the guidance message instead and exits cleanly. See [Setup — drop-through to agents-setup](./setup.md) for the wizard-side details.
-
-Under `AIMX_NONINTERACTIVE=1`, the drop-through is skipped (no TTY is assumed).
+When `sudo aimx setup` completes, Step 6 prints the list of supported agents and a `→ aimx agents setup` callout, then marks Step 6 as `⎘ Handoff` and exits. Agent wiring is a separate, operator-initiated step — the same idiom as `apt install` / `gh auth login`. Run `aimx agents setup` yourself as your regular (non-root) user once the wizard finishes. See [Setup — wiring agents](./setup.md#wiring-agents) for the wizard-side details.
 
 ## Key properties
 
-- **Refuses root.** Run `aimx agents setup` as the user whose agent you are configuring. For single-user root-login VPS setups, pass `--dangerously-allow-root` to wire AIMX into root's home. The flag applies to the TUI, per-agent runs, and `--no-interactive`, and is never passed implicitly by `aimx setup`'s drop-through.
+- **Refuses root.** Run `aimx agents setup` as the user whose agent you are configuring. For single-user root-login VPS setups, pass `--dangerously-allow-root` to wire AIMX into root's home. The flag applies to the TUI, per-agent runs, and `--no-interactive`.
 - **Writes only to `$HOME`.** Nothing under `/etc/` or `/var/` is touched by the plugin-install step.
 - **Offline.** The plugin tree is embedded at compile time.
 - **Idempotent.** `--force` overwrites existing plugin files.
