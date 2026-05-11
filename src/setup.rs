@@ -2775,24 +2775,30 @@ pub(crate) fn build_agents_setup_argv(
 ///
 /// 1. If `$SUDO_USER` is set and non-empty → re-exec the resolved aimx
 ///    binary as the invoking user via
-///    `runuser -l $SUDO_USER -s /bin/bash -- -ic "<shell-quoted argv>"`.
+///    `runuser -l $SUDO_USER -s /bin/bash -- -lc "PATH=...:$HOME/.npm-global/bin:... exec <argv>"`.
 ///    Control returns here once the child TUI exits so the closing
 ///    message can print after `aimx agents setup` finishes.
 /// 2. If `$SUDO_USER` is unset → print the guidance message (naming
 ///    `--dangerously-allow-root` as the root-login option) and return
 ///    [`AgentsSetupOutcome::Skipped`].
 ///
-/// We deliberately invoke bash with `-i` (interactive) so that
-/// `~/.bashrc` runs in full. Stock Ubuntu's `~/.bashrc` (seeded from
-/// `/etc/skel/.bashrc`) opens with a non-interactive guard that
-/// `return`s immediately when `$-` does not contain `i` — and any PATH
-/// edits below that guard are skipped. The canonical placements for
-/// `claude` (`~/.npm-global/bin` after `npm config set prefix
-/// '~/.npm-global'`) and the NVM loader both live below the guard, so
-/// without `-i` the dropped-through process can't find `claude` and
-/// MCP auto-registration silently lands in the `CliMissing` fallback.
-/// Forcing `-i` makes `$-` contain `i`, the guard falls through, and
-/// the PATH edits actually run.
+/// We invoke bash with `-l` (login) but **NOT** `-i` (interactive).
+/// An earlier shape used `-ic` to source `~/.bashrc` (where stock
+/// Ubuntu adds `~/.npm-global/bin` to PATH), but interactive bash
+/// also runs `initialize_job_control()`, which calls
+/// `tcsetpgrp(0, shell_pgrp)` to take over the controlling
+/// terminal's foreground process group. Since this bash sits at the
+/// bottom of `sudo → aimx setup → runuser → bash`, several pgrps away
+/// from the foreground, the kernel raises SIGTTOU and bash either
+/// self-stops or spin-retries — the user sees the terminal freeze
+/// after the "Dropping through..." line, with no TUI ever rendering.
+///
+/// To replace the `~/.bashrc`-sourced PATH edits without `-i`, we
+/// prepend `$HOME/.npm-global/bin` (canonical Claude Code install
+/// location: `npm config set prefix '~/.npm-global'`) and
+/// `$HOME/.local/bin` (XDG default, covers pip `--user` installs of
+/// `codex`) inside the shell command body. `bash -l` still sources
+/// `/etc/profile` and `~/.profile`, but with no job-control attempt.
 ///
 /// On spawn failure (e.g. `runuser` not installed on a stripped
 /// container image) print the same guidance and return
@@ -2859,35 +2865,54 @@ fn drop_through_to_agents_setup(explicit_data_dir: Option<&Path>) -> AgentsSetup
     // TUI exits, allowing the closing message to print AFTER agents setup.
     //
     // Shape:
-    //   runuser -l <user> -s /bin/bash -- -ic "<shell-quoted argv>"
+    //   runuser -l <user> -s /bin/bash -- -lc \
+    //     "PATH=\"$HOME/.npm-global/bin:$HOME/.local/bin:$PATH\" exec <argv>"
     //
-    // The login flag (`-l`) initialises HOME, SHELL, USER, LOGNAME, and
-    // a baseline PATH from the user's profile chain. The interactive
-    // flag (`-i`) is what actually pulls `claude` into PATH on stock
-    // Ubuntu — see the function-level doc above for why a
-    // non-interactive shell skips the `~/.bashrc` body that exports
-    // `~/.npm-global/bin` (and seeds NVM).
+    // `-l` makes bash a login shell, sourcing `/etc/profile` and
+    // `~/.profile` (HOME, SHELL, USER, LOGNAME, baseline PATH).
+    // `-c <cmd>` runs the command and exits.
     //
-    // Pinning the shell to `/bin/bash` (rather than the user's login
-    // shell from `/etc/passwd`) keeps the `-i` flag meaningful: a user
-    // on zsh/fish would not source `~/.bashrc` and would re-introduce
-    // the original PATH gap. Bash is a stock package on every supported
-    // distro, so this is a safe assumption.
+    // Why NOT `-i`: the previous shape used `-ic` to source
+    // `~/.bashrc` (where stock Ubuntu adds `~/.npm-global/bin` to
+    // PATH). Interactive bash also runs `initialize_job_control()`,
+    // which calls `tcsetpgrp(0, shell_pgrp)` to grab the controlling
+    // terminal's foreground pgrp. Since this bash is several pgrps
+    // away from the foreground (`sudo → aimx setup → runuser → bash`),
+    // the kernel raises SIGTTOU and bash either self-stops or
+    // spin-retries — the user reports the terminal freezes after the
+    // "Dropping through..." line. We avoid that entirely by NOT
+    // enabling job control.
     //
-    // The argv must be shell-quoted because the bash invocation reads
-    // the command from a single string passed after `-c` (here `-ic`).
-    let cmd = argv
+    // The PATH augmentation here is the load-bearing replacement for
+    // `~/.bashrc` sourcing. `~/.npm-global/bin` is the canonical
+    // Claude Code install location (`npm config set prefix
+    // '~/.npm-global' && npm install -g @anthropic-ai/claude-code`)
+    // and `~/.local/bin` covers pip `--user` installs (e.g. `codex`).
+    // Without these, the auto-`mcp add` step in agents_mcp.rs lands
+    // in the `CliMissing` branch and prints the manual hint instead.
+    //
+    // `exec` replaces the bash process with aimx so the parent
+    // observes aimx's exit status directly.
+    //
+    // Pinning to `/bin/bash` keeps PATH-prefix expansion of `$HOME`
+    // and `$PATH` consistent across hosts where the user's login
+    // shell from `/etc/passwd` may be zsh/fish.
+    //
+    // The argv must be shell-quoted because the bash invocation
+    // reads the whole command from a single string passed after `-c`.
+    let quoted_argv = argv
         .iter()
         .map(|a| crate::agents_setup::posix_single_quote(&a.to_string_lossy()))
         .collect::<Vec<_>>()
         .join(" ");
+    let cmd = format!("PATH=\"$HOME/.npm-global/bin:$HOME/.local/bin:$PATH\" exec {quoted_argv}");
     match std::process::Command::new("runuser")
         .arg("-l")
         .arg(&sudo_user)
         .arg("-s")
         .arg("/bin/bash")
         .arg("--")
-        .arg("-ic")
+        .arg("-lc")
         .arg(&cmd)
         .status()
     {
@@ -6365,22 +6390,36 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn drop_through_uses_interactive_bash_login_shell() {
-        // Regression guard for the runuser invocation shape. Stock
-        // Ubuntu's `~/.bashrc` (seeded from `/etc/skel/.bashrc`) opens
-        // with a non-interactive guard:
+    fn drop_through_uses_login_bash_with_path_augmentation() {
+        // Regression guard for the runuser invocation shape.
         //
-        //   case $- in *i*) ;; *) return;; esac
+        // History: an earlier shape was `runuser -l USER -c CMD`, which
+        // ran the user's login shell non-interactively. On stock Ubuntu
+        // `~/.bashrc` opens with `case $- in *i*) ;; *) return;; esac`,
+        // so the non-interactive shell skipped the body — including the
+        // `~/.npm-global/bin` PATH export below the guard. Commit
+        // b9c1fa1 flipped the invocation to `bash -ic` so `$-` contained
+        // `i` and the body ran. That fix introduced a worse bug:
+        // interactive bash (`-i`) calls `initialize_job_control()`,
+        // which tries to `tcsetpgrp(0, shell_pgrp)` and either
+        // self-stops on SIGTTOU or loops on the retry — because bash
+        // here is `sudo → aimx setup → runuser → bash`, several pgrps
+        // away from the foreground. Result: dead terminal, no TUI,
+        // setup hangs forever at Step 6.
         //
-        // `runuser -l USER -c CMD` runs the user's login shell
-        // non-interactively, the guard returns, and the PATH edits
-        // below it (notably `~/.npm-global/bin` and the NVM loader)
-        // never execute. The drop-through MUST instead invoke an
-        // interactive bash to load `~/.bashrc` in full so `claude` is
-        // reachable when `aimx agents setup` re-execs.
+        // The current shape sidesteps the deadlock by dropping `-i`
+        // entirely and substituting **explicit PATH augmentation** for
+        // the `~/.bashrc` source: the shell command body prepends
+        // `$HOME/.npm-global/bin` (the canonical Claude Code install
+        // path under `npm config set prefix '~/.npm-global'`) and
+        // `$HOME/.local/bin` (XDG default for pip `--user` and similar)
+        // to `$PATH`. `bash -lc` keeps the login profile chain
+        // (`/etc/profile`, `~/.profile`) in scope without enabling
+        // interactive job control.
         //
-        // Lock the new shape (`-l`, `-s /bin/bash`, `--`, `-ic`) and
-        // forbid the old shape (`-u <user> --`, `/proc/self/exe`) by
+        // Lock the new shape (`-l`, `-s /bin/bash`, `--`, `-lc`,
+        // `PATH=...:.npm-global/bin:...`) and forbid both prior shapes
+        // (`-u <user> --` non-login form, `-ic` interactive form) by
         // source-grepping the function body.
         let source = include_str!("setup.rs");
         let start = source
@@ -6392,24 +6431,43 @@ owner = "aimx-catchall"
             .unwrap_or(source.len());
         let body = &source[start..end];
 
-        // New shape: `runuser -l <user> -s /bin/bash -- -ic <cmd>`.
+        // New shape: `runuser -l <user> -s /bin/bash -- -lc <cmd>`.
         assert!(
             body.contains(".arg(\"-l\")"),
             "drop_through must use `runuser -l` (login shell) so the \
-             user's profile chain is sourced; got body without `-l`"
+             user's profile chain (`/etc/profile`, `~/.profile`) is \
+             sourced; got body without `-l`"
         );
         assert!(
             body.contains(".arg(\"-s\")") && body.contains("/bin/bash"),
             "drop_through must pin the shell to `/bin/bash` via `-s` so \
-             `-i` actually sources `~/.bashrc` regardless of the user's \
+             the `-lc` invocation is consistent regardless of the user's \
              login-shell setting in /etc/passwd"
         );
         assert!(
-            body.contains(".arg(\"-ic\")"),
-            "drop_through must pass `-ic` to bash so `$-` contains `i` \
-             and stock Ubuntu's `~/.bashrc` non-interactive guard does \
-             NOT early-return — otherwise `~/.npm-global/bin` is missing \
-             from PATH and `claude` is unreachable"
+            body.contains(".arg(\"-lc\")"),
+            "drop_through must pass `-lc` to bash (login + run-command, \
+             NON-interactive). `-ic` (the prior shape) deadlocks under \
+             `sudo → aimx setup → runuser → bash` because interactive \
+             bash tries to grab the foreground pgrp via `tcsetpgrp` and \
+             either self-stops on SIGTTOU or spin-retries forever"
+        );
+        assert!(
+            !body.contains(".arg(\"-ic\")"),
+            "drop_through must NOT pass `-ic` — interactive bash here \
+             deadlocks on terminal-pgrp handoff. See the test doc above \
+             for the full chain of regressions"
+        );
+        // The PATH augmentation is the load-bearing replacement for
+        // `~/.bashrc` sourcing: without it, `claude` is unreachable on
+        // a stock Ubuntu install and the auto-`mcp add` step silently
+        // falls into the `CliMissing` branch (`agents_mcp.rs:121`).
+        assert!(
+            body.contains("PATH=") && body.contains(".npm-global/bin"),
+            "drop_through must explicitly prepend `~/.npm-global/bin` \
+             to PATH in the shell command body — that is what makes \
+             `claude` reachable on stock Ubuntu without `~/.bashrc` \
+             being sourced. Got a body that does not augment PATH."
         );
 
         // Old shape: must NOT call runuser via the non-login `-u` form
