@@ -12,6 +12,49 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// How `ingest_email` runs `on_receive` hooks after the email is on disk.
+///
+/// `Sync` blocks the caller until every hook subprocess exits. `Async`
+/// spawns hooks into a detached `std::thread` so the caller returns as
+/// soon as the email is durable on disk. The SMTP DATA handler uses
+/// `Async` so the `250 OK` reply is not gated on hook duration — a 5+
+/// minute hook would otherwise exceed the remote MTA's DATA-reply
+/// timeout and trigger a re-delivery (re-firing the hook on every
+/// retry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookMode {
+    /// Fire `on_receive` hooks synchronously. Used by the `aimx ingest`
+    /// CLI path and by tests so the call brackets the full hook
+    /// lifetime.
+    Sync,
+    /// Spawn `on_receive` hooks in a detached `std::thread`. Used by
+    /// the SMTP DATA handler so `250 OK` is not delayed by hook
+    /// duration. The hook subprocess itself is sandboxed via
+    /// `systemd-run` and survives a daemon restart; only the
+    /// in-process logging of its outcome is lost on shutdown.
+    Async,
+}
+
+/// Retention window for the per-mailbox Message-Id dedup cache. Inbound
+/// `Message-Id`s persist in the cache for this long after receipt;
+/// older entries are auto-evicted by SparKV. 24h sits comfortably
+/// above any practical SMTP retry window: most retries land within
+/// minutes, and even pathological MTAs give up well before a day.
+const DEDUP_TTL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Safety cap on the per-mailbox dedup cache. SparKV's default
+/// (10_000) would silently start rejecting inserts on very busy
+/// mailboxes. 100k is roughly 10MB of string overhead at typical
+/// `<id@host>` lengths — still cheap, but well above the inbound rate
+/// of any realistic single-mailbox aimx deployment.
+const DEDUP_MAX_ITEMS: usize = 100_000;
+
+/// Max size of a single value stored in the dedup cache. We only store
+/// the email's filesystem `id` (a fixed-shape `YYYY-MM-DD-HHMMSS-<slug>`
+/// stem) as a debug aid, so 256 bytes is more than enough.
+const DEDUP_MAX_VALUE_SIZE: usize = 256;
 
 /// Decide whether a recipient address routes to a configured mailbox.
 ///
@@ -52,7 +95,18 @@ pub fn run(rcpt: &str, config: Config) -> Result<(), Box<dyn std::error::Error>>
     // process with a single ingest so contention isn't possible. The
     // daemon path shares its map across all writers.
     let locks = Arc::new(MailboxLocks::new());
-    ingest_email(&config, &locks, rcpt, &raw, sentinel_ip, None)
+    // Manual stdin path is a short-lived process; wait for any
+    // `on_receive` hook so the CLI doesn't exit before the hook
+    // finishes (the spawned thread would be killed).
+    ingest_email(
+        &config,
+        &locks,
+        rcpt,
+        &raw,
+        sentinel_ip,
+        None,
+        HookMode::Sync,
+    )
 }
 
 /// Inbound ingest entry point.
@@ -71,6 +125,7 @@ pub fn ingest_email(
     raw: &[u8],
     received_from_ip: IpAddr,
     envelope_mail_from: Option<&str>,
+    hook_mode: HookMode,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Test-only seam: force a synthetic ingest failure for a specific
     // recipient so we can drive the DATA partial-success contract
@@ -280,8 +335,33 @@ pub fn ingest_email(
     // final `.md` write sequence; readers of the mailbox directory
     // observe either the pre-state or the post-state, never a half-
     // written bundle.
-    let lock = locks.lock_for(&mailbox);
-    let _guard = lock.blocking_lock();
+    let state = locks.lock_for(&mailbox);
+    let _guard = state.lock.blocking_lock();
+
+    // Message-Id dedup: if this exact Message-Id was already ingested
+    // within the SMTP-retry window, skip storage + hook firing but
+    // still return Ok so the caller emits `250 OK`. Without this,
+    // every MTA retry — including the ones triggered by our own
+    // slow-hook → DATA timeout interaction before this change — would
+    // re-fire `on_receive`. The cache is lazily rebuilt from disk on
+    // first ingest into the mailbox after daemon startup.
+    if !message_id.is_empty() {
+        let mut cache_guard = state
+            .seen_message_ids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let cache = cache_guard.get_or_insert_with(|| build_dedup_cache_from_disk(&inbox_dir));
+        if cache.get(&message_id).is_some() {
+            tracing::info!(
+                target: "aimx::ingest",
+                "duplicate message_id, skipping rcpt={rcpt} mailbox={mailbox} message_id={message_id}",
+                rcpt = rcpt,
+                mailbox = mailbox,
+                message_id = message_id,
+            );
+            return Ok(());
+        }
+    }
 
     let md_path = allocate_filename(&inbox_dir, timestamp, &slug, has_attachments);
     let parent_dir = md_path
@@ -392,14 +472,88 @@ pub fn ingest_email(
         attachments = attachments_count,
     );
 
+    // Record the Message-Id in the dedup cache before releasing the
+    // per-mailbox lock so a concurrent retry from a different SMTP
+    // session can never observe a state where the `.md` is on disk
+    // but the cache has not been updated yet.
+    if !meta.message_id.is_empty() {
+        let mut cache_guard = state
+            .seen_message_ids
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(cache) = cache_guard.as_mut() {
+            // Truncate values that exceed SparKV's per-item cap. The id
+            // here is the filesystem stem (a known-bounded shape), so
+            // truncation should never actually trigger in practice; the
+            // check is belt-and-braces against the cache's `set_with_ttl`
+            // returning `Err(ItemSizeExceeded)` and silently dropping the
+            // dedup record.
+            let value: &str = if meta.id.len() <= DEDUP_MAX_VALUE_SIZE {
+                meta.id.as_str()
+            } else {
+                ""
+            };
+            if let Err(e) = cache.set_with_ttl(&meta.message_id, value, DEDUP_TTL) {
+                tracing::warn!(
+                    target: "aimx::ingest",
+                    "dedup cache insert failed mailbox={mailbox} message_id={message_id}: {err:?}",
+                    mailbox = mailbox,
+                    message_id = meta.message_id,
+                    err = e,
+                );
+            }
+        }
+    }
+
     drop(_guard);
 
     if let Some(mailbox_config) = config.mailboxes.get(&mailbox) {
-        let ctx = OnReceiveContext {
-            filepath: &md_path,
-            metadata: &meta,
-        };
-        hook::execute_on_receive(config, mailbox_config, &ctx);
+        match hook_mode {
+            HookMode::Sync => {
+                let ctx = OnReceiveContext {
+                    filepath: &md_path,
+                    metadata: &meta,
+                };
+                hook::execute_on_receive(config, mailbox_config, &ctx);
+            }
+            HookMode::Async => {
+                // Detach hook execution onto a fresh OS thread so the
+                // calling SMTP DATA handler can return immediately. We
+                // own all the data the hook needs; clone it into the
+                // closure to give the thread a self-contained snapshot.
+                let config_owned = config.clone();
+                let mailbox_name = mailbox.clone();
+                let mailbox_name_for_log = mailbox_name.clone();
+                let thread_name = format!("aimx-hook-{mailbox_name}");
+                let md_path_owned = md_path.clone();
+                let meta_owned = meta.clone();
+                if let Err(e) = std::thread::Builder::new()
+                    .name(thread_name)
+                    .spawn(move || {
+                        let Some(mb_cfg) = config_owned.mailboxes.get(&mailbox_name) else {
+                            return;
+                        };
+                        let ctx = OnReceiveContext {
+                            filepath: &md_path_owned,
+                            metadata: &meta_owned,
+                        };
+                        hook::execute_on_receive(&config_owned, mb_cfg, &ctx);
+                    })
+                {
+                    // Falling back to a synchronous fire on spawn
+                    // failure would re-introduce the SMTP-blocking bug
+                    // this branch exists to fix; swallow the error and
+                    // log instead. The email is still on disk so the
+                    // operator can re-fire the hook manually if needed.
+                    tracing::warn!(
+                        target: "aimx::hook",
+                        "failed to spawn async hook thread mailbox={mailbox_name}: {err}",
+                        mailbox_name = mailbox_name_for_log,
+                        err = e,
+                    );
+                }
+            }
+        }
     }
 
     Ok(())
@@ -409,6 +563,144 @@ fn extract_header_value(message: &mail_parser::Message, name: &str) -> Option<St
     let val = message.header_raw(name)?;
     let s = val.trim().to_string();
     if s.is_empty() { None } else { Some(s) }
+}
+
+/// Build a fresh dedup cache by scanning the mailbox inbox once. Walks
+/// flat `<stem>.md` files and bundle dirs `<stem>/<stem>.md`,
+/// filtering by filename date prefix so a giant historical mailbox
+/// doesn't open every file. Each loaded entry's TTL is adjusted so it
+/// expires `DEDUP_TTL` after its original `received_at`, not
+/// `DEDUP_TTL` from now — a daemon restart cannot extend the dedup
+/// window past its real lifetime.
+fn build_dedup_cache_from_disk(inbox_dir: &Path) -> sparkv::SparKV {
+    let mut kv = make_dedup_sparkv();
+    let now = chrono::Utc::now();
+    let cutoff_dt =
+        now - chrono::Duration::from_std(DEDUP_TTL).unwrap_or(chrono::Duration::days(1));
+    let cutoff_date_prefix = cutoff_dt.format("%Y-%m-%d").to_string();
+
+    let rd = match std::fs::read_dir(inbox_dir) {
+        Ok(rd) => rd,
+        Err(_) => return kv,
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Some(file_name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+
+        // Skip anything dated before the retention cutoff. Filenames
+        // always start with `YYYY-MM-DD-HHMMSS-`; lex compare on the
+        // first 10 chars matches date order. Files whose name is too
+        // short to carry a date prefix are inspected (don't filter
+        // overzealously — they may be legitimate non-standard fixtures).
+        if file_name.len() >= 10 {
+            let date_prefix = &file_name[..10];
+            if date_prefix < cutoff_date_prefix.as_str() {
+                continue;
+            }
+        }
+
+        let md_path = if path.is_dir() {
+            // Bundle layout: <stem>/<stem>.md
+            path.join(format!("{file_name}.md"))
+        } else if file_name.ends_with(".md") {
+            path
+        } else {
+            continue;
+        };
+
+        let Some((msg_id, received_at)) = read_frontmatter_id_pair(&md_path) else {
+            continue;
+        };
+
+        let total = chrono::Duration::from_std(DEDUP_TTL).unwrap_or(chrono::Duration::days(1));
+        let elapsed = now - received_at;
+        if elapsed >= total {
+            continue;
+        }
+        let remaining = total - elapsed;
+        let remaining_secs = remaining.num_seconds().max(1) as u64;
+        let _ = kv.set_with_ttl(&msg_id, "loaded", Duration::from_secs(remaining_secs));
+    }
+    kv
+}
+
+/// Read just the frontmatter `message_id` and `received_at` from a
+/// `.md` file. Opens at most the first 4 KiB so a huge body (rare on
+/// inbound, but possible) doesn't cost the dedup-rebuild path. Returns
+/// `None` when the frontmatter is malformed, the keys are missing, or
+/// `received_at` doesn't parse as RFC-3339.
+fn read_frontmatter_id_pair(md_path: &Path) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(md_path).ok()?;
+    let mut buf = [0u8; 4096];
+    let n = file.read(&mut buf).ok()?;
+    let head = std::str::from_utf8(&buf[..n]).ok()?;
+
+    let body_after_open = head
+        .strip_prefix("+++\n")
+        .or_else(|| head.strip_prefix("+++\r\n"))?;
+    // Closing delimiter sits on its own line.
+    let end_idx = body_after_open
+        .find("\n+++")
+        .or_else(|| body_after_open.find("\r\n+++"))?;
+    let toml_block = &body_after_open[..end_idx];
+
+    let mut message_id: Option<String> = None;
+    let mut received_at: Option<String> = None;
+    for raw_line in toml_block.lines() {
+        let line = raw_line.trim_start();
+        if message_id.is_none()
+            && let Some(rest) = line.strip_prefix("message_id")
+            && let Some(val) = parse_toml_string_value(rest)
+        {
+            message_id = Some(val);
+        } else if received_at.is_none()
+            && let Some(rest) = line.strip_prefix("received_at")
+            && let Some(val) = parse_toml_string_value(rest)
+        {
+            received_at = Some(val);
+        }
+        if message_id.is_some() && received_at.is_some() {
+            break;
+        }
+    }
+
+    let msg_id = message_id?;
+    if msg_id.is_empty() {
+        return None;
+    }
+    let received_at_str = received_at?;
+    let dt = chrono::DateTime::parse_from_rfc3339(&received_at_str)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some((msg_id, dt))
+}
+
+/// Parse a value out of a `key = "value"` TOML line. The caller has
+/// already stripped the key, so `after_key` looks like ` = "..."`. We
+/// accept double-quoted strings only — TOML literals (single-quoted)
+/// are never emitted by `format_frontmatter`.
+fn parse_toml_string_value(after_key: &str) -> Option<String> {
+    let rest = after_key.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Construct a SparKV tuned for the dedup cache: 24h max TTL, a
+/// per-mailbox safety cap on item count, and auto-eviction enabled so
+/// stale entries don't accumulate.
+fn make_dedup_sparkv() -> sparkv::SparKV {
+    let mut config = sparkv::Config::new();
+    config.max_items = DEDUP_MAX_ITEMS;
+    config.max_item_size = DEDUP_MAX_VALUE_SIZE;
+    config.max_ttl = DEDUP_TTL;
+    config.default_ttl = DEDUP_TTL;
+    config.auto_clear_expired = true;
+    sparkv::SparKV::with_config(config)
 }
 
 fn create_resolver() -> Option<mail_auth::MessageAuthenticator> {
@@ -1023,6 +1315,38 @@ mod tests {
           This is a plain text email.\r\n"
     }
 
+    /// Substitute a fresh, monotonically-unique `Message-ID:` header
+    /// into a static `.eml` fixture. The fixtures hard-code a
+    /// Message-Id so they parse to deterministic bytes; the inbound
+    /// Message-Id dedup in `ingest_email` correctly treats two ingests
+    /// of the same fixture as duplicates. Tests that need to observe
+    /// two distinct deliveries swap in a per-call unique Message-Id
+    /// via this helper.
+    fn with_fresh_message_id(eml: &[u8]) -> Vec<u8> {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let new_id = format!("<test-fresh-{n}@example.test>");
+        let s = std::str::from_utf8(eml).expect("test fixtures are UTF-8");
+        let mut out = String::with_capacity(s.len() + 32);
+        let mut replaced = false;
+        for line in s.split_inclusive('\n') {
+            let trimmed = line.trim_start();
+            if !replaced && trimmed.to_ascii_lowercase().starts_with("message-id:") {
+                let leading_ws = &line[..line.len() - trimmed.len()];
+                let line_ending = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+                out.push_str(leading_ws);
+                out.push_str("Message-ID: ");
+                out.push_str(&new_id);
+                out.push_str(line_ending);
+                replaced = true;
+            } else {
+                out.push_str(line);
+            }
+        }
+        out.into_bytes()
+    }
+
     fn html_only_eml() -> &'static [u8] {
         b"From: sender@example.com\r\n\
           To: alice@test.com\r\n\
@@ -1147,6 +1471,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1177,6 +1502,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1195,6 +1521,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1228,6 +1555,7 @@ mod tests {
             html_only_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1281,6 +1609,7 @@ mod tests {
             multipart_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1301,6 +1630,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1363,6 +1693,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         );
         assert!(result.is_err(), "expected error when no mailbox routes");
     }
@@ -1378,6 +1709,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1414,18 +1746,20 @@ mod tests {
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            &with_fresh_message_id(plain_text_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
         ingest_email(
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            &with_fresh_message_id(plain_text_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1445,6 +1779,7 @@ mod tests {
             attachment_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1488,6 +1823,7 @@ mod tests {
             multi_attachment_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1512,18 +1848,20 @@ mod tests {
             &config,
             &test_locks(),
             "alice@test.com",
-            attachment_eml(),
+            &with_fresh_message_id(attachment_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
         ingest_email(
             &config,
             &test_locks(),
             "alice@test.com",
-            attachment_eml(),
+            &with_fresh_message_id(attachment_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1551,6 +1889,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1721,6 +2060,7 @@ mod tests {
             eml,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1778,6 +2118,7 @@ mod tests {
             eml,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1869,6 +2210,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -1982,6 +2324,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2035,6 +2378,7 @@ mod tests {
             raw,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2114,14 +2458,18 @@ mod tests {
         for _ in 0..8 {
             let cfg = Arc::clone(&config);
             let locks = Arc::clone(&locks);
+            // Per-thread unique Message-Id so inbound dedup treats
+            // each ingest as a distinct delivery.
+            let eml = with_fresh_message_id(attachment_eml());
             handles.push(thread::spawn(move || {
                 ingest_email(
                     &cfg,
                     &locks,
                     "alice@test.com",
-                    attachment_eml(),
+                    &eml,
                     sentinel_ip(),
                     None,
+                    HookMode::Sync,
                 )
                 .unwrap();
             }));
@@ -2158,18 +2506,20 @@ mod tests {
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            &with_fresh_message_id(plain_text_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
         ingest_email(
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            &with_fresh_message_id(plain_text_eml()),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2260,6 +2610,7 @@ mod tests {
             plain_text_eml(),
             ip,
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2300,6 +2651,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2331,6 +2683,7 @@ mod tests {
             eml,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2363,6 +2716,7 @@ mod tests {
             eml,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2386,6 +2740,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2404,25 +2759,53 @@ mod tests {
 
     #[test]
     fn thread_id_deterministic_for_same_message() {
+        // Two distinct messages that reply to the same parent must
+        // land on the same `thread_id`. We can no longer assert this
+        // by ingesting the same fixture twice — inbound Message-Id
+        // dedup correctly drops the second copy — so the test now
+        // ingests two replies (distinct Message-Ids) sharing an
+        // `In-Reply-To`. The thread-derivation logic is the property
+        // under test, not the dedup boundary.
         let tmp = TempDir::new().unwrap();
         let config = test_config(tmp.path());
+
+        let reply_a = b"From: sender@example.com\r\n\
+                       To: alice@test.com\r\n\
+                       Subject: Re: Hello\r\n\
+                       Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                       Message-ID: <reply-a@example.com>\r\n\
+                       In-Reply-To: <parent@example.com>\r\n\
+                       References: <parent@example.com>\r\n\
+                       \r\n\
+                       Hello.\r\n";
+        let reply_b = b"From: sender@example.com\r\n\
+                       To: alice@test.com\r\n\
+                       Subject: Re: Hello\r\n\
+                       Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                       Message-ID: <reply-b@example.com>\r\n\
+                       In-Reply-To: <parent@example.com>\r\n\
+                       References: <parent@example.com>\r\n\
+                       \r\n\
+                       Hi.\r\n";
 
         ingest_email(
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            reply_a,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
         ingest_email(
             &config,
             &test_locks(),
             "alice@test.com",
-            plain_text_eml(),
+            reply_b,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2454,6 +2837,7 @@ mod tests {
             plain_text_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2491,6 +2875,7 @@ mod tests {
             attachment_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2513,6 +2898,7 @@ mod tests {
             bogus,
             sentinel_ip(),
             None,
+            HookMode::Sync,
         );
         assert!(result.is_err(), "empty input must propagate parse failure");
         assert!(logs_contain("Failed to parse email"));
@@ -2591,6 +2977,7 @@ mod tests {
             multi_attachment_eml(),
             sentinel_ip(),
             None,
+            HookMode::Sync,
         )
         .unwrap();
 
@@ -2624,5 +3011,191 @@ mod tests {
                 );
             }
         }
+    }
+
+    // --- Message-Id dedup ---
+
+    /// Re-ingesting the same Message-Id is silently absorbed: the
+    /// second call returns `Ok(())` (so SMTP returns `250 OK` and the
+    /// remote MTA stops retrying), but no second `.md` is written.
+    #[test]
+    fn ingest_skips_duplicate_message_id() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let locks = test_locks();
+
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+        // Same fixture, same Message-Id. Must succeed but not store.
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        assert_eq!(
+            entries.len(),
+            1,
+            "duplicate Message-Id must not produce a second .md"
+        );
+    }
+
+    /// Distinct Message-Ids must both pass through dedup and produce
+    /// two stored `.md` files. Guards against the dedup check being
+    /// overly aggressive (e.g., a stale cache returning true for any
+    /// query).
+    #[test]
+    fn ingest_allows_distinct_message_ids() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+        let locks = test_locks();
+
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            &with_fresh_message_id(plain_text_eml()),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            &with_fresh_message_id(plain_text_eml()),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+
+        let entries = collect_md_files(&inbox(tmp.path(), "alice"));
+        assert_eq!(entries.len(), 2);
+    }
+
+    /// The dedup cache is rebuilt lazily from disk on the first ingest
+    /// into a mailbox after daemon start. Drive that path by ingesting
+    /// twice through *different* `MailboxLocks` (so the second has no
+    /// in-memory cache and must rebuild from the .md the first ingest
+    /// wrote). Using aimx's own write path on both sides keeps the
+    /// test agnostic to whether `mail-parser` includes angle brackets
+    /// on the Message-Id — whatever shape gets persisted is the same
+    /// shape the second ingest will look up.
+    #[test]
+    fn ingest_dedup_cache_loads_from_disk() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+
+        // First ingest: writes the .md to disk + populates locks_a's
+        // in-memory cache. locks_a is then dropped at scope end.
+        let locks_a = test_locks();
+        ingest_email(
+            &config,
+            &locks_a,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+
+        let alice = inbox(tmp.path(), "alice");
+        let entries_after_first = collect_md_files(&alice);
+        assert_eq!(
+            entries_after_first.len(),
+            1,
+            "first ingest must store one .md"
+        );
+
+        // Second ingest with a fresh MailboxLocks (no in-memory cache):
+        // dedup must rebuild from disk and skip the duplicate.
+        let locks_b = test_locks();
+        ingest_email(
+            &config,
+            &locks_b,
+            "alice@test.com",
+            plain_text_eml(),
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+
+        let entries = collect_md_files(&alice);
+        assert_eq!(
+            entries.len(),
+            1,
+            "fresh-locks ingest of duplicate Message-Id must use disk-loaded cache and skip"
+        );
+    }
+
+    /// Stale on-disk Message-Ids past the dedup TTL must not appear in
+    /// the rebuilt cache. Pre-stage an `.md` with `received_at` set
+    /// well outside the 24h window; an incoming message reusing that
+    /// Message-Id is treated as a fresh delivery.
+    #[test]
+    fn ingest_dedup_cache_excludes_expired() {
+        let tmp = TempDir::new().unwrap();
+        let config = test_config(tmp.path());
+
+        let alice = inbox(tmp.path(), "alice");
+        std::fs::create_dir_all(&alice).unwrap();
+        // `received_at` 5 days ago — outside the 24h DEDUP_TTL.
+        let received_at = (chrono::Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        let date_prefix = (chrono::Utc::now() - chrono::Duration::days(5))
+            .format("%Y-%m-%d-%H%M%S")
+            .to_string();
+        let staged = format!(
+            "+++\n\
+             id = \"{date_prefix}-stub\"\n\
+             message_id = \"<stale@example.com>\"\n\
+             received_at = \"{received_at}\"\n\
+             +++\nbody\n"
+        );
+        std::fs::write(alice.join(format!("{date_prefix}-stub.md")), staged).unwrap();
+
+        let incoming = b"From: sender@example.com\r\n\
+                        To: alice@test.com\r\n\
+                        Subject: Hello\r\n\
+                        Date: Thu, 01 Jan 2025 12:00:00 +0000\r\n\
+                        Message-ID: <stale@example.com>\r\n\
+                        \r\n\
+                        Reuse.\r\n";
+
+        let locks = test_locks();
+        ingest_email(
+            &config,
+            &locks,
+            "alice@test.com",
+            incoming,
+            sentinel_ip(),
+            None,
+            HookMode::Sync,
+        )
+        .unwrap();
+
+        let entries = collect_md_files(&alice);
+        assert_eq!(
+            entries.len(),
+            2,
+            "stale on-disk Message-Id must not block a fresh delivery"
+        );
     }
 }

@@ -1,5 +1,5 @@
-//! Per-mailbox write lock map shared by every path that mutates a
-//! mailbox's on-disk tree.
+//! Per-mailbox write lock map and dedup cache shared by every path
+//! that mutates a mailbox's on-disk tree.
 //!
 //! # Why a shared lock
 //!
@@ -17,9 +17,10 @@
 //!
 //! Always acquire in this order; never the reverse:
 //!
-//! 1. **Outer**: per-mailbox [`tokio::sync::Mutex<()>`] from this map.
-//!    Held for the full read-modify-write critical section on any file
-//!    in `<data_dir>/inbox/<mailbox>/` or `<data_dir>/sent/<mailbox>/`.
+//! 1. **Outer**: per-mailbox [`tokio::sync::Mutex<()>`] held on
+//!    [`MailboxState::lock`]. Held for the full read-modify-write
+//!    critical section on any file in `<data_dir>/inbox/<mailbox>/`
+//!    or `<data_dir>/sent/<mailbox>/`.
 //! 2. **Inner**: process-wide `CONFIG_WRITE_LOCK`
 //!    (`std::sync::Mutex<()>` in [`crate::mailbox_handler`]). Held only
 //!    for the `load → modify → write → store` sequence on
@@ -35,6 +36,16 @@
 //! `MAILBOX-CREATE` on different names both take the config lock, then
 //! race for their per-mailbox locks.
 //!
+//! # Dedup cache
+//!
+//! Each [`MailboxState`] also carries a lazily-initialized SparKV-backed
+//! cache of recently-seen `Message-Id` headers. Inbound ingest consults
+//! it before touching disk so that legitimate SMTP retries (which
+//! re-deliver the same `Message-Id`) don't re-fire `on_receive` hooks.
+//! Entries auto-evict after 24h, matching the practical upper bound of
+//! MTA retry queues. The cache is not the source of truth — it is
+//! rebuilt on demand from the frontmatter of files already on disk.
+//!
 //! # Contention notes
 //!
 //! The map-level `std::sync::Mutex` around the hashmap is held only for
@@ -47,34 +58,59 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::Mutex as AsyncMutex;
 
-/// Shared per-mailbox lock map. Every writer (inbound ingest, MARK-*,
-/// MAILBOX-*) acquires its mailbox's lock before touching files under
-/// that mailbox's tree.
+/// Per-mailbox state held by [`MailboxLocks`]. Exposes the async write
+/// lock plus a lazily-initialized Message-Id dedup cache.
+pub struct MailboxState {
+    /// Outer lock from the hierarchy described in the module docs.
+    /// Acquired via `.lock().await` from async contexts (UDS handlers)
+    /// and `.blocking_lock()` from sync contexts (ingest under
+    /// `spawn_blocking`).
+    pub lock: AsyncMutex<()>,
+
+    /// Message-Id dedup cache. `None` until the first ingest into this
+    /// mailbox after daemon startup; populated lazily from disk on
+    /// first use. Wrapped in `std::sync::Mutex` because `SparKV`
+    /// mutates on every read/write.
+    pub seen_message_ids: Mutex<Option<sparkv::SparKV>>,
+}
+
+impl MailboxState {
+    fn new() -> Self {
+        Self {
+            lock: AsyncMutex::new(()),
+            seen_message_ids: Mutex::new(None),
+        }
+    }
+}
+
+/// Shared per-mailbox state map. Every writer (inbound ingest, MARK-*,
+/// MAILBOX-*) acquires its mailbox's [`MailboxState::lock`] before
+/// touching files under that mailbox's tree.
 pub struct MailboxLocks {
     // `std::sync::Mutex` around the map itself because the insert-if-
     // absent step is synchronous and uncontended. The per-mailbox
     // `AsyncMutex` is what callers actually hold across `.await` points.
-    locks: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+    states: Mutex<HashMap<String, Arc<MailboxState>>>,
 }
 
 impl MailboxLocks {
     pub fn new() -> Self {
         Self {
-            locks: Mutex::new(HashMap::new()),
+            states: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Return (lazy-inserting if needed) the per-mailbox lock handle.
-    /// The caller decides whether to `.lock().await` (async contexts)
-    /// or `.blocking_lock()` (sync contexts like blocking `ingest_email`
-    /// under `spawn_blocking`).
-    pub fn lock_for(&self, mailbox: &str) -> Arc<AsyncMutex<()>> {
+    /// Return (lazy-inserting if needed) the per-mailbox state handle.
+    /// The caller decides whether to `.lock.lock().await` (async
+    /// contexts) or `.lock.blocking_lock()` (sync contexts like
+    /// blocking `ingest_email` under `spawn_blocking`).
+    pub fn lock_for(&self, mailbox: &str) -> Arc<MailboxState> {
         let mut map = self
-            .locks
+            .states
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         map.entry(mailbox.to_string())
-            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .or_insert_with(|| Arc::new(MailboxState::new()))
             .clone()
     }
 }
@@ -90,16 +126,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn lock_for_same_mailbox_returns_same_mutex() {
+    fn lock_for_same_mailbox_returns_same_state() {
         let locks = MailboxLocks::new();
         let a = locks.lock_for("alice");
         let b = locks.lock_for("alice");
-        // Same underlying Arc => same semaphore => `Arc::ptr_eq`.
+        // Same underlying Arc => same state struct => `Arc::ptr_eq`.
         assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[test]
-    fn lock_for_different_mailboxes_returns_distinct_mutex() {
+    fn lock_for_different_mailboxes_returns_distinct_state() {
         let locks = MailboxLocks::new();
         let a = locks.lock_for("alice");
         let b = locks.lock_for("bob");
@@ -109,18 +145,26 @@ mod tests {
     #[tokio::test]
     async fn async_lock_serializes_two_holders() {
         let locks = Arc::new(MailboxLocks::new());
-        let l1 = locks.lock_for("alice");
-        let g1 = l1.lock().await;
+        let s1 = locks.lock_for("alice");
+        let g1 = s1.lock.lock().await;
 
         // Second waiter times out fast when the first holder is still up.
-        let l2 = locks.lock_for("alice");
-        let res = tokio::time::timeout(std::time::Duration::from_millis(50), l2.lock()).await;
+        let s2 = locks.lock_for("alice");
+        let res = tokio::time::timeout(std::time::Duration::from_millis(50), s2.lock.lock()).await;
         assert!(res.is_err(), "second lock must block while first is held");
 
         drop(g1);
         // Now acquirable.
-        let _g2 = tokio::time::timeout(std::time::Duration::from_millis(100), l2.lock())
+        let _g2 = tokio::time::timeout(std::time::Duration::from_millis(100), s2.lock.lock())
             .await
             .expect("second lock must acquire once first is dropped");
+    }
+
+    #[test]
+    fn seen_message_ids_starts_uninitialized() {
+        let locks = MailboxLocks::new();
+        let state = locks.lock_for("alice");
+        let guard = state.seen_message_ids.lock().unwrap();
+        assert!(guard.is_none());
     }
 }

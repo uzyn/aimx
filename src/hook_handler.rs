@@ -158,8 +158,8 @@ pub async fn handle_hook_create(
     // Acquire the same lock hierarchy mailbox CRUD takes: outer per-
     // mailbox lock (shared with ingest / MARK-* / MAILBOX-CRUD), inner
     // process-wide config write lock. Always outer → inner.
-    let lock = state_ctx.lock_for(&req.mailbox);
-    let _guard = lock.lock().await;
+    let state = state_ctx.lock_for(&req.mailbox);
+    let _guard = state.lock.lock().await;
     let _config_guard = CONFIG_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -255,8 +255,8 @@ pub async fn handle_hook_delete(
         };
     }
 
-    let lock = state_ctx.lock_for(mailbox_name);
-    let _guard = lock.lock().await;
+    let state = state_ctx.lock_for(mailbox_name);
+    let _guard = state.lock.lock().await;
     let _config_guard = CONFIG_WRITE_LOCK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());

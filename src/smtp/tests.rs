@@ -179,6 +179,20 @@ fn test_email() -> &'static str {
     "From: sender@example.com\r\nTo: alice@test.local\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <test@example.com>\r\n\r\nHello World\r\n"
 }
 
+/// Build a `test_email()`-shaped string with a per-call unique
+/// Message-Id. Inbound Message-Id dedup correctly drops the second
+/// copy of `test_email()` when it appears twice in the same session,
+/// so tests that expect two distinct stored messages need distinct
+/// Message-Ids.
+fn test_email_with_unique_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(
+        "From: sender@example.com\r\nTo: alice@test.local\r\nSubject: Test\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <test-unique-{n}@example.com>\r\n\r\nHello World\r\n"
+    )
+}
+
 // --- SMTP state machine tests ---
 
 #[tokio::test]
@@ -1008,18 +1022,22 @@ async fn test_multiple_transactions_per_connection() {
     client.send_and_read("EHLO test.com").await;
 
     // First message
+    let email_a = test_email_with_unique_id();
     client.send_and_read("MAIL FROM:<sender@test.com>").await;
     client.send_and_read("RCPT TO:<alice@test.local>").await;
     client.send_and_read("DATA").await;
-    client.send(test_email()).await;
+    client.send(&email_a).await;
     let resp = client.send_and_read(".").await;
     assert!(resp.starts_with("250"));
 
-    // Second message
+    // Second message (distinct Message-Id so inbound dedup treats it
+    // as a separate delivery, matching real-world clients that
+    // generate one Message-Id per email).
+    let email_b = test_email_with_unique_id();
     client.send_and_read("MAIL FROM:<sender2@test.com>").await;
     client.send_and_read("RCPT TO:<alice@test.local>").await;
     client.send_and_read("DATA").await;
-    client.send(test_email()).await;
+    client.send(&email_b).await;
     let resp = client.send_and_read(".").await;
     assert!(resp.starts_with("250"));
 

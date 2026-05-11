@@ -542,6 +542,7 @@ impl SmtpSession {
                     &data,
                     peer.ip(),
                     envelope,
+                    crate::ingest::HookMode::Async,
                 )
                 .map_err(|e| e.to_string())
             })
