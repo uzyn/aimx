@@ -740,7 +740,7 @@ h1 em {
 }
 
 /* Harness grid — logo + name only. 4 across at md+, 2 below md.
-   Single command (aimx agents setup) lives in the tagline below the grid. */
+   Lead tagline (with aimx agents setup) sits above the grid; closing tagline sits below. */
 .harness-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);

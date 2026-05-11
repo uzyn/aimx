@@ -2,6 +2,8 @@
 
 `aimx agents setup` wires AI agents into AIMX in one command. It launches an interactive picker, then installs each selected agent's plugin or skill bundle under `$HOME` so the agent can call AIMX's MCP tools and create hooks via MCP. No sudo, no manual config edit. `aimx agents remove <agent>` is the inverse.
 
+> **AIMX is a standard MCP stdio server — any MCP-compatible client works.** The agents below come with **batteries included**: `aimx agents setup` writes the MCP config and skill bundle in one command. For any other harness, see [Any MCP-compatible client (manual wiring)](#any-mcp-compatible-client-manual-wiring).
+
 For email-triggered workflows after installation, see [Hook Recipes](hook-recipes.md).
 
 ## The one-command flow
@@ -63,6 +65,33 @@ The same `--force`, `--print`, `--data-dir`, and `--dangerously-allow-root` flag
 
 When `sudo aimx setup` completes, Step 6 prints the list of supported agents and a `→ aimx agents setup` callout, then marks Step 6 as `⎘ Handoff` and exits. Agent wiring is a separate, operator-initiated step — the same idiom as `apt install` / `gh auth login`. Run `aimx agents setup` yourself as your regular (non-root) user once the wizard finishes. See [Setup — wiring agents](./setup.md#wiring-agents) for the wizard-side details.
 
+## Any MCP-compatible client (manual wiring)
+
+AIMX speaks standard MCP over stdio. Any MCP-compatible client can connect
+by adding AIMX as a stdio MCP server. Most clients accept a JSON snippet of
+this form:
+
+```json
+{
+  "mcpServers": {
+    "aimx": {
+      "command": "/usr/local/bin/aimx",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+For a custom data directory, extend `args`:
+
+```json
+"args": ["--data-dir", "/custom/path", "mcp"]
+```
+
+The location that JSON goes in is agent-specific. Check your agent's MCP
+documentation. The [MCP Server](mcp.md) chapter documents the available
+tools.
+
 ## Key properties
 
 - **Refuses root.** Run `aimx agents setup` as the user whose agent you are configuring. For single-user root-login VPS setups, pass `--dangerously-allow-root` to wire AIMX into root's home. The flag applies to the TUI, per-agent runs, and `--no-interactive`.
@@ -90,7 +119,7 @@ When `sudo aimx setup` completes, Step 6 prints the list of supported agents and
 aimx agents remove claude-code
 ```
 
-## Supported agents
+## Agents with batteries included
 
 Pick the agents you want from the `aimx agents setup` picker. The reference table below covers per-agent destinations, activation steps, and how the AIMX primer is laid out.
 
@@ -327,33 +356,6 @@ The merged `.mcp.json` entry's `args` array will include
 
 See [`agents/nanoclaw/README.md`](https://github.com/uzyn/aimx/tree/main/agents/nanoclaw)
 for the schema reference.
-
-## Manual MCP wiring
-
-If your agent is not yet supported, wire AIMX in manually as a plain MCP
-stdio server. Most MCP-compatible agents accept a JSON snippet of this
-form:
-
-```json
-{
-  "mcpServers": {
-    "aimx": {
-      "command": "/usr/local/bin/aimx",
-      "args": ["mcp"]
-    }
-  }
-}
-```
-
-For a custom data directory, extend `args`:
-
-```json
-"args": ["--data-dir", "/custom/path", "mcp"]
-```
-
-The location that JSON goes in is agent-specific. Check your agent's MCP
-documentation. The [MCP Server](mcp.md) chapter documents the available
-tools.
 
 ## Troubleshooting
 

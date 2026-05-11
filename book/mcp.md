@@ -6,7 +6,7 @@ AIMX includes a Model Context Protocol server that gives AI agents programmatic 
 
 - **Transport:** stdio (launched on-demand by the MCP client; no background daemon).
 - **Protocol:** Model Context Protocol.
-- **Compatible clients:** any MCP-compatible client. See [Agent Integration § Supported agents](agent-integration.md#supported-agents) for the per-agent matrix.
+- **Compatible clients:** any MCP-compatible client. See [Agent Integration § Agents with batteries included](agent-integration.md#agents-with-batteries-included) for the per-agent matrix.
 
 ## Running the MCP server
 

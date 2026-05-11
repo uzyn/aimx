@@ -117,7 +117,7 @@ Options:
 
 ### MCP server for AI agents
 
-AIMX supports an easy MCP wiring for your AI agents and harnesses. Simply run `aimx agents setup` and follow the interactive prompts. Most harnesses are wired automatically.
+AIMX is a standard MCP stdio server — any MCP-compatible harness connects to it. The harnesses below ship pre-wired: `aimx agents setup` installs the MCP config and skill bundle in one command. For anything else, see [Any MCP-compatible client (manual wiring)](https://aimx.email/book/agent-integration.html#any-mcp-compatible-client-manual-wiring).
 
   | Agent | MCP | Skill / Recipe |
   |-------|-----|----------------|
