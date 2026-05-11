@@ -75,11 +75,13 @@ pub struct EmailSendParams {
                        When set, References is built automatically unless overridden by the references field."
     )]
     pub reply_to: Option<String>,
-    #[schemars(description = "Email body. Interpreted as Markdown by default \
-                       (CommonMark + GFM extensions). AIMX renders it to HTML and \
-                       sends as multipart/alternative. Set text_only=true for \
-                       plain-text-only sends. Set html_body to override the \
-                       auto-rendered HTML.")]
+    #[schemars(
+        description = "Email body. Rendered as Markdown (CommonMark + GFM: tables, \
+                       strikethrough, autolinks, task lists, footnotes) into \
+                       multipart/alternative HTML+text by default. The recipient sees \
+                       styled HTML on Gmail / Outlook / Apple Mail and the Markdown source \
+                       on text-only clients. See the text_only field before opting out."
+    )]
     pub body: String,
     #[schemars(description = "File paths to attach")]
     pub attachments: Option<Vec<String>>,
@@ -89,8 +91,12 @@ pub struct EmailSendParams {
     )]
     pub references: Option<String>,
     #[schemars(
-        description = "When true, send body verbatim as text/plain (no Markdown \
-                       rendering, no HTML alternative part). Mutually exclusive with html_body."
+        description = "DO NOT set true for prose, briefs, summaries, reports, or any body \
+                       containing Markdown syntax — it ships the raw Markdown source as \
+                       text/plain and the recipient sees `#` `**bold**` `-` markers instead \
+                       of rendered HTML. Only set true for short transactional one-liners with \
+                       no formatting (OTPs, verification codes, single-line confirmations) and \
+                       existing scripts that must not change shape. Mutually exclusive with html_body."
     )]
     pub text_only: Option<bool>,
     #[schemars(
@@ -108,15 +114,21 @@ pub struct EmailReplyParams {
     pub mailbox: String,
     #[schemars(description = "Email ID to reply to (e.g. 2025-01-01-001)")]
     pub id: String,
-    #[schemars(description = "Reply body. Interpreted as Markdown by default \
-                       (CommonMark + GFM extensions). AIMX renders it to HTML and \
-                       sends as multipart/alternative. Set text_only=true for \
-                       plain-text-only sends. Set html_body to override the \
-                       auto-rendered HTML.")]
+    #[schemars(
+        description = "Reply body. Rendered as Markdown (CommonMark + GFM: tables, \
+                       strikethrough, autolinks, task lists, footnotes) into \
+                       multipart/alternative HTML+text by default. The recipient sees \
+                       styled HTML on Gmail / Outlook / Apple Mail and the Markdown source \
+                       on text-only clients. See the text_only field before opting out."
+    )]
     pub body: String,
     #[schemars(
-        description = "When true, send body verbatim as text/plain (no Markdown \
-                       rendering, no HTML alternative part). Mutually exclusive with html_body."
+        description = "DO NOT set true for prose, briefs, summaries, reports, or any body \
+                       containing Markdown syntax — it ships the raw Markdown source as \
+                       text/plain and the recipient sees `#` `**bold**` `-` markers instead \
+                       of rendered HTML. Only set true for short transactional one-liners with \
+                       no formatting (OTPs, verification codes, single-line confirmations) and \
+                       existing scripts that must not change shape. Mutually exclusive with html_body."
     )]
     pub text_only: Option<bool>,
     #[schemars(
@@ -378,9 +390,14 @@ impl AimxMcpServer {
     #[tool(
         name = "email_send",
         description = "Submit an email for DKIM signing and delivery via the aimx daemon. \
-                       `body` is interpreted as Markdown (CommonMark + GFM extensions). \
-                       AIMX renders it to HTML and sends as multipart/alternative. \
-                       Set `text_only: true` for plain-text-only sends. \
+                       `body` is rendered as Markdown (CommonMark + GFM) into \
+                       multipart/alternative HTML+text by default — the recipient sees \
+                       styled HTML on Gmail / Outlook / Apple Mail. \
+                       DO NOT set `text_only: true` for prose, briefs, summaries, reports, \
+                       or any body containing markdown syntax; that ships the raw markdown \
+                       source as `text/plain` and breaks rendering. \
+                       Only set `text_only: true` for short transactional one-liners with \
+                       no formatting (OTPs, verification codes, single-line confirmations). \
                        Set `html_body` to override the auto-rendered HTML with your own template."
     )]
     fn email_send(
@@ -423,9 +440,14 @@ impl AimxMcpServer {
     #[tool(
         name = "email_reply",
         description = "Reply to an email with correct threading headers. \
-                       `body` is interpreted as Markdown (CommonMark + GFM extensions). \
-                       AIMX renders it to HTML and sends as multipart/alternative. \
-                       Set `text_only: true` for plain-text-only replies. \
+                       `body` is rendered as Markdown (CommonMark + GFM) into \
+                       multipart/alternative HTML+text by default — the recipient sees \
+                       styled HTML on Gmail / Outlook / Apple Mail. \
+                       DO NOT set `text_only: true` for prose, briefs, summaries, reports, \
+                       or any body containing markdown syntax; that ships the raw markdown \
+                       source as `text/plain` and breaks rendering. \
+                       Only set `text_only: true` for short transactional one-liners with \
+                       no formatting (OTPs, verification codes, single-line confirmations). \
                        Set `html_body` to override the auto-rendered HTML with your own template."
     )]
     fn email_reply(

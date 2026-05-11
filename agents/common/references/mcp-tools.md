@@ -261,9 +261,13 @@ styled HTML; recipients on text-only clients see the Markdown source.
 
 Two escape hatches cover the edge cases:
 
-- `text_only: true` — ship `body` verbatim as `text/plain`. No
-  rendering. Use for OTPs, transactional one-liners, and existing
-  scripts that must not change shape.
+- `text_only: true` — **DO NOT use for prose, briefs, summaries,
+  reports, or any body containing Markdown syntax.** That ships the
+  raw Markdown source as `text/plain` and the recipient sees `#` /
+  `**bold**` / `-` markers instead of rendered HTML. Use only for
+  short transactional one-liners with no formatting (OTPs,
+  verification codes, single-line confirmations) and existing scripts
+  that must not change shape.
 - `html_body: "<custom html>"` — supply a custom HTML template that
   AIMX uses verbatim as the `text/html` part. `body` is the
   `text/plain` fallback. Mutually exclusive with `text_only`.
@@ -278,7 +282,7 @@ Two escape hatches cover the edge cases:
 | `body`         | string   | yes      | Email body. Interpreted as Markdown by default (CommonMark + GFM). Used verbatim as `text/plain` when `text_only: true`; used as the `text/plain` fallback when `html_body` is set |
 | `attachments`  | string[] | no       | Absolute file paths to attach |
 | `references`   | string   | no       | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
-| `text_only`    | boolean  | no       | When `true`, ship `body` verbatim as `text/plain` with no Markdown rendering and no HTML alternative part. Mutually exclusive with `html_body` |
+| `text_only`    | boolean  | no       | Use only for plain, unformatted bodies (OTPs, verification codes, single-line transactional notes). **DO NOT set `true` for prose or any body containing Markdown syntax** — it ships the raw Markdown source as `text/plain` and breaks rendering. When `true`, ships `body` verbatim as `text/plain` with no Markdown rendering and no HTML alternative part. Mutually exclusive with `html_body` |
 | `html_body`    | string   | no       | Custom HTML for the `text/html` part. Operator-supplied; bypasses the renderer. Mutually exclusive with `text_only` |
 
 For simple replies to a single sender, prefer `email_reply`. It reads the
@@ -370,7 +374,9 @@ Reply to an existing email. AIMX automatically sets `In-Reply-To`,
 `References`, and prepends `Re:` to the subject.
 
 `body` is interpreted as **Markdown by default** with the same
-`text_only` / `html_body` escape hatches as `email_send`.
+`text_only` / `html_body` escape hatches as `email_send`. The same
+DO-NOT-pass-`text_only`-for-formatted-content rule applies: replies
+containing Markdown syntax must not set `text_only: true`.
 
 **Parameters:**
 | Name        | Type    | Required | Description |
@@ -378,7 +384,7 @@ Reply to an existing email. AIMX automatically sets `In-Reply-To`,
 | `mailbox`   | string  | yes      | Mailbox containing the email to reply to (must be owned by you) |
 | `id`        | string  | yes      | Email ID to reply to |
 | `body`      | string  | yes      | Reply body. Interpreted as Markdown by default. With `text_only: true`, shipped verbatim as `text/plain`. With `html_body`, used as the `text/plain` fallback |
-| `text_only` | boolean | no       | When `true`, ship `body` verbatim as `text/plain` with no Markdown rendering. Mutually exclusive with `html_body` |
+| `text_only` | boolean | no       | Use only for plain, unformatted replies (acknowledgements, OTPs, single-line confirmations). **DO NOT set `true` for replies containing Markdown syntax** — it ships the raw source as `text/plain` and breaks rendering. When `true`, ships `body` verbatim as `text/plain` with no Markdown rendering. Mutually exclusive with `html_body` |
 | `html_body` | string  | no       | Custom HTML for the `text/html` part. Operator-supplied; bypasses the renderer. Mutually exclusive with `text_only` |
 
 **Returns:** Confirmation with Message-ID.

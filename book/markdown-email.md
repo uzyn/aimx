@@ -5,7 +5,7 @@ AIMX is Markdown-native end-to-end. Inbound mail is stored as Markdown for direc
 ## How a default send is delivered
 
 1. **Caller submits Markdown.** `aimx send --body "..."` (or the MCP `email_send` tool with `body: "..."`) ships the Markdown source to the daemon over the local UDS.
-2. **Daemon appends the per-mailbox signature** to the Markdown body so the signature renders as part of the HTML output. Markdown link syntax in the signature renders as a clickable HTML anchor.
+2. **Daemon appends the per-mailbox signature** to the body so the recipient always sees it in the `text/plain` region. On the default Markdown path the signature is part of the Markdown source, so it also renders into the HTML alternative (and a `[link](url)` in the signature becomes a clickable `<a>`).
 3. **Daemon renders Markdown to HTML.** The renderer uses [`comrak`](https://github.com/kivikakk/comrak) configured for CommonMark + GFM extensions (tables, strikethrough, autolinks, task lists, footnotes, tag filter for unsafe tags). Raw HTML embedded in Markdown is escaped, not rendered — operators wanting raw HTML use `--html-body` instead.
 4. **Inlined stylesheet pass.** The renderer walks the rendered HTML tree and adds `style="..."` attributes per element. Inlining is required because Gmail, Outlook for Web, and Yahoo Mail strip or limit `<style>` blocks.
 5. **Multipart assembly.** The daemon builds a `multipart/alternative` MIME message with the **Markdown source** as the `text/plain` part and the **rendered HTML** as the `text/html` part. With one or more attachments, the `multipart/alternative` is wrapped in an outer `multipart/mixed` so attachments sit as siblings of the alternative block.
@@ -84,7 +84,7 @@ aimx send --from alice@example.com --to bob@example.com \
   --text-only
 ```
 
-The per-mailbox signature is **not** auto-appended on this path — the operator already chose plain-text shape; the binary stays out of the way.
+The per-mailbox signature **is** auto-appended on this path. AIMX appends the configured signature (or the built-in default) to the body before encoding, so even one-liner text-only sends carry the configured footer. Disable globally with `signature = ""` in `config.toml` if your one-liner shape really needs to ship verbatim.
 
 Use for:
 - OTPs, transactional one-liners, system-generated alerts.
@@ -105,7 +105,7 @@ The shell pattern `--html-body "$(cat template.html)"` reads the template from a
 
 `--html-body` and `--text-only` are mutually exclusive. clap rejects the invocation before any UDS round-trip. The same canonical error fires server-side on the MCP `email_send` / `email_reply` tools so operators see one consistent message regardless of the surface.
 
-The per-mailbox signature is **not** auto-appended on this path — operator-supplied content is verbatim. Include any signature inside your template.
+The per-mailbox signature **is** appended to the `text/plain` fallback so text-only readers still see it. The supplied HTML stays operator-verbatim — if you want the signature visible in the HTML view, include it inside your template. Disable globally with `signature = ""` in `config.toml` if you want the text fallback to ship verbatim too.
 
 `--html-body` bypasses the renderer's tag-filter and other safety checks; the operator owns the consequences. Do not pass user-controlled HTML through this flag.
 
@@ -117,9 +117,9 @@ The frontmatter declares the wire shape so an operator browsing `sent/` can tell
 
 | `outbound_format` | Wire shape | Sent body content |
 |-------------------|------------|-------------------|
-| `"markdown"` | `multipart/alternative` (text + rendered HTML) | Markdown source verbatim (signature appended before render) |
-| `"text"` | single-part `text/plain` | literal text verbatim |
-| `"html"` | `multipart/alternative` (text + custom HTML) | the `--body` text part (custom HTML is **not** stored) |
+| `"markdown"` | `multipart/alternative` (text + rendered HTML) | Markdown source with signature appended before render |
+| `"text"` | single-part `text/plain` | body with signature appended |
+| `"html"` | `multipart/alternative` (text + custom HTML) | the `--body` text part with signature appended (custom HTML is **not** stored) |
 
 The `outbound_format` field appears immediately after `outbound = true` in the Outbound block of the frontmatter:
 

@@ -3081,10 +3081,15 @@ fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
         payload_str.contains("Your code: 9999"),
         "body must reach the wire verbatim: {payload_str}"
     );
-    // No default signature appended (operator-supplied content).
+    // The default signature IS appended on the text-only path so
+    // recipients always see the configured footer.
     assert!(
-        !payload_str.contains("Sent from AIMX."),
-        "text-only path must not append the default signature: {payload_str}"
+        payload_str.contains("Sent from AIMX."),
+        "text-only path must append the default signature: {payload_str}"
+    );
+    assert!(
+        payload_str.contains("https://aimx.email"),
+        "text-only path must carry the default signature URL: {payload_str}"
     );
 
     // DKIM body-hash must verify against the single-part wire shape.
@@ -3198,10 +3203,17 @@ fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
         !html_section.contains("style=\""),
         "renderer must not be invoked on --html-body path: {html_section}"
     );
-    // No default signature appended on the html-body branch.
+    // The default signature IS appended to the text/plain fallback on
+    // the html-body branch so text-only readers still see it. The
+    // operator-supplied HTML stays verbatim (signature must not leak
+    // into the HTML part).
     assert!(
-        !payload_str.contains("Sent from AIMX."),
-        "html-body path must not append the default signature: {payload_str}"
+        payload_str.contains("Sent from AIMX."),
+        "html-body path must append the default signature to the text/plain fallback: {payload_str}"
+    );
+    assert!(
+        !html_section.contains("Sent from AIMX."),
+        "operator-supplied HTML must stay verbatim (no signature in HTML part): {html_section}"
     );
 
     // DKIM body-hash verifies on the alternative wire shape.
