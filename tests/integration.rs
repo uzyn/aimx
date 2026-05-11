@@ -6421,8 +6421,8 @@ fn ingest_succeeds_and_chown_failure_is_nonfatal() {
 }
 
 /// `aimx --version` must render
-/// `aimx <tag> (<git-sha>) <target-triple> built <date>` — all four fields
-/// present on a single line.
+/// `AIMX (AI Mail Exchange) version <tag> (<git-sha>) <target-triple> built <date>`
+/// — all four metadata fields present on a single line behind the banner.
 #[test]
 fn aimx_version_renders_full_metadata() {
     let output = Command::cargo_bin("aimx")
@@ -6439,44 +6439,47 @@ fn aimx_version_renders_full_metadata() {
         .expect("at least one output line")
         .to_string();
 
-    // Output must be exactly `aimx <tag> (<sha>) <target> built <date>`
-    // — one `aimx ` prefix, not two. An earlier revision of this test stripped
-    // an optional leading `aimx ` and would have silently accepted the
-    // `aimx aimx ...` bug; we assert the exact shape here so that regression
-    // fails loudly.
+    // Output must be exactly
+    // `AIMX (AI Mail Exchange) version <tag> (<sha>) <target> built <date>`.
+    // An earlier revision of this test stripped an optional leading `aimx `
+    // and would have silently accepted a duplicated banner from clap's
+    // default `ArgAction::Version`; we assert the exact shape here so that
+    // regression fails loudly.
+    const BANNER: &str = "AIMX (AI Mail Exchange) version ";
     assert!(
-        line.starts_with("aimx "),
-        "version line missing `aimx ` banner prefix: {line:?}"
+        line.starts_with(BANNER),
+        "version line missing banner prefix: {line:?}"
     );
-    // Crucially, the second token must be the tag — NOT a second `aimx`.
-    let mut tokens = line.split(' ');
-    assert_eq!(tokens.next(), Some("aimx"), "first token must be `aimx`");
-    let second = tokens
+    let rest = &line[BANNER.len()..];
+    // Reject `AIMX (AI Mail Exchange) version AIMX ...` — the duplicate-banner
+    // regression that clap's default `--version` would produce.
+    assert!(
+        !rest.starts_with("AIMX "),
+        "duplicate banner reintroduced: {line:?}"
+    );
+    // First token after the banner must be the tag.
+    let tag = rest
+        .split(' ')
         .next()
         .unwrap_or_else(|| panic!("version line missing tag token: {line:?}"));
-    assert_ne!(
-        second, "aimx",
-        "duplicate `aimx` prefix reintroduced: {line:?}"
-    );
-    assert!(!second.is_empty(), "tag token must be non-empty: {line:?}");
+    assert!(!tag.is_empty(), "tag token must be non-empty: {line:?}");
     // Tags are bare SemVer — the baked
     // `RELEASE_TAG` goes through `build.rs::strip_legacy_v_prefix`, so a
     // leading `v` on this token would signal a regression in either
     // `build.rs` or the release tagging convention. Reject it loudly.
     assert!(
-        !second.starts_with('v'),
+        !tag.starts_with('v'),
         "tag token must not carry a leading `v` (bare SemVer): {line:?}"
     );
     // The tag must either begin with a digit (bare SemVer like `0.1.0`,
     // `0.0.0-fixture`, `0.0.0-fixture-12-gabcdef1-dirty`) or equal `dev`
     // (the build.rs fallback when `git describe` finds no tag).
     assert!(
-        second == "dev" || second.chars().next().is_some_and(|c| c.is_ascii_digit()),
-        "tag token must be bare SemVer or `dev`: {second:?} in {line:?}"
+        tag == "dev" || tag.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "tag token must be bare SemVer or `dev`: {tag:?} in {line:?}"
     );
 
     // Remainder must match: `<tag> (<hex-sha>) <target> built <YYYY-MM-DD>`.
-    let rest = &line["aimx ".len()..];
     // Parenthesised SHA.
     let open = rest
         .find(" (")
@@ -6665,17 +6668,23 @@ fn uds_version_verb_returns_running_daemon_metadata() {
     // The reported tag must match what the test binary itself prints
     // for `aimx --version` — in test builds this is whatever
     // `crate::version::release_tag()` resolves to. Cross-check by
-    // running the bin and parsing the first space-delimited token
-    // after `aimx`.
+    // running the bin and parsing the token immediately after the
+    // literal "version" keyword in the banner
+    // (`AIMX (AI Mail Exchange) version <tag> (<sha>) <target> built <date>`).
     let v_out = std::process::Command::new(aimx_binary_path())
         .arg("--version")
         .output()
         .expect("aimx --version");
     let v_stdout = String::from_utf8(v_out.stdout).unwrap();
-    let local_tag = v_stdout
-        .split_whitespace()
-        .nth(1)
-        .expect("aimx --version emits a tag");
+    let mut tokens = v_stdout.split_whitespace();
+    for tok in tokens.by_ref() {
+        if tok == "version" {
+            break;
+        }
+    }
+    let local_tag = tokens
+        .next()
+        .expect("aimx --version emits a tag after the \"version\" keyword");
     assert!(
         body_str.contains(local_tag),
         "daemon tag missing local {local_tag:?} in {body_str}",

@@ -2,9 +2,11 @@
 //!
 //! `build.rs` emits four `cargo:rustc-env` values — `RELEASE_TAG`, `GIT_HASH`,
 //! `TARGET`, `BUILD_DATE` — that this module re-exports through typed helpers.
-//! `aimx upgrade` consumes [`release_tag`] / [`target_triple`] directly rather
-//! than string-parsing `aimx --version` output, so the renderer in
-//! [`version_string`] and the upgrade flow cannot drift.
+//! [`banner_string`] is the short product banner shared by clap's help `about`
+//! line and the `--version` renderer; [`version_string`] extends it with the
+//! target triple and build date. `aimx upgrade` consumes [`release_tag`] /
+//! [`target_triple`] directly rather than string-parsing `aimx --version`
+//! output, so the renderer and the upgrade flow cannot drift.
 
 /// Release tag from `git describe --tags --always --dirty`, or `dev` when the
 /// build tree is not a git checkout / has no tags.
@@ -32,18 +34,35 @@ pub fn build_date() -> &'static str {
     env!("BUILD_DATE")
 }
 
-/// `aimx <tag> (<git-sha>) <target-triple> built <date>`.
+/// `AIMX (AI Mail Exchange) version <tag> (<git-sha>)` — short product banner
+/// shared by clap's help `about` line and the `--version` renderer.
 ///
 /// When `git describe` had no tags to resolve, the tag field renders as `dev`
 /// and the git hash renders as `unknown`, producing the documented fallback
-/// `aimx dev (unknown) <target> built <date>`.
+/// `AIMX (AI Mail Exchange) version dev (unknown)`.
+pub fn banner_string() -> &'static str {
+    use std::sync::LazyLock;
+    static BANNER: LazyLock<String> = LazyLock::new(|| {
+        format!(
+            "AIMX (AI Mail Exchange) version {} ({})",
+            release_tag(),
+            git_hash()
+        )
+    });
+    &BANNER
+}
+
+/// `<banner> <target-triple> built <date>`. Rendered by `aimx --version`.
+///
+/// When `git describe` had no tags to resolve, the tag field renders as `dev`
+/// and the git hash renders as `unknown`, producing the documented fallback
+/// `AIMX (AI Mail Exchange) version dev (unknown) <target> built <date>`.
 pub fn version_string() -> &'static str {
     use std::sync::LazyLock;
     static VERSION: LazyLock<String> = LazyLock::new(|| {
         format!(
-            "aimx {} ({}) {} built {}",
-            release_tag(),
-            git_hash(),
+            "{} {} built {}",
+            banner_string(),
             target_triple(),
             build_date()
         )
@@ -90,11 +109,20 @@ mod tests {
     #[test]
     fn version_string_contains_all_fields() {
         let v = version_string();
-        assert!(v.starts_with("aimx "));
+        assert!(v.starts_with("AIMX (AI Mail Exchange) version "));
         assert!(v.contains(release_tag()));
         assert!(v.contains(git_hash()));
         assert!(v.contains(target_triple()));
         assert!(v.contains(build_date()));
         assert!(v.contains(" built "));
+    }
+
+    #[test]
+    fn banner_string_shape() {
+        let b = banner_string();
+        assert!(b.starts_with("AIMX (AI Mail Exchange) version "));
+        assert!(b.contains(release_tag()));
+        assert!(b.contains(git_hash()));
+        assert!(!b.contains(" built "));
     }
 }

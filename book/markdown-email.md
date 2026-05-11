@@ -135,7 +135,7 @@ Pre-feature sent records lack the field; on read, those default to `"text"` (the
 
 ## Determinism
 
-The renderer is deterministic: the same Markdown input produces byte-identical HTML output across two invocations. This is what justifies dropping the rendered HTML from sent storage — the recipient's view is recoverable. `comrak` is pinned to an exact patch version in `Cargo.toml` (currently `=0.52.0`); bumping it requires re-blessing the renderer fixtures and noting the change in the release notes.
+The renderer is deterministic: the same Markdown input produces byte-identical HTML output across two invocations. This is what justifies dropping the rendered HTML from sent storage — the recipient's view is recoverable. `comrak` is pinned to an exact patch version in `Cargo.toml`; bumping it requires re-blessing the renderer fixtures and is called out on the corresponding GitHub Release.
 
 CI defends the determinism guarantee with two checked-in fixtures (`tests/fixtures/markdown/briefing-5kb.md` and `tests/fixtures/markdown/report-50kb.md`) and their pinned expected outputs. A `comrak` bump that changes whitespace or attribute ordering surfaces at CI time, not in production.
 

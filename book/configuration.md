@@ -50,7 +50,7 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 |---------|------|---------|-------------|
 | `domain` | string | *(required)* | The email domain (e.g. `agent.yourdomain.com`) |
 | `data_dir` | string | `/var/lib/aimx` | Directory for storing mailboxes (config and keys live under `/etc/aimx/`) |
-| `dkim_selector` | string | `dkim` | DKIM selector name used in DNS records |
+| `dkim_selector` | string | `aimx` | DKIM selector name used in DNS records |
 | `trust` | string | `none` | Default trust policy for every mailbox: `none` or `verified`. Per-mailbox `trust` replaces this default. |
 | `trusted_senders` | array | `[]` | Default allowlist of glob patterns applied to every mailbox. Per-mailbox `trusted_senders` replaces this list (no merging). |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |

@@ -181,7 +181,7 @@ Every MCP tool call is scoped to mailboxes the calling uid owns: `mailbox_list` 
 
 ### How do I update the installed agent plugin after upgrading AIMX?
 
-`aimx agents setup <agent> --force`. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. Re-running with `--force` overwrites whatever is at the destination.
+Re-run `aimx agents setup --force` and re-select the agents you want to update from the picker. The plugin bundle is embedded in the binary at compile time, so the installed plugin is always in sync with the binary version. `--force` overwrites whatever is at the destination.
 
 ## Operations
 
@@ -205,4 +205,4 @@ A small companion service that exists purely to answer the question "is port 25 
 
 ### When would I self-host `services/verifier/`?
 
-When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying AIMX in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See `services/verifier/README.md` for the Docker Compose deploy. Point AIMX at it with `verify_host` in `config.toml` or `--verify-host` at the command line.
+When you do not want your setup traffic to hit `check.aimx.email`, or when you are deploying AIMX in an air-gapped / regulated environment. The verifier is a small axum service plus a port-25 listener. See the [verifier service README](https://github.com/uzyn/aimx/blob/main/services/verifier/README.md) for the Docker Compose deploy. Point AIMX at it with `verify_host` in `config.toml` or `--verify-host` at the command line.

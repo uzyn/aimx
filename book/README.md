@@ -16,15 +16,17 @@ AIMX (AI Mail Exchange) is a self-hosted SMTP server that gives AI agents their 
 ## Quick start
 
 ```bash
-# 1. Install (Linux only; x86_64 and aarch64, glibc and musl)
 curl -fsSL https://aimx.email/install.sh | sh
-
-# 2. Run setup (generates service file, DKIM keys, DNS guidance)
-sudo aimx setup agent.yourdomain.com
-
-# 3. Verify
-sudo aimx portcheck
 ```
+
+This launches a guided setup with the following steps:
+
+- [ ] Preflight checks on port 25
+- [ ] Set up domain and DNS
+- [ ] Set up STARTTLS certificate
+- [ ] Set up trust policy
+- [ ] Install AIMX service
+- [ ] Optionally, wire up MCP for agent(s)
 
 See [Installation](installation.md) for install flags, verification, and upgrades,
 and [Getting Started](getting-started.md) for the full walkthrough.
@@ -39,6 +41,7 @@ and [Getting Started](getting-started.md) for the full walkthrough.
 | [Configuration](configuration.md) | `config.toml` field reference, data / config directories, environment variables |
 | [Security](security.md) | Threat model, trust boundaries, what AIMX defends and what it does not |
 | [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
+| [Markdown Email](markdown-email.md) | How outbound `--body` is rendered to HTML, the inlined stylesheet, escape hatches |
 | [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, ownership-as-authorization, trust gate |
 | [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, NanoClaw) |
 | [MCP Server](mcp.md) | The 12 MCP tools: parameters, frontmatter contract, workflow examples |
@@ -46,4 +49,3 @@ and [Getting Started](getting-started.md) for the full walkthrough.
 | [CLI Reference](cli.md) | Every `aimx` subcommand and flag |
 | [Troubleshooting](troubleshooting.md) | Diagnostics, common issues, useful commands |
 | [FAQ](faq.md) | Deployment, DNS, storage, MCP, and operations questions |
-| [Release Notes](release-notes.md) | Version-by-version operator-visible changes |

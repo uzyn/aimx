@@ -25,7 +25,7 @@ Every recipe uses `/usr/local/bin/<agent>` for `cmd[0]`. `Config::load` rejects 
 
 ## Self-loop reminder
 
-The headless agent process runs as the mailbox owner's uid. That user must have the agent binary installed at the `cmd[0]` path AND the AIMX skill installed (run `aimx agents setup <agent>` as that user). Without both, the agent starts without the skill loaded and does not know what to do with the email.
+The headless agent process runs as the mailbox owner's uid. That user must have the agent binary installed at the `cmd[0]` path AND the AIMX skill installed (run `aimx agents setup` as that user and pick the agent). Without both, the agent starts without the skill loaded and does not know what to do with the email.
 
 ## Claude Code
 

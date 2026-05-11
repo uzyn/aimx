@@ -10,9 +10,7 @@ AIMX includes a Model Context Protocol server that gives AI agents programmatic 
 
 ## Running the MCP server
 
-```bash
-aimx mcp
-```
+As this is a `stdio` MCP server, you do not need to "start a listening MCP server". Your AI agents would spawn a server on demand via `aimx mcp` . Just to be clear, you `aimx mcp` is for your AI agents than for you to run.
 
 The server reads from stdin and writes to stdout. To install it into a supported agent, see [Agent Integration](agent-integration.md).
 
@@ -139,12 +137,14 @@ Compose and send an email with DKIM signing.
 | `from_mailbox` | string | yes | Mailbox name to send from. Must be owned by the caller. |
 | `to` | string | yes | Recipient email address |
 | `subject` | string | yes | Email subject |
-| `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
-| `body` | string | yes | Email body text |
+| `body` | string | yes | Email body. Interpreted as Markdown by default — rendered to HTML and shipped as `multipart/alternative` with the Markdown source as the text part. |
+| `text_only` | bool | no | When `true`, ship the body verbatim as `text/plain`. No Markdown rendering, no HTML alternative. Mutually exclusive with `html_body`. |
+| `html_body` | string | no | Operator-supplied HTML used verbatim as the `text/html` part; `body` becomes the `text/plain` fallback. Mutually exclusive with `text_only`. |
 | `attachments` | array of strings | no | File paths to attach |
+| `reply_to` | string | no | Message-ID of the email being replied to. Sets the `In-Reply-To` header and (when `references` is omitted) builds the `References` chain automatically. Required to enable threading. Without `reply_to`, any `references` value is silently ignored and no threading headers are emitted |
 | `references` | string | no | Full `References` header chain (space-separated Message-IDs). **Only applied when `reply_to` is also set.** Supplied alone, it is silently ignored |
 
-The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. `aimx serve` parses `From:` from the body, validates that the caller's uid owns the resolved mailbox, DKIM-signs the message, and delivers it directly to the recipient's MX server via SMTP.
+The MCP server composes the RFC 5322 message and submits it to `aimx serve` over the local `/run/aimx/aimx.sock` UDS. `aimx serve` parses `From:` from the body, validates that the caller's uid owns the resolved mailbox, DKIM-signs the message, and delivers it directly to the recipient's MX server via SMTP. See [Markdown Email](markdown-email.md) for the rendering pipeline and the `--text-only` / `--html-body` semantics that mirror these MCP parameters.
 
 For replies to a single sender, prefer `email_reply`. It handles threading headers and the `Re:` subject prefix automatically. Use `email_send` with `reply_to` / `references` only when you need to override the recipient list (e.g. reply-all) or build a custom threading chain.
 
@@ -158,7 +158,9 @@ Reply to an email with correct threading.
 |-----------|------|----------|-------------|
 | `mailbox` | string | yes | Mailbox name containing the email to reply to. Must be owned by the caller. |
 | `id` | string | yes | Email ID to reply to (e.g. `2025-01-15-001`) |
-| `body` | string | yes | Reply body text |
+| `body` | string | yes | Reply body. Interpreted as Markdown by default — same semantics as `email_send`'s `body`. |
+| `text_only` | bool | no | When `true`, ship the body verbatim as `text/plain`. Mutually exclusive with `html_body`. |
+| `html_body` | string | no | Operator-supplied HTML used verbatim as the `text/html` part; `body` becomes the `text/plain` fallback. Mutually exclusive with `text_only`. |
 
 Automatically sets `In-Reply-To` and `References` headers from the original email for proper thread grouping in the recipient's mail client.
 

@@ -1,7 +1,9 @@
 use clap::{Parser, Subcommand};
 
 #[allow(unused_imports)]
-pub use crate::version::{build_date, git_hash, release_tag, target_triple, version_string};
+pub use crate::version::{
+    banner_string, build_date, git_hash, release_tag, target_triple, version_string,
+};
 
 /// Hand-rolled subcommand listing, grouped by audience (per-user vs
 /// server-wide). Clap 4 does not support `help_heading` on subcommand
@@ -30,7 +32,7 @@ Server administration:
 #[derive(Parser)]
 #[command(
     name = "aimx",
-    about = "The internet's oldest protocol, rebuilt for AI agents.",
+    about = crate::version::banner_string(),
     after_help = SUBCOMMAND_HELP,
     help_template = "{about}\n\n\
                      {usage-heading} {usage}\
@@ -38,7 +40,8 @@ Server administration:
                      Options:\n{options}\n",
     // We render `--version` ourselves so the output is exactly the
     // banner produced by `version_string()`. Clap's built-in version flag
-    // would prepend the binary name, yielding `aimx aimx <tag> ...`.
+    // would prepend the binary name, yielding
+    // `aimx AIMX (AI Mail Exchange) version <tag> ...`.
     disable_version_flag = true
 )]
 pub struct Cli {
@@ -64,7 +67,7 @@ pub struct Cli {
 /// print the version banner and return `true` so `main()` can exit before
 /// clap's parser refuses a missing subcommand. Handled manually because
 /// clap's default `ArgAction::Version` prepends the binary name and would
-/// render `aimx aimx <tag> ...`.
+/// render `aimx AIMX (AI Mail Exchange) version <tag> ...`.
 pub fn handle_version_flag<I, S>(args: I) -> bool
 where
     I: IntoIterator<Item = S>,
