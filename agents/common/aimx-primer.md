@@ -148,8 +148,16 @@ does not require the child to consume it.
 - `hook_create(mailbox, event, cmd, name?, timeout_secs?, fire_on_untrusted?)`:
   attach a hook. `cmd` is an argv array (e.g. `["claude", "-p", "...",
   "--dangerously-skip-permissions"]`). `fire_on_untrusted` defaults to
-  `false`; set `true` only on `on_receive` hooks where you want the
-  hook to fire even on `trusted = "false"` mail.
+  `false` — **keep it that way unless the user explicitly asks** for
+  untrusted-sender firing. Silently flipping it to `true` opens the
+  hook to any sender on the internet (including spoofed-From spam) and
+  is a real cost / security exposure when `cmd` invokes an LLM or
+  shell. Assume the operator has already configured the mailbox's
+  trust policy correctly; with `false`, the hook fires only on inbound
+  mail the daemon marks `trusted = "true"` (allowlisted sender AND
+  DKIM passes). After creating an `on_receive` hook, tell the user
+  that the cmd will fire on inbound mail from senders the operator has
+  marked trusted, so they know what triggers it.
 - `hook_list(mailbox?)`: list hooks on mailboxes you own.
 - `hook_delete(name)`: delete a hook on a mailbox you own.
 
@@ -323,42 +331,17 @@ triage, filtering by list, handling attachments, reply-all, and mark-all-read.
 
 ## Creating hooks
 
-Hooks are commands that fire when mail arrives (`on_receive`) or is
-sent (`after_send`). They are how you go from "the agent reads mail"
-to "the agent acts on mail automatically."
-
-The model is straightforward: hooks belong to mailboxes, and you can
-only create hooks on mailboxes you own. The hook's `cmd` is the literal
-argv that the daemon spawns; there is no template substitution and no
-per-hook `run_as` field. The child always executes as the mailbox's
-owning Linux user (`setuid` from root before `exec`), so a hook can
-do whatever its owner can already do — no more, no less.
-
-The trust gate still applies: an `on_receive` hook fires only on
-mail whose `trusted` frontmatter is `"true"`, unless you opt the hook
-in with `fire_on_untrusted = true`. `after_send` hooks fire on every
-send regardless of trust.
-
-Three tools cover the lifecycle:
-
-1. **Create**: call `hook_create(mailbox, event, cmd, ...)` with an
-   argv array. `cmd[0]` must be an absolute path the owning user can
-   execute. The daemon validates and writes the hook to `config.toml`,
-   then hot-swaps its in-memory state — no restart needed.
-2. **Inspect**: call `hook_list(mailbox?)` to see hooks on mailboxes
-   you own.
-3. **Remove**: call `hook_delete(name)` with the effective name from
-   `hook_list`.
-
-For the exact `cmd` argv to use when wiring yourself up as the hook,
-see your agent's skill bundle — each agent ships a "Wiring yourself
-up as a mailbox hook" section with a verified recipe. The argv for
-every supported agent (Claude Code, Codex CLI, OpenCode, Gemini CLI,
-Goose, Hermes) plus the OpenClaw gap is documented per agent.
-
-If you need to invoke an arbitrary command that doesn't fit your
-agent's recipe (a webhook, a custom script, etc.), build the argv
-yourself; `cmd` is just an argv array.
+Hooks fire commands on mail events. The Hook tools section above
+covers `hook_create` / `hook_list` / `hook_delete`. The hook's `cmd`
+is the literal argv the daemon spawns (no template substitution); the
+child runs as the mailbox's owning Linux user, so a hook on mailbox
+`alice` can do exactly what `alice` can do. The trust gate applies:
+`on_receive` fires only on `trusted = "true"` mail unless the hook
+opts in with `fire_on_untrusted = true` (see the warning in the Hook
+tools section and `references/hooks.md`). `after_send` fires on every
+send. For the exact argv to wire your agent up, see your agent's
+skill bundle's "Wiring yourself up as a mailbox hook" recipe; for
+hooks that don't fit that recipe, build the argv yourself.
 
 ## Trust model
 
@@ -483,6 +466,15 @@ untrusted mail. When deciding whether to act on an email's content
 - **Do not send large volumes without operator awareness.** aimx delivers
   synchronously with no outbound queue. Each `email_send` call blocks until
   the remote MX accepts or rejects the message.
+- **Do not silently set `fire_on_untrusted = true` on `hook_create`.**
+  Default it to `false` / omit it. Only set `true` when the user's
+  request literally calls for untrusted-sender firing (e.g. "fire
+  regardless of trust", "even from untrusted senders"). The trust gate
+  is the primary defense against arbitrary external senders triggering
+  the hook's cmd. Assume the operator has configured the trust policy
+  correctly — do not propose edits to `trusted_senders` or the trust
+  policy from MCP; those live in root-owned `/etc/aimx/config.toml`
+  and there is no MCP tool to change them.
 
 ## Further reading
 
