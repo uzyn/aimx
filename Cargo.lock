@@ -43,7 +43,6 @@ dependencies = [
  "nix",
  "predicates",
  "psl",
- "rand 0.10.1",
  "rcgen",
  "rmcp",
  "rsa",
