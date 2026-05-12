@@ -282,7 +282,7 @@ As such, currently, by design:
 * No bounces. AIMX doesn't generate or process DSNs.
 * No mail indexing or search. Bring your own RAG, indexing system or AI brains.
 
-Subject to change, but for now AIMX is intentionally single-operator and single-domain. If you need multi-user, multi-domain, or IMAP access, run [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/).
+Subject to future improvements. Single-operator is key to the core design philosophy.. If you need multi-user or IMAP access, run [Postfix](https://www.postfix.org/) or [Stalwart](https://stalw.art/).
 
 
 ## FAQ
@@ -290,11 +290,11 @@ Subject to change, but for now AIMX is intentionally single-operator and single-
 ### Why does AIMX need port 25 open?
 AIMX is your mail server. SMTP runs on port 25. It has been defined and set in [RFC 821](https://www.rfc-editor.org/rfc/rfc821) since 1982. AIMX speaks SMTP directly to other mail servers, no third-party relays involved. Your mail stays truly private and secure.
 
-### Can I run AIMX on my home server?
-Usually not. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run `curl -fsSL https://aimx.email/portcheck.sh | sh`.
-
 ### Can I switch AIMX to operate on another port?
-No. SMTP is strictly port 25 as defined and set in [RFC 821](https://www.rfc-editor.org/rfc/rfc821) since 1982. Other mail servers will only deliver to you on 25.
+No. SMTP operates strictly on port 25 as defined and set in [RFC 821](https://www.rfc-editor.org/rfc/rfc821) since 1982. Other mail servers will only deliver to you on 25.
+
+### Can I run AIMX on my home server?
+Yes, as long as you have globally accessible port 25. Home ISPs typically block port 25. To check if port 25 is open without installing AIMX, run `curl -fsSL https://aimx.email/portcheck.sh | sh`.
 
 ### What AI models does AIMX support?
 All of them. AIMX does not call AI models directly. It is a mail server with a stdio Model Context Protocol (MCP) server built-in, so your AI harnesses and agents can connect to it easily and effectively.
@@ -303,7 +303,7 @@ All of them. AIMX does not call AI models directly. It is a mail server with a s
 Once AIMX is set up, mailboxes can be created with the `aimx mailboxes` CLI, or via the `mailbox_create` MCP tool by simply instructing your AI harness in plain natural language, such as `Create a receipt@ mailbox and file receipts for me when you receive them`.
 
 ### Can I run AIMX without owning a domain name?
-No. You need a domain to define how emails are delivered to you (`MX` record) and verified (`DKIM` TXT record). Email specifications ([RFC 5321 §5.1](https://datatracker.ietf.org/doc/html/rfc5321#section-5.1)) require the MX record to point to a domain name, not an IP.
+No. You need a domain to define how emails are delivered to you (`MX` record) and verified (`DKIM` TXT record). Email specifications ([RFC 5321 §5.1](https://datatracker.ietf.org/doc/html/rfc5321#section-5.1)) require the MX record to point to a domain name, not an IP. Subdomain is fine too.
 
 ### Why do I need AIMX when I can just use Gmail + MCP?
 You can, if you do not mind your emails being stored and accessible on both Gmail servers AND third-party MCP servers. If you are on a free Gmail account, you might also be violating Gmail's ToS. Besides, it is a lot of work to create multiple mailboxes for separate agentic use.
