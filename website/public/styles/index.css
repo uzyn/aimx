@@ -79,25 +79,38 @@ body {
 @media (min-width: 992px)  { .wrap { max-width: 960px;  } }
 @media (min-width: 1200px) { .wrap { max-width: 1140px; } }
 
+/* Header layout — CSS grid with two named areas so we can flip between
+   a single desktop row (brand | nav | toggle) and a 2-row mobile stack
+   (brand+toggle on row 1, nav full-width on row 2). Source order keeps
+   brand → toggle → nav so the toggle sits next to the brand even when
+   the page is rendered without CSS. */
 header {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas: "brand nav toggle";
   align-items: center;
-  flex-wrap: wrap;
-  gap: 12px 24px;
+  gap: 12px 22px;
   padding-bottom: 24px;
   border-bottom: 1px solid var(--rule);
 }
 
-.header-left, .header-right {
+.header-left {
+  grid-area: brand;
   display: flex;
   align-items: baseline;
-  gap: 22px;
+  gap: 14px;
   flex-wrap: wrap;
 }
-.header-right {
-  gap: 22px;
-  align-items: center;
+.theme-toggle { grid-area: toggle; }
+
+@media (max-width: 719px) {
+  header {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "brand toggle"
+      "nav   nav";
+    gap: 14px 16px;
+  }
 }
 
 .brand {
@@ -121,8 +134,11 @@ header {
 }
 
 .topnav {
+  grid-area: nav;
   display: flex;
+  align-items: center;
   gap: 22px;
+  justify-content: flex-end;
   font-family: 'IBM Plex Mono', monospace;
   font-size: 0.43em;
   letter-spacing: 0.02em;
@@ -134,6 +150,48 @@ header {
   border-bottom: 1px solid transparent;
   padding-bottom: 2px;
   transition: color 0.15s, border-color 0.15s;
+}
+
+@media (max-width: 719px) {
+  .topnav {
+    justify-content: space-between;
+    width: 100%;
+    gap: 14px;
+  }
+  /* Make plain text links comfortably tappable on phone */
+  .topnav a:not(.github-pill):not(.discord-pill) {
+    padding: 6px 4px 4px;
+  }
+}
+
+/* Below 480px the brand subtitle becomes a luxury and the pills lose
+   their text labels so the entire nav still fits on a single row. */
+@media (max-width: 480px) {
+  .topnav .pill-label { display: none; }
+  .topnav a.github-pill,
+  .topnav a.discord-pill {
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    justify-content: center;
+    gap: 0;
+  }
+  .topnav a.github-pill svg,
+  .topnav a.discord-pill svg {
+    width: 16px;
+    height: 16px;
+  }
+}
+
+/* Hide the brand subtitle in the two viewport bands where the header
+   doesn't have room: the narrowest phones (<381px) where brand+sub+toggle
+   would stack to three rows, and the intermediate-desktop band 720–991px
+   where the grid's auto column squeezes brand-left enough that the sub
+   would wrap onto its own line. AIMX as a wordmark carries enough brand
+   on both ends. */
+@media (max-width: 380px),
+       (min-width: 720px) and (max-width: 991px) {
+  .header-left .brand-sub { display: none; }
 }
 
 .topnav a:hover {
@@ -487,6 +545,13 @@ h1 em {
   grid-column: 2;
   grid-row: 2;
   justify-self: start;
+  /* Keep the chip on a single line at every viewport — the placeholder
+     `<YOUR_DOMAIN>` is the bit that gets truncated when the card grid
+     goes to 2 cols around 768–880px. */
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The mailbox chip — the user-facing AIMX address. Bold, accent-tinted,
@@ -743,13 +808,18 @@ h1 em {
    Lead tagline (with aimx agents setup) sits above the grid; closing tagline sits below. */
 .harness-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   grid-auto-rows: 1fr;       /* every row matches the tallest row's height */
   gap: 16px;
   margin: 12px 0 0;
 }
+/* 3 cols starting at 576px (where .wrap becomes 540 max-width) — keeps
+   8 tiles to a tidy 3×3 with one empty cell. */
+@media (min-width: 576px) {
+  .harness-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 @media (min-width: 768px) {
-  .harness-grid { grid-template-columns: repeat(4, 1fr); }
+  .harness-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 }
 .harness-tile {
   border: 1px solid var(--rule);
@@ -812,7 +882,7 @@ h1 em {
 }
 .compare {
   font-family: 'IBM Plex Sans', system-ui, sans-serif;
-  font-size: 0.32em;
+  font-size: 0.36em;
   width: 100%;
   border-collapse: collapse;
 }
@@ -880,6 +950,81 @@ h1 em {
 }
 .compare td.aimx-col.cell-yes { font-size: 1.2em; }
 .compare tr + tr td { border-top: 1px solid var(--rule); }
+
+/* Mobile-only stacked-card rendering of the comparison data. The desktop
+   <table> stays in the DOM for assistive tech and print; below 640px we
+   swap it out for a column of cards (AIMX first, accent-tinted) so the
+   punchline column never lives behind a horizontal scroll. */
+.compare-cards { display: none; }
+@media (max-width: 640px) {
+  .compare-wrap { display: none; }
+  .compare-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 14px;
+  }
+}
+.compare-card {
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: 12px;
+  padding: 16px 18px 12px;
+}
+.compare-card.aimx {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--rule));
+  background: color-mix(in srgb, var(--accent) 8%, var(--paper-2));
+}
+.compare-card-title {
+  font-family: 'Fraunces', serif;
+  font-variation-settings: 'opsz' 30;
+  font-weight: 500;
+  font-size: 0.5em;
+  line-height: 1.2;
+  color: var(--ink);
+  display: block;
+  margin-bottom: 0.45em;
+}
+.compare-card.aimx .compare-card-title { color: var(--accent); }
+.compare-card-title .compare-card-sub {
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62em;
+  color: var(--ink-faded);
+  font-weight: 400;
+  letter-spacing: 0;
+  margin-top: 2px;
+}
+.compare-card ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.4em;
+  line-height: 1.5;
+}
+.compare-card li {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 0.45em 0;
+  border-bottom: 1px solid var(--rule);
+  color: var(--ink-soft);
+}
+.compare-card li:last-child { border-bottom: none; }
+.compare-card li > span:last-child {
+  flex-shrink: 0;
+  text-align: right;
+}
+.compare-card .compare-note {
+  display: block;
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.78em;
+  color: var(--ink-faded);
+  font-weight: 400;
+  letter-spacing: 0;
+  margin-top: 2px;
+}
 
 .faq details {
   border-bottom: 1px solid var(--rule);
@@ -1028,6 +1173,16 @@ footer a:hover {
   border-bottom-color: var(--accent);
 }
 
+/* Phablet / small-tablet tier — tighten the cramped 561–767px band that
+   previously inherited desktop sizing inside a 540px container. */
+@media (max-width: 767px) {
+  .mascot { width: 220px; margin-bottom: 28px; }
+  h1 { font-size: 1.15em; }
+  .pitch { font-size: 0.39em; }
+  .section-label { font-size: 0.66em; }
+  footer { gap: 16px; }
+}
+
 @media (max-width: 560px) {
   .wrap { padding: 24px 20px 28px; }
   main { padding: 40px 0 32px; }
@@ -1037,7 +1192,6 @@ footer a:hover {
   .block { margin-top: 40px; padding-top: 24px; }
   .detail { margin-top: 40px; }
   .theme-toggle { font-size: 0.3em; }
-  .compare { font-size: 0.3em; }
 }
 
 /* ===== Grid system =========================================================
