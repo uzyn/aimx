@@ -1407,13 +1407,21 @@ pub fn display_mcp_section() {
 ///
 /// Shape: a header sentence, a bullet list of every supported agent's
 /// `display_name` (driven by [`crate::agents_setup::registry`] so adding
-/// a new agent automatically appears here), then a closing instruction
-/// to run `aimx agents setup` as the regular user. No per-agent install
+/// a new agent automatically appears here), a brief instruction sentence,
+/// then a labeled, boxed `→ aimx agents setup` callout so the operator's
+/// next concrete action can't be skimmed past. No per-agent install
 /// commands — the picker (`aimx agents setup` with no argument) handles
 /// detection and per-agent dispatch.
+///
+/// The box uses literal `→` (one column) instead of [`term::prompt_mark`]
+/// so the body row's visible width stays fixed at 29 columns regardless
+/// of TTY / `NO_COLOR` — `prompt_mark`'s non-TTY `[>]` fallback would
+/// otherwise widen the row by two columns and misalign the borders.
 pub fn mcp_section_lines() -> Vec<String> {
     let mut lines = Vec::new();
-    lines.push("AIMX bundles MCP and skill files for the following AI agents:".to_string());
+    lines.push(
+        "AIMX bundles MCP and skill files for the following AI agents & harnesses:".to_string(),
+    );
     lines.push(String::new());
 
     for spec in crate::agents_setup::registry() {
@@ -1422,11 +1430,15 @@ pub fn mcp_section_lines() -> Vec<String> {
 
     lines.push(String::new());
     lines.push(
-        "Run as your regular user (not root) to wire AIMX into the agents you have installed:"
+        "To wire AIMX into the harness you have installed, run the agents guided setup \
+         as a regular user (not root):"
             .to_string(),
     );
     lines.push(String::new());
-    lines.push(format!("  {} aimx agents setup", term::prompt_mark()));
+    lines.push("  ┌─────────────────────────────┐".to_string());
+    lines.push("  │  → aimx agents setup        │".to_string());
+    lines.push("  └─────────────────────────────┘".to_string());
+    lines.push(String::new());
     lines.push(String::new());
     lines
 }
@@ -2379,13 +2391,13 @@ pub fn print_welcome_banner(checklist: &Checklist) {
     println!();
 }
 
-/// Print the closing checklist banner. Reprinted with the terminal step
-/// states so the operator sees ☐ flip to ☑ / ☒ at the end of the run.
-pub fn print_final_banner(checklist: &Checklist) {
+/// Print the completion banner that sits between Step 5 and the Step 6
+/// handoff. The per-step checklist was already printed by
+/// `print_step_complete(5)` immediately above; reprinting it under the
+/// banner was noise.
+pub fn print_final_banner() {
     println!();
     println!("{}", term::header("🐦‍⬛ AIMX setup — complete"));
-    println!();
-    print_step_list(checklist);
     println!();
 }
 
@@ -2658,11 +2670,17 @@ pub fn run_setup(
     // interactive picker) to run as themselves. Step 6 is marked
     // `Handoff` (⎘) in the closing checklist — distinct from ☑ Done
     // (the wizard completed it) and ☒ Skipped (the wizard bypassed it).
+    // Banner first — sits between Step 5 (already printed with its
+    // checklist via `print_step_complete(5)` above) and the Step 6
+    // handoff below. The operator's "I'm done" cue arrives BEFORE the
+    // handoff section so the boxed `aimx agents setup` callout that
+    // follows reads as the operator's next concrete action, not as
+    // wizard work still in progress.
+    checklist.set(6, term::StepState::Handoff);
+    print_final_banner();
+
     section_header(6, SETUP_STEPS[5]);
     display_mcp_section();
-
-    checklist.set(6, term::StepState::Handoff);
-    print_final_banner(&checklist);
 
     // Closing message — final thing the operator sees.
     print_closing_message(&domain);
@@ -2674,16 +2692,18 @@ pub fn run_setup(
 /// configured domain into the template the spec mandates.
 fn print_closing_message(domain: &str) {
     println!();
-    println!("{}", term::success("AIMX has been set up successfully."));
+    println!(
+        "{} {}",
+        term::step_glyph(term::StepState::Done),
+        term::success("AIMX has been set up successfully.")
+    );
     println!();
     println!(
-        "Your agents now have access to set up, send and receive emails from {} emails.",
+        "AIMX is now running at {} and ready to send and receive email.",
         term::highlight(&format!("@{domain}"))
     );
     println!();
-    println!(
-        "Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g."
-    );
+    println!("Once you've wired your MCP to your LLM, try asking your agent, e.g.");
     println!(
         "  claude -p \"Set up agent@{domain} and respond to me via email the moment you receive my instructions via email.\""
     );
@@ -3934,10 +3954,10 @@ owner = "aimx-catchall"
     fn mcp_section_lines_are_in_documented_order() {
         // Pins the line *flow* of `mcp_section_lines`, not just presence.
         // The contract: header sentence → blank → bullets → blank →
-        // "Run as your regular user..." sentence → blank → callout →
-        // blank. A refactor that scrambles this order (e.g. moves the
-        // bullets below the callout) would still pass the existing
-        // presence-only tests but produce confusing output.
+        // "To wire AIMX..." sentence → blank → box top border → box body
+        // row → box bottom border. A refactor that scrambles this order
+        // (e.g. moves the bullets below the box) would still pass the
+        // presence-only tests but would produce confusing output.
         let lines = mcp_section_lines();
         let header_idx = lines
             .iter()
@@ -3947,28 +3967,81 @@ owner = "aimx-catchall"
             .iter()
             .position(|line| line.starts_with("  • "))
             .expect("at least one bullet must be present");
-        let run_as_user_idx = lines
+        let wire_sentence_idx = lines
             .iter()
-            .position(|line| line.starts_with("Run as your regular user"))
-            .expect("\"Run as your regular user...\" sentence must be present");
-        let callout_idx = lines
+            .position(|line| line.starts_with("To wire AIMX"))
+            .expect("\"To wire AIMX...\" sentence must be present");
+        let top_border_idx = lines
             .iter()
-            .position(|line| line.contains("aimx agents setup") && !line.starts_with("AIMX"))
-            .expect("`aimx agents setup` callout must be present");
+            .position(|line| line.starts_with("  ┌"))
+            .expect("box top border must be present");
+        let body_row_idx = lines
+            .iter()
+            .position(|line| line.contains('│') && line.contains("aimx agents setup"))
+            .expect("box body row with `aimx agents setup` must be present");
+        let bottom_border_idx = lines
+            .iter()
+            .position(|line| line.starts_with("  └"))
+            .expect("box bottom border must be present");
 
         assert!(
             header_idx < first_bullet_idx,
             "header must precede bullets (header={header_idx}, bullets={first_bullet_idx})"
         );
         assert!(
-            first_bullet_idx < run_as_user_idx,
-            "bullets must precede the run-as-user sentence \
-             (bullets={first_bullet_idx}, run_as_user={run_as_user_idx})"
+            first_bullet_idx < wire_sentence_idx,
+            "bullets must precede the wire-up sentence \
+             (bullets={first_bullet_idx}, wire={wire_sentence_idx})"
         );
         assert!(
-            run_as_user_idx < callout_idx,
-            "run-as-user sentence must precede callout \
-             (run_as_user={run_as_user_idx}, callout={callout_idx})"
+            wire_sentence_idx < top_border_idx,
+            "wire-up sentence must precede box top border \
+             (wire={wire_sentence_idx}, top_border={top_border_idx})"
+        );
+        assert!(
+            top_border_idx < body_row_idx,
+            "box top border must precede body row \
+             (top_border={top_border_idx}, body={body_row_idx})"
+        );
+        assert!(
+            body_row_idx < bottom_border_idx,
+            "box body row must precede bottom border \
+             (body={body_row_idx}, bottom_border={bottom_border_idx})"
+        );
+
+        // The three box rows are contiguous (no blank rows inside the box).
+        assert_eq!(
+            body_row_idx,
+            top_border_idx + 1,
+            "box body row must sit directly under the top border"
+        );
+        assert_eq!(
+            bottom_border_idx,
+            body_row_idx + 1,
+            "box bottom border must sit directly under the body row"
+        );
+
+        // Box geometry: top and bottom borders must be the same length,
+        // and the body row must match. Locks in alignment so a future
+        // edit to the literal command can't silently misalign the box.
+        let top = &lines[top_border_idx];
+        let body = &lines[body_row_idx];
+        let bottom = &lines[bottom_border_idx];
+        assert_eq!(
+            top.chars().count(),
+            bottom.chars().count(),
+            "top and bottom box borders must be the same width \
+             (top={:?}, bottom={:?})",
+            top,
+            bottom
+        );
+        assert_eq!(
+            top.chars().count(),
+            body.chars().count(),
+            "box body row width must match border width \
+             (top={:?}, body={:?})",
+            top,
+            body
         );
 
         // Blank-line separators between each landmark.
@@ -3979,22 +4052,16 @@ owner = "aimx-catchall"
             lines[header_idx + 1]
         );
         assert!(
-            lines[run_as_user_idx - 1].is_empty(),
-            "expected blank line before run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx - 1,
-            lines[run_as_user_idx - 1]
+            lines[wire_sentence_idx - 1].is_empty(),
+            "expected blank line before wire-up sentence at index {}; got {:?}",
+            wire_sentence_idx - 1,
+            lines[wire_sentence_idx - 1]
         );
         assert!(
-            lines[run_as_user_idx + 1].is_empty(),
-            "expected blank line after run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx + 1,
-            lines[run_as_user_idx + 1]
-        );
-        assert!(
-            lines[callout_idx - 1].is_empty(),
-            "expected blank line before callout at index {}; got {:?}",
-            callout_idx - 1,
-            lines[callout_idx - 1]
+            lines[top_border_idx - 1].is_empty(),
+            "expected blank line before box top border at index {}; got {:?}",
+            top_border_idx - 1,
+            lines[top_border_idx - 1]
         );
     }
 
@@ -6010,17 +6077,29 @@ owner = "aimx-catchall"
     #[test]
     fn closing_message_carries_required_phrasing() {
         // The wizard closes with the spec-mandated message: a success
-        // banner, the `@<DOMAIN>` line, and the `claude -p` example
-        // prompt. Direct stdout capture is finicky under cargo test, so
-        // grep the source for the load-bearing literals instead.
+        // banner, the `@<DOMAIN>` capability line, the wired-MCP follow-up,
+        // and the `claude -p` example prompt. Direct stdout capture is
+        // finicky under cargo test, so grep the source for the
+        // load-bearing literals instead.
         let source = include_str!("setup.rs");
         assert!(
             source.contains("AIMX has been set up successfully."),
             "closing message must include the success banner"
         );
         assert!(
-            source.contains("Your agents now have access to set up, send and receive emails from"),
-            "closing message must surface agent capabilities"
+            source.contains("AIMX is now running at"),
+            "closing message must surface the running-daemon capability line \
+             (must NOT claim agents already have access — the operator still \
+             needs to run `aimx agents setup`)"
+        );
+        assert!(
+            source.contains("ready to send and receive email"),
+            "closing message capability line must describe AIMX's email role"
+        );
+        assert!(
+            source.contains("Once you've wired your MCP to your LLM"),
+            "closing message must acknowledge the MCP-wiring step before \
+             the `claude -p` example"
         );
         assert!(
             source.contains("claude -p"),
@@ -6029,28 +6108,32 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn closing_message_preserves_trailing_emails_word() {
-        // Spec wording explicitly ends with "...emails from @<DOMAIN>
-        // emails." with the trailing "emails" word. Lock in both the
-        // template (what's in the source) and the rendered string (what
-        // an operator actually sees with their domain substituted in).
+    fn closing_message_does_not_overclaim_agent_capability() {
+        // Regression: at the moment Step 6 runs, the daemon is up and the
+        // mailboxes exist but NO agent has its MCP wired yet. The
+        // closing line must not read like agents already have access —
+        // wiring is the operator handoff the wizard just printed above
+        // (boxed `aimx agents setup` callout). The prior wording tripped
+        // this and was rewritten to "AIMX is now running at <domain>..."
         let source = include_str!("setup.rs");
+        // Build the forbidden phrase from split pieces so this very
+        // assertion doesn't put the bytes it's forbidding into the
+        // source file. `include_str!` reads `setup.rs` verbatim, so any
+        // string literal mentioning the old phrase would self-trigger.
+        let forbidden = ["Your agents", " now have access"].concat();
         assert!(
-            source.contains(
-                "Your agents now have access to set up, send and receive emails from {} emails."
-            ),
-            "closing message template must keep the trailing `emails.` word \
-             so the rendered line reads `... from @<DOMAIN> emails.`"
+            !source.contains(&forbidden),
+            "closing message must not overclaim — wiring (`aimx agents setup`) \
+             is still the operator handoff at this point"
         );
 
-        // Cross-check the rendered substring an operator would see.
+        // Cross-check the rendered substring an operator actually sees.
         let domain = "agent.example.com";
-        let rendered = format!(
-            "Your agents now have access to set up, send and receive emails from @{domain} emails."
-        );
+        let rendered =
+            format!("AIMX is now running at @{domain} and ready to send and receive email.");
         assert!(
-            rendered.contains(&format!("emails from @{domain} emails.")),
-            "rendered closing message must contain `emails from @{{domain}} emails.`. \
+            rendered.contains(&format!("at @{domain}")),
+            "rendered capability line must substitute the configured domain. \
              Got: {rendered}"
         );
     }
@@ -6189,7 +6272,10 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn final_banner_signals_completion_and_renders_step_list() {
+    fn final_banner_signals_completion() {
+        // The checklist is no longer reprinted under the banner —
+        // `print_step_complete(5)` immediately above already showed the
+        // same state with Step 6 as ☐. Just the headline survives.
         let source = include_str!("setup.rs");
         let body_start = source
             .find("pub fn print_final_banner")
@@ -6200,9 +6286,10 @@ owner = "aimx-catchall"
             "final banner missing completion title. Window:\n{window}"
         );
         assert!(
-            window.contains("print_step_list"),
-            "final banner must reuse print_step_list so per-step glyphs render. \
-             Window:\n{window}"
+            !window.contains("print_step_list"),
+            "final banner must NOT reprint the checklist — \
+             `print_step_complete(5)` already showed the running checklist \
+             immediately above. Window:\n{window}"
         );
     }
 

@@ -43,16 +43,38 @@ The wizard prints a six-line checklist and walks each step, advancing each entry
 3. **STARTTLS certificate.** Generates a self-signed cert at `/etc/ssl/aimx/`. Skipped on re-entry.
 4. **Trust policy.** Asks for a comma-separated list of addresses or globs (e.g. `you@example.com, *@company.com`). An empty list sets `trust = "none"` with a loud warning that hooks will not fire for inbound email until trusted senders are added. Skipped on re-entry. Under `AIMX_NONINTERACTIVE=1` the prompt is skipped and the warning is logged.
 5. **Install AIMX.** Generates a 2048-bit DKIM keypair under `/etc/aimx/dkim/`, writes `/etc/aimx/config.toml` with the catchall mailbox, creates the `aimx-catchall` system user, generates the systemd (or OpenRC) service unit, starts `aimx serve`, and waits for port 25 to bind. Skipped on re-entry.
-6. **Set up MCP for agent(s).** Prints a guidance section listing every supported AI agent (driven by `agents_setup::registry()` so the list extends automatically) and a `→ aimx agents setup` callout pointing the operator at the per-user agent wiring command. The wizard does not spawn a subprocess — agent wiring is operator-initiated as a separate step (the same idiom as `apt install` / `gh auth login`). Marked `⎘ Handoff` in the closing checklist regardless of `$SUDO_USER` or `AIMX_NONINTERACTIVE`.
+6. **Set up MCP for agent(s).** Prints the `🐦‍⬛ AIMX setup — complete` banner first, then a guidance section listing every supported AI agent and harness (driven by `agents_setup::registry()` so the list extends automatically), and a boxed `→ aimx agents setup` callout under a sentence directing the operator to run the agents guided setup as a regular user (not root). The wizard does not spawn a subprocess — agent wiring is operator-initiated as a separate step (the same idiom as `apt install` / `gh auth login`). Marked `⎘ Handoff` on the checklist regardless of `$SUDO_USER` or `AIMX_NONINTERACTIVE`; the checklist itself is rendered immediately after Step 5 completes (with Step 6 still as `☐`) and is not reprinted under the banner.
 
 After step 6 returns, the wizard prints the final closing message:
 
 ```
-AIMX has been set up successfully.
+🐦‍⬛ AIMX setup — complete
 
-Your agents now have access to set up, send and receive emails from @<DOMAIN> emails.
+Step 6: Set up MCP for agent(s)
 
-Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g.
+AIMX bundles MCP and skill files for the following AI agents & harnesses:
+
+  • Claude Code
+  • Codex CLI
+  • OpenCode
+  • Gemini CLI
+  • Goose
+  • OpenClaw
+  • Hermes
+  • NanoClaw
+
+To wire AIMX into the harness you have installed, run the agents guided setup as a regular user (not root):
+
+  ┌─────────────────────────────┐
+  │  → aimx agents setup        │
+  └─────────────────────────────┘
+
+
+☑ AIMX has been set up successfully.
+
+AIMX is now running at @<DOMAIN> and ready to send and receive email.
+
+Once you've wired your MCP to your LLM, try asking your agent, e.g.
   claude -p "Set up agent@<DOMAIN> and respond to me via email the moment you receive my instructions via email."
 ```
 
