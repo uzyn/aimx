@@ -561,6 +561,27 @@ start_service() {
     esac
 }
 
+# True iff `aimx setup` has previously completed on this host — i.e. a
+# service unit is on disk. Setup writes the unit as its final step
+# (src/setup.rs); if neither file is present, an earlier install was
+# interrupted before reaching the service-install stage. Without this
+# gate the upgrade path runs `systemctl start aimx` after the binary
+# swap and bails fatally on "Unit aimx.service not found", trapping the
+# operator: every re-run rolls itself back. Override the probe paths
+# via AIMX_SETUP_COMPLETED_SYSTEMD / AIMX_SETUP_COMPLETED_OPENRC for
+# tests — production callers leave them unset.
+setup_completed() {
+    _systemd_unit="${AIMX_SETUP_COMPLETED_SYSTEMD:-/etc/systemd/system/aimx.service}"
+    _openrc_unit="${AIMX_SETUP_COMPLETED_OPENRC:-/etc/init.d/aimx}"
+    if [ -f "${_systemd_unit}" ]; then
+        return 0
+    fi
+    if [ -f "${_openrc_unit}" ]; then
+        return 0
+    fi
+    return 1
+}
+
 # Detect a manually-launched `aimx serve` process running outside
 # systemd / OpenRC. Used on the upgrade path: when no init system
 # manages the unit but a stray `aimx serve` is still bound to the
@@ -1252,39 +1273,50 @@ main() {
     _installed_tag=""
     _is_upgrade=0
     if [ -x "${_install_path}" ]; then
-        _installed_tag="$(parse_installed_tag "${_install_path}")"
-        if [ -n "${_installed_tag}" ]; then
-            _cmp="$(compare_tags "${_installed_tag}" "${TAG}")"
-            case "${_cmp}" in
-                equal)
-                    if [ "${FORCE}" -eq 1 ]; then
-                        say "re-installing ${TAG} (--force)"
-                        _is_upgrade=1
-                    elif [ "${DRY_RUN}" != "1" ] && prompt_reinstall; then
-                        # Binary is already correct; skip the swap and
-                        # jump straight to the wizard. backup_existing_config
-                        # below covers any partial config from an aborted run.
-                        # Dry-run never prompts — auditing the script must
-                        # stay non-interactive, matching pre-PR behavior on
-                        # the equal-version branch.
-                        _skip_swap=1
-                        _is_upgrade=0
-                    else
-                        say "AIMX ${_installed_tag} is already installed (pass --force to re-install)"
-                        exit 0
-                    fi
-                    ;;
-                newer)
-                    err "installed ${_installed_tag} is newer than target ${TAG}; run 'aimx upgrade --version ${TAG} --force' to downgrade explicitly"
-                    ;;
-                older)
-                    say "upgrading ${_installed_tag} -> ${TAG}"
-                    _is_upgrade=1
-                    ;;
-            esac
+        if ! setup_completed; then
+            # Binary exists but no service unit on disk — `aimx setup`
+            # never reached its final step (typically the operator
+            # Ctrl+C'd partway through). The upgrade branch would try
+            # `systemctl start aimx` on a unit that isn't there and
+            # bail fatally. Fall through to the fresh-install path so
+            # the binary is re-laid at the target tag and the wizard
+            # re-enters cleanly.
+            say "binary present but aimx setup did not complete (no service unit); continuing setup"
         else
-            say "existing binary at ${_install_path} did not report a parseable version; proceeding as upgrade"
-            _is_upgrade=1
+            _installed_tag="$(parse_installed_tag "${_install_path}")"
+            if [ -n "${_installed_tag}" ]; then
+                _cmp="$(compare_tags "${_installed_tag}" "${TAG}")"
+                case "${_cmp}" in
+                    equal)
+                        if [ "${FORCE}" -eq 1 ]; then
+                            say "re-installing ${TAG} (--force)"
+                            _is_upgrade=1
+                        elif [ "${DRY_RUN}" != "1" ] && prompt_reinstall; then
+                            # Binary is already correct; skip the swap and
+                            # jump straight to the wizard. backup_existing_config
+                            # below covers any partial config from an aborted run.
+                            # Dry-run never prompts — auditing the script must
+                            # stay non-interactive, matching pre-PR behavior on
+                            # the equal-version branch.
+                            _skip_swap=1
+                            _is_upgrade=0
+                        else
+                            say "AIMX ${_installed_tag} is already installed (pass --force to re-install)"
+                            exit 0
+                        fi
+                        ;;
+                    newer)
+                        err "installed ${_installed_tag} is newer than target ${TAG}; run 'aimx upgrade --version ${TAG} --force' to downgrade explicitly"
+                        ;;
+                    older)
+                        say "upgrading ${_installed_tag} -> ${TAG}"
+                        _is_upgrade=1
+                        ;;
+                esac
+            else
+                say "existing binary at ${_install_path} did not report a parseable version; proceeding as upgrade"
+                _is_upgrade=1
+            fi
         fi
     fi
 

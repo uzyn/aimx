@@ -151,6 +151,7 @@ _out="$(
         type ui_warn >/dev/null 2>&1 && echo "HAS ui_warn"
         type ui_error >/dev/null 2>&1 && echo "HAS ui_error"
         type ui_success >/dev/null 2>&1 && echo "HAS ui_success"
+        type setup_completed >/dev/null 2>&1 && echo "HAS setup_completed"
     ' 2>&1
 )"
 assert_contains "INSTALL_SH_TEST=1 suppresses main" "${_out}" "SOURCED_OK"
@@ -163,6 +164,7 @@ assert_contains "helper: ui_info"                  "${_out}" "HAS ui_info"
 assert_contains "helper: ui_warn"                  "${_out}" "HAS ui_warn"
 assert_contains "helper: ui_error"                 "${_out}" "HAS ui_error"
 assert_contains "helper: ui_success"               "${_out}" "HAS ui_success"
+assert_contains "helper: setup_completed"          "${_out}" "HAS setup_completed"
 
 # Removed-helper regression: the binary owns the six-step UI now.
 # `has_tty` was removed when the post-install handoff was rewritten to
@@ -282,6 +284,91 @@ else
     FAIL=$((FAIL + 1))
     FAILED_NAMES="${FAILED_NAMES} sudo-v-redirect-missing"
     printf '  FAIL no sudo -v </dev/tty line found at all\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
+# 3c. setup_completed gate (interrupted-setup regression)
+#
+# Re-running install.sh after Ctrl+C'ing out of `aimx setup` must NOT
+# bail with "Unit aimx.service not found". The fix gates the upgrade
+# decision on `setup_completed`: a service unit on disk is the durable
+# signal that the wizard previously finished. When the gate is missing,
+# the upgrade branch swaps the binary then runs `systemctl start aimx`
+# on a unit that doesn't exist and rolls back fatally.
+# ---------------------------------------------------------------------------
+
+echo "# setup_completed gate"
+
+# install.sh sets `set -eu` at its top, so sourcing it into a subshell
+# inherits errexit. Wrap each probe in an `if ... fi` so the returned
+# nonzero from setup_completed doesn't tear down the subshell before
+# the `printf` captures the result.
+
+# (a) Functional: no unit files → returns 1 (treat as fresh install).
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        if AIMX_SETUP_COMPLETED_SYSTEMD="/nonexistent/aimx.service" \
+           AIMX_SETUP_COMPLETED_OPENRC="/nonexistent/aimx" \
+                setup_completed
+        then
+            printf "RC=0"
+        else
+            printf "RC=%d" $?
+        fi
+    '
+)"
+assert_contains "setup_completed: no unit → rc 1" "${_out}" "RC=1"
+
+# (b) Functional: systemd unit present → returns 0 (treat as upgrade).
+_unit_tmp="$(mktemp -d 2>/dev/null || mktemp -d -t aimxsc)"
+: > "${_unit_tmp}/aimx.service"
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        if AIMX_SETUP_COMPLETED_SYSTEMD="'"${_unit_tmp}/aimx.service"'" \
+           AIMX_SETUP_COMPLETED_OPENRC="/nonexistent/aimx" \
+                setup_completed
+        then
+            printf "RC=0"
+        else
+            printf "RC=%d" $?
+        fi
+    '
+)"
+assert_contains "setup_completed: systemd unit present → rc 0" "${_out}" "RC=0"
+
+# (c) Functional: OpenRC script present → returns 0.
+: > "${_unit_tmp}/openrc-aimx"
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        if AIMX_SETUP_COMPLETED_SYSTEMD="/nonexistent/aimx.service" \
+           AIMX_SETUP_COMPLETED_OPENRC="'"${_unit_tmp}/openrc-aimx"'" \
+                setup_completed
+        then
+            printf "RC=0"
+        else
+            printf "RC=%d" $?
+        fi
+    '
+)"
+assert_contains "setup_completed: openrc script present → rc 0" "${_out}" "RC=0"
+
+rm -rf "${_unit_tmp}"
+
+# (d) Source-grep regression: the upgrade-decision block must call
+#     `setup_completed` before the version-comparison case statement.
+#     Without this gate, a binary present + no unit installed routes
+#     to the fatal `systemctl start aimx` path on re-run.
+_gate_count="$(grep -c 'if ! setup_completed' "${INSTALL_SH}" || true)"
+if [ "${_gate_count:-0}" -ge 1 ]; then
+    PASS=$((PASS + 1))
+    printf '  ok  upgrade decision gated on setup_completed (count=%s)\n' "${_gate_count}"
+else
+    FAIL=$((FAIL + 1))
+    FAILED_NAMES="${FAILED_NAMES} setup-completed-gate-missing"
+    printf '  FAIL `if ! setup_completed` gate missing from install.sh\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
