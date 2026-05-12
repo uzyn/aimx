@@ -2,10 +2,14 @@
 //!
 //! `MARK-READ` and `MARK-UNREAD` rewrite the target email's TOML
 //! frontmatter in place so the `read` field persists across restarts.
-//! Files on disk are owned by `root:root 0644` (writable only by the
-//! daemon, which runs as root), so the MCP server (running as the
-//! invoking non-root user) routes through these verbs instead of
-//! touching the files directly.
+//! Files on disk are mode `0o600` owned by the mailbox's configured
+//! owner (`<owner>:<owner>`), sitting inside `0o700` per-mailbox
+//! directories. The MCP server runs as the invoking non-root user,
+//! which is generally not the mailbox owner, so it cannot write the
+//! file directly and routes through these verbs instead. The daemon
+//! (running as root) performs the rewrite and re-applies
+//! `<owner>:<owner> 0o600` via `chown_as_owner` on the temp file
+//! before `rename(2)`.
 //!
 //! # Concurrency model
 //!
