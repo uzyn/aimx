@@ -3988,7 +3988,7 @@ owner = "aimx-catchall"
             .iter()
             .position(|line| line.starts_with("  • "))
             .expect("at least one bullet must be present");
-        let run_as_user_idx = lines
+        let handoff_sentence_idx = lines
             .iter()
             .position(|line| line.starts_with("To wire AIMX into the harness"))
             .expect("\"To wire AIMX into the harness...\" sentence must be present");
@@ -4002,14 +4002,14 @@ owner = "aimx-catchall"
             "header must precede bullets (header={header_idx}, bullets={first_bullet_idx})"
         );
         assert!(
-            first_bullet_idx < run_as_user_idx,
-            "bullets must precede the run-as-user sentence \
-             (bullets={first_bullet_idx}, run_as_user={run_as_user_idx})"
+            first_bullet_idx < handoff_sentence_idx,
+            "bullets must precede the handoff sentence \
+             (bullets={first_bullet_idx}, handoff={handoff_sentence_idx})"
         );
         assert!(
-            run_as_user_idx < callout_top_idx,
-            "run-as-user sentence must precede callout box \
-             (run_as_user={run_as_user_idx}, callout_top={callout_top_idx})"
+            handoff_sentence_idx < callout_top_idx,
+            "handoff sentence must precede callout box \
+             (handoff={handoff_sentence_idx}, callout_top={callout_top_idx})"
         );
 
         // Blank-line separators between each landmark.
@@ -4020,16 +4020,16 @@ owner = "aimx-catchall"
             lines[header_idx + 1]
         );
         assert!(
-            lines[run_as_user_idx - 1].is_empty(),
-            "expected blank line before run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx - 1,
-            lines[run_as_user_idx - 1]
+            lines[handoff_sentence_idx - 1].is_empty(),
+            "expected blank line before handoff sentence at index {}; got {:?}",
+            handoff_sentence_idx - 1,
+            lines[handoff_sentence_idx - 1]
         );
         assert!(
-            lines[run_as_user_idx + 1].is_empty(),
-            "expected blank line after run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx + 1,
-            lines[run_as_user_idx + 1]
+            lines[handoff_sentence_idx + 1].is_empty(),
+            "expected blank line after handoff sentence at index {}; got {:?}",
+            handoff_sentence_idx + 1,
+            lines[handoff_sentence_idx + 1]
         );
         assert!(
             lines[callout_top_idx - 1].is_empty(),
