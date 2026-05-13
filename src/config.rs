@@ -43,7 +43,7 @@ const CONFIG_DIR_ENV: &str = "AIMX_CONFIG_DIR";
 /// [`Config::signature`] is `None`. Operators override by setting
 /// `signature = "..."` in `config.toml`; an empty string disables the
 /// signature entirely.
-pub const DEFAULT_SIGNATURE: &str = "Sent from AIMX.\nhttps://aimx.email";
+pub const DEFAULT_SIGNATURE: &str = "Sent from AIMX.  \nhttps://aimx.email";
 
 /// Resolve the configuration directory.
 ///
