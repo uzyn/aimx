@@ -1407,10 +1407,12 @@ pub fn display_mcp_section() {
 ///
 /// Shape: a header sentence, a bullet list of every supported agent's
 /// `display_name` (driven by [`crate::agents_setup::registry`] so adding
-/// a new agent automatically appears here), then a closing instruction
-/// to run `aimx agents setup` as the regular user. No per-agent install
-/// commands — the picker (`aimx agents setup` with no argument) handles
-/// detection and per-agent dispatch.
+/// a new agent automatically appears here), then a sentence telling the
+/// operator to run `aimx agents setup` as a regular user, followed by a
+/// box-drawn callout with the command itself. The body row of the box
+/// hard-codes the literal `→` arrow (rather than going through
+/// [`term::prompt_mark`], which would expand to `[>]` under `NO_COLOR` /
+/// non-TTY and desync the box geometry).
 pub fn mcp_section_lines() -> Vec<String> {
     let mut lines = Vec::new();
     lines.push("AIMX bundles MCP and skill files for the following AI agents:".to_string());
@@ -1422,13 +1424,37 @@ pub fn mcp_section_lines() -> Vec<String> {
 
     lines.push(String::new());
     lines.push(
-        "Run as your regular user (not root) to wire AIMX into the agents you have installed:"
+        "To wire AIMX into the harness you have installed, run the agents guided setup as a regular user (not root):"
             .to_string(),
     );
     lines.push(String::new());
-    lines.push(format!("  {} aimx agents setup", term::prompt_mark()));
+    // Inner width hoisted here so the coupling between body content and
+    // pad width is visible at the call site: `  → aimx agents setup` is
+    // 21 chars; 29 gives 8 chars of right padding for breathing room
+    // without dominating the terminal. If the subcommand is renamed,
+    // adjust this number and `mcp_section_callout_box_is_equal_width`
+    // will fail loudly if the new body overruns the pad.
+    lines.extend(callout_box("  → aimx agents setup", 29));
     lines.push(String::new());
     lines
+}
+
+/// Render a three-line box-drawn callout around `body`, padded to
+/// `inner_width` characters inside the box. The body string is
+/// right-padded with spaces so the three lines have equal character
+/// width (top border, body row, bottom border) — the geometry guarantee
+/// the `mcp_section_callout_box_is_equal_width` test enforces. Without
+/// equal width the corners visibly drift under `NO_COLOR` / non-TTY.
+fn callout_box(body: &str, inner_width: usize) -> Vec<String> {
+    let body_chars = body.chars().count();
+    let pad = inner_width.saturating_sub(body_chars);
+    let body_padded = format!("{body}{}", " ".repeat(pad));
+    let rule: String = "─".repeat(inner_width);
+    vec![
+        format!("  ┌{rule}┐"),
+        format!("  │{body_padded}│"),
+        format!("  └{rule}┘"),
+    ]
 }
 
 /// Finalize the on-disk install: ensure `data_dir` exists, create or
@@ -2379,13 +2405,16 @@ pub fn print_welcome_banner(checklist: &Checklist) {
     println!();
 }
 
-/// Print the closing checklist banner. Reprinted with the terminal step
-/// states so the operator sees ☐ flip to ☑ / ☒ at the end of the run.
-pub fn print_final_banner(checklist: &Checklist) {
+/// Print the closing banner that marks the wizard as complete. Emitted
+/// between Step 5 finishing and the Step 6 section header so the operator
+/// reads it as a strong "the install part is done; what follows is your
+/// handoff to do as a regular user" delimiter. Title-only by design — the
+/// operator already saw the full checklist redraw when Step 5 marked
+/// complete, so reprinting it here would be redundant noise. Takes no
+/// arguments — the banner does not depend on checklist state.
+pub fn print_final_banner() {
     println!();
     println!("{}", term::header("🐦‍⬛ AIMX setup — complete"));
-    println!();
-    print_step_list(checklist);
     println!();
 }
 
@@ -2646,6 +2675,14 @@ pub fn run_setup(
         print_step_complete(5, &checklist);
     }
 
+    // The install half of the wizard is done — print the completion
+    // banner here, BEFORE Step 6. Step 6 is a handoff to the operator
+    // (run `aimx agents setup` as themselves), so the banner reads as a
+    // delimiter between "the wizard completed its work" and "now this
+    // is what's left for you to do".
+    checklist.set(6, term::StepState::Handoff);
+    print_final_banner();
+
     // ---- Step 6: Set up MCP for agent(s) -----------------------------------
     //
     // The wizard does NOT auto-wire MCP into the operator's agents.
@@ -2661,9 +2698,6 @@ pub fn run_setup(
     section_header(6, SETUP_STEPS[5]);
     display_mcp_section();
 
-    checklist.set(6, term::StepState::Handoff);
-    print_final_banner(&checklist);
-
     // Closing message — final thing the operator sees.
     print_closing_message(&domain);
 
@@ -2671,19 +2705,26 @@ pub fn run_setup(
 }
 
 /// Print the closing message that ends `aimx setup`. Substitutes the
-/// configured domain into the template the spec mandates.
+/// configured domain into the template the spec mandates. The success
+/// line is prefixed with the same ☑ glyph the per-step checklist uses
+/// (via [`term::step_glyph`] with [`term::StepState::Done`]) — ☑ on TTY,
+/// `[x]` on non-TTY — so it reads as one final tick after the closing
+/// handoff banner / Step 6 MCP section. `term::success_mark()` renders
+/// `✓` / `[OK]` and would NOT match the checklist glyph.
 fn print_closing_message(domain: &str) {
     println!();
-    println!("{}", term::success("AIMX has been set up successfully."));
+    println!(
+        "{} {}",
+        term::step_glyph(term::StepState::Done),
+        term::success("AIMX has been set up successfully.")
+    );
     println!();
     println!(
-        "Your agents now have access to set up, send and receive emails from {} emails.",
+        "AIMX is now running at {} and ready to send and receive email.",
         term::highlight(&format!("@{domain}"))
     );
     println!();
-    println!(
-        "Once you have linked up your MCP to your LLM, try asking it to set up a mailbox for you, e.g."
-    );
+    println!("Once you've wired your MCP to your LLM, try asking your agent, e.g.");
     println!(
         "  claude -p \"Set up agent@{domain} and respond to me via email the moment you receive my instructions via email.\""
     );
@@ -3934,10 +3975,10 @@ owner = "aimx-catchall"
     fn mcp_section_lines_are_in_documented_order() {
         // Pins the line *flow* of `mcp_section_lines`, not just presence.
         // The contract: header sentence → blank → bullets → blank →
-        // "Run as your regular user..." sentence → blank → callout →
-        // blank. A refactor that scrambles this order (e.g. moves the
-        // bullets below the callout) would still pass the existing
-        // presence-only tests but produce confusing output.
+        // "To wire AIMX into the harness..." sentence → blank →
+        // callout box → blank. A refactor that scrambles this order
+        // (e.g. moves the bullets below the callout) would still pass
+        // the existing presence-only tests but produce confusing output.
         let lines = mcp_section_lines();
         let header_idx = lines
             .iter()
@@ -3947,28 +3988,28 @@ owner = "aimx-catchall"
             .iter()
             .position(|line| line.starts_with("  • "))
             .expect("at least one bullet must be present");
-        let run_as_user_idx = lines
+        let handoff_sentence_idx = lines
             .iter()
-            .position(|line| line.starts_with("Run as your regular user"))
-            .expect("\"Run as your regular user...\" sentence must be present");
-        let callout_idx = lines
+            .position(|line| line.starts_with("To wire AIMX into the harness"))
+            .expect("\"To wire AIMX into the harness...\" sentence must be present");
+        let callout_top_idx = lines
             .iter()
-            .position(|line| line.contains("aimx agents setup") && !line.starts_with("AIMX"))
-            .expect("`aimx agents setup` callout must be present");
+            .position(|line| line.starts_with("  ┌"))
+            .expect("box-drawn callout top border must be present");
 
         assert!(
             header_idx < first_bullet_idx,
             "header must precede bullets (header={header_idx}, bullets={first_bullet_idx})"
         );
         assert!(
-            first_bullet_idx < run_as_user_idx,
-            "bullets must precede the run-as-user sentence \
-             (bullets={first_bullet_idx}, run_as_user={run_as_user_idx})"
+            first_bullet_idx < handoff_sentence_idx,
+            "bullets must precede the handoff sentence \
+             (bullets={first_bullet_idx}, handoff={handoff_sentence_idx})"
         );
         assert!(
-            run_as_user_idx < callout_idx,
-            "run-as-user sentence must precede callout \
-             (run_as_user={run_as_user_idx}, callout={callout_idx})"
+            handoff_sentence_idx < callout_top_idx,
+            "handoff sentence must precede callout box \
+             (handoff={handoff_sentence_idx}, callout_top={callout_top_idx})"
         );
 
         // Blank-line separators between each landmark.
@@ -3979,22 +4020,100 @@ owner = "aimx-catchall"
             lines[header_idx + 1]
         );
         assert!(
-            lines[run_as_user_idx - 1].is_empty(),
-            "expected blank line before run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx - 1,
-            lines[run_as_user_idx - 1]
+            lines[handoff_sentence_idx - 1].is_empty(),
+            "expected blank line before handoff sentence at index {}; got {:?}",
+            handoff_sentence_idx - 1,
+            lines[handoff_sentence_idx - 1]
         );
         assert!(
-            lines[run_as_user_idx + 1].is_empty(),
-            "expected blank line after run-as-user sentence at index {}; got {:?}",
-            run_as_user_idx + 1,
-            lines[run_as_user_idx + 1]
+            lines[handoff_sentence_idx + 1].is_empty(),
+            "expected blank line after handoff sentence at index {}; got {:?}",
+            handoff_sentence_idx + 1,
+            lines[handoff_sentence_idx + 1]
         );
         assert!(
-            lines[callout_idx - 1].is_empty(),
-            "expected blank line before callout at index {}; got {:?}",
-            callout_idx - 1,
-            lines[callout_idx - 1]
+            lines[callout_top_idx - 1].is_empty(),
+            "expected blank line before callout box at index {}; got {:?}",
+            callout_top_idx - 1,
+            lines[callout_top_idx - 1]
+        );
+    }
+
+    #[test]
+    fn mcp_section_callout_box_is_equal_width() {
+        // The Step 6 callout is rendered as a three-line box (top
+        // border, body row, bottom border). The box characters must be
+        // perfectly aligned regardless of the terminal: ┌───┐ above,
+        // │ ... │ below, └───┘ below that. The body row hard-codes a
+        // literal `→` arrow (not `term::prompt_mark()`) so the `[>]`
+        // non-TTY expansion can't widen the body row and desync the
+        // corners. Lock both the geometry and the rendering choice in.
+        let lines = mcp_section_lines();
+        let top_idx = lines
+            .iter()
+            .position(|line| line.starts_with("  ┌"))
+            .expect("callout top border missing");
+        let body_idx = top_idx + 1;
+        let bot_idx = top_idx + 2;
+        let top = &lines[top_idx];
+        let body = &lines[body_idx];
+        let bot = &lines[bot_idx];
+
+        assert!(
+            body.starts_with("  │") && body.ends_with("│"),
+            "callout body row must be wrapped in │ pipes; got {body:?}"
+        );
+        assert!(
+            bot.starts_with("  └") && bot.ends_with("┘"),
+            "callout bottom border must use └ and ┘; got {bot:?}"
+        );
+
+        // Equal CHAR width (not byte width — box characters are
+        // multi-byte). Without this every NO_COLOR render would walk
+        // the corners off the right side of the body row.
+        let top_w = top.chars().count();
+        let body_w = body.chars().count();
+        let bot_w = bot.chars().count();
+        assert_eq!(
+            top_w, body_w,
+            "callout top border ({top_w}) and body row ({body_w}) must be the same width.\n\
+             top:  {top}\n\
+             body: {body}"
+        );
+        assert_eq!(
+            body_w, bot_w,
+            "callout body row ({body_w}) and bottom border ({bot_w}) must be the same width.\n\
+             body: {body}\n\
+             bot:  {bot}"
+        );
+
+        // The body row must contain a literal `→` arrow. If a future
+        // refactor swaps in `term::prompt_mark()` the box will desync
+        // on non-TTY because `[>]` is wider than `→`.
+        assert!(
+            body.contains('→'),
+            "callout body row must contain the literal `→` arrow; got {body:?}"
+        );
+
+        // Backstop: the source must not route the callout body through
+        // term::prompt_mark — the test above already covers this
+        // indirectly, but a direct source-grep catches the regression
+        // earlier in the diff.
+        let source = include_str!("setup.rs");
+        let mcp_fn = source
+            .find("pub fn mcp_section_lines()")
+            .expect("mcp_section_lines must exist");
+        let mcp_body = &source[mcp_fn..];
+        let mcp_end = mcp_body
+            .find("\n}\n")
+            .expect("mcp_section_lines body terminator");
+        let mcp_body = &mcp_body[..mcp_end];
+        assert!(
+            !mcp_body.contains("term::prompt_mark"),
+            "mcp_section_lines must not call term::prompt_mark() in the \
+             callout body — the `[>]` non-TTY expansion would widen the \
+             body row and desync the box corners. Use the literal `→` \
+             instead. Body:\n{mcp_body}"
         );
     }
 
@@ -6010,17 +6129,72 @@ owner = "aimx-catchall"
     #[test]
     fn closing_message_carries_required_phrasing() {
         // The wizard closes with the spec-mandated message: a success
-        // banner, the `@<DOMAIN>` line, and the `claude -p` example
-        // prompt. Direct stdout capture is finicky under cargo test, so
-        // grep the source for the load-bearing literals instead.
+        // banner prefixed with the checklist ☑ glyph, the running-at
+        // `@<DOMAIN>` line, the agent-prompt instruction, and the
+        // `claude -p` example. Direct stdout capture is finicky under
+        // cargo test, so grep the source for the load-bearing literals.
+        //
+        // The glyph assertion is bounded to the `print_closing_message`
+        // body and tied to the actual rendering of
+        // `term::step_glyph(StepState::Done)` so a future swap of the
+        // helper to a `✓` / `[OK]` rendering can't silently regress the
+        // glyph parity with the per-step checklist (cycle-1 review caught
+        // exactly that — the prior test only checked that `success_mark`
+        // was *referenced*, not that the rendered glyph matched ☑).
         let source = include_str!("setup.rs");
+        let print_closing = source
+            .find("fn print_closing_message(")
+            .expect("print_closing_message must exist");
+        let body_window = &source[print_closing..];
+        let body_end_rel = body_window
+            .find("\n}\n")
+            .map(|off| off + 1)
+            .expect("print_closing_message body terminator");
+        let body = &body_window[..body_end_rel];
+
         assert!(
             source.contains("AIMX has been set up successfully."),
             "closing message must include the success banner"
         );
         assert!(
-            source.contains("Your agents now have access to set up, send and receive emails from"),
-            "closing message must surface agent capabilities"
+            body.contains("term::step_glyph(term::StepState::Done)"),
+            "print_closing_message must prefix the success line with the \
+             checklist's ☑ / [x] glyph via \
+             `term::step_glyph(term::StepState::Done)` so it reads as the \
+             final box checked. Body:\n{body}"
+        );
+        assert!(
+            !body.contains("term::success_mark"),
+            "print_closing_message must NOT use `term::success_mark()` — \
+             it renders `✓` / `[OK]` and would NOT match the per-step \
+             checklist's ☑ / [x] glyph. Use \
+             `term::step_glyph(term::StepState::Done)` instead. Body:\n{body}"
+        );
+
+        // Tie the assertion to the actual rendered glyph so a future swap
+        // of the helper internals (e.g. swapping `step_glyph(Done)` away
+        // from ☑) trips this test immediately.
+        let rendered = term::step_glyph(term::StepState::Done).to_string();
+        assert!(
+            rendered.contains('☑') || rendered.contains("[x]"),
+            "term::step_glyph(StepState::Done) must render ☑ on TTY or \
+             `[x]` on non-TTY for the closing message to match the \
+             checklist. Got: {rendered:?}"
+        );
+
+        assert!(
+            source.contains("AIMX is now running at"),
+            "closing message must surface that AIMX is running at the \
+             operator's domain"
+        );
+        assert!(
+            source.contains("ready to send and receive email."),
+            "closing message must surface the send/receive capability"
+        );
+        assert!(
+            source.contains("Once you've wired your MCP to your LLM"),
+            "closing message must instruct the operator to wire MCP \
+             before asking the agent"
         );
         assert!(
             source.contains("claude -p"),
@@ -6029,29 +6203,36 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn closing_message_preserves_trailing_emails_word() {
-        // Spec wording explicitly ends with "...emails from @<DOMAIN>
-        // emails." with the trailing "emails" word. Lock in both the
-        // template (what's in the source) and the rendered string (what
-        // an operator actually sees with their domain substituted in).
+    fn closing_message_does_not_overclaim_agent_capability() {
+        // Pre-fix the wizard claimed *"Your agents now have access to
+        // set up, send and receive emails from @<DOMAIN>"* — but at
+        // that point the daemon is up and no agent is wired yet. The
+        // new wording (`AIMX is now running at ... and ready to send
+        // and receive email.`) is accurate for the state the operator
+        // is actually in. Lock the old phrasing out so a future refactor
+        // can't quietly reintroduce the overclaim.
         let source = include_str!("setup.rs");
+        let print_closing = source
+            .find("fn print_closing_message(")
+            .expect("print_closing_message must exist");
+        let body = &source[print_closing..];
+        let body_end = body
+            .find("\n}\n")
+            .map(|off| off + 1)
+            .expect("print_closing_message body terminator");
+        let body = &body[..body_end];
         assert!(
-            source.contains(
-                "Your agents now have access to set up, send and receive emails from {} emails."
-            ),
-            "closing message template must keep the trailing `emails.` word \
-             so the rendered line reads `... from @<DOMAIN> emails.`"
-        );
-
-        // Cross-check the rendered substring an operator would see.
-        let domain = "agent.example.com";
-        let rendered = format!(
-            "Your agents now have access to set up, send and receive emails from @{domain} emails."
+            !body.contains("Your agents now have access to"),
+            "print_closing_message must not overclaim that the agents \
+             have access to anything (no agent is wired yet at this point). \
+             Body:\n{body}"
         );
         assert!(
-            rendered.contains(&format!("emails from @{domain} emails.")),
-            "rendered closing message must contain `emails from @{{domain}} emails.`. \
-             Got: {rendered}"
+            !body.contains("Once you have linked up your MCP"),
+            "the legacy `Once you have linked up your MCP to your LLM, \
+             try asking it to set up a mailbox` line was rewritten; the \
+             new wording is `Once you've wired your MCP to your LLM, try \
+             asking your agent, e.g.`. Body:\n{body}"
         );
     }
 
@@ -6189,20 +6370,35 @@ owner = "aimx-catchall"
     }
 
     #[test]
-    fn final_banner_signals_completion_and_renders_step_list() {
+    fn final_banner_signals_completion() {
+        // The completion banner is title-only by design — the operator
+        // already saw the full checklist redraw when Step 5 marked
+        // complete (one section above), and the banner now sits BEFORE
+        // Step 6 to read as a delimiter between "the install part is
+        // done" and "this is what's left for you to do as a regular
+        // user". A second checklist render here would be redundant
+        // noise.
         let source = include_str!("setup.rs");
         let body_start = source
             .find("pub fn print_final_banner")
             .expect("print_final_banner signature present");
-        let window = &source[body_start..body_start + 400];
+        // Find the end of the function body so we only inspect the body,
+        // not whatever follows.
+        let body_window = &source[body_start..];
+        let body_end_rel = body_window
+            .find("\n}\n")
+            .map(|off| off + 1)
+            .expect("print_final_banner body terminator");
+        let window = &body_window[..body_end_rel];
         assert!(
             window.contains("AIMX setup — complete"),
             "final banner missing completion title. Window:\n{window}"
         );
         assert!(
-            window.contains("print_step_list"),
-            "final banner must reuse print_step_list so per-step glyphs render. \
-             Window:\n{window}"
+            !window.contains("print_step_list"),
+            "final banner must NOT reprint the step checklist — the \
+             operator already saw it when Step 5 marked complete; \
+             reprinting here is redundant noise. Window:\n{window}"
         );
     }
 
@@ -6257,7 +6453,8 @@ owner = "aimx-catchall"
     // actual `run_setup` execution.
     #[test]
     fn run_setup_emits_section_headers_in_spec_order() {
-        // Spec order: Preflight → Domain & DNS → TLS → Trust → Install → MCP.
+        // Spec order: Preflight → Domain & DNS → TLS → Trust → Install →
+        // 🐦‍⬛ AIMX setup — complete banner → MCP → closing message.
         // We exercise this by driving `run_setup` against MockSystemOps +
         // MockNetworkOps. The DNS verify loop reads from stdin, so use
         // `q\n` to skip immediately. Preflight passes because the mocks
@@ -6275,29 +6472,47 @@ owner = "aimx-catchall"
         // compile time.
         let _ = tmp;
         let source = include_str!("setup.rs");
-        let preflight = source
-            .find("section_header(1,")
-            .expect("step 1 header call");
-        let domain = source
-            .find("section_header(2,")
-            .expect("step 2 header call");
-        let tls = source
-            .find("section_header(3,")
-            .expect("step 3 header call");
-        let trust = source
-            .find("section_header(4,")
-            .expect("step 4 header call");
-        let install = source
-            .find("section_header(5,")
-            .expect("step 5 header call");
-        let mcp = source
-            .find("section_header(6,")
-            .expect("step 6 header call");
+        // Only inspect the run_setup body so we don't false-match on
+        // the same call literals appearing in test fixtures further
+        // down the file.
+        let run_setup_start = source
+            .find("pub fn run_setup(")
+            .expect("run_setup signature present");
+        let run_setup_body = &source[run_setup_start..];
+        let run_setup_end = run_setup_body
+            .find("\nfn print_closing_message(")
+            .expect("run_setup body ends before print_closing_message");
+        let body = &run_setup_body[..run_setup_end];
+
+        let preflight = body.find("section_header(1,").expect("step 1 header call");
+        let domain = body.find("section_header(2,").expect("step 2 header call");
+        let tls = body.find("section_header(3,").expect("step 3 header call");
+        let trust = body.find("section_header(4,").expect("step 4 header call");
+        let install = body.find("section_header(5,").expect("step 5 header call");
+        let final_banner = body
+            .find("print_final_banner(")
+            .expect("print_final_banner call present in run_setup");
+        let mcp = body.find("section_header(6,").expect("step 6 header call");
+        let closing = body
+            .find("print_closing_message(")
+            .expect("print_closing_message call present in run_setup");
         assert!(preflight < domain, "step 1 must precede step 2");
         assert!(domain < tls, "step 2 must precede step 3");
         assert!(tls < trust, "step 3 must precede step 4");
         assert!(trust < install, "step 4 must precede step 5");
-        assert!(install < mcp, "step 5 must precede step 6");
+        assert!(
+            install < final_banner,
+            "the `🐦‍⬛ AIMX setup — complete` banner must follow Step 5 \
+             (install={install}, final_banner={final_banner})"
+        );
+        assert!(
+            final_banner < mcp,
+            "the `🐦‍⬛ AIMX setup — complete` banner must precede Step 6 \
+             so it reads as a delimiter between `the wizard finished` \
+             and `here is your handoff` \
+             (final_banner={final_banner}, mcp={mcp})"
+        );
+        assert!(mcp < closing, "step 6 must precede the closing message");
     }
 
     // CAVEAT: this test relies on the re-entrant `checklist.set(N,

@@ -516,6 +516,36 @@ compare_tags() {
 }
 
 # ---------------------------------------------------------------------------
+# Setup-completion probe (Ctrl+C recovery)
+# ---------------------------------------------------------------------------
+
+# setup_completed
+#   Returns 0 (true) when there is evidence the operator-facing
+#   `aimx setup` wizard finished a previous run — specifically, when a
+#   service unit file is in place on disk. Returns 1 otherwise.
+#
+#   This is the gate that lets a re-run after Ctrl+C fall back to the
+#   fresh-install path. The binary on disk by itself is not proof that
+#   setup completed: the installer drops the binary first and only then
+#   exec's `aimx setup`, which is where the systemd / OpenRC unit file
+#   actually lands. If the operator Ctrl+Cs out of the wizard before
+#   that, the binary is on disk but no unit exists; without this gate
+#   the next run would enter the upgrade branch and die on
+#   `systemctl start aimx` ("Unit aimx.service not found").
+#
+#   Probe paths are overridable via AIMX_SETUP_COMPLETED_SYSTEMD /
+#   AIMX_SETUP_COMPLETED_OPENRC so the test harness can exercise the
+#   helper without touching the host's real `/etc/`.
+setup_completed() {
+    _systemd_unit="${AIMX_SETUP_COMPLETED_SYSTEMD:-/etc/systemd/system/aimx.service}"
+    _openrc_init="${AIMX_SETUP_COMPLETED_OPENRC:-/etc/init.d/aimx}"
+    if [ -f "${_systemd_unit}" ] || [ -f "${_openrc_init}" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# ---------------------------------------------------------------------------
 # Service control (upgrade path)
 # ---------------------------------------------------------------------------
 
@@ -1249,9 +1279,21 @@ main() {
 
     # Upgrade-vs-fresh decision. Only matters when a binary is already
     # present at ${_install_path}.
+    #
+    # The binary on disk by itself is not proof that setup completed:
+    # the installer drops the binary first and only then exec's
+    # `aimx setup`, which is where the systemd / OpenRC unit file
+    # actually lands. If the operator Ctrl+Cs out of the wizard before
+    # the unit lands, we treat the next run as a fresh install — re-lay
+    # the binary at the target tag and re-enter the wizard — rather
+    # than entering the upgrade branch and dying on
+    # `systemctl start aimx` ("Unit aimx.service not found").
     _installed_tag=""
     _is_upgrade=0
-    if [ -x "${_install_path}" ]; then
+    if [ -x "${_install_path}" ] && ! setup_completed; then
+        say "binary present but aimx setup did not complete (no service unit); continuing setup"
+        _is_upgrade=0
+    elif [ -x "${_install_path}" ]; then
         _installed_tag="$(parse_installed_tag "${_install_path}")"
         if [ -n "${_installed_tag}" ]; then
             _cmp="$(compare_tags "${_installed_tag}" "${TAG}")"
