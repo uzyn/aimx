@@ -1080,6 +1080,23 @@ mod tests {
     }
 
     #[test]
+    fn default_signature_renders_two_lines_in_html_alternative() {
+        // Regression: the built-in default signature uses a CommonMark
+        // hard break (two trailing spaces before `\n`) so the rendered
+        // HTML alternative keeps the footer on two lines. A bare `\n`
+        // would render as a soft break (collapsed to a space), fusing
+        // "Sent from AIMX." and the URL onto one line in the HTML view.
+        let req = build_request("From: a@b.com\nTo: c@d.com\n", "Body.");
+        let out =
+            assemble_wire_message(&req, crate::config::DEFAULT_SIGNATURE, false, None).unwrap();
+        let text = String::from_utf8_lossy(&out);
+        assert!(
+            text.contains("Sent from AIMX.<br />") || text.contains("Sent from AIMX. <br />"),
+            "html alternative must hard-break between signature lines: {text}",
+        );
+    }
+
+    #[test]
     fn empty_signature_appends_nothing() {
         let body = "User body.\n";
         let req = build_request("From: a@b.com\nTo: c@d.com\n", body);

@@ -55,7 +55,7 @@ Hook commands receive additional `AIMX_*` env vars carrying the triggering email
 | `trusted_senders` | array | `[]` | Default allowlist of glob patterns applied to every mailbox. Per-mailbox `trusted_senders` replaces this list (no merging). |
 | `verify_host` | string | `https://check.aimx.email` | Base URL of the verifier service used by `aimx portcheck` and `aimx setup`. Can be overridden per-invocation with the `--verify-host` flag. |
 | `enable_ipv6` | bool | `false` | Advanced. Opt into IPv6 outbound delivery. See [IPv6 delivery](#ipv6-delivery-advanced). |
-| `signature` | string | *(built-in)* | Outbound signature appended to every email's body. Omit to use the built-in default `Sent from AIMX.\nhttps://aimx.email`. Set to a custom string to override. Set to `""` to disable the signature entirely. See [Outbound signature](#outbound-signature). |
+| `signature` | string | *(built-in)* | Outbound signature appended to every email's body. Omit to use the built-in default `Sent from AIMX.  \nhttps://aimx.email`. Set to a custom string to override. Set to `""` to disable the signature entirely. See [Outbound signature](#outbound-signature). |
 
 `aimx setup` asks for a list of trusted sender addresses interactively on
 the first run (comma-separated, accepts plain addresses and globs like
@@ -162,7 +162,7 @@ Override via the top-level `signature` key in `config.toml`:
 
 ```toml
 # Use the built-in default (omit the key entirely):
-# signature = "Sent from AIMX.\nhttps://aimx.email"
+# signature = "Sent from AIMX.  \nhttps://aimx.email"
 
 # Custom signature:
 signature = "Best regards,\nThe team"
