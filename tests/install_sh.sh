@@ -1225,9 +1225,17 @@ esac
 AIMXEOF
 chmod +x "${_tmp}/bin/aimx"
 
+# Fake systemd unit so the setup_completed gate believes setup ran to
+# completion on a prior install — exercises the equal-version branch
+# rather than the Ctrl+C fall-through that the next section covers.
+_fake_unit="${_tmp}/aimx.service"
+: > "${_fake_unit}"
+
 _out="$(
     AIMX_DRY_RUN=1 \
     AIMX_PREFIX="${_tmp}/bin" \
+    AIMX_SETUP_COMPLETED_SYSTEMD="${_fake_unit}" \
+    AIMX_SETUP_COMPLETED_OPENRC=/nonexistent \
     PATH="${_tmp}/bin:${PATH}" \
     NO_COLOR=1 \
     sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
@@ -1235,6 +1243,7 @@ _out="$(
 assert_contains "dry-run+equal-version reports already-installed" "${_out}" "AIMX 0.1.0 is already installed"
 assert_not_contains "dry-run+equal-version does not invoke prompt_reinstall" "${_out}" "Re-run setup to (re)configure"
 
+rm -f "${_fake_unit}"
 rm -f "${_tmp}/bin/aimx"
 
 # ---------------------------------------------------------------------------
@@ -1295,6 +1304,115 @@ assert_contains "prompt_reinstall returns 1 when no TTY" "${_out}" "NO"
 # "AIMX is already installed..." question in `curl | sh </dev/null`
 # / CI logs even though the script exited 0 cleanly.
 assert_not_contains "prompt_reinstall stays quiet on no TTY" "${_out}" "Re-run setup to (re)configure"
+
+# ---------------------------------------------------------------------------
+# 9b. setup_completed gate — Ctrl+C recovery
+# ---------------------------------------------------------------------------
+#
+# `install.sh` drops the binary first, then exec's `aimx setup` which
+# installs the systemd / OpenRC unit. If the operator Ctrl+Cs out of
+# the wizard before the unit lands, a re-run of `install.sh` must NOT
+# enter the upgrade branch (which would die on `systemctl start aimx`
+# with "Unit aimx.service not found"). The `setup_completed` helper is
+# the gate; this section covers the unit-file probe directly plus an
+# end-to-end dry-run that proves the upgrade decision is bypassed.
+
+echo "# setup_completed gate"
+
+# (a) Only the systemd unit file exists → setup_completed returns true.
+_fake_systemd="${_tmp}/aimx.service"
+: > "${_fake_systemd}"
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        AIMX_SETUP_COMPLETED_SYSTEMD="'"${_fake_systemd}"'"
+        AIMX_SETUP_COMPLETED_OPENRC=/nonexistent
+        if setup_completed; then echo TRUE; else echo FALSE; fi
+    ' 2>&1
+)"
+assert_contains "setup_completed true when only systemd unit present" "${_out}" "TRUE"
+rm -f "${_fake_systemd}"
+
+# (b) Only the OpenRC init file exists → setup_completed returns true.
+_fake_openrc="${_tmp}/aimx"
+: > "${_fake_openrc}"
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        AIMX_SETUP_COMPLETED_SYSTEMD=/nonexistent
+        AIMX_SETUP_COMPLETED_OPENRC="'"${_fake_openrc}"'"
+        if setup_completed; then echo TRUE; else echo FALSE; fi
+    ' 2>&1
+)"
+assert_contains "setup_completed true when only openrc init present" "${_out}" "TRUE"
+rm -f "${_fake_openrc}"
+
+# (c) Neither file exists → setup_completed returns false.
+_out="$(
+    INSTALL_SH_TEST=1 sh -c '
+        . "'"${INSTALL_SH}"'"
+        AIMX_SETUP_COMPLETED_SYSTEMD=/nonexistent
+        AIMX_SETUP_COMPLETED_OPENRC=/nonexistent
+        if setup_completed; then echo TRUE; else echo FALSE; fi
+    ' 2>&1
+)"
+assert_contains "setup_completed false when neither unit nor init present" "${_out}" "FALSE"
+
+# (d) End-to-end dry-run: binary present at the target tag + neither
+# unit file present → the installer must emit the "continuing setup"
+# message and choose the fresh-install branch (no `would stop
+# aimx.service`). Pre-fix the same shape would have flagged this as a
+# re-install / already-installed and would have left the upgrade
+# branch active on real systems.
+cat > "${_tmp}/bin/aimx" <<'AIMXEOF'
+#!/bin/sh
+case "$1" in
+    --version) echo "aimx 0.1.0 (deadbeef) x86_64-unknown-linux-gnu built 2026-01-01" ;;
+    *) exit 0 ;;
+esac
+AIMXEOF
+chmod +x "${_tmp}/bin/aimx"
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_PREFIX="${_tmp}/bin" \
+    AIMX_SETUP_COMPLETED_SYSTEMD=/nonexistent \
+    AIMX_SETUP_COMPLETED_OPENRC=/nonexistent \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)"
+assert_contains "dry-run+no-unit emits 'continuing setup'" "${_out}" "continuing setup"
+assert_contains "dry-run+no-unit takes fresh-install branch" "${_out}" "would exec 'sudo aimx setup'"
+assert_not_contains "dry-run+no-unit does NOT take upgrade branch" "${_out}" "would stop aimx.service"
+rm -f "${_tmp}/bin/aimx"
+
+# (e) Regression: when the systemd unit IS present + version diff, the
+# upgrade branch must still run (older -> newer). This is the genuine
+# upgrade path the gate must not break.
+cat > "${_tmp}/bin/aimx" <<'AIMXEOF'
+#!/bin/sh
+case "$1" in
+    --version) echo "aimx 0.0.5 (deadbeef) x86_64-unknown-linux-gnu built 2026-01-01" ;;
+    *) exit 0 ;;
+esac
+AIMXEOF
+chmod +x "${_tmp}/bin/aimx"
+_fake_unit="${_tmp}/aimx.service"
+: > "${_fake_unit}"
+_out="$(
+    AIMX_DRY_RUN=1 \
+    AIMX_PREFIX="${_tmp}/bin" \
+    AIMX_SETUP_COMPLETED_SYSTEMD="${_fake_unit}" \
+    AIMX_SETUP_COMPLETED_OPENRC=/nonexistent \
+    PATH="${_tmp}/bin:${PATH}" \
+    NO_COLOR=1 \
+    sh "${INSTALL_SH}" --target x86_64-unknown-linux-gnu --tag 0.1.0 2>&1
+)"
+assert_contains "dry-run+unit-present preserves upgrade banner" "${_out}" "upgrading 0.0.5 -> 0.1.0"
+assert_contains "dry-run+unit-present takes upgrade branch" "${_out}" "would stop aimx.service"
+assert_not_contains "dry-run+unit-present does NOT emit 'continuing setup'" "${_out}" "continuing setup"
+rm -f "${_fake_unit}"
+rm -f "${_tmp}/bin/aimx"
 
 # ---------------------------------------------------------------------------
 # 10. AIMX branding sweep — no lowercase brand-as-noun in install.sh prose
