@@ -1428,28 +1428,28 @@ pub fn mcp_section_lines() -> Vec<String> {
             .to_string(),
     );
     lines.push(String::new());
-    lines.extend(callout_box("  → aimx agents setup"));
+    // Inner width hoisted here so the coupling between body content and
+    // pad width is visible at the call site: `  → aimx agents setup` is
+    // 21 chars; 29 gives 8 chars of right padding for breathing room
+    // without dominating the terminal. If the subcommand is renamed,
+    // adjust this number and `mcp_section_callout_box_is_equal_width`
+    // will fail loudly if the new body overruns the pad.
+    lines.extend(callout_box("  → aimx agents setup", 29));
     lines.push(String::new());
     lines
 }
 
-/// Render a three-line box-drawn callout around `body`. The body string
-/// is right-padded inside the box with spaces so the three lines have
-/// equal character width (top border, body row, bottom border). This is
-/// the geometry guarantee the `mcp_section_callout_box_is_equal_width`
-/// test enforces — without equal width the corners visibly drift under
-/// `NO_COLOR` / non-TTY.
-fn callout_box(body: &str) -> Vec<String> {
-    // Pad the body to a stable inner width. The arrow + command is 21
-    // chars wide, so we pad up to 29 columns inside the box (`body` is
-    // already two-space indented). The numbers are chosen empirically
-    // to give the callout a bit of breathing room on the right without
-    // making it dominate the terminal.
-    const INNER_WIDTH: usize = 29;
+/// Render a three-line box-drawn callout around `body`, padded to
+/// `inner_width` characters inside the box. The body string is
+/// right-padded with spaces so the three lines have equal character
+/// width (top border, body row, bottom border) — the geometry guarantee
+/// the `mcp_section_callout_box_is_equal_width` test enforces. Without
+/// equal width the corners visibly drift under `NO_COLOR` / non-TTY.
+fn callout_box(body: &str, inner_width: usize) -> Vec<String> {
     let body_chars = body.chars().count();
-    let pad = INNER_WIDTH.saturating_sub(body_chars);
+    let pad = inner_width.saturating_sub(body_chars);
     let body_padded = format!("{body}{}", " ".repeat(pad));
-    let rule: String = "─".repeat(INNER_WIDTH);
+    let rule: String = "─".repeat(inner_width);
     vec![
         format!("  ┌{rule}┐"),
         format!("  │{body_padded}│"),
@@ -2410,8 +2410,9 @@ pub fn print_welcome_banner(checklist: &Checklist) {
 /// reads it as a strong "the install part is done; what follows is your
 /// handoff to do as a regular user" delimiter. Title-only by design — the
 /// operator already saw the full checklist redraw when Step 5 marked
-/// complete, so reprinting it here would be redundant noise.
-pub fn print_final_banner(_checklist: &Checklist) {
+/// complete, so reprinting it here would be redundant noise. Takes no
+/// arguments — the banner does not depend on checklist state.
+pub fn print_final_banner() {
     println!();
     println!("{}", term::header("🐦‍⬛ AIMX setup — complete"));
     println!();
@@ -2680,7 +2681,7 @@ pub fn run_setup(
     // delimiter between "the wizard completed its work" and "now this
     // is what's left for you to do".
     checklist.set(6, term::StepState::Handoff);
-    print_final_banner(&checklist);
+    print_final_banner();
 
     // ---- Step 6: Set up MCP for agent(s) -----------------------------------
     //
@@ -2706,13 +2707,15 @@ pub fn run_setup(
 /// Print the closing message that ends `aimx setup`. Substitutes the
 /// configured domain into the template the spec mandates. The success
 /// line is prefixed with the same ☑ glyph the per-step checklist uses
-/// (via [`term::success_mark`]), so it reads as one final tick after the
-/// closing handoff banner / Step 6 MCP section.
+/// (via [`term::step_glyph`] with [`term::StepState::Done`]) — ☑ on TTY,
+/// `[x]` on non-TTY — so it reads as one final tick after the closing
+/// handoff banner / Step 6 MCP section. `term::success_mark()` renders
+/// `✓` / `[OK]` and would NOT match the checklist glyph.
 fn print_closing_message(domain: &str) {
     println!();
     println!(
         "{} {}",
-        term::success_mark(),
+        term::step_glyph(term::StepState::Done),
         term::success("AIMX has been set up successfully.")
     );
     println!();
@@ -6130,17 +6133,55 @@ owner = "aimx-catchall"
         // `@<DOMAIN>` line, the agent-prompt instruction, and the
         // `claude -p` example. Direct stdout capture is finicky under
         // cargo test, so grep the source for the load-bearing literals.
+        //
+        // The glyph assertion is bounded to the `print_closing_message`
+        // body and tied to the actual rendering of
+        // `term::step_glyph(StepState::Done)` so a future swap of the
+        // helper to a `✓` / `[OK]` rendering can't silently regress the
+        // glyph parity with the per-step checklist (cycle-1 review caught
+        // exactly that — the prior test only checked that `success_mark`
+        // was *referenced*, not that the rendered glyph matched ☑).
         let source = include_str!("setup.rs");
+        let print_closing = source
+            .find("fn print_closing_message(")
+            .expect("print_closing_message must exist");
+        let body_window = &source[print_closing..];
+        let body_end_rel = body_window
+            .find("\n}\n")
+            .map(|off| off + 1)
+            .expect("print_closing_message body terminator");
+        let body = &body_window[..body_end_rel];
+
         assert!(
             source.contains("AIMX has been set up successfully."),
             "closing message must include the success banner"
         );
         assert!(
-            source.contains("term::success_mark()"),
-            "closing message must prefix the success line with the ☑ \
-             glyph (`term::success_mark()`) so it reads as the final box \
-             checked"
+            body.contains("term::step_glyph(term::StepState::Done)"),
+            "print_closing_message must prefix the success line with the \
+             checklist's ☑ / [x] glyph via \
+             `term::step_glyph(term::StepState::Done)` so it reads as the \
+             final box checked. Body:\n{body}"
         );
+        assert!(
+            !body.contains("term::success_mark"),
+            "print_closing_message must NOT use `term::success_mark()` — \
+             it renders `✓` / `[OK]` and would NOT match the per-step \
+             checklist's ☑ / [x] glyph. Use \
+             `term::step_glyph(term::StepState::Done)` instead. Body:\n{body}"
+        );
+
+        // Tie the assertion to the actual rendered glyph so a future swap
+        // of the helper internals (e.g. swapping `step_glyph(Done)` away
+        // from ☑) trips this test immediately.
+        let rendered = term::step_glyph(term::StepState::Done).to_string();
+        assert!(
+            rendered.contains('☑') || rendered.contains("[x]"),
+            "term::step_glyph(StepState::Done) must render ☑ on TTY or \
+             `[x]` on non-TTY for the closing message to match the \
+             checklist. Got: {rendered:?}"
+        );
+
         assert!(
             source.contains("AIMX is now running at"),
             "closing message must surface that AIMX is running at the \
