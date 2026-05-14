@@ -1026,6 +1026,34 @@ h1 em {
   margin-top: 2px;
 }
 
+.demo-block { text-align: center; }
+.demo-caption {
+  max-width: 56ch;
+  margin: 0 auto 1.4em;
+}
+.demo-figure {
+  margin: 0 auto;
+  max-width: 800px;
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--paper-2);
+  padding: 8px;
+  box-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.18),
+    0 14px 36px rgba(0, 0, 0, 0.18);
+}
+.demo {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 6px;
+}
+:root[data-theme="light"] .demo-figure {
+  box-shadow:
+    0 1px 2px rgba(21, 19, 16, 0.08),
+    0 12px 28px rgba(21, 19, 16, 0.10);
+}
+
 .faq details {
   border-bottom: 1px solid var(--rule);
   padding: 0.85em 0;
@@ -1190,6 +1218,7 @@ footer a:hover {
   .mascot { width: 200px; margin-bottom: 24px; }
   .pitch, .prose, .features, .faq-body { font-size: 0.38em; }
   .block { margin-top: 40px; padding-top: 24px; }
+  .demo-figure { padding: 4px; border-radius: 8px; }
   .detail { margin-top: 40px; }
   .theme-toggle { font-size: 0.3em; }
 }
