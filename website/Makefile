@@ -1,9 +1,8 @@
 DIST      := dist
-PIGEON    := ../etc/aimx-pigeon.svg
 INSTALL   := ../install.sh
 PORTCHECK := ../portcheck.sh
 
-.PHONY: build book pages sitemap llms serve clean media
+.PHONY: build book pages sitemap llms serve clean
 
 # Full build. mdbook first (writes dist/book/), then static passthrough,
 # then sitemap + llms-full regeneration.
@@ -14,9 +13,9 @@ book:
 	mdbook build .
 
 pages:
-	mkdir -p $(DIST)/assets
 	cp -R public/. $(DIST)/
-	cp $(PIGEON) $(DIST)/assets/aimx-pigeon.svg
+	mkdir -p $(DIST)/assets
+	cp -R assets/. $(DIST)/assets/
 	# Publish the installer at https://aimx.email/install.sh so the
 	# curl-to-shell one-liner has a canonical URL. GitHub Pages serves
 	# files under their on-disk extension; `.sh` resolves to
@@ -54,15 +53,6 @@ sitemap:
 	    | LC_ALL=C sort \
 	    | sed 's|^\./||; s|/index\.html$$|/|; s|^index\.html$$||; s|^|  <url><loc>https://aimx.email/|; s|$$|</loc></url>|'; \
 	  echo '</urlset>') > $(DIST)/sitemap.xml
-
-# Local-only: render vhs tapes into MP4/WebM/poster outputs. Requires
-# `vhs` (charm.sh). Outputs are committed to public/media/ so CI never
-# runs this.
-media:
-	@command -v vhs >/dev/null || { echo "vhs not installed (https://github.com/charmbracelet/vhs)"; exit 1; }
-	mkdir -p public/media
-	cd media && vhs hero-loop.tape
-	cd media && vhs tour-60s.tape
 
 serve: build
 	@echo ""

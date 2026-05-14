@@ -10,15 +10,11 @@ readme = "README.md"
 repository = "https://github.com/uzyn/aimx"
 homepage = "https://aimx.email"
 keywords = ["email", "smtp", "mcp", "self-hosted", "ai-agent"]
-categories = ["command-line-utilities", "email"]
+categories = ["command-line-utilities", "email", "artificial-intelligence"]
 exclude = ["/etc", "/website"]
 
 [features]
 default = []
-# Opt-in feature for Tier-2 integration tests that hit real network
-# endpoints (GitHub Releases API + asset downloads). Enabled in CI via
-# `cargo test --features integration`; omitted from the default
-# `cargo test` so local runs stay offline and free of rate-limit flakes.
 integration = []
 
 [dependencies]
@@ -54,49 +50,13 @@ unicode-normalization = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "env-filter"] }
 dialoguer = { version = "0.12", default-features = false }
-# Agent-setup TUI. Hand-rolled checkbox renderer on top of `console::Term`
-# / `console::Key` to match the Claude Code / OpenClaw multi-select look
-# (colored caret + filled/hollow mark + dim non-selectable rows).
-# dialoguer's MultiSelect doesn't support non-selectable rows cleanly and
-# its default theme ships blue-bold, which conflicts with branding — so
-# we drive `console` directly. `console` is already a transitive dep via
-# dialoguer; declaring it here keeps the dependency explicit and avoids
-# relying on a sibling's re-export.
 console = { version = "0.16", default-features = false, features = ["ansi-parsing", "std", "alloc"] }
 ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "rustls-webpki-roots", "gzip", "json"] }
-# `aimx upgrade` extracts release tarballs produced by
-# `.github/workflows/release.yml`. The shape is well-known (a flat
-# `aimx-<version>-<target>/` directory with the `aimx` binary), so the
-# upgrade path only needs gzip + basic tar extraction — no rollback,
-# no symlink handling. `tar` + `flate2` are the obvious minimal deps.
 tar = "0.4"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# Markdown → HTML renderer for the rich-text outbound path. Pinned to
-# an exact version because the determinism guarantee (recipient HTML
-# is recoverable by re-rendering the stored Markdown source) only
-# holds across builds when the renderer output is byte-stable.
-# Bumping requires regenerating the checked-in
-# `tests/fixtures/markdown/*.expected.html` fixtures and a release-
-# notes line. Default features (`cli`, `syntect`) are disabled so we
-# don't pull clap/xdg/syntect into the binary.
 comrak = { version = "=0.52.0", default-features = false }
-# Streaming HTML rewriter used by `inline_email_styles` to walk the
-# comrak output and add per-element `style="..."` attributes. Inlining
-# is required because Gmail / Outlook for Web strip `<style>` blocks.
 lol_html = "2"
-# `aimx upgrade` stages the extracted tarball in a tempdir before
-# atomically swapping the binary into place. Pulled into runtime deps
-# (not just dev-deps) so `run_upgrade` can call `tempfile::tempdir`
-# directly rather than re-implementing tempdir cleanup by hand.
 tempfile = "3"
-# Per-mailbox Message-Id dedup cache for inbound ingest. SMTP MTAs
-# legitimately retry deliveries when an ACK is delayed or lost; without
-# dedup, every retry would re-fire `on_receive` hooks. SparKV gives us
-# an in-memory KV with per-entry TTL plus auto-eviction, so the cache
-# stays bounded (24h retention window) without us hand-rolling a TTL
-# heap. The cache is rebuilt lazily from disk on first ingest per
-# mailbox; the disk frontmatter (`message_id`, `received_at`) remains
-# the source of truth.
 sparkv = "0.1"
 
 [dev-dependencies]
@@ -107,8 +67,4 @@ rcgen = "0.14"
 tracing-subscriber = { version = "0.3", features = ["fmt"] }
 tracing-test = "0.2"
 serial_test = "3"
-# Dev-only: structural AST walk for the legacy-template-phase
-# regression guard in `src/setup.rs` tests. Replaces a brittle
-# `include_str!` + substring grep with a proper syn visitor that matches
-# on `ItemFn` signatures rather than source text.
 syn = { version = "2", features = ["full", "visit"] }
