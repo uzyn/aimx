@@ -6,7 +6,6 @@ on:
     paths:
       - 'website/**'
       - 'book/**'
-      - 'etc/aimx-pigeon.svg'
       - 'install.sh'
       - 'portcheck.sh'
       - '.github/workflows/site.yml'
@@ -14,7 +13,6 @@ on:
     paths:
       - 'website/**'
       - 'book/**'
-      - 'etc/aimx-pigeon.svg'
       - 'install.sh'
       - 'portcheck.sh'
       - '.github/workflows/site.yml'
@@ -55,6 +53,7 @@ jobs:
           test -f website/dist/book/faq.html
           test -f website/dist/book/security.html
           test -f website/dist/assets/aimx-pigeon.svg
+          test -f website/dist/assets/aimx-claude-demo-op.gif
           test -f website/dist/install.sh
           test -f website/dist/portcheck.sh
           # Verify install.sh and portcheck.sh are syntactically valid
