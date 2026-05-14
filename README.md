@@ -31,6 +31,10 @@ Human-friendly setup. LLM-friendly everything else.
 
 AIMX (AI Mail Exchange) is a self-hosted email server (SMTP) and MCP stdio server that gives AI agents their own email addresses. Plugs into Claude Code, Codex CLI, Gemini CLI, Goose, and any other agent harness. No Gmail, no OAuth, no SaaS. Runs on the same VPS you already provisioned for your agents.
 
+<p align="center">
+  <img alt="AIMX Demo" src="https://raw.githubusercontent.com/uzyn/aimx/refs/heads/main/etc/aimx-claude-demo-op.gif" width="600">
+</p>
+
 ## Features
 
 * **Single binary.** With human-friendly guided set up process.
