@@ -78,6 +78,7 @@ impl DkimTxtResolver for HickoryDkimResolver {
         // helper so we can keep the hot path (MX lookups during outbound
         // delivery) isolated.
         use hickory_resolver::TokioResolver;
+        use hickory_resolver::proto::rr::RData;
         let handle = tokio::runtime::Handle::current();
         let result: Result<Vec<String>, Box<dyn std::error::Error + Send + Sync>> =
             tokio::task::block_in_place(|| {
@@ -86,23 +87,29 @@ impl DkimTxtResolver for HickoryDkimResolver {
                         .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
                             format!("failed to create DNS resolver: {e}").into()
                         })?
-                        .build();
+                        .build()
+                        .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+                            format!("failed to build DNS resolver: {e}").into()
+                        })?;
                     let lookup = resolver.txt_lookup(fqdn).await.map_err(
                         |e| -> Box<dyn std::error::Error + Send + Sync> {
                             format!("TXT lookup failed for {fqdn}: {e}").into()
                         },
                     )?;
                     let mut records = Vec::new();
-                    for txt in lookup.iter() {
-                        // A TXT record may be split across multiple strings
-                        // by resolvers; join them so the `p=` value parses
-                        // cleanly after whitespace stripping.
-                        let joined: String = txt
-                            .iter()
-                            .map(|b| String::from_utf8_lossy(b).into_owned())
-                            .collect::<Vec<_>>()
-                            .join("");
-                        records.push(joined);
+                    for record in lookup.answers() {
+                        if let RData::TXT(txt) = &record.data {
+                            // A TXT record may be split across multiple strings
+                            // by resolvers; join them so the `p=` value parses
+                            // cleanly after whitespace stripping.
+                            let joined: String = txt
+                                .txt_data
+                                .iter()
+                                .map(|b| String::from_utf8_lossy(b).into_owned())
+                                .collect::<Vec<_>>()
+                                .join("");
+                            records.push(joined);
+                        }
                     }
                     Ok(records)
                 })
