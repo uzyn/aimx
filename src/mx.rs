@@ -1,18 +1,24 @@
 use hickory_resolver::TokioResolver;
+use hickory_resolver::proto::rr::RData;
 
 pub async fn resolve_mx(domain: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
     let resolver = TokioResolver::builder_tokio()
         .map_err(|e| format!("Failed to create DNS resolver: {e}"))?
-        .build();
+        .build()
+        .map_err(|e| format!("Failed to build DNS resolver: {e}"))?;
 
     match resolver.mx_lookup(domain).await {
         Ok(response) => {
             let mut entries: Vec<(u16, String)> = response
+                .answers()
                 .iter()
-                .map(|mx| {
-                    let host = mx.exchange().to_ascii();
-                    let host = host.trim_end_matches('.').to_string();
-                    (mx.preference(), host)
+                .filter_map(|record| match &record.data {
+                    RData::MX(mx) => {
+                        let host = mx.exchange.to_ascii();
+                        let host = host.trim_end_matches('.').to_string();
+                        Some((mx.preference, host))
+                    }
+                    _ => None,
                 })
                 .collect();
 
@@ -45,10 +51,18 @@ async fn fallback_to_a_record(
 pub async fn resolve_a(host: &str) -> Result<Vec<std::net::Ipv4Addr>, Box<dyn std::error::Error>> {
     let resolver = TokioResolver::builder_tokio()
         .map_err(|e| format!("Failed to create DNS resolver: {e}"))?
-        .build();
+        .build()
+        .map_err(|e| format!("Failed to build DNS resolver: {e}"))?;
 
     match resolver.ipv4_lookup(host).await {
-        Ok(response) => Ok(response.iter().map(|a| a.0).collect()),
+        Ok(response) => Ok(response
+            .answers()
+            .iter()
+            .filter_map(|record| match &record.data {
+                RData::A(a) => Some(a.0),
+                _ => None,
+            })
+            .collect()),
         Err(e) if e.is_no_records_found() || e.is_nx_domain() => Ok(vec![]),
         Err(e) => Err(format!("DNS A-record lookup failed for {host}: {e}").into()),
     }
