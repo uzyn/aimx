@@ -1907,12 +1907,13 @@ mod auth_tests {
             );
         }
         Config {
-            domain: "agent.example.com".into(),
+            domains: vec!["agent.example.com".into()],
             data_dir: tmp.to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,

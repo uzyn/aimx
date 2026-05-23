@@ -197,9 +197,12 @@ fn dispatch_with_config(
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
         Command::Hooks(cmd) => hooks::run(cmd, config),
-        Command::DkimKeygen { selector, force } => {
-            dkim::run_keygen(&config::dkim_dir(), &config.domain, &selector, force)
-        }
+        Command::DkimKeygen { selector, force } => dkim::run_keygen(
+            &config::dkim_dir(),
+            config.default_domain(),
+            &selector,
+            force,
+        ),
         Command::Serve {
             bind,
             tls_cert,

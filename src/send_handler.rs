@@ -96,7 +96,7 @@ where
     // MAILBOX-CREATE/DELETE that lands after this point still runs; the
     // swap just doesn't affect the decision for *this* particular send.
     let config = ctx.config_handle.load();
-    let primary_domain = config.domain.as_str();
+    let primary_domain = config.default_domain();
     let mailboxes = config.mailboxes.iter().map(|(name, mb)| {
         (
             name.clone(),
@@ -805,12 +805,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: dir.clone(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -1425,12 +1426,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".into(),
+            domains: vec!["example.com".into()],
             data_dir: data_dir.path().to_path_buf(),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -1489,12 +1491,13 @@ mod tests {
             },
         );
         let config = crate::config::Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.clone(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature,

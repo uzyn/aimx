@@ -381,7 +381,7 @@ fn handle_create(
     // resolved-side chown uses this MailboxConfig so a future
     // `config.toml` reload would still agree with the on-disk owner.
     let mut new_config: Config = (*current).clone();
-    let address = format!("{name}@{}", new_config.domain);
+    let address = format!("{name}@{}", new_config.default_domain());
     let mb_cfg = MailboxConfig {
         address,
         owner: owner.to_string(),
@@ -638,12 +638,13 @@ mod tests {
             },
         );
         Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,

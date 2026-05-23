@@ -119,15 +119,24 @@ pub fn write_atomic(path: &Path, config: &Config) -> std::io::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Clone, PartialEq)]
 pub struct Config {
-    pub domain: String,
+    /// Configured domains, in operator-declared order. `domains[0]` is the
+    /// default domain; bare local-parts resolve against it. Non-empty,
+    /// lowercased, RFC 1035 valid, deduplicated. Always serialized as
+    /// `domains = [...]` (canonical shape). The legacy single-domain field
+    /// `domain = "..."` is accepted on read but never written back.
+    pub domains: Vec<String>,
 
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
-    #[serde(default = "default_dkim_selector")]
-    pub dkim_selector: String,
+    /// Top-level DKIM selector. `None` resolves to the built-in default
+    /// `"aimx"` via [`Config::default_dkim_selector`]. Per-domain
+    /// `[domains.<d>] dkim_selector = "..."` overrides this for that
+    /// domain (resolution order: per-domain -> top-level -> `"aimx"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkim_selector: Option<String>,
 
     /// Default trust policy applied to every mailbox that does not set
     /// its own `trust`. Allowed values: `"none"` (default) or `"verified"`.
@@ -142,8 +151,32 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trusted_senders: Vec<String>,
 
+    /// Mailboxes keyed by full address (FQDN), e.g. `"info@a.com"`. Legacy
+    /// local-part-keyed mailboxes (`[mailboxes.info]`) are accepted on
+    /// read and preserved as the operator-friendly key in the in-memory
+    /// map; only the `address` field is validated against `domains`. The
+    /// canonical serialized shape on rewrite is FQDN-keyed, and on-disk
+    /// re-keying of legacy installs is performed by the upgrade
+    /// migration on first daemon start — not during config load.
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
+
+    /// Per-domain overrides loaded from `[domain."<name>"]` sub-tables.
+    /// Each key must appear in [`Config::domains`]; dangling sub-tables
+    /// produce a load error. Resolution helpers that consume this map
+    /// land later in the multi-domain track.
+    ///
+    /// The TOML key is `domain` (singular) so it doesn't collide with the
+    /// `domains = [...]` array at the top level — TOML cannot let one key
+    /// be both an array and a table. The singular form mirrors the
+    /// existing `aimx domain` / `aimx domains` clap alias pattern.
+    #[serde(
+        default,
+        rename = "domain",
+        skip_serializing_if = "HashMap::is_empty",
+        serialize_with = "serialize_per_domain"
+    )]
+    pub per_domain: HashMap<String, DomainOverride>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_host: Option<String>,
@@ -172,6 +205,383 @@ impl Config {
     /// string disables the signature).
     pub fn effective_signature(&self) -> &str {
         self.signature.as_deref().unwrap_or(DEFAULT_SIGNATURE)
+    }
+
+    /// Default domain — the first entry of [`Config::domains`]. Bare
+    /// local-parts on `aimx send` and bare-local-part mailbox keys in
+    /// the legacy config shape resolve against this value.
+    ///
+    /// Panics if `domains` is empty, but `Config::load` rejects empty
+    /// `domains` before this is reachable on a loaded `Config`.
+    pub fn default_domain(&self) -> &str {
+        &self.domains[0]
+    }
+
+    /// Resolve the global default DKIM selector. Returns the top-level
+    /// `dkim_selector` when set, otherwise the built-in default `"aimx"`.
+    /// Per-domain overrides are layered on top of this by later
+    /// callers that consume `per_domain`.
+    pub fn default_dkim_selector(&self) -> &str {
+        self.dkim_selector.as_deref().unwrap_or("aimx")
+    }
+}
+
+/// Per-domain override carried under `[domain."<name>"]` sub-tables.
+/// All fields are optional; absent fields fall back to the top-level
+/// `Config` defaults. Resolution helpers that consume this map are
+/// added later as the multi-domain runtime wiring lands.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
+pub struct DomainOverride {
+    /// Per-domain outbound signature override. Falls back to
+    /// [`Config::signature`] when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
+
+    /// Per-domain DKIM selector override. Falls back to the top-level
+    /// `dkim_selector` and then to the built-in `"aimx"` when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dkim_selector: Option<String>,
+
+    /// Per-domain trust policy override. Allowed values mirror the
+    /// top-level [`Config::trust`] (`"none"` or `"verified"`); validated
+    /// at load time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust: Option<String>,
+
+    /// Per-domain trusted-senders override. Replace semantics: a `Some`
+    /// here entirely replaces the top-level list (no merging), matching
+    /// the per-mailbox layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted_senders: Option<Vec<String>>,
+}
+
+fn serialize_per_domain<S>(
+    map: &HashMap<String, DomainOverride>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use serde::ser::SerializeMap;
+    let mut sorted: Vec<(&String, &DomainOverride)> = map.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    let mut m = serializer.serialize_map(Some(sorted.len()))?;
+    for (k, v) in sorted {
+        m.serialize_entry(k, v)?;
+    }
+    m.end()
+}
+
+/// Accepts either the legacy single-domain field (`domain = "..."`, a
+/// string) or the canonical multi-domain per-domain sub-table
+/// (`[domain."<name>"] ...`, a map of per-domain overrides). The two
+/// shapes share the TOML key `domain`; an untagged enum disambiguates on
+/// the value's runtime shape.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DomainField {
+    Legacy(String),
+    PerDomain(HashMap<String, DomainOverride>),
+}
+
+/// Internal raw shape for `Config` deserialization. Mirrors the on-disk
+/// TOML one-for-one, accepting either the legacy single-domain field
+/// (`domain = "..."`) or the canonical multi-domain field
+/// (`domains = [...]`). The conversion to `Config` is implemented in
+/// `Deserialize for Config` and applies all of the multi-domain
+/// validation rules.
+#[derive(Deserialize)]
+struct RawConfig {
+    /// Carries either the legacy `domain = "..."` string or the
+    /// canonical `[domain."<name>"]` per-domain sub-table. Disambiguated
+    /// inside [`Config::from_raw`].
+    #[serde(default)]
+    domain: Option<DomainField>,
+    #[serde(default)]
+    domains: Option<Vec<String>>,
+    #[serde(default = "default_data_dir")]
+    data_dir: PathBuf,
+    #[serde(default)]
+    dkim_selector: Option<String>,
+    #[serde(default = "default_trust")]
+    trust: String,
+    #[serde(default)]
+    trusted_senders: Vec<String>,
+    #[serde(default)]
+    mailboxes: HashMap<String, MailboxConfig>,
+    #[serde(default)]
+    verify_host: Option<String>,
+    #[serde(default)]
+    enable_ipv6: bool,
+    #[serde(default)]
+    signature: Option<String>,
+    #[serde(default)]
+    upgrade: Option<UpgradeConfig>,
+}
+
+impl<'de> Deserialize<'de> for Config {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawConfig::deserialize(deserializer)?;
+        Self::from_raw(raw).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Config {
+    /// Normalize a `RawConfig` (either legacy or canonical shape on disk)
+    /// into the canonical in-memory `Config`. Applies every multi-domain
+    /// rule that does not depend on filesystem state:
+    ///
+    /// - rejects mixing `domain` + `domains`;
+    /// - lowercases + RFC 1035-validates each domain;
+    /// - rejects empty `domains`, duplicates (case-insensitive), and
+    ///   syntactically invalid entries;
+    /// - preserves legacy local-part mailbox keys as-is in the in-memory
+    ///   map (on-disk re-keying to FQDN is handled later by the upgrade
+    ///   migration, not here);
+    /// - enforces the key/`address` invariant for FQDN-keyed mailboxes
+    ///   and the address-domain-in-`domains` invariant for every
+    ///   mailbox;
+    /// - rejects dangling `[domain."<name>"]` sub-tables whose key isn't
+    ///   in `domains`.
+    ///
+    /// Mailbox owner resolution, hook-shape validation, and the legacy
+    /// schema rejections all run later in [`Config::load`].
+    fn from_raw(raw: RawConfig) -> Result<Self, String> {
+        let RawConfig {
+            domain,
+            domains,
+            data_dir,
+            dkim_selector,
+            trust,
+            trusted_senders,
+            mailboxes,
+            verify_host,
+            enable_ipv6,
+            signature,
+            upgrade,
+        } = raw;
+
+        let (legacy_domain, per_domain) = match domain {
+            None => (None, HashMap::new()),
+            Some(DomainField::Legacy(s)) => (Some(s), HashMap::new()),
+            Some(DomainField::PerDomain(m)) => (None, m),
+        };
+
+        let domains = normalize_domains_field(legacy_domain, domains)?;
+
+        // Lowercase per-domain keys so lookups against `domains[0]`
+        // (already lowercased) stay consistent.
+        let mut per_domain_norm: HashMap<String, DomainOverride> =
+            HashMap::with_capacity(per_domain.len());
+        for (k, v) in per_domain {
+            per_domain_norm.insert(k.to_ascii_lowercase(), v);
+        }
+
+        // Every per-domain sub-table key must reference a configured
+        // domain. Dangling overrides are a load error.
+        for key in per_domain_norm.keys() {
+            if !domains.iter().any(|d| d == key) {
+                return Err(format!(
+                    "per-domain override `[domain.\"{key}\"]` references a \
+                     domain not listed in `domains = [...]`; add '{key}' to \
+                     `domains` or remove the sub-table"
+                ));
+            }
+        }
+
+        let mailboxes = normalize_mailboxes_field(mailboxes, &domains)?;
+
+        Ok(Config {
+            domains,
+            data_dir,
+            dkim_selector,
+            trust,
+            trusted_senders,
+            mailboxes,
+            per_domain: per_domain_norm,
+            verify_host,
+            enable_ipv6,
+            signature,
+            upgrade,
+        })
+    }
+}
+
+/// Resolve the `domain` (legacy) and `domains` (canonical) fields into a
+/// single canonical `Vec<String>` with lowercasing, dedup, RFC 1035
+/// validation, and the mixed-shape rejection rule.
+fn normalize_domains_field(
+    legacy_domain: Option<String>,
+    canonical_domains: Option<Vec<String>>,
+) -> Result<Vec<String>, String> {
+    let raw = match (legacy_domain, canonical_domains) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "specify either 'domain' (singular, legacy) or 'domains' (plural), not both"
+                    .to_string(),
+            );
+        }
+        (Some(d), None) => vec![d],
+        (None, Some(list)) => list,
+        (None, None) => {
+            return Err(
+                "missing required field: set either `domain = \"...\"` (legacy) \
+                 or `domains = [\"a.com\", ...]` (canonical) in config.toml"
+                    .to_string(),
+            );
+        }
+    };
+
+    if raw.is_empty() {
+        return Err("`domains` must contain at least one entry".to_string());
+    }
+
+    let mut out: Vec<String> = Vec::with_capacity(raw.len());
+    for entry in raw {
+        let lower = entry.trim().to_ascii_lowercase();
+        if !is_valid_domain_syntax(&lower) {
+            return Err(format!(
+                "domain '{entry}' is not a valid RFC 1035 hostname (lowercased to '{lower}')"
+            ));
+        }
+        if out.iter().any(|existing| existing == &lower) {
+            return Err(format!(
+                "duplicate domain '{lower}' in `domains` (case-insensitive)"
+            ));
+        }
+        out.push(lower);
+    }
+    Ok(out)
+}
+
+/// Predicate for RFC 1035 hostname syntax suitable for an email domain.
+///
+/// Accepts: ASCII letters, digits, hyphens, dots; labels must be 1-63
+/// characters and may not start or end with a hyphen; total length
+/// 1-253; at least two labels (a single bare label is not a valid email
+/// domain). Hyphen-only labels and empty labels (double dots) are
+/// rejected.
+pub fn is_valid_domain_syntax(s: &str) -> bool {
+    if s.is_empty() || s.len() > 253 {
+        return false;
+    }
+    let mut label_count = 0;
+    for label in s.split('.') {
+        label_count += 1;
+        if label.is_empty() || label.len() > 63 {
+            return false;
+        }
+        if label.starts_with('-') || label.ends_with('-') {
+            return false;
+        }
+        if !label
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        {
+            return false;
+        }
+    }
+    label_count >= 2
+}
+
+/// Normalize mailboxes loaded from TOML. Two key shapes are accepted:
+///
+/// - FQDN-keyed: `[mailboxes."info@a.com"]` with `address = "info@a.com"`.
+///   Key and `address` must match (case-insensitive on the domain).
+/// - Legacy local-part-keyed: `[mailboxes.info]` (no `@` in the key).
+///   On read, the operator-chosen friendly key is preserved as-is in
+///   the in-memory map; the `address` field is required to be a full
+///   FQDN whose domain appears in `domains`. A later one-shot upgrade
+///   migration re-keys legacy entries to FQDN on disk; until then, the
+///   in-memory map preserves the existing single-domain naming so the
+///   runtime data plane (ingest, storage paths, mailbox CRUD) keeps
+///   working unchanged.
+///
+/// In every case `address` must:
+/// - carry an `@` (no bare local-part addresses);
+/// - reference a domain listed in `domains`;
+/// - be lowercased on the domain portion.
+fn normalize_mailboxes_field(
+    raw: HashMap<String, MailboxConfig>,
+    domains: &[String],
+) -> Result<HashMap<String, MailboxConfig>, String> {
+    let mut out: HashMap<String, MailboxConfig> = HashMap::with_capacity(raw.len());
+
+    for (key, mut mb) in raw {
+        // `address` is required to be a full FQDN. Lowercase the domain
+        // portion so equality checks are case-insensitive on the
+        // domain (matching DNS semantics) and downstream code only ever
+        // sees one shape.
+        if !mb.address.contains('@') {
+            return Err(format!(
+                "mailbox '{key}' has `address = \"{addr}\"` which is not a \
+                 full <local>@<domain> address",
+                addr = mb.address,
+            ));
+        }
+        mb.address = normalize_fqdn(&mb.address);
+
+        if key.contains('@') {
+            // FQDN-keyed mailbox in the source TOML. Validate key ==
+            // address (case-insensitive on the domain portion).
+            let normalized_key = normalize_fqdn(&key);
+            if mb.address != normalized_key {
+                return Err(format!(
+                    "mailbox `[mailboxes.\"{key}\"]` has `address = \"{addr}\"` \
+                     which does not match its key (expected '{normalized_key}'); \
+                     rename the key or update the address",
+                    addr = mb.address,
+                ));
+            }
+            // The address's domain must be in `domains`.
+            require_address_domain_in_domains(&normalized_key, &mb.address, domains)?;
+            if out.insert(normalized_key.clone(), mb).is_some() {
+                return Err(format!(
+                    "duplicate mailbox key '{normalized_key}' in `[mailboxes]`"
+                ));
+            }
+        } else {
+            // Legacy local-part-keyed mailbox. Preserve the
+            // operator-friendly key as the in-memory map key (a later
+            // upgrade migration rewrites these to FQDN on disk; the
+            // in-memory shape stays operator-friendly so single-domain
+            // runtime paths keep working unchanged). The `address`
+            // field is still required to reference a configured domain.
+            require_address_domain_in_domains(&key, &mb.address, domains)?;
+            if out.insert(key.clone(), mb).is_some() {
+                return Err(format!("duplicate mailbox key '{key}' in `[mailboxes]`"));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn require_address_domain_in_domains(
+    key: &str,
+    address: &str,
+    domains: &[String],
+) -> Result<(), String> {
+    let domain_part = address.rsplit_once('@').map(|(_, d)| d).unwrap_or_default();
+    if !domains.iter().any(|d| d == domain_part) {
+        return Err(format!(
+            "mailbox '{key}' references domain '{domain_part}' which is not \
+             in `domains = [...]`; add the domain or update the mailbox address"
+        ));
+    }
+    Ok(())
+}
+
+/// Lowercase the domain portion of an FQDN-shaped address (everything
+/// after the last `@`). The local part is preserved as written; the
+/// domain is lowercased to match DNS case-insensitivity. The wildcard
+/// catchall syntax (`*@<domain>`) is supported.
+fn normalize_fqdn(addr: &str) -> String {
+    match addr.rsplit_once('@') {
+        Some((local, domain)) => format!("{local}@{}", domain.to_ascii_lowercase()),
+        None => addr.to_string(),
     }
 }
 
@@ -324,14 +734,16 @@ pub struct MailboxConfig {
 }
 
 impl MailboxConfig {
-    /// True iff this mailbox's `address` is the wildcard catchall for
-    /// the configured `domain` (`*@domain`). Used by
-    /// [`check_hook_owner_invariant`] to relax the owner-match rule for
-    /// the catchall (hooks run as `aimx-catchall` there, not the
-    /// mailbox owner).
+    /// True iff this mailbox's `address` is the wildcard catchall
+    /// (`*@<domain>`) for any of the configured domains in
+    /// [`Config::domains`]. Used by [`check_hook_owner_invariant`] to
+    /// relax the owner-match rule for the catchall (hooks run as
+    /// `aimx-catchall` there, not the mailbox owner).
     pub fn is_catchall(&self, config: &Config) -> bool {
-        self.address
-            .eq_ignore_ascii_case(&format!("*@{}", config.domain))
+        config
+            .domains
+            .iter()
+            .any(|d| self.address.eq_ignore_ascii_case(&format!("*@{d}")))
     }
 
     /// Resolve the mailbox's `owner` via [`validate_run_as`]. Returns
@@ -464,10 +876,6 @@ fn is_default_trust(s: &str) -> bool {
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from(DEFAULT_DATA_DIR)
-}
-
-fn default_dkim_selector() -> String {
-    "aimx".to_string()
 }
 
 /// Allowed values for `Config::trust` and per-mailbox `MailboxConfig::trust`.
@@ -858,8 +1266,8 @@ fn validate_mailbox_owners(config: &Config) -> Result<Vec<LoadWarning>, String> 
         if mb.allow_root_catchall && !is_catchall {
             return Err(format!(
                 "mailbox '{name}' sets allow_root_catchall=true but is not a \
-                 catchall (*@{domain}); remove the flag or change the address",
-                domain = config.domain,
+                 catchall (*@<domain> for any configured domain); remove the \
+                 flag or change the address",
             ));
         }
 
@@ -901,6 +1309,16 @@ fn validate_trust_values(config: &Config) -> Result<(), String> {
         {
             return Err(format!(
                 "invalid trust value '{t}' on mailbox '{name}': expected one of {VALID_TRUST_VALUES:?}"
+            ));
+        }
+    }
+    for (domain, override_) in &config.per_domain {
+        if let Some(t) = override_.trust.as_deref()
+            && !VALID_TRUST_VALUES.contains(&t)
+        {
+            return Err(format!(
+                "invalid trust value '{t}' on per-domain override \
+                 `[domain.\"{domain}\"]`: expected one of {VALID_TRUST_VALUES:?}"
             ));
         }
     }
@@ -1119,7 +1537,7 @@ impl ConfigHandle {
 impl std::fmt::Debug for ConfigHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConfigHandle")
-            .field("domain", &self.load().domain)
+            .field("domains", &self.load().domains)
             .finish_non_exhaustive()
     }
 }
@@ -1625,5 +2043,478 @@ cmd = ["echo", "hi"]
             err.contains("non-absolute `cmd[0]`"),
             "error should call out non-absolute cmd[0]: {err}"
         );
+    }
+
+    // --- Multi-domain schema: domains field + legacy `domain` back-compat ---
+
+    #[test]
+    fn load_legacy_domain_single_string_normalizes_to_domains_vec() {
+        let toml = r#"
+domain = "example.com"
+
+[mailboxes.info]
+address = "info@example.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.domains, vec!["example.com".to_string()]);
+        assert_eq!(cfg.default_domain(), "example.com");
+    }
+
+    #[test]
+    fn load_canonical_domains_vec_parses_verbatim() {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.domains, vec!["a.com".to_string(), "b.com".to_string()]);
+        assert_eq!(cfg.default_domain(), "a.com");
+    }
+
+    #[test]
+    fn load_rejects_mixed_legacy_and_canonical_domain_fields() {
+        // The legacy `domain = "..."` and canonical `[domain."<name>"]`
+        // share a TOML key. When both shapes are present, the canonical
+        // shape "wins" because TOML tables outrank a leaf value. We
+        // exercise the explicit mixed shape via `domain` + `domains`
+        // together, which is the real backwards-compat pitfall.
+        let toml = r#"
+domain = "a.com"
+domains = ["a.com", "b.com"]
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains(
+                "specify either 'domain' (singular, legacy) or 'domains' (plural), not both"
+            ),
+            "error should match the exact wording: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_empty_domains_list() {
+        let toml = r#"
+domains = []
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("must contain at least one entry"),
+            "error should reject empty domains: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_duplicate_domains_case_insensitive() {
+        let toml = r#"
+domains = ["a.com", "A.com"]
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate domain"),
+            "error should reject case-insensitive duplicates: {err}"
+        );
+    }
+
+    #[test]
+    fn load_lowercases_domain_entries() {
+        let toml = r#"
+domains = ["A.COM", "B.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.domains, vec!["a.com".to_string(), "b.com".to_string()]);
+    }
+
+    #[test]
+    fn load_rejects_syntactically_invalid_domain() {
+        for bad in &["a..com", "a com", "-foo.com", "foo-.com", "single"] {
+            let toml = format!("domains = [\"{bad}\"]\n");
+            let err = toml::from_str::<Config>(&toml).unwrap_err().to_string();
+            assert!(
+                err.contains("RFC 1035") || err.contains("not a valid"),
+                "domain '{bad}' should reject as syntactically invalid: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_missing_domain_and_domains_is_load_error() {
+        let toml = r#"
+trust = "none"
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("missing required field"),
+            "error should hint at the missing field: {err}"
+        );
+    }
+
+    // --- Multi-domain schema: FQDN-keyed mailboxes + legacy local-part ---
+
+    #[test]
+    fn load_fqdn_keyed_mailbox_parses() {
+        let toml = r#"
+domains = ["a.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.mailboxes.contains_key("info@a.com"));
+        assert_eq!(cfg.mailboxes["info@a.com"].address, "info@a.com");
+    }
+
+    #[test]
+    fn load_legacy_local_part_mailbox_keeps_key_and_validates_address() {
+        // The legacy key shape stays as-is in the in-memory map; a
+        // later upgrade migration is what rewrites the on-disk key to
+        // FQDN. The `address` field must still reference a domain in
+        // `domains`.
+        let toml = r#"
+domains = ["a.com"]
+
+[mailboxes.info]
+address = "info@a.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.mailboxes.contains_key("info"));
+        assert_eq!(cfg.mailboxes["info"].address, "info@a.com");
+    }
+
+    #[test]
+    fn load_rejects_fqdn_key_mismatched_address() {
+        let toml = r#"
+domains = ["a.com"]
+
+[mailboxes."info@a.com"]
+address = "support@a.com"
+owner = "ops"
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("does not match its key"),
+            "error should reject FQDN key/address mismatch: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_mailbox_address_domain_not_in_domains() {
+        let toml = r#"
+domains = ["a.com"]
+
+[mailboxes."info@b.com"]
+address = "info@b.com"
+owner = "ops"
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("not in `domains = [...]`"),
+            "error should reject foreign-domain mailbox: {err}"
+        );
+    }
+
+    #[test]
+    fn is_catchall_recognizes_any_configured_domain() {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[mailboxes."*@b.com"]
+address = "*@b.com"
+owner = "aimx-catchall"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let mb = &cfg.mailboxes["*@b.com"];
+        assert!(mb.is_catchall(&cfg));
+    }
+
+    #[test]
+    fn load_accepts_per_domain_catchalls_as_distinct_mailboxes() {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[mailboxes."*@a.com"]
+address = "*@a.com"
+owner = "aimx-catchall"
+
+[mailboxes."*@b.com"]
+address = "*@b.com"
+owner = "aimx-catchall"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.mailboxes.contains_key("*@a.com"));
+        assert!(cfg.mailboxes.contains_key("*@b.com"));
+        assert!(cfg.mailboxes["*@a.com"].is_catchall(&cfg));
+        assert!(cfg.mailboxes["*@b.com"].is_catchall(&cfg));
+    }
+
+    #[test]
+    fn load_accepts_same_local_part_on_different_domains() {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+
+[mailboxes."info@b.com"]
+address = "info@b.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.mailboxes.len(), 2);
+        assert!(cfg.mailboxes.contains_key("info@a.com"));
+        assert!(cfg.mailboxes.contains_key("info@b.com"));
+    }
+
+    #[test]
+    fn load_accepts_mixed_legacy_and_fqdn_keys_in_same_file() {
+        let toml = r#"
+domains = ["a.com"]
+
+[mailboxes.info]
+address = "info@a.com"
+owner = "ops"
+
+[mailboxes."support@a.com"]
+address = "support@a.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.mailboxes.contains_key("info"));
+        assert!(cfg.mailboxes.contains_key("support@a.com"));
+    }
+
+    // --- Multi-domain schema: per-domain `[domain."<name>"]` sub-tables ---
+
+    #[test]
+    fn load_empty_per_domain_sub_table_parses() {
+        let toml = r#"
+domains = ["a.com"]
+
+[domain."a.com"]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let over = cfg.per_domain.get("a.com").expect("override present");
+        assert!(over.signature.is_none());
+        assert!(over.dkim_selector.is_none());
+        assert!(over.trust.is_none());
+        assert!(over.trusted_senders.is_none());
+    }
+
+    #[test]
+    fn load_full_per_domain_sub_table_parses() {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[domain."b.com"]
+signature = "Sent from B Corp"
+dkim_selector = "s2025"
+trust = "verified"
+trusted_senders = ["*@trusted-partner.com"]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let over = cfg.per_domain.get("b.com").expect("override present");
+        assert_eq!(over.signature.as_deref(), Some("Sent from B Corp"));
+        assert_eq!(over.dkim_selector.as_deref(), Some("s2025"));
+        assert_eq!(over.trust.as_deref(), Some("verified"));
+        assert_eq!(
+            over.trusted_senders.as_deref(),
+            Some(&["*@trusted-partner.com".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn load_partial_per_domain_sub_table_parses() {
+        let toml = r#"
+domains = ["a.com"]
+
+[domain."a.com"]
+signature = "Sent from A"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let over = &cfg.per_domain["a.com"];
+        assert_eq!(over.signature.as_deref(), Some("Sent from A"));
+        assert!(over.dkim_selector.is_none());
+    }
+
+    #[test]
+    fn load_rejects_dangling_per_domain_sub_table() {
+        let toml = r#"
+domains = ["a.com"]
+
+[domain."c.com"]
+signature = "Sent from C"
+"#;
+        let err = toml::from_str::<Config>(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("references a domain not listed in"),
+            "error should reject dangling sub-table: {err}"
+        );
+    }
+
+    #[test]
+    fn load_rejects_invalid_trust_value_in_per_domain_override() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domains = ["a.com"]
+
+[domain."a.com"]
+trust = "totally-trusted"
+
+[mailboxes.catchall]
+address = "*@a.com"
+owner = "aimx-catchall"
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("invalid trust value 'totally-trusted'"),
+            "error should reject bad per-domain trust value: {err}"
+        );
+    }
+
+    #[test]
+    fn default_dkim_selector_falls_back_to_aimx_when_unset() {
+        let toml = r#"
+domains = ["a.com"]
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert!(cfg.dkim_selector.is_none());
+        assert_eq!(cfg.default_dkim_selector(), "aimx");
+    }
+
+    #[test]
+    fn default_dkim_selector_respects_top_level_override() {
+        let toml = r#"
+domains = ["a.com"]
+dkim_selector = "s2025"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.default_dkim_selector(), "s2025");
+    }
+
+    /// `validate_hooks` still runs on multi-domain configs and still
+    /// rejects the legacy hook fields.
+    #[test]
+    fn load_still_rejects_legacy_hook_fields_on_multi_domain_config() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        write_cfg(
+            &path,
+            r#"
+domains = ["a.com"]
+
+[mailboxes."support@a.com"]
+address = "support@a.com"
+owner = "ops"
+
+[[mailboxes."support@a.com".hooks]]
+event = "on_receive"
+cmd = ["/bin/true"]
+run_as = "ops"
+"#,
+        );
+        let err = Config::load(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("`run_as`") && err.contains("removed"),
+            "error should still reject legacy `run_as`: {err}"
+        );
+    }
+
+    // --- Fixture snapshot tests for every legal config shape ---
+
+    fn fixtures_dir() -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("config")
+    }
+
+    #[test]
+    fn fixture_legacy_v1_single_domain_parses() {
+        let path = fixtures_dir().join("legacy-v1-single-domain.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["mydomain.com".to_string()]);
+        assert_eq!(cfg.default_domain(), "mydomain.com");
+        // Legacy local-part keys are preserved in-memory at this
+        // layer; the on-disk rewrite to FQDN happens during the later
+        // upgrade migration.
+        assert!(cfg.mailboxes.contains_key("info"));
+        assert!(cfg.mailboxes.contains_key("support"));
+        assert!(cfg.per_domain.is_empty());
+        assert!(cfg.dkim_selector.is_none());
+        assert_eq!(cfg.default_dkim_selector(), "aimx");
+    }
+
+    #[test]
+    fn fixture_legacy_v1_with_catchall_parses() {
+        let path = fixtures_dir().join("legacy-v1-with-catchall.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["mydomain.com".to_string()]);
+        let catchall = cfg.mailboxes.get("catchall").expect("catchall present");
+        assert!(catchall.is_catchall(&cfg));
+    }
+
+    #[test]
+    fn fixture_canonical_single_domain_parses() {
+        let path = fixtures_dir().join("canonical-single-domain.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["mydomain.com".to_string()]);
+        assert!(cfg.mailboxes.contains_key("info@mydomain.com"));
+        assert!(cfg.mailboxes.contains_key("*@mydomain.com"));
+        assert!(cfg.per_domain.is_empty());
+    }
+
+    #[test]
+    fn fixture_canonical_two_domains_parses() {
+        let path = fixtures_dir().join("canonical-two-domains.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["a.com".to_string(), "b.com".to_string()]);
+        assert_eq!(cfg.default_domain(), "a.com");
+        assert!(cfg.mailboxes.contains_key("info@a.com"));
+        assert!(cfg.mailboxes.contains_key("support@b.com"));
+        assert!(cfg.mailboxes.contains_key("*@a.com"));
+        assert!(cfg.mailboxes.contains_key("*@b.com"));
+        assert_eq!(cfg.mailboxes.len(), 4);
+        assert!(cfg.per_domain.is_empty());
+    }
+
+    #[test]
+    fn fixture_canonical_two_domains_with_overrides_parses() {
+        let path = fixtures_dir().join("canonical-two-domains-with-overrides.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["a.com".to_string(), "b.com".to_string()]);
+        let b_over = cfg.per_domain.get("b.com").expect("b.com override present");
+        assert_eq!(b_over.signature.as_deref(), Some("Sent from B Corp"));
+        assert_eq!(b_over.dkim_selector.as_deref(), Some("s2025"));
+        assert_eq!(b_over.trust.as_deref(), Some("verified"));
+        assert_eq!(
+            b_over.trusted_senders.as_deref(),
+            Some(&["*@trusted-partner.com".to_string()][..])
+        );
+        assert!(!cfg.per_domain.contains_key("a.com"));
+    }
+
+    #[test]
+    fn fixture_mixed_legacy_fqdn_parses() {
+        let path = fixtures_dir().join("mixed-legacy-fqdn.toml");
+        let cfg = Config::load_ignore_warnings(&path).unwrap();
+        assert_eq!(cfg.domains, vec!["mydomain.com".to_string()]);
+        // Legacy local-part key preserved as-is, FQDN key preserved as-is.
+        assert!(cfg.mailboxes.contains_key("info"));
+        assert!(cfg.mailboxes.contains_key("support@mydomain.com"));
+        assert_eq!(cfg.mailboxes["info"].address, "info@mydomain.com");
     }
 }

@@ -494,9 +494,10 @@ async fn run_serve(
     // Compare the on-disk public key to the DNS-published `p=` value.
     // Never fatal. DNS may not have propagated yet after a fresh setup.
     let resolver = HickoryDkimResolver;
-    let outcome =
-        run_dkim_startup_check(&resolver, &config.domain, &config.dkim_selector, &dkim_root);
-    log_dkim_startup_check(&outcome, &config.domain, &config.dkim_selector);
+    let primary_domain = config.default_domain().to_string();
+    let selector = config.default_dkim_selector().to_string();
+    let outcome = run_dkim_startup_check(&resolver, &primary_domain, &selector, &dkim_root);
+    log_dkim_startup_check(&outcome, &primary_domain, &selector);
 
     // Build the SendContext shared across every per-connection UDS task.
     //
@@ -519,7 +520,7 @@ async fn run_serve(
         }
         None => Arc::new(LettreTransport::new(
             config.enable_ipv6,
-            config.domain.clone(),
+            primary_domain.clone(),
         )),
     };
 
@@ -528,7 +529,7 @@ async fn run_serve(
     // through this same handle so MAILBOX-CREATE/DELETE is reflected
     // everywhere at once on a successful atomic `config.toml` write.
     let data_dir = config.data_dir.clone();
-    let dkim_selector = config.dkim_selector.clone();
+    let dkim_selector = selector.clone();
     let config_handle = ConfigHandle::new(config);
 
     let send_ctx = Arc::new(SendContext {
@@ -1565,12 +1566,13 @@ mod tests {
                 },
             );
             let config = crate::config::Config {
-                domain: "test.local".to_string(),
+                domains: vec!["test.local".to_string()],
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "aimx".to_string(),
+                dkim_selector: Some("aimx".to_string()),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
+                per_domain: std::collections::HashMap::new(),
                 verify_host: None,
                 enable_ipv6: false,
                 signature: None,
@@ -1876,12 +1878,13 @@ mod tests {
             },
         );
         crate::config::Config {
-            domain: "example.com".to_string(),
+            domains: vec!["example.com".to_string()],
             data_dir: data_dir.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: None,
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -2037,12 +2040,13 @@ mod tests {
                 },
             );
             let config = crate::config::Config {
-                domain: "example.com".to_string(),
+                domains: vec!["example.com".to_string()],
                 data_dir: tmp.path().to_path_buf(),
-                dkim_selector: "aimx".to_string(),
+                dkim_selector: Some("aimx".to_string()),
                 trust: "none".to_string(),
                 trusted_senders: vec![],
                 mailboxes,
+                per_domain: std::collections::HashMap::new(),
                 verify_host: None,
                 enable_ipv6: false,
                 signature: None,
@@ -2306,7 +2310,7 @@ mod tests {
         let cfg = build_test_config(tmp.path());
         cfg.save(&path).unwrap();
         let handle = ConfigHandle::new(Config::load_ignore_warnings(&path).unwrap());
-        let before_domain = handle.load().domain.clone();
+        let before_domains = handle.load().domains.clone();
 
         // Corrupt the file — not valid TOML.
         std::fs::write(&path, b"this is ][ not toml").unwrap();
@@ -2317,7 +2321,7 @@ mod tests {
             msg.to_lowercase().contains("toml") || msg.to_lowercase().contains("expected"),
             "error should mention TOML parse issue: {msg}"
         );
-        assert_eq!(handle.load().domain, before_domain);
+        assert_eq!(handle.load().domains, before_domains);
         assert_eq!(handle.load().mailboxes.len(), 2);
     }
 

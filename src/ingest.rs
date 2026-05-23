@@ -1341,12 +1341,13 @@ mod tests {
             },
         );
         Config {
-            domain: "test.com".to_string(),
+            domains: vec!["test.com".to_string()],
             data_dir: tmp.to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
@@ -3019,12 +3020,13 @@ mod tests {
             },
         );
         let config = Config {
-            domain: "test.com".to_string(),
+            domains: vec!["test.com".to_string()],
             data_dir: tmp.path().to_path_buf(),
-            dkim_selector: "aimx".to_string(),
+            dkim_selector: Some("aimx".to_string()),
             trust: "none".to_string(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
