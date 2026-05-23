@@ -44,6 +44,11 @@ pub enum Action {
     MarkReadWrite(String),
     /// Create or delete a hook on a named mailbox.
     HookCrud(String),
+    /// Add, remove, or list domains. Root-only — domain management
+    /// belongs to the server operator, not to per-mailbox owners. Mirrors
+    /// the existing `SystemCommand` shape: the predicate's only check is
+    /// `caller_uid == 0`, no mailbox context required.
+    DomainCrud,
     /// Run a system-level command (setup, serve, dkim-keygen, …).
     /// Root-only.
     SystemCommand,
@@ -203,7 +208,7 @@ pub fn authorize(
     }
 
     match action {
-        Action::SystemCommand => Err(AuthError::NotRoot),
+        Action::SystemCommand | Action::DomainCrud => Err(AuthError::NotRoot),
         Action::MailboxCreate { owner_uid } => {
             if caller_uid == owner_uid {
                 Ok(())
@@ -352,6 +357,27 @@ mod tests {
             authorize(1000, Action::SystemCommand, None),
             Err(AuthError::NotRoot),
         );
+    }
+
+    /// `Action::DomainCrud` is root-only; non-root callers refuse with
+    /// the canonical `NotRoot` shape. The mailbox arg is irrelevant.
+    #[test]
+    fn non_root_domain_crud_is_not_root() {
+        assert_eq!(
+            authorize(1000, Action::DomainCrud, None),
+            Err(AuthError::NotRoot),
+        );
+        assert_eq!(
+            authorize(1, Action::DomainCrud, None),
+            Err(AuthError::NotRoot),
+        );
+    }
+
+    /// Root passes `Action::DomainCrud` unconditionally — domain
+    /// management is operator-only.
+    #[test]
+    fn root_passes_domain_crud() {
+        assert!(authorize(0, Action::DomainCrud, None).is_ok());
     }
 
     #[test]

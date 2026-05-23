@@ -33,14 +33,23 @@ static DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
     cache
 });
 
-/// Copy the cached DKIM keypair into `tmp/dkim/`.
+/// Copy the cached DKIM keypair into `tmp/dkim/`. `aimx dkim-keygen`
+/// (no `--domain`) writes the cache under
+/// `<DKIM_CACHE>/dkim/cache.example.com/{private,public}.key` (the
+/// per-domain default-domain layout). We replicate it at the legacy
+/// un-namespaced `tmp/dkim/{private,public}.key` location because the
+/// daemon's loader falls back to the legacy path for the default
+/// domain when no per-domain key exists under `tmp/dkim/<default>/`,
+/// which keeps the existing integration fixtures (legacy-style
+/// `domain = "agent.example.com"` configs) working without forcing
+/// every test to know its default-domain name.
 fn install_cached_dkim_keys(tmp: &Path) {
     let dkim_dir = tmp.join("dkim");
     if dkim_dir.join("private.key").exists() {
         return;
     }
     std::fs::create_dir_all(&dkim_dir).unwrap();
-    let cache_dkim = DKIM_CACHE.path().join("dkim");
+    let cache_dkim = DKIM_CACHE.path().join("dkim").join("cache.example.com");
     for name in ["private.key", "public.key"] {
         let src = cache_dkim.join(name);
         let dst = dkim_dir.join(name);
@@ -463,13 +472,20 @@ fn dkim_keygen_end_to_end() {
         .stdout(predicate::str::contains("DKIM keypair generated"))
         .stdout(predicate::str::contains("_domainkey"));
 
-    assert!(tmp.path().join("dkim/private.key").exists());
-    assert!(tmp.path().join("dkim/public.key").exists());
+    // `aimx dkim-keygen` (no `--domain`) writes the default domain's
+    // keypair under `<dkim_dir>/<default_domain>/` — the per-domain
+    // layout the v2 daemon's loader reads from. Writing to the legacy
+    // un-namespaced root would be a silent-rotation footgun on v2
+    // installs.
+    let private_path = tmp.path().join("dkim/agent.example.com/private.key");
+    let public_path = tmp.path().join("dkim/agent.example.com/public.key");
+    assert!(private_path.exists(), "expected {}", private_path.display());
+    assert!(public_path.exists(), "expected {}", public_path.display());
 
-    let private_pem = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    let private_pem = std::fs::read_to_string(&private_path).unwrap();
     assert!(private_pem.contains("BEGIN RSA PRIVATE KEY"));
 
-    let public_pem = std::fs::read_to_string(tmp.path().join("dkim/public.key")).unwrap();
+    let public_pem = std::fs::read_to_string(&public_path).unwrap();
     assert!(public_pem.contains("BEGIN PUBLIC KEY"));
 }
 
@@ -515,7 +531,10 @@ fn dkim_keygen_force_overwrite() {
         .assert()
         .success();
 
-    let original = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    // The no-`--domain` keygen lands under the per-domain default-domain
+    // path on v2 installs.
+    let private_path = tmp.path().join("dkim/agent.example.com/private.key");
+    let original = std::fs::read_to_string(&private_path).unwrap();
 
     aimx_cmd(tmp.path())
         .arg("--data-dir")
@@ -525,7 +544,7 @@ fn dkim_keygen_force_overwrite() {
         .assert()
         .success();
 
-    let new = std::fs::read_to_string(tmp.path().join("dkim/private.key")).unwrap();
+    let new = std::fs::read_to_string(&private_path).unwrap();
     assert_ne!(original, new);
 }
 

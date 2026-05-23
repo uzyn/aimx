@@ -10,6 +10,9 @@ mod datadir_readme;
 mod dkim;
 mod dkim_keys;
 mod doctor;
+mod domain;
+mod domain_handler;
+mod domain_list_handler;
 mod frontmatter;
 mod hook;
 mod hook_handler;
@@ -154,6 +157,13 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // LIST falls back to `MAILBOX-LIST`; SHOW errors with an
         // actionable hint).
         Command::Mailboxes(cmd) => mailbox::run(cmd, cli.data_dir.as_deref()),
+        // `aimx domains` is a UDS-first client like `mailboxes`. It
+        // must NOT pre-load config here — non-root callers cannot read
+        // `/etc/aimx/config.toml` in production, so the read EACCES
+        // would surface as a bare `Permission denied (os error 13)`
+        // before `domain::run` ever sees the request. `domain::run`
+        // loads config lazily only on the root daemon-down fallback.
+        Command::Domains(cmd) => domain::run(cmd),
         // `aimx upgrade` reads the release-manifest URL from Config
         // (optional `[upgrade] release_manifest_url`) but tolerates a
         // missing / unloadable config — a freshly-installed machine
@@ -200,12 +210,44 @@ fn dispatch_with_config(
     match cmd {
         Command::Ingest { rcpt } => ingest::run(&rcpt, config),
         Command::Hooks(cmd) => hooks::run(cmd, config),
-        Command::DkimKeygen { selector, force } => dkim::run_keygen(
-            &config::dkim_dir(),
-            config.default_domain(),
-            &selector,
+        Command::DkimKeygen {
+            selector,
+            domain,
             force,
-        ),
+        } => match domain.as_deref() {
+            Some(d) => {
+                // Explicit `--domain <d>`: write to the per-domain
+                // layout under `<dkim_dir>/<d>/`. Refuses when the
+                // requested domain is not in `domains` so a typo
+                // doesn't silently generate a key for an unrelated
+                // identity.
+                let d_lc = d.trim().to_ascii_lowercase();
+                if !config.is_configured_domain(&d_lc) {
+                    return Err(format!(
+                        "domain '{d}' is not in `domains = [...]`. \
+                         Add it with `aimx domains add {d_lc}` first."
+                    )
+                    .into());
+                }
+                let dkim_root = config::dkim_dir().join(&d_lc);
+                dkim::run_keygen(&dkim_root, &d_lc, &selector, force)
+            }
+            None => {
+                // No `--domain`: target the default domain's per-domain
+                // layout (`<dkim_dir>/<default_domain>/`). The daemon
+                // reads keys from the per-domain path on v2 installs;
+                // writing to the un-namespaced legacy root here would
+                // silently land the new key where the daemon never
+                // looks, leaving the OLD key signing — a silent
+                // rotation footgun. The loader still falls back to
+                // the legacy root for *reads* on unmigrated v1
+                // installs, so existing single-domain installs keep
+                // working until they migrate. The DNS record printed
+                // is for the default domain.
+                let dkim_root = config::dkim_dir().join(config.default_domain());
+                dkim::run_keygen(&dkim_root, config.default_domain(), &selector, force)
+            }
+        },
         Command::Serve {
             bind,
             tls_cert,
@@ -224,6 +266,7 @@ fn dispatch_with_config(
         | Command::Send(_)
         | Command::Logs { .. }
         | Command::Mailboxes(_)
+        | Command::Domains(_)
         | Command::Agents(_)
         | Command::Upgrade(_) => unreachable!("handled by dispatch"),
     }

@@ -190,6 +190,22 @@ pub struct HookDeleteRequest {
     pub name: String,
 }
 
+/// Decoded `AIMX/1 DOMAIN-ADD` request. The daemon-side handler runs
+/// `auth::authorize(.., Action::DomainCrud)` (root-only) before doing
+/// anything, then appends the domain, generates the DKIM keypair, and
+/// rewrites + hot-swaps the config.
+///
+/// `selector` is optional: when `None` the daemon resolves the selector
+/// via the documented order (top-level `Config.dkim_selector` →
+/// built-in `"aimx"`). When `Some(s)` the selector is persisted in
+/// `[domain."<domain>"] dkim_selector = "<s>"` so subsequent loads
+/// pick it up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DomainAddRequest {
+    pub domain: String,
+    pub selector: Option<String>,
+}
+
 // `AIMX/1 HOOK-LIST` carries no payload; the daemon resolves the
 // caller via `SO_PEERCRED` and returns the hooks visible to the
 // caller's uid (root sees every hook on every mailbox; non-root sees
@@ -232,6 +248,14 @@ pub enum Request {
     /// binary on disk and a still-running pre-upgrade daemon. Open to
     /// every UDS caller — version data is not sensitive.
     Version,
+    /// `AIMX/1 DOMAIN-LIST` carries no payload. The daemon enforces
+    /// root-only authz via `Action::DomainCrud` and returns a JSON
+    /// array of `DomainListRow` covering every configured domain.
+    /// Mirrors `MAILBOX-LIST` line-for-line.
+    DomainList,
+    /// `AIMX/1 DOMAIN-ADD` carries the `Domain:` header (required) plus
+    /// an optional `Selector:` header. Root-only.
+    DomainAdd(DomainAddRequest),
 }
 
 /// Error codes reported on the wire in `AIMX/1 ERR <code> <reason>`.
@@ -471,6 +495,12 @@ where
         "VERSION" => parse_version_headers(reader)
             .await
             .map(|()| Request::Version),
+        "DOMAIN-LIST" => parse_domain_list_headers(reader)
+            .await
+            .map(|()| Request::DomainList),
+        "DOMAIN-ADD" => parse_domain_add_headers(reader)
+            .await
+            .map(Request::DomainAdd),
         other => Err(ParseError::UnknownVerb(other.to_string())),
     }
 }
@@ -499,6 +529,9 @@ where
         ),
         Request::Version => Err(ParseError::Malformed(
             "expected SEND verb, got VERSION".to_string(),
+        )),
+        Request::DomainList | Request::DomainAdd(_) => Err(ParseError::Malformed(
+            "expected SEND verb, got DOMAIN-*".to_string(),
         )),
     }
 }
@@ -934,6 +967,106 @@ where
         )));
     }
     Ok(())
+}
+
+/// Parse the empty body of an `AIMX/1 DOMAIN-LIST` request. Mirrors
+/// `parse_mailbox_list_headers` / `parse_hook_list_headers`
+/// line-for-line: the verb carries no headers, and silently ignoring
+/// one would let a future caller smuggle a forged header past the
+/// `SO_PEERCRED` filter.
+async fn parse_domain_list_headers<R>(reader: &mut R) -> Result<(), ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let line = read_line(reader)
+        .await?
+        .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+    let line = line.trim_end_matches('\r');
+    if !line.is_empty() {
+        return Err(ParseError::Malformed(format!(
+            "DOMAIN-LIST takes no headers, got {line:?}"
+        )));
+    }
+    Ok(())
+}
+
+/// Parse `AIMX/1 DOMAIN-ADD` headers: `Domain:` (required) plus
+/// optional `Selector:`. `Content-Length:` is allowed but must be 0
+/// (the verb carries no body).
+async fn parse_domain_add_headers<R>(reader: &mut R) -> Result<DomainAddRequest, ParseError>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut domain: Option<String> = None;
+    let mut selector: Option<String> = None;
+    let mut content_length: Option<usize> = None;
+
+    loop {
+        let line = read_line(reader)
+            .await?
+            .ok_or_else(|| ParseError::Malformed("unexpected EOF in headers".into()))?;
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+
+        let (n, v) = line
+            .split_once(':')
+            .ok_or_else(|| ParseError::Malformed(format!("invalid header line: {line:?}")))?;
+
+        if !n.is_ascii() {
+            return Err(ParseError::Malformed(format!(
+                "non-ascii header name: {n:?}"
+            )));
+        }
+        let name_norm = n.trim().to_ascii_lowercase();
+        let value = v.trim().to_string();
+
+        match name_norm.as_str() {
+            "domain" => {
+                if domain.is_some() {
+                    return Err(ParseError::Malformed("duplicate Domain header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Domain value".into()));
+                }
+                domain = Some(value);
+            }
+            "selector" => {
+                if selector.is_some() {
+                    return Err(ParseError::Malformed("duplicate Selector header".into()));
+                }
+                if value.is_empty() {
+                    return Err(ParseError::Malformed("empty Selector value".into()));
+                }
+                selector = Some(value);
+            }
+            "content-length" => {
+                if content_length.is_some() {
+                    return Err(ParseError::Malformed(
+                        "duplicate Content-Length header".into(),
+                    ));
+                }
+                let n: usize = value.parse().map_err(|_| {
+                    ParseError::Malformed(format!("non-integer Content-Length: {value:?}"))
+                })?;
+                if n != 0 {
+                    return Err(ParseError::Malformed(format!(
+                        "DOMAIN-ADD must have Content-Length: 0, got {n}"
+                    )));
+                }
+                content_length = Some(n);
+            }
+            _ => {
+                // Unknown headers ignored.
+            }
+        }
+    }
+
+    let domain =
+        domain.ok_or_else(|| ParseError::Malformed("missing required header: Domain".into()))?;
+    let _ = content_length;
+    Ok(DomainAddRequest { domain, selector })
 }
 
 async fn parse_hook_create_headers_and_body<R>(
@@ -1492,6 +1625,40 @@ where
     Ok(())
 }
 
+/// Write an `AIMX/1 DOMAIN-LIST` request frame. Bare verb line plus a
+/// single blank separator — no headers, no body. Mirrors
+/// `write_mailbox_list_request` / `write_hook_list_request`.
+pub async fn write_domain_list_request<W>(writer: &mut W) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(b"AIMX/1 DOMAIN-LIST\n\n").await?;
+    writer.flush().await?;
+    Ok(())
+}
+
+/// Write an `AIMX/1 DOMAIN-ADD` request frame. `Domain:` is required;
+/// `Selector:` is emitted only when set.
+pub async fn write_domain_add_request<W>(
+    writer: &mut W,
+    request: &DomainAddRequest,
+) -> Result<(), std::io::Error>
+where
+    W: AsyncWrite + Unpin,
+{
+    let mut header = format!(
+        "AIMX/1 DOMAIN-ADD\nDomain: {}\n",
+        sanitize_inline(&request.domain),
+    );
+    if let Some(s) = &request.selector {
+        header.push_str(&format!("Selector: {}\n", sanitize_inline(s)));
+    }
+    header.push_str("Content-Length: 0\n\n");
+    writer.write_all(header.as_bytes()).await?;
+    writer.flush().await?;
+    Ok(())
+}
+
 /// Strip CR/LF from a single-line wire field. Callers must never emit bare
 /// LF inside a reason or message-ID or the framer ambiguates the next line.
 fn sanitize_inline(s: &str) -> String {
@@ -1537,6 +1704,96 @@ mod mailbox_list_codec_tests {
     #[tokio::test]
     async fn mailbox_list_rejects_content_length_header() {
         let frame = b"AIMX/1 MAILBOX-LIST\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(_)) => {}
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a `DOMAIN-LIST` frame: writer emits the bare verb +
+    /// blank separator, parser decodes it as `Request::DomainList`.
+    #[tokio::test]
+    async fn round_trip_domain_list_request() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_domain_list_request(&mut buf).await.unwrap();
+        assert_eq!(buf, b"AIMX/1 DOMAIN-LIST\n\n");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let req = parse_request(&mut reader).await.unwrap();
+        assert_eq!(req, Request::DomainList);
+    }
+
+    /// Any header on `DOMAIN-LIST` is a parse error. Same rationale as
+    /// `MAILBOX-LIST` / `HOOK-LIST`: the caller is identified via
+    /// `SO_PEERCRED`, so a stray header could only confuse a future
+    /// implementation.
+    #[tokio::test]
+    async fn domain_list_rejects_any_header() {
+        let frame = b"AIMX/1 DOMAIN-LIST\nDomain: a.com\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("DOMAIN-LIST"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// Round-trip a `DOMAIN-ADD` frame without selector: the parser
+    /// decodes back the same struct.
+    #[tokio::test]
+    async fn round_trip_domain_add_request_without_selector() {
+        let req = DomainAddRequest {
+            domain: "b.com".into(),
+            selector: None,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_domain_add_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.starts_with("AIMX/1 DOMAIN-ADD\n"), "{text}");
+        assert!(text.contains("Domain: b.com\n"), "{text}");
+        assert!(!text.contains("Selector:"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::DomainAdd(req));
+    }
+
+    /// Round-trip a `DOMAIN-ADD` frame with a selector header.
+    #[tokio::test]
+    async fn round_trip_domain_add_request_with_selector() {
+        let req = DomainAddRequest {
+            domain: "b.com".into(),
+            selector: Some("s2025".into()),
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        write_domain_add_request(&mut buf, &req).await.unwrap();
+        let text = std::str::from_utf8(&buf).unwrap();
+        assert!(text.contains("Selector: s2025\n"), "{text}");
+
+        let mut reader = std::io::Cursor::new(buf);
+        let parsed = parse_request(&mut reader).await.unwrap();
+        assert_eq!(parsed, Request::DomainAdd(req));
+    }
+
+    /// Missing the required `Domain:` header is a parse error.
+    #[tokio::test]
+    async fn domain_add_rejects_missing_domain_header() {
+        let frame = b"AIMX/1 DOMAIN-ADD\nSelector: s\nContent-Length: 0\n\n";
+        let mut reader = std::io::Cursor::new(frame.to_vec());
+        match parse_request(&mut reader).await {
+            Err(ParseError::Malformed(reason)) => {
+                assert!(reason.contains("Domain"), "{reason}");
+            }
+            other => panic!("expected Malformed, got {other:?}"),
+        }
+    }
+
+    /// A non-zero `Content-Length:` on DOMAIN-ADD is a parse error.
+    #[tokio::test]
+    async fn domain_add_rejects_nonzero_content_length() {
+        let frame = b"AIMX/1 DOMAIN-ADD\nDomain: b.com\nContent-Length: 5\n\n";
         let mut reader = std::io::Cursor::new(frame.to_vec());
         match parse_request(&mut reader).await {
             Err(ParseError::Malformed(_)) => {}
