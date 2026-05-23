@@ -374,12 +374,10 @@ impl SmtpSession {
             return "501 Syntax: RCPT TO:<address>\r\n".to_string();
         }
         let config = self.params.config_handle.load();
-        if !recipient_domain_matches(&addr, config.default_domain()) {
+        if !recipient_domain_matches_any(&addr, &config.domains) {
             eprintln!(
-                "[{}] RCPT rejected (relay): recipient={} configured_domain={}",
-                self.params.peer_addr,
-                addr,
-                config.default_domain()
+                "[{}] RCPT rejected (relay): recipient={} configured_domains={:?}",
+                self.params.peer_addr, addr, config.domains
             );
             return "550 5.7.1 relay not permitted\r\n".to_string();
         }
@@ -686,14 +684,23 @@ fn extract_angle_addr(s: &str) -> String {
     s.to_string()
 }
 
-fn recipient_domain_matches(addr: &str, configured_domain: &str) -> bool {
+/// True when `addr`'s domain matches any entry in `domains`
+/// (case-insensitive). Generalises the legacy single-domain helper to
+/// the multi-domain layout — the SMTP RCPT TO handler accepts mail for
+/// any configured domain on the same listener.
+fn recipient_domain_matches_any(addr: &str, domains: &[String]) -> bool {
     let Some((_, domain)) = addr.rsplit_once('@') else {
         return false;
     };
     if domain.is_empty() {
         return false;
     }
-    domain.eq_ignore_ascii_case(configured_domain)
+    domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+}
+
+#[cfg(test)]
+fn recipient_domain_matches(addr: &str, configured_domain: &str) -> bool {
+    recipient_domain_matches_any(addr, std::slice::from_ref(&configured_domain.to_string()))
 }
 
 #[cfg(test)]
@@ -777,5 +784,33 @@ mod unit_tests {
             "\"weird@name\"@test.local",
             "test.local"
         ));
+    }
+
+    // --- Multi-domain: recipient_domain_matches_any ---
+
+    #[test]
+    fn recipient_domain_matches_any_accepts_any_configured_domain() {
+        let domains = vec!["a.com".to_string(), "b.com".to_string()];
+        assert!(recipient_domain_matches_any("alice@a.com", &domains));
+        assert!(recipient_domain_matches_any("bob@b.com", &domains));
+    }
+
+    #[test]
+    fn recipient_domain_matches_any_rejects_unconfigured_domain() {
+        let domains = vec!["a.com".to_string(), "b.com".to_string()];
+        assert!(!recipient_domain_matches_any("alice@c.com", &domains));
+    }
+
+    #[test]
+    fn recipient_domain_matches_any_case_insensitive() {
+        let domains = vec!["a.com".to_string()];
+        assert!(recipient_domain_matches_any("alice@A.COM", &domains));
+        assert!(recipient_domain_matches_any("ALICE@a.com", &domains));
+    }
+
+    #[test]
+    fn recipient_domain_matches_any_empty_domains_rejects_all() {
+        let domains: Vec<String> = vec![];
+        assert!(!recipient_domain_matches_any("alice@a.com", &domains));
     }
 }

@@ -281,6 +281,18 @@ pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
 
     let mut set: BTreeSet<String> = config.mailboxes.keys().cloned().collect();
 
+    // On-disk dir names are the per-mailbox local-part (e.g. `alice`)
+    // even on multi-domain installs where the in-memory map is keyed by
+    // FQDN (`alice@a.com`). Skip on-disk entries whose local-part
+    // already corresponds to an in-memory mailbox so the listing isn't
+    // duplicated. Map every in-memory mailbox to its on-disk dir name
+    // (the local-part) via `mailbox_storage_dir_name`.
+    let covered_dirnames: std::collections::HashSet<String> = config
+        .mailboxes
+        .values()
+        .map(crate::storage::mailbox_dir_name)
+        .collect();
+
     for root in config.storage_roots() {
         let inbox_root = root.join("inbox");
         let Ok(entries) = std::fs::read_dir(&inbox_root) else {
@@ -290,6 +302,9 @@ pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
             if entry.file_type().is_ok_and(|t| t.is_dir())
                 && let Some(name) = entry.file_name().to_str()
             {
+                if covered_dirnames.contains(name) {
+                    continue;
+                }
                 set.insert(name.to_string());
             }
         }
@@ -644,15 +659,16 @@ pub(crate) fn build_show_lines(
     config: &Config,
     name: &str,
 ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mb = config
-        .mailboxes
-        .get(name)
-        .ok_or_else(|| -> Box<dyn std::error::Error> {
-            format!("Mailbox '{name}' does not exist").into()
-        })?;
+    // Multi-domain: accept either FQDN keys or bare local-parts.
+    let (resolved_name, mb) =
+        config
+            .resolve_mailbox_by_name(name)
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("Mailbox '{name}' does not exist").into()
+            })?;
 
-    let inbox_dir = config.inbox_dir(name);
-    let sent_dir = config.sent_dir(name);
+    let inbox_dir = config.inbox_dir(resolved_name);
+    let sent_dir = config.sent_dir(resolved_name);
     let (inbox_total, inbox_unread) = count_with_unread(&inbox_dir);
     let (sent_total, _sent_unread) = count_with_unread(&sent_dir);
 

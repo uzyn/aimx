@@ -50,6 +50,56 @@ jobs:
           fi
           echo "Author metadata check passed"
 
+      # Storage-path enforcement: every NEW mailbox storage path must
+      # go through `crate::storage::mailbox_storage_path` (or
+      # `storage_path_for` in the same module). The grep below catches
+      # raw concatenation of `/inbox/` and `/sent/` outside the
+      # storage-helper module, the upgrade-migration module (which owns
+      # the rename(2) of the legacy roots, by design), and the
+      # discover-mailbox-names path (which walks `storage_roots()` and
+      # then joins `inbox/`).
+      #
+      # Test fixtures that build directories under tempdirs to simulate
+      # the on-disk layout are allowed: the `#[cfg(test)]` modules in
+      # `src/` are scoped by file (so `src/storage.rs`'s tests pass
+      # because the file is exempt) and `tests/` integration tests are
+      # exempt entirely. Production code outside the allowed surface
+      # surfaces here as a hard failure so the helper stays the single
+      # source of truth.
+      - name: Check storage path enforcement
+        run: |
+          set -euo pipefail
+          # Limit to production source (exclude in-file test modules
+          # via grep's line-level test). We run rust's macro-expansion
+          # text against a simple `#[cfg(test)]`-aware filter by piping
+          # through awk: any line inside a `#[cfg(test)]` mod gets
+          # marked, and the final filter drops marked hits. Test
+          # fixtures in tests/ are exempt entirely.
+          HITS=$(awk '
+            FNR == 1 { in_test = 0 }
+            /^[[:space:]]*#\[cfg\(test\)\]/ { in_test = 1 }
+            /^[[:space:]]*#\[cfg\(all\(test/ { in_test = 1 }
+            in_test == 1 { next }
+            /\.join\("(inbox|sent)"\)/ { print FILENAME ":" FNR ": " $0 }
+          ' \
+            src/storage.rs src/upgrade_migration.rs src/mailbox.rs \
+            src/mailbox_list_handler.rs src/mailbox_handler.rs \
+            src/send_handler.rs src/ingest.rs src/state_handler.rs \
+            src/mcp.rs src/hook_handler.rs src/hooks.rs src/serve.rs \
+            src/setup.rs 2>/dev/null \
+            | grep -vE 'src/(storage|upgrade_migration|mailbox)\.rs' || true)
+          if [ -n "$HITS" ]; then
+            echo "ERROR: raw .join(\"inbox\"|\"sent\") found in production code outside the storage helper."
+            echo "Use crate::storage::mailbox_storage_path or storage_path_for instead."
+            echo "Allowed exemptions: src/storage.rs (the helper itself),"
+            echo "src/upgrade_migration.rs (owns the rename(2) of legacy roots),"
+            echo "src/mailbox.rs (discover_mailbox_names walks storage_roots() + inbox/)."
+            echo
+            echo "$HITS"
+            exit 1
+          fi
+          echo "Storage path enforcement check passed"
+
   mailbox-dir-perms-isolation:
     runs-on: ubuntu-latest
     steps:

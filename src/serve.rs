@@ -523,6 +523,44 @@ async fn run_upgrade_migration_at_startup(
     }
 }
 
+/// Mailbox-key FQDN re-key absorbed from the upgrade migration.
+///
+/// Rewrites legacy local-part-keyed mailboxes on disk to the canonical
+/// FQDN-keyed shape. Fires on the first start after an upgrade where
+/// the storage + DKIM relocation already ran but the mailbox keys on
+/// disk are still local-part shaped, and no-ops on every subsequent
+/// start (the rewrite leaves the on-disk shape canonical, so the
+/// detector sees zero legacy keys and skips the rewrite).
+///
+/// Holds `CONFIG_WRITE_LOCK` for the rewrite + Arc swap so concurrent
+/// MAILBOX-CRUD requests (none yet at startup) cannot interleave.
+async fn run_mailbox_key_rekey_at_startup(
+    config: Config,
+) -> Result<Config, Box<dyn std::error::Error>> {
+    let config_path = crate::config::config_path();
+    if !crate::upgrade_migration::config_has_legacy_mailbox_keys(&config_path) {
+        return Ok(config);
+    }
+    let _config_guard = crate::mailbox_handler::CONFIG_WRITE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let rewritten =
+        crate::upgrade_migration::rewrite_config_to_canonical_shape(&config_path, &config)
+            .map_err(|e| -> Box<dyn std::error::Error> {
+                format!(
+                    "deferred mailbox-key FQDN re-key failed: {e}; \
+             see book/multi-domain.md for manual recovery"
+                )
+                .into()
+            })?;
+    tracing::info!(
+        target: "aimx::upgrade",
+        "deferred mailbox-key FQDN re-key completed: {} mailboxes re-keyed",
+        rewritten.mailboxes.len(),
+    );
+    Ok(rewritten)
+}
+
 pub fn run(
     bind: Option<&str>,
     tls_cert: Option<&str>,
@@ -588,6 +626,13 @@ async fn run_serve(
     // restarts (gated by `<data_dir>/.layout-version`).
     let config = run_upgrade_migration_at_startup(config, Arc::clone(&mailbox_locks)).await?;
 
+    // Mailbox-key FQDN re-key absorbed from the upgrade migration:
+    // legacy local-part-keyed mailboxes on an already-migrated v2 install
+    // get rewritten to canonical `[mailboxes."<local>@<domain>"]` on
+    // first start under the multi-domain runtime data plane. Idempotent
+    // — a second start sees no legacy keys and is a no-op.
+    let config = run_mailbox_key_rekey_at_startup(config).await?;
+
     // Refresh the agent-facing README if the baked-in version differs from
     // what is on disk. Runs before any listener is bound so the file is
     // up-to-date by the time agents read it.
@@ -614,37 +659,69 @@ async fn run_serve(
         );
     }
 
-    // Load DKIM key once at startup. Every accepted UDS send reuses this
-    // in-memory key. A failure here is fatal: the daemon cannot sign
-    // outbound mail without it.
+    // Build the per-domain DKIM key map at startup. Each entry carries
+    // the per-domain DKIM private key + its resolved selector. The map
+    // is wrapped in `ArcSwap` so future DOMAIN-ADD / DOMAIN-REMOVE verbs
+    // can hot-swap an entry without restarting the daemon.
     //
-    // After the upgrade migration relocates DKIM keys into
-    // `<dkim_dir>/<default_domain>/`, the resolver below returns the
-    // per-domain path; on a never-migrated fresh install it returns the
-    // legacy `<dkim_dir>` root. The downstream `HashMap<domain, DkimKey>`
-    // refactor replaces this single-key load entirely.
-    let dkim_root_base = crate::config::dkim_dir();
-    let dkim_root = crate::upgrade_migration::resolve_active_dkim_dir(&config, &dkim_root_base);
-    let dkim_key = match dkim::load_private_key(&dkim_root) {
-        Ok(k) => Arc::new(k),
-        Err(e) => {
-            return Err(format!(
-                "Failed to load DKIM private key from {}: {e}. \
-                 `aimx serve` requires a readable DKIM private key \
-                 (generate with `aimx setup` or `aimx dkim-keygen`).",
-                dkim_root.join("private.key").display()
-            )
-            .into());
+    // A miss for the default domain is fatal (the daemon cannot sign
+    // outbound mail from the default identity without it). Misses for
+    // non-default domains log a warning and the daemon still starts —
+    // outbound from those domains fails with the canonical "no DKIM key
+    // for domain X" error until the operator runs
+    // `aimx dkim-keygen --domain <d>`.
+    let dkim_dir_root = crate::config::dkim_dir();
+    let (initial_dkim_map, dkim_reports) =
+        crate::dkim_keys::load_dkim_keys(&config, &dkim_dir_root);
+    let default_domain_lc = config.default_domain().to_ascii_lowercase();
+    if !initial_dkim_map.contains_key(&default_domain_lc) {
+        return Err(format!(
+            "Failed to load DKIM private key for default domain '{default_domain_lc}'. \
+             `aimx serve` requires a readable DKIM private key. Expected at {} \
+             (per-domain) or {} (legacy single-domain). Generate one with \
+             `aimx setup` or `aimx dkim-keygen --domain {default_domain_lc}`.",
+            dkim_dir_root
+                .join(&default_domain_lc)
+                .join("private.key")
+                .display(),
+            dkim_dir_root.join("private.key").display(),
+        )
+        .into());
+    }
+    for r in &dkim_reports {
+        if let crate::dkim_keys::LoadOutcome::MissingKey { path, error } = &r.outcome
+            && r.domain != default_domain_lc
+        {
+            eprintln!(
+                "{} no DKIM key loaded for domain '{}': {error} (expected at {}). \
+                 Outbound from this domain will fail until `aimx dkim-keygen --domain {}` runs.",
+                term::warn("Warning:"),
+                r.domain,
+                path.display(),
+                r.domain,
+            );
         }
-    };
+    }
+    let dkim_keys_map: crate::dkim_keys::SharedDkimKeyMap =
+        Arc::new(arc_swap::ArcSwap::from_pointee(initial_dkim_map));
 
-    // Compare the on-disk public key to the DNS-published `p=` value.
-    // Never fatal. DNS may not have propagated yet after a fresh setup.
+    // Compare the default-domain on-disk public key to the DNS-published
+    // `p=` value. Never fatal. DNS may not have propagated yet after a
+    // fresh setup. The check still uses the layout-aware DKIM dir
+    // resolver so an install that hasn't moved to the per-domain layout
+    // yet (rare; only fresh installs) is handled correctly.
     let resolver = HickoryDkimResolver;
     let primary_domain = config.default_domain().to_string();
-    let selector = config.default_dkim_selector().to_string();
-    let outcome = run_dkim_startup_check(&resolver, &primary_domain, &selector, &dkim_root);
-    log_dkim_startup_check(&outcome, &primary_domain, &selector);
+    let primary_selector = crate::dkim_keys::resolve_selector_for_domain(&config, &primary_domain);
+    let dkim_root_for_check =
+        crate::upgrade_migration::resolve_active_dkim_dir(&config, &dkim_dir_root);
+    let outcome = run_dkim_startup_check(
+        &resolver,
+        &primary_domain,
+        &primary_selector,
+        &dkim_root_for_check,
+    );
+    log_dkim_startup_check(&outcome, &primary_domain, &primary_selector);
 
     // Build the SendContext shared across every per-connection UDS task.
     //
@@ -676,12 +753,10 @@ async fn run_serve(
     // through this same handle so MAILBOX-CREATE/DELETE is reflected
     // everywhere at once on a successful atomic `config.toml` write.
     let data_dir = config.data_dir.clone();
-    let dkim_selector = selector.clone();
     let config_handle = ConfigHandle::new(config);
 
     let send_ctx = Arc::new(SendContext {
-        dkim_key,
-        dkim_selector,
+        dkim_keys: Arc::clone(&dkim_keys_map),
         config_handle: config_handle.clone(),
         transport,
         data_dir: data_dir.clone(),
@@ -2047,10 +2122,21 @@ mod tests {
         let dkim_tmp = tempfile::TempDir::new().unwrap();
         crate::dkim::generate_keypair(dkim_tmp.path(), false).unwrap();
         let key = crate::dkim::load_private_key(dkim_tmp.path()).unwrap();
+        let domain = handle.load().default_domain().to_string();
+        let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+            std::collections::HashMap::new();
+        map.insert(
+            domain,
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key),
+                selector: "aimx".to_string(),
+            },
+        );
+        let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+            Arc::new(arc_swap::ArcSwap::from_pointee(map));
         let transport: Arc<dyn MailTransport + Send + Sync> = Arc::new(NoopTransport);
         Arc::new(crate::send_handler::SendContext {
-            dkim_key: Arc::new(key),
-            dkim_selector: "aimx".to_string(),
+            dkim_keys,
             config_handle: handle,
             transport,
             data_dir: data_dir.to_path_buf(),
@@ -2201,9 +2287,19 @@ mod tests {
             };
             let handle_cfg = ConfigHandle::new(config);
 
+            let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+                std::collections::HashMap::new();
+            map.insert(
+                "example.com".to_string(),
+                crate::dkim_keys::DkimKeyEntry {
+                    key: Arc::new(key),
+                    selector: "aimx".to_string(),
+                },
+            );
+            let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+                Arc::new(arc_swap::ArcSwap::from_pointee(map));
             let send_ctx = Arc::new(crate::send_handler::SendContext {
-                dkim_key: Arc::new(key),
-                dkim_selector: "aimx".to_string(),
+                dkim_keys,
                 config_handle: handle_cfg.clone(),
                 transport,
                 data_dir: tmp.path().to_path_buf(),

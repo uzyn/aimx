@@ -48,7 +48,7 @@ use crate::uds_authz::Caller;
 /// from `MailboxConfig::address`, which the MCP `mailbox_create`
 /// tool reads back to surface `<name>@<domain>` to the agent without
 /// requiring a separate config-read path.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxListRow {
     pub name: String,
     pub address: Option<String>,

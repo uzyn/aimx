@@ -272,7 +272,10 @@ impl AimxMcpServer {
         let mb = if mailbox_name.is_empty() {
             None
         } else {
-            config.mailboxes.get(&mailbox_name)
+            // Multi-domain: accept either FQDN keys or bare local-parts.
+            config
+                .resolve_mailbox_by_name(&mailbox_name)
+                .map(|(_, m)| m)
         };
         crate::auth::authorize(self.caller_uid, action, mb).map_err(|e| {
             // Sprint 3 (S3-5): the MCP, CLI, and hooks surfaces all
@@ -1267,8 +1270,26 @@ fn lookup_mailbox_row(name: &str) -> Result<crate::mailbox_list_handler::Mailbox
     let json = submit_mailbox_list_via_daemon()?;
     let rows: Vec<crate::mailbox_list_handler::MailboxListRow> =
         serde_json::from_str(&json).map_err(|e| format!("Failed to parse mailbox list: {e}"))?;
-    rows.into_iter()
-        .find(|r| r.name == name)
+    // Multi-domain: agents may pass either the operator-friendly bare
+    // local-part (`"alice"`) or the canonical FQDN (`"alice@a.com"`).
+    // Match by exact key first, then fall back to "address ends in
+    // @<rest>" / "address.local_part matches name" so the bare form
+    // keeps working post-rekey.
+    rows.iter()
+        .find(|r| r.name.eq_ignore_ascii_case(name))
+        .cloned()
+        .or_else(|| {
+            // Bare-local-part / address-tail match.
+            rows.iter()
+                .find(|r| match r.address.as_deref() {
+                    Some(addr) => {
+                        let local = addr.rsplit_once('@').map(|(l, _)| l).unwrap_or(addr);
+                        local.eq_ignore_ascii_case(name) || addr.eq_ignore_ascii_case(name)
+                    }
+                    None => false,
+                })
+                .cloned()
+        })
         .ok_or_else(|| format!("Mailbox '{name}' does not exist."))
 }
 
@@ -1821,11 +1842,12 @@ fn set_read_status(
 ) -> Result<(), String> {
     validate_email_id(id)?;
 
-    if !config.mailboxes.contains_key(mailbox) {
-        return Err(format!("Mailbox '{mailbox}' does not exist."));
-    }
+    let resolved = config
+        .resolve_mailbox_by_name(mailbox)
+        .map(|(k, _)| k.to_string())
+        .ok_or_else(|| format!("Mailbox '{mailbox}' does not exist."))?;
 
-    let mailbox_dir = folder_dir(config, mailbox, folder);
+    let mailbox_dir = folder_dir(config, &resolved, folder);
     let filepath = resolve_email_path_strict(&mailbox_dir, id)
         .ok_or_else(|| format!("Email '{id}' not found in mailbox '{mailbox}'."))?;
 

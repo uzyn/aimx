@@ -224,6 +224,86 @@ impl Config {
     pub fn default_dkim_selector(&self) -> &str {
         self.dkim_selector.as_deref().unwrap_or("aimx")
     }
+
+    /// True iff `domain` matches any entry in [`Self::domains`] —
+    /// case-insensitive. Used by the SMTP RCPT TO handler to accept
+    /// any configured domain on a multi-domain install.
+    pub fn is_configured_domain(&self, domain: &str) -> bool {
+        self.domains.iter().any(|d| d.eq_ignore_ascii_case(domain))
+    }
+
+    /// Resolve an inbound recipient address (FQDN: `local@domain`) to a
+    /// configured mailbox. First tries an exact `local@domain` match
+    /// against [`Self::mailboxes`]; on miss, falls back to the per-domain
+    /// catchall `*@<domain>`. Returns the matching `(key, mailbox)` pair
+    /// where `key` is the operator-friendly key the in-memory map uses
+    /// (FQDN for canonical configs, local-part for legacy single-domain
+    /// installs).
+    ///
+    /// The recipient's domain is compared case-insensitively. Catchall
+    /// (`*@domain`) is scoped to that specific domain; a `*@a.com`
+    /// catchall never matches `rcpt@b.com`.
+    /// Resolve a mailbox by either its in-memory key (FQDN or legacy
+    /// local-part) OR by its bare local-part for the default domain.
+    /// Used by every consumer (MARK-*, MAILBOX-DELETE, hook CRUD,
+    /// MCP / CLI surface) that needs to accept the operator-friendly
+    /// short name while the in-memory map is FQDN-keyed.
+    ///
+    /// Returns the canonical key + mailbox config when found.
+    pub fn resolve_mailbox_by_name<'a>(
+        &'a self,
+        name: &str,
+    ) -> Option<(&'a str, &'a MailboxConfig)> {
+        // Exact key match (covers FQDN keys and any legacy local-part
+        // keys still in memory).
+        if let Some((k, v)) = self.mailboxes.get_key_value(name) {
+            return Some((k.as_str(), v));
+        }
+        // Bare local-part: try FQDN under default domain.
+        if !name.contains('@') && !self.domains.is_empty() {
+            let fqdn = format!("{name}@{}", self.default_domain());
+            if let Some((k, v)) = self.mailboxes.get_key_value(&fqdn) {
+                return Some((k.as_str(), v));
+            }
+        }
+        // Reserved legacy alias for the catchall: `"catchall"` maps to
+        // `*@<default_domain>` so callers that pass the historical
+        // friendly name keep working post-rekey.
+        if name == "catchall" && !self.domains.is_empty() {
+            let catchall = format!("*@{}", self.default_domain());
+            if let Some((k, v)) = self.mailboxes.get_key_value(&catchall) {
+                return Some((k.as_str(), v));
+            }
+        }
+        None
+    }
+
+    pub fn resolve_mailbox_for_rcpt<'a>(
+        &'a self,
+        rcpt: &str,
+    ) -> Option<(&'a str, &'a MailboxConfig)> {
+        let (local, domain) = rcpt.rsplit_once('@')?;
+        let local = local.trim();
+        if local.is_empty() || domain.trim().is_empty() {
+            return None;
+        }
+        let domain_lower = domain.to_ascii_lowercase();
+        // 1) Exact FQDN match against the map.
+        let fqdn = format!("{local}@{domain_lower}");
+        for (key, mb) in &self.mailboxes {
+            if mb.address.eq_ignore_ascii_case(&fqdn) && !mb.address.starts_with('*') {
+                return Some((key.as_str(), mb));
+            }
+        }
+        // 2) Per-domain catchall.
+        let catchall_addr = format!("*@{domain_lower}");
+        for (key, mb) in &self.mailboxes {
+            if mb.address.eq_ignore_ascii_case(&catchall_addr) {
+                return Some((key.as_str(), mb));
+            }
+        }
+        None
+    }
 }
 
 /// Per-domain override carried under `[domain."<name>"]` sub-tables.
@@ -1466,24 +1546,33 @@ impl Config {
 
     /// Path to a mailbox's inbox directory.
     ///
-    /// Returns `<data_dir>/<default_domain>/inbox/<name>/` when the
-    /// `.layout-version` marker is present in `data_dir` (v2 per-domain
-    /// layout, post upgrade migration), otherwise the legacy
-    /// `<data_dir>/inbox/<name>/` (single-domain v1 layout, never
-    /// migrated). A future rewire (per-domain mailbox storage helper)
-    /// replaces this branching with a single `mailbox_storage_path`
-    /// that takes the resolved mailbox directly.
+    /// Resolves through [`crate::storage::mailbox_storage_path`] when the
+    /// mailbox is configured (so per-domain installs land each mailbox
+    /// under `<data_dir>/<domain>/inbox/<local>/`), and falls back to the
+    /// default-domain root when `name` does not appear in
+    /// [`Self::mailboxes`]. The fallback is the same layout-aware
+    /// resolution that the upgrade migration ships — it covers callers
+    /// that ask about a mailbox that hasn't been registered yet (e.g.
+    /// the daemon's MAILBOX-CREATE pre-flight, or the doctor walking a
+    /// directory observed on disk but not in config).
     pub fn inbox_dir(&self, name: &str) -> PathBuf {
-        let root = self.storage_root_for_default_domain();
-        root.join("inbox").join(name)
+        self.mailbox_folder_dir(name, crate::storage::Folder::Inbox)
     }
 
-    /// Path to a mailbox's sent directory.
-    ///
-    /// Same v1/v2 layout branching as [`Self::inbox_dir`].
+    /// Path to a mailbox's sent directory. See [`Self::inbox_dir`].
     pub fn sent_dir(&self, name: &str) -> PathBuf {
-        let root = self.storage_root_for_default_domain();
-        root.join("sent").join(name)
+        self.mailbox_folder_dir(name, crate::storage::Folder::Sent)
+    }
+
+    fn mailbox_folder_dir(&self, name: &str, folder: crate::storage::Folder) -> PathBuf {
+        if let Some(mb) = self.mailboxes.get(name) {
+            return crate::storage::mailbox_storage_path(self, mb, folder);
+        }
+        // Caller asked about a name that isn't registered. Route through
+        // the shared helper so layout decisions stay in one module: the
+        // default domain is the only sensible host root here, and the
+        // dirname is the supplied `name` verbatim.
+        crate::storage::storage_path_for(self, self.default_domain(), name, folder)
     }
 
     /// Resolve the active storage root for mailboxes under the default
@@ -1492,6 +1581,12 @@ impl Config {
     /// `<data_dir>` itself. The layout is detected by the presence of
     /// the `.layout-version` marker file written by the upgrade
     /// migration.
+    ///
+    /// Per-mailbox paths go through [`crate::storage::mailbox_storage_path`];
+    /// this helper exists for callers (mostly the doctor's orphan-
+    /// storage scan and the discover-mailboxes path) that want a single
+    /// root to walk.
+    #[allow(dead_code)]
     pub fn storage_root_for_default_domain(&self) -> PathBuf {
         if self.data_dir.join(".layout-version").is_file() {
             self.data_dir.join(self.default_domain())
@@ -2558,5 +2653,83 @@ run_as = "ops"
         assert!(cfg.mailboxes.contains_key("info"));
         assert!(cfg.mailboxes.contains_key("support@mydomain.com"));
         assert_eq!(cfg.mailboxes["info"].address, "info@mydomain.com");
+    }
+
+    // --- Multi-domain: resolve_mailbox_for_rcpt + is_configured_domain ---
+
+    fn two_domain_cfg() -> Config {
+        let toml = r#"
+domains = ["a.com", "b.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+
+[mailboxes."support@b.com"]
+address = "support@b.com"
+owner = "ops"
+
+[mailboxes."*@b.com"]
+address = "*@b.com"
+owner = "aimx-catchall"
+"#;
+        toml::from_str(toml).unwrap()
+    }
+
+    #[test]
+    fn is_configured_domain_matches_any_domain_case_insensitive() {
+        let cfg = two_domain_cfg();
+        assert!(cfg.is_configured_domain("a.com"));
+        assert!(cfg.is_configured_domain("A.COM"));
+        assert!(cfg.is_configured_domain("b.com"));
+        assert!(!cfg.is_configured_domain("other.com"));
+    }
+
+    #[test]
+    fn resolve_mailbox_for_rcpt_exact_fqdn_match() {
+        let cfg = two_domain_cfg();
+        let (name, mb) = cfg.resolve_mailbox_for_rcpt("info@a.com").unwrap();
+        assert_eq!(name, "info@a.com");
+        assert_eq!(mb.address, "info@a.com");
+    }
+
+    #[test]
+    fn resolve_mailbox_for_rcpt_routes_to_per_domain_catchall() {
+        let cfg = two_domain_cfg();
+        // `random@b.com` lacks an exact match but b.com has a catchall.
+        let (name, mb) = cfg.resolve_mailbox_for_rcpt("random@b.com").unwrap();
+        assert_eq!(name, "*@b.com");
+        assert_eq!(mb.address, "*@b.com");
+    }
+
+    #[test]
+    fn resolve_mailbox_for_rcpt_no_catchall_on_other_domain() {
+        let cfg = two_domain_cfg();
+        // a.com has no catchall — a missing local-part rejects.
+        assert!(cfg.resolve_mailbox_for_rcpt("random@a.com").is_none());
+    }
+
+    #[test]
+    fn resolve_mailbox_for_rcpt_rejects_unknown_domain() {
+        let cfg = two_domain_cfg();
+        assert!(cfg.resolve_mailbox_for_rcpt("alice@other.com").is_none());
+    }
+
+    #[test]
+    fn resolve_mailbox_for_rcpt_handles_legacy_local_part_keys() {
+        // Legacy single-domain v1 config: mailbox keyed by local-part
+        // with `address = "info@x.com"`. Resolution still works
+        // because we match by `mb.address`, not by map key.
+        let toml = r#"
+domain = "x.com"
+
+[mailboxes.info]
+address = "info@x.com"
+owner = "ops"
+"#;
+        let cfg: Config = toml::from_str(toml).unwrap();
+        let (name, mb) = cfg.resolve_mailbox_for_rcpt("info@x.com").unwrap();
+        assert_eq!(name, "info");
+        assert_eq!(mb.address, "info@x.com");
     }
 }

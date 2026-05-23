@@ -41,7 +41,7 @@ pub fn run(cmd: HookCommand, config: Config) -> Result<(), Box<dyn std::error::E
 
 fn list(config: &Config, filter_mailbox: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(name) = filter_mailbox
-        && !config.mailboxes.contains_key(name)
+        && config.resolve_mailbox_by_name(name).is_none()
     {
         return Err(format!("Mailbox '{name}' does not exist").into());
     }
@@ -144,9 +144,10 @@ fn create(config: &Config, args: HookCreateArgs) -> Result<(), Box<dyn std::erro
         )
         .into());
     }
+    // Multi-domain: accept either FQDN keys or bare local-parts.
     let mb_cfg = config
-        .mailboxes
-        .get(&args.mailbox)
+        .resolve_mailbox_by_name(&args.mailbox)
+        .map(|(_, m)| m)
         .ok_or_else(|| format!("Mailbox '{}' does not exist", args.mailbox))?;
 
     // Pre-flight authz so non-owners get a precise error before any
@@ -403,9 +404,14 @@ fn apply_create_direct(
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = crate::config::config_path();
     let mut cfg = config.clone();
+    // Multi-domain: accept either FQDN keys or bare local-parts.
+    let resolved = cfg
+        .resolve_mailbox_by_name(mailbox)
+        .map(|(k, _)| k.to_string())
+        .ok_or_else(|| format!("Mailbox '{mailbox}' does not exist"))?;
     let mb = cfg
         .mailboxes
-        .get_mut(mailbox)
+        .get_mut(&resolved)
         .ok_or_else(|| format!("Mailbox '{mailbox}' does not exist"))?;
     mb.hooks.push(hook);
     validate_hooks(&cfg)?;

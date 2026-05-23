@@ -207,8 +207,11 @@ pub async fn handle_mailbox_crud(
         // "mailbox exists but caller doesn't own it" paths must
         // produce a string-identical wire response so the daemon
         // doesn't leak whether the mailbox exists.
+        //
+        // Multi-domain: accept either the legacy local-part key or the
+        // canonical FQDN key by routing through `resolve_mailbox_by_name`.
         let current = mb_ctx.config_handle.load();
-        let mb_cfg = current.mailboxes.get(&req.name);
+        let mb_cfg = current.resolve_mailbox_by_name(&req.name).map(|(_, m)| m);
         if let Err(e) = authorize(
             caller.uid,
             Action::MailboxDelete {
@@ -323,7 +326,10 @@ fn handle_create(
 ) -> AckResponse {
     let current = mb_ctx.config_handle.load();
 
-    if current.mailboxes.contains_key(name) {
+    // Multi-domain: a "duplicate" check has to look up by either the
+    // bare local-part the caller passed or the canonical FQDN key the
+    // in-memory map uses. The resolver handles both.
+    if current.resolve_mailbox_by_name(name).is_some() {
         return AckResponse::Err {
             code: ErrCode::Mailbox,
             reason: format!("mailbox '{name}' already exists"),
@@ -509,20 +515,24 @@ fn handle_delete(
     }
 
     let current = mb_ctx.config_handle.load();
-    if !current.mailboxes.contains_key(name) {
-        return AckResponse::Err {
-            code: ErrCode::Mailbox,
-            reason: no_such_mailbox_reason(name),
-        };
-    }
+    // Multi-domain: accept either FQDN keys or bare local-parts.
+    let resolved_key = match current.resolve_mailbox_by_name(name) {
+        Some((k, _)) => k.to_string(),
+        None => {
+            return AckResponse::Err {
+                code: ErrCode::Mailbox,
+                reason: no_such_mailbox_reason(name),
+            };
+        }
+    };
 
     // Route through the layout-aware `Config::inbox_dir` / `sent_dir`
     // helpers so a post-migration daemon wipes the per-domain tree
-    // (`<data_dir>/<default_domain>/{inbox|sent}/<name>/`) rather than
+    // (`<data_dir>/<from-domain>/{inbox|sent}/<local>/`) rather than
     // the legacy `<data_dir>/{inbox|sent}/<name>/` location that the
     // migration has already moved away from.
-    let inbox = current.inbox_dir(name);
-    let sent = current.sent_dir(name);
+    let inbox = current.inbox_dir(&resolved_key);
+    let sent = current.sent_dir(&resolved_key);
     drop(current);
 
     // `force=true`: wipe inbox + sent contents under the same per-mailbox
@@ -557,7 +567,7 @@ fn handle_delete(
     let current = mb_ctx.config_handle.load();
 
     let mut new_config: Config = (*current).clone();
-    new_config.mailboxes.remove(name);
+    new_config.mailboxes.remove(&resolved_key);
 
     if let Err(e) = write_config_atomic(&mb_ctx.config_path, &new_config) {
         return AckResponse::Err {
