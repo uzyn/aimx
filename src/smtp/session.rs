@@ -374,10 +374,12 @@ impl SmtpSession {
             return "501 Syntax: RCPT TO:<address>\r\n".to_string();
         }
         let config = self.params.config_handle.load();
-        if !recipient_domain_matches(&addr, &config.domain) {
+        if !recipient_domain_matches(&addr, config.default_domain()) {
             eprintln!(
                 "[{}] RCPT rejected (relay): recipient={} configured_domain={}",
-                self.params.peer_addr, addr, config.domain
+                self.params.peer_addr,
+                addr,
+                config.default_domain()
             );
             return "550 5.7.1 relay not permitted\r\n".to_string();
         }

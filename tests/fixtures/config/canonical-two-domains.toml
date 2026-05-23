@@ -1,0 +1,17 @@
+domains = ["a.com", "b.com"]
+
+[mailboxes."*@a.com"]
+address = "*@a.com"
+owner = "aimx-catchall"
+
+[mailboxes."*@b.com"]
+address = "*@b.com"
+owner = "aimx-catchall"
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "ops"
+
+[mailboxes."support@b.com"]
+address = "support@b.com"
+owner = "ops"

@@ -404,7 +404,7 @@ mod tests {
     fn config_without_verify_address_parses() {
         let toml_str = "domain = \"test.com\"\n[mailboxes]\n";
         let config: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(config.domain, "test.com");
+        assert_eq!(config.domains, vec!["test.com".to_string()]);
     }
 
     #[test]

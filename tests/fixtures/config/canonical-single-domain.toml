@@ -1,0 +1,13 @@
+domains = ["mydomain.com"]
+
+[mailboxes."*@mydomain.com"]
+address = "*@mydomain.com"
+owner = "aimx-catchall"
+
+[mailboxes."info@mydomain.com"]
+address = "info@mydomain.com"
+owner = "ops"
+
+[mailboxes."support@mydomain.com"]
+address = "support@mydomain.com"
+owner = "ops"

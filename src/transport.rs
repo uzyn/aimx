@@ -467,11 +467,11 @@ mod tests {
 
     #[test]
     fn lettre_transport_helo_name_tracks_config_domain() {
-        // End-to-end: serve builds the transport from `config.domain`.
+        // End-to-end: serve builds the transport from the default domain.
         // The transport surfaces that value as its EHLO identity.
         use crate::config::Config;
         let cfg: Config = toml::from_str("domain = \"a.example\"\n[mailboxes]\n").unwrap();
-        let t = LettreTransport::new(false, cfg.domain.clone());
+        let t = LettreTransport::new(false, cfg.default_domain().to_string());
         assert_eq!(t.helo_name(), "a.example");
     }
 

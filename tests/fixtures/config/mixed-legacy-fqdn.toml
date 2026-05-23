@@ -1,0 +1,9 @@
+domains = ["mydomain.com"]
+
+[mailboxes.info]
+address = "info@mydomain.com"
+owner = "ops"
+
+[mailboxes."support@mydomain.com"]
+address = "support@mydomain.com"
+owner = "ops"

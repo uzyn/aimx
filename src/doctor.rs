@@ -179,10 +179,10 @@ pub fn gather_status_with_ops<S: SystemOps>(
     let dns = gather_dns_section(config, net);
 
     StatusInfo {
-        domain: config.domain.clone(),
+        domain: config.default_domain().to_string(),
         data_dir: config.data_dir.to_string_lossy().to_string(),
         config_path: crate::config::config_path().to_string_lossy().to_string(),
-        dkim_selector: config.dkim_selector.clone(),
+        dkim_selector: config.default_dkim_selector().to_string(),
         dkim_key_present,
         smtp_running,
         client_version,
@@ -214,18 +214,20 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
         None
     };
 
+    let primary_domain = config.default_domain();
+    let selector = config.default_dkim_selector();
     let results = setup::verify_all_dns(
         net,
-        &config.domain,
+        primary_domain,
         &server_ip,
         server_ipv6.as_ref(),
-        &config.dkim_selector,
+        selector,
         local_dkim_pubkey.as_deref(),
     );
 
     let server_ipv6_str = server_ipv6.map(|ip| ip.to_string());
     let mut records = setup::generate_dns_records(
-        &config.domain,
+        primary_domain,
         &server_ip.to_string(),
         server_ipv6_str.as_deref(),
         local_dkim_pubkey
@@ -233,7 +235,7 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
             .map(|p| format!("v=DKIM1; k=rsa; p={p}"))
             .unwrap_or_default()
             .as_str(),
-        &config.dkim_selector,
+        selector,
     );
 
     // Without a local DKIM public key on disk we have no authoritative value
@@ -241,7 +243,7 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
     // suppressed. The DKIM DNS check itself still runs (it just verifies the
     // record exists) and its FAIL/MISSING badge is still rendered.
     if local_dkim_pubkey.is_none() {
-        let dkim_name = format!("{}._domainkey.{}", config.dkim_selector, config.domain);
+        let dkim_name = format!("{selector}._domainkey.{primary_domain}");
         records.retain(|r| !(r.record_type == "TXT" && r.name == dkim_name));
     }
 

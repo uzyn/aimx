@@ -1,0 +1,10 @@
+domain = "mydomain.com"
+dkim_selector = "aimx"
+
+[mailboxes.catchall]
+address = "*@mydomain.com"
+owner = "aimx-catchall"
+
+[mailboxes.info]
+address = "info@mydomain.com"
+owner = "ops"

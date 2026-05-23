@@ -211,7 +211,7 @@ pub fn create_mailbox(
     }
 
     let new_mb = MailboxConfig {
-        address: format!("{name}@{}", config.domain),
+        address: format!("{name}@{}", config.default_domain()),
         owner: owner.to_string(),
         hooks: vec![],
         trust: None,
@@ -553,7 +553,7 @@ fn resolve_create_owner(
         }
         return Ok(o.to_string());
     }
-    let address = format!("{name}@{domain}", domain = config.domain);
+    let address = format!("{name}@{}", config.default_domain());
     crate::setup::prompt_mailbox_owner(&address, sys)
 }
 
@@ -1065,12 +1065,13 @@ mod tests {
             );
         }
         Config {
-            domain: "agent.example.com".into(),
+            domains: vec!["agent.example.com".into()],
             data_dir: std::path::PathBuf::from("/tmp/test"),
-            dkim_selector: "aimx".into(),
+            dkim_selector: Some("aimx".into()),
             trust: "none".into(),
             trusted_senders: vec![],
             mailboxes,
+            per_domain: std::collections::HashMap::new(),
             verify_host: None,
             enable_ipv6: false,
             signature: None,
