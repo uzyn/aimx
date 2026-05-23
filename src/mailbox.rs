@@ -194,7 +194,10 @@ pub fn create_mailbox(
 ) -> Result<(), Box<dyn std::error::Error>> {
     validate_mailbox_name(name).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    if config.mailboxes.contains_key(name) {
+    // Duplicate check has to look up by either the bare local-part the
+    // caller passed or the canonical FQDN key produced by the daemon.
+    // The resolver handles both.
+    if config.resolve_mailbox_by_name(name).is_some() {
         return Err(format!("Mailbox '{name}' already exists").into());
     }
 
@@ -210,8 +213,9 @@ pub fn create_mailbox(
         return Err(e.into());
     }
 
+    let address = format!("{name}@{}", config.default_domain());
     let new_mb = MailboxConfig {
-        address: format!("{name}@{}", config.default_domain()),
+        address: address.clone(),
         owner: owner.to_string(),
         hooks: vec![],
         trust: None,
@@ -241,8 +245,11 @@ pub fn create_mailbox(
         }
     }
 
+    // Key by the canonical FQDN so the on-disk and in-memory shape
+    // matches what the daemon's MAILBOX-CREATE path emits. Bare local-
+    // part lookups still work via `resolve_mailbox_by_name`.
     let mut config = config.clone();
-    config.mailboxes.insert(name.to_string(), new_mb);
+    config.mailboxes.insert(address, new_mb);
 
     config.save(&crate::config::config_path())?;
 
@@ -315,9 +322,10 @@ pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
 
 /// Returns true when a mailbox name appears in the config map.
 /// Useful for callers that want to mark filesystem-only mailboxes as
-/// `(unregistered)` in display output.
+/// `(unregistered)` in display output. Accepts both bare local-parts
+/// and FQDN keys.
 pub fn is_registered(config: &Config, name: &str) -> bool {
-    config.mailboxes.contains_key(name)
+    config.resolve_mailbox_by_name(name).is_some()
 }
 
 pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::error::Error>> {
@@ -325,9 +333,10 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
         return Err("Cannot delete the catchall mailbox".into());
     }
 
-    if !config.mailboxes.contains_key(name) {
-        return Err(format!("Mailbox '{name}' does not exist").into());
-    }
+    let resolved_key = match config.resolve_mailbox_by_name(name) {
+        Some((key, _)) => key.to_string(),
+        None => return Err(format!("Mailbox '{name}' does not exist").into()),
+    };
 
     // Save-then-delete ordering.
     //
@@ -341,7 +350,7 @@ pub fn delete_mailbox(config: &Config, name: &str) -> Result<(), Box<dyn std::er
     //    leftover directories, and propagate the error so the CLI exits
     //    non-zero.
     let mut new_config = config.clone();
-    new_config.mailboxes.remove(name);
+    new_config.mailboxes.remove(&resolved_key);
     new_config.save(&crate::config::config_path())?;
 
     let inbox = config.inbox_dir(name);

@@ -4508,7 +4508,10 @@ owner = "aimx-catchall"
         finalize_setup(tmp.path(), "test.example.com", "aimx", None).unwrap();
 
         let config = Config::load_resolved_ignore_warnings().unwrap();
-        assert!(config.mailboxes.contains_key("alice"));
+        // `create_mailbox` writes FQDN-keyed stanzas so the on-disk
+        // shape matches what the daemon's MAILBOX-CREATE path produces.
+        // The resolver accepts the bare local-part either way.
+        assert!(config.resolve_mailbox_by_name("alice").is_some());
         assert!(config.mailboxes.contains_key("catchall"));
     }
 

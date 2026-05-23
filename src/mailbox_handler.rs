@@ -392,16 +392,18 @@ fn handle_create(
     let mut new_config: Config = (*current).clone();
     let address = format!("{name}@{}", new_config.default_domain());
     let mb_cfg = MailboxConfig {
-        address,
+        address: address.clone(),
         owner: owner.to_string(),
         hooks: vec![],
         trust: None,
         trusted_senders: None,
         allow_root_catchall: false,
     };
-    new_config
-        .mailboxes
-        .insert(name.to_string(), mb_cfg.clone());
+    // Insert FQDN-keyed so the in-memory map matches the shape produced
+    // by the carry-over re-key on daemon load. Keying by the bare
+    // local-part here would leave `resolve_mailbox_by_name("<name>@<default>")`
+    // returning `None` until the next restart fires the carry-over.
+    new_config.mailboxes.insert(address.clone(), mb_cfg.clone());
 
     // Chown + chmod the freshly-created dirs. Mode 0o700 means only
     // the owning user (and root) can traverse; this is the isolation
@@ -780,13 +782,29 @@ mod tests {
         assert!(tmp.path().join("inbox").join("alice").is_dir());
         assert!(tmp.path().join("sent").join("alice").is_dir());
 
-        // config.toml reloads the new mailbox
+        // config.toml reloads the new mailbox under its FQDN key.
         let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
-        assert!(reloaded.mailboxes.contains_key("alice"));
-        assert_eq!(reloaded.mailboxes["alice"].address, "alice@example.com");
+        assert!(
+            reloaded.mailboxes.contains_key("alice@example.com"),
+            "new mailbox must land FQDN-keyed: {:?}",
+            reloaded.mailboxes.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            reloaded.mailboxes["alice@example.com"].address,
+            "alice@example.com"
+        );
 
-        // In-memory handle reflects the swap immediately.
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
+        // In-memory handle reflects the swap immediately, and the
+        // resolver reaches the new mailbox by both bare local-part and
+        // FQDN forms — proving the post-create state is consistent
+        // without waiting for the next daemon restart.
+        let live = mb_ctx.config_handle.load();
+        assert!(live.mailboxes.contains_key("alice@example.com"));
+        assert!(live.resolve_mailbox_by_name("alice").is_some());
+        assert!(
+            live.resolve_mailbox_by_name("alice@example.com").is_some(),
+            "FQDN lookup must succeed immediately post-create"
+        );
     }
 
     #[tokio::test]
@@ -984,8 +1002,14 @@ mod tests {
             other => panic!("expected Err(NONEMPTY), got {other:?}"),
         }
 
-        // Stanza still present
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("alice"));
+        // Stanza still present (FQDN-keyed post-create).
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("alice@example.com")
+        );
     }
 
     #[tokio::test]
@@ -1277,12 +1301,13 @@ mod tests {
             assert!(matches!(h.await.unwrap(), AckResponse::Ok));
         }
 
-        // Every stanza survives on disk.
+        // Every stanza survives on disk (FQDN-keyed post-create).
         let reloaded = Config::load_ignore_warnings(&mb_ctx.config_path).unwrap();
         for name in &names {
+            let fqdn = format!("{name}@example.com");
             assert!(
-                reloaded.mailboxes.contains_key(name),
-                "{name} missing on disk: {:?}",
+                reloaded.mailboxes.contains_key(&fqdn),
+                "{fqdn} missing on disk: {:?}",
                 reloaded.mailboxes.keys().collect::<Vec<_>>()
             );
         }
@@ -1290,9 +1315,10 @@ mod tests {
         // Every stanza survives in the live handle.
         let in_mem = mb_ctx.config_handle.load();
         for name in &names {
+            let fqdn = format!("{name}@example.com");
             assert!(
-                in_mem.mailboxes.contains_key(name),
-                "{name} missing in handle: {:?}",
+                in_mem.mailboxes.contains_key(&fqdn),
+                "{fqdn} missing in handle: {:?}",
                 in_mem.mailboxes.keys().collect::<Vec<_>>()
             );
         }
@@ -1593,9 +1619,13 @@ mod tests {
             ),
             "idempotent re-create should succeed"
         );
-        // Config stanza was still written.
+        // Config stanza was still written (FQDN-keyed).
         assert!(
-            mb_ctx.config_handle.load().mailboxes.contains_key("alice"),
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("alice@example.com"),
             "config must register the mailbox on idempotent re-create"
         );
     }
@@ -1632,9 +1662,8 @@ mod tests {
         assert!(matches!(resp, AckResponse::Ok), "{resp:?}");
 
         let cfg = mb_ctx.config_handle.load();
-        let stanza = cfg
-            .mailboxes
-            .get("x")
+        let (_, stanza) = cfg
+            .resolve_mailbox_by_name("x")
             .expect("mailbox stanza must be present after Ok");
 
         let expected_owner =
@@ -1827,15 +1856,29 @@ mod tests {
 
         let r1 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
         assert!(matches!(r1, AckResponse::Ok), "create #1: {r1:?}");
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("task42@example.com")
+        );
 
         let r2 = handle_mailbox_crud(&state_ctx, &mb_ctx, &delete_req, &caller).await;
         assert!(matches!(r2, AckResponse::Ok), "delete: {r2:?}");
-        assert!(!mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        let after_delete = mb_ctx.config_handle.load();
+        assert!(!after_delete.mailboxes.contains_key("task42"));
+        assert!(!after_delete.mailboxes.contains_key("task42@example.com"));
 
         let r3 = handle_mailbox_crud(&state_ctx, &mb_ctx, &create_req, &caller).await;
         assert!(matches!(r3, AckResponse::Ok), "create #2: {r3:?}");
-        assert!(mb_ctx.config_handle.load().mailboxes.contains_key("task42"));
+        assert!(
+            mb_ctx
+                .config_handle
+                .load()
+                .mailboxes
+                .contains_key("task42@example.com")
+        );
     }
 
     #[tokio::test]

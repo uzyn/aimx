@@ -85,10 +85,12 @@ pub struct DomainLoadReport {
 /// For each domain, the loader looks under `<dkim_dir>/<domain>/private.key`
 /// first (canonical multi-domain layout). When that file is missing the
 /// loader falls back to `<dkim_dir>/private.key` for the **default
-/// domain only** — pre-Sprint-3 fresh installs that ran `aimx setup
-/// <domain>` have the keypair at the legacy root, and the daemon
-/// continues to load it from there until the operator runs `aimx
-/// dkim-keygen --domain <d>` once that flag lands.
+/// domain only** — legacy single-key installs that ran `aimx setup
+/// <domain>` have the keypair at the un-namespaced root
+/// (`<dkim_dir>/{private,public}.key`), and the daemon continues to
+/// load it from there until the operator runs `aimx dkim-keygen
+/// --domain <d>` to migrate to the per-domain layout
+/// (`<dkim_dir>/<domain>/{private,public}.key`).
 ///
 /// Missing keys for non-default domains surface as
 /// [`LoadOutcome::MissingKey`] in the returned report; the caller logs

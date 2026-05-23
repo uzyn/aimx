@@ -659,26 +659,116 @@ fn extract_bare_local_only(value: &str) -> Option<String> {
     Some(token.to_string())
 }
 
-/// Replace the first occurrence of `From:` in the body with the new
-/// header value. Preserves the body's existing line endings. Returns
-/// `None` when the body has no recognisable `From:` line.
+/// Replace the first `From:` header in the body with `new_value`.
+/// Preserves the body's existing line endings. Returns `None` when the
+/// header block has no recognisable `From:` line.
+///
+/// The search is restricted to the header block (everything before the
+/// first blank line) so a `From:` literal in quoted / forwarded body
+/// text cannot be mistaken for the real header. Header folding (RFC
+/// 5322 §2.2.3 — continuation lines starting with whitespace) is
+/// handled: the whole logical header, including any folded continuation
+/// lines, is replaced as a unit.
 fn rewrite_from_header_in_body(body: &[u8], new_value: &str) -> Option<Vec<u8>> {
-    let text = std::str::from_utf8(body).ok()?;
-    let lower = text.to_ascii_lowercase();
-    let from_idx = lower.find("from:")?;
-    // Find the end of the header line (CR/LF terminator) so the
-    // continuation-line logic stays simple.
-    let after_from = &text[from_idx..];
-    let line_end = after_from.find('\n').unwrap_or(after_from.len());
+    // Validate UTF-8 once; the rest of the search operates on bytes
+    // so we can keep slice arithmetic exact.
+    std::str::from_utf8(body).ok()?;
+    let bytes = body;
+
+    // Walk header lines from byte 0. A header line ends at the next
+    // `\n`. A blank line (zero-width or just `\r`) terminates the
+    // header block — anything from that point on is body text and
+    // must NOT match. Continuation lines (start with SP / HT) bind to
+    // the previous logical header.
+    let mut from_start: Option<usize> = None;
+    let mut from_after: Option<usize> = None; // index of the `\n` that ends the logical header
+    let mut crlf_terminator = false;
+
+    let mut pos = 0;
+    while pos < bytes.len() {
+        let line_end = match bytes[pos..].iter().position(|b| *b == b'\n') {
+            Some(n) => pos + n,
+            None => bytes.len(),
+        };
+        let has_cr = line_end > pos && bytes[line_end - 1] == b'\r';
+        let content_end = if has_cr { line_end - 1 } else { line_end };
+        let line_bytes = &bytes[pos..content_end];
+
+        // Blank line → end of header block. Stop searching.
+        if line_bytes.is_empty() {
+            break;
+        }
+
+        // Continuation line (folded header): not eligible as a `From:`
+        // start; the outer header line carries the name.
+        let is_continuation = line_bytes[0] == b' ' || line_bytes[0] == b'\t';
+        if is_continuation {
+            pos = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            continue;
+        }
+
+        let starts_with_from = line_bytes.len() >= 5
+            && line_bytes[0].eq_ignore_ascii_case(&b'f')
+            && line_bytes[1].eq_ignore_ascii_case(&b'r')
+            && line_bytes[2].eq_ignore_ascii_case(&b'o')
+            && line_bytes[3].eq_ignore_ascii_case(&b'm')
+            && line_bytes[4] == b':';
+        if starts_with_from && from_start.is_none() {
+            from_start = Some(pos);
+            // Absorb any continuation lines into the logical header.
+            let mut log_line_end = line_end;
+            let mut log_has_cr = has_cr;
+            let mut cursor = if line_end < bytes.len() {
+                line_end + 1
+            } else {
+                line_end
+            };
+            while cursor < bytes.len() {
+                let first = bytes[cursor];
+                if first != b' ' && first != b'\t' {
+                    break;
+                }
+                let next_end = match bytes[cursor..].iter().position(|b| *b == b'\n') {
+                    Some(n) => cursor + n,
+                    None => bytes.len(),
+                };
+                let next_has_cr = next_end > cursor && bytes[next_end - 1] == b'\r';
+                log_line_end = next_end;
+                log_has_cr = next_has_cr;
+                cursor = if next_end < bytes.len() {
+                    next_end + 1
+                } else {
+                    next_end
+                };
+            }
+            from_after = Some(log_line_end);
+            crlf_terminator = log_has_cr;
+            break;
+        }
+
+        pos = if line_end < bytes.len() {
+            line_end + 1
+        } else {
+            line_end
+        };
+    }
+
+    let start = from_start?;
+    let after = from_after?;
+
+    // Rebuild: <bytes before From:> + "From: <new_value>" [+ CR] + <rest>.
+    // When the original header ran to EOF with no `\n`, `after` ==
+    // `bytes.len()` and the slice append is empty; the rewritten
+    // header inherits the same no-terminator shape.
+    let trailing = if crlf_terminator { "\r" } else { "" };
     let mut new_body = Vec::with_capacity(body.len());
-    new_body.extend_from_slice(&body[..from_idx]);
-    let trailing = if after_from[..line_end].ends_with('\r') {
-        "\r"
-    } else {
-        ""
-    };
+    new_body.extend_from_slice(&body[..start]);
     new_body.extend_from_slice(format!("From: {new_value}{trailing}").as_bytes());
-    new_body.extend_from_slice(&body[from_idx + line_end..]);
+    new_body.extend_from_slice(&body[after..]);
     Some(new_body)
 }
 
@@ -2425,6 +2515,59 @@ mod tests {
         assert!(
             body_str.contains("alice@a.com"),
             "body From: must carry the FQDN: {body_str}"
+        );
+    }
+
+    #[test]
+    fn rewrite_from_header_in_body_handles_folded_from_header() {
+        // RFC 5322 §2.2.3 header folding: the From: value runs across
+        // two physical lines. The rewrite must replace the whole
+        // logical header (folded continuation included) rather than
+        // leaving the continuation line stranded with no header name.
+        let body = b"From: Alice\r\n  <alice@a.com>\r\nTo: bob@b.com\r\n\r\nbody";
+        let out = rewrite_from_header_in_body(body, "alice@a.com")
+            .expect("rewrite must locate the folded From: header");
+        let text = String::from_utf8(out).expect("rewrite output must be UTF-8");
+        assert!(
+            text.starts_with("From: alice@a.com\r\nTo: bob@b.com"),
+            "folded From: must be collapsed to a single rewritten header: {text:?}"
+        );
+        assert!(
+            !text.contains("<alice@a.com>"),
+            "folded continuation must not survive the rewrite: {text:?}"
+        );
+        assert!(
+            text.ends_with("\r\n\r\nbody"),
+            "body must be preserved verbatim: {text:?}"
+        );
+    }
+
+    #[test]
+    fn rewrite_from_header_in_body_ignores_from_literal_in_body() {
+        // A quoted forwarded message in the body carries `From:` as
+        // ordinary text. The rewrite must restrict its search to the
+        // header block (everything before the first blank line) so
+        // the body literal cannot be mistaken for the real header.
+        let body = b"To: bob@b.com\r\nSubject: fwd\r\n\r\nFrom: ghost@nowhere\r\nhi\r\n";
+        let out = rewrite_from_header_in_body(body, "alice@a.com");
+        assert!(
+            out.is_none(),
+            "no real From: header → no rewrite; body literal must not match"
+        );
+
+        // Now confirm the dual case: a real From: header AND a body
+        // From: literal. Only the real header is rewritten.
+        let mixed = b"From: alice\r\nTo: bob@b.com\r\n\r\n> From: someone-else@elsewhere\r\nbody";
+        let out = rewrite_from_header_in_body(mixed, "alice@a.com")
+            .expect("real From: header must be located");
+        let text = String::from_utf8(out).expect("rewrite output must be UTF-8");
+        assert!(
+            text.starts_with("From: alice@a.com\r\n"),
+            "real header rewritten: {text:?}"
+        );
+        assert!(
+            text.contains("> From: someone-else@elsewhere"),
+            "body literal must be preserved verbatim: {text:?}"
         );
     }
 }

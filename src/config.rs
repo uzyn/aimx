@@ -1565,14 +1565,25 @@ impl Config {
     }
 
     fn mailbox_folder_dir(&self, name: &str, folder: crate::storage::Folder) -> PathBuf {
-        if let Some(mb) = self.mailboxes.get(name) {
+        // Prefer the resolver so callers can pass either a bare local-
+        // part or the FQDN key; both reach the same MailboxConfig.
+        if let Some((_, mb)) = self.resolve_mailbox_by_name(name) {
             return crate::storage::mailbox_storage_path(self, mb, folder);
         }
         // Caller asked about a name that isn't registered. Route through
-        // the shared helper so layout decisions stay in one module: the
-        // default domain is the only sensible host root here, and the
-        // dirname is the supplied `name` verbatim.
-        crate::storage::storage_path_for(self, self.default_domain(), name, folder)
+        // the shared helper so layout decisions stay in one module. If
+        // the supplied `name` is itself an FQDN (`local@domain`), honor
+        // that domain — this is the path the upcoming MAILBOX-CREATE
+        // expansion (cross-domain mailbox creates) will exercise. Fall
+        // back to the default domain only when no `@` is present, since
+        // a bare local-part has no other reasonable host root.
+        let (dirname, domain) = match name.rsplit_once('@') {
+            Some((local, domain)) if !local.is_empty() && !domain.is_empty() => {
+                (local, domain.to_ascii_lowercase())
+            }
+            _ => (name, self.default_domain().to_string()),
+        };
+        crate::storage::storage_path_for(self, &domain, dirname, folder)
     }
 
     /// Resolve the active storage root for mailboxes under the default

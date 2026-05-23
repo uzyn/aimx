@@ -4019,11 +4019,12 @@ fn mailbox_create_via_uds_hotswaps_config_and_routes_new_mail() {
          catchall contents = {catchall_md:?}"
     );
 
-    // config.toml on disk reflects the new mailbox stanza.
+    // config.toml on disk reflects the new mailbox stanza (FQDN-keyed
+    // so the on-disk shape matches the multi-domain in-memory shape).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.eve]"),
-        "config.toml should contain the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"eve@agent.example.com\"]"),
+        "config.toml should contain the new FQDN-keyed stanza: {config_text}"
     );
 
     stop_serve(daemon);
@@ -4127,9 +4128,9 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
         "delete must be refused with NONEMPTY error, got stderr: {stderr}"
     );
 
-    // The stanza must still be there.
+    // The stanza must still be there (FQDN-keyed post-create).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(config_text.contains("[mailboxes.qux]"));
+    assert!(config_text.contains("[mailboxes.\"qux@agent.example.com\"]"));
 
     // Remove the file and retry; delete now succeeds, stanza is gone,
     // subsequent mail addressed to qux@domain falls through to catchall.
@@ -4148,7 +4149,7 @@ fn mailbox_delete_via_uds_refuses_nonempty_and_succeeds_after_cleanup() {
 
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text.contains("[mailboxes.qux]"),
+        !config_text.contains("qux"),
         "stanza should be removed after successful delete: {config_text}"
     );
 
@@ -4231,7 +4232,7 @@ fn mailbox_delete_force_yes_wipes_contents_and_succeeds() {
     // Stanza is gone.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text.contains("[mailboxes.zed]"),
+        !config_text.contains("zed"),
         "stanza should be removed after force-delete: {config_text}"
     );
     // Inbox dir is empty (the daemon leaves the empty dir on disk per S46).
@@ -4307,9 +4308,9 @@ fn mailbox_delete_force_without_yes_prompts_and_aborts_on_n() {
         yon_inbox.join("2025-04-01-130000-keep.md").is_file(),
         "abort must leave the email on disk"
     );
-    // Stanza still present.
+    // Stanza still present (FQDN-keyed post-create).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
-    assert!(config_text.contains("[mailboxes.yon]"));
+    assert!(config_text.contains("[mailboxes.\"yon@agent.example.com\"]"));
 
     stop_serve(daemon);
 }
@@ -4403,11 +4404,13 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
         "UDS path must NOT print the restart-hint banner: {stdout}"
     );
 
-    // config.toml on disk reflects the new mailbox stanza.
+    // config.toml on disk reflects the new mailbox stanza, keyed by
+    // the canonical FQDN so the on-disk shape matches the multi-domain
+    // in-memory shape.
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.task-mb]"),
-        "config.toml should contain the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"task-mb@agent.example.com\"]"),
+        "config.toml should contain the new FQDN-keyed stanza: {config_text}"
     );
     // The owner field must be the runner's username (synthesized by
     // the daemon from SO_PEERCRED — never client-supplied).
@@ -4453,8 +4456,8 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
     // config.toml must no longer reference task-mb.
     let config_text_after = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        !config_text_after.contains("[mailboxes.task-mb]"),
-        "config.toml must no longer contain task-mb stanza: {config_text_after}"
+        !config_text_after.contains("task-mb"),
+        "config.toml must no longer reference task-mb: {config_text_after}"
     );
 
     stop_serve(daemon);
@@ -5107,12 +5110,15 @@ fn mcp_mailbox_create_against_running_daemon_succeeds_for_non_root() {
 
     // Daemon hot-swapped the config. The on-disk stanza names the
     // runner as the owner because the daemon synthesizes from
-    // SO_PEERCRED, not from any client-supplied value.
+    // SO_PEERCRED, not from any client-supplied value. The stanza is
+    // keyed by the canonical FQDN so the on-disk shape matches the
+    // multi-domain in-memory shape (no carry-over re-key needed on
+    // the next restart).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     let runner = current_username();
     assert!(
-        config_text.contains("[mailboxes.agent-mb]"),
-        "config.toml should carry the new stanza: {config_text}"
+        config_text.contains("[mailboxes.\"agent-mb@agent.example.com\"]"),
+        "config.toml should carry the new stanza FQDN-keyed: {config_text}"
     );
     assert!(
         config_text.contains(&format!("owner = \"{runner}\"")),
@@ -5540,11 +5546,11 @@ fn concurrent_mailbox_create_and_ingest_does_not_deadlock() {
     watchdog_cancel.store(true, std::sync::atomic::Ordering::Release);
     watchdog.join().unwrap();
 
-    // config.toml reflects the create.
+    // config.toml reflects the create (FQDN-keyed).
     let config_text = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
     assert!(
-        config_text.contains("[mailboxes.newton]"),
-        "mailbox create must land on disk: {config_text}"
+        config_text.contains("[mailboxes.\"newton@agent.example.com\"]"),
+        "mailbox create must land on disk FQDN-keyed: {config_text}"
     );
 
     // The message went to either newton (if create won) or catchall
