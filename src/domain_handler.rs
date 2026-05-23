@@ -356,11 +356,22 @@ pub struct DomainRemoveResponse {
     /// `outcome == Removed` AND `--force` was set; empty otherwise.
     /// Sorted for stable output.
     pub cascaded_mailboxes: Vec<String>,
-    /// `true` when the per-domain storage tree (`<data_dir>/<domain>/`)
-    /// was rmdir'd as part of the cascade. `false` for the non-force
-    /// clean-remove path (the tree never existed there to begin with
-    /// — no mailboxes on the domain — but the `rmdir` is still
-    /// attempted best-effort so an empty leftover tree is cleaned up).
+    /// `true` iff this remove operation actually deleted a non-empty
+    /// per-domain storage tree from disk (`<data_dir>/<domain>/`). The
+    /// CLI uses this to decide whether to print the "Storage tree
+    /// removed." line. False for:
+    ///
+    /// * the soft-refused `blocked_by_mailboxes` path (no cascade
+    ///   ran),
+    /// * the clean-no-blockers path when no per-domain dir existed
+    ///   beforehand (typical — no mailboxes on the domain means no
+    ///   storage tree was ever provisioned),
+    /// * `--force` cascades where the per-domain dir was absent at
+    ///   entry (degenerate, but possible if storage was hand-cleaned
+    ///   before the remove).
+    ///
+    /// True only when the handler observed an on-disk per-domain tree
+    /// at entry and successfully `rmdir`'d it.
     pub storage_tree_removed: bool,
     /// Absolute path to `<dkim_dir>/<domain>/` — preserved on disk
     /// regardless of `--force` so the operator can re-add the domain
@@ -404,6 +415,30 @@ pub enum DomainRemoveOutcome {
 /// rewrite → `ConfigHandle::store` → DKIM map hot-swap) so any other
 /// handler observes either the pre-cascade or the post-cascade state,
 /// never a half-cascaded one.
+///
+/// **Re-run recovery contract (not strict atomicity).** The cascade
+/// is *re-runnable*, not atomic in the database-transaction sense. If
+/// a per-mailbox wipe or `rmdir` fails partway through, the early
+/// return surfaces the IO error and:
+///
+/// * the per-mailbox locks and `CONFIG_WRITE_LOCK` are released
+///   (RAII drop on the held guards),
+/// * the in-memory `Config` and DKIM map have NOT been swapped yet
+///   (both stores happen after the wipe/rmdir block), so external
+///   observers (SMTP RCPT, MCP, CLI list) still see the domain and
+///   its mailboxes as configured,
+/// * on-disk state may be partially wiped (some mailboxes' inbox /
+///   sent directories empty, others still populated).
+///
+/// Recovery is to re-run `aimx domains remove <domain> --force`. The
+/// second invocation re-acquires every per-mailbox lock, re-walks the
+/// (still-configured) mailbox set, and re-applies the wipes idempotently
+/// (`wipe_mailbox_contents` tolerates already-empty / already-missing
+/// directories; `rmdir` on a missing path is treated as success-and-
+/// no-op). Nothing observes intermediate state outside the lock — a
+/// concurrent reader either sees the pre-cascade view (locks held by
+/// the first attempt) or the post-cascade view (after the second
+/// attempt completes).
 ///
 /// DKIM key files at `<dkim_dir>/<domain>/` are **never** deleted by
 /// this handler. The path is echoed back in the response so the CLI
@@ -557,6 +592,15 @@ pub async fn handle_domain_remove(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+    // Test-only injection point: between lock acquisition and the
+    // under-lock re-snapshot. Used to pin the
+    // `live_blocker_fqdns != lock_keys` conflict-detection invariant
+    // by simulating a (hypothetically) racing mailbox-set mutation
+    // without actually racing another handler. No-op in release
+    // builds.
+    #[cfg(test)]
+    test_hooks::run_after_locks_hook(mb_ctx);
+
     // Re-snapshot under the lock so the rest of the critical section
     // runs against a coherent view. A concurrent writer that landed
     // between our pre-flight snapshot and the lock acquisition is
@@ -664,6 +708,12 @@ pub async fn handle_domain_remove(
     // mailbox wipe missed something or an unmanaged file leaked in.
     // Either way, surface the failure loudly rather than silently
     // recursing.
+    //
+    // `storage_tree_removed` is only set to `true` when we observed a
+    // per-domain directory at entry AND successfully removed it. The
+    // CLI uses this flag to decide whether to print "Storage tree
+    // removed." — printing it on the clean-no-blockers path when no
+    // tree ever existed is misleading.
     let domain_root = current.data_dir.join(&domain_lc);
     let storage_tree_removed = if domain_root.is_dir() {
         // The cascade wipes both `inbox/<local>/` and `sent/<local>/`
@@ -678,7 +728,11 @@ pub async fn handle_domain_remove(
         }
         match std::fs::remove_dir(&domain_root) {
             Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            // Race against an external cleanup — the directory was
+            // there when we checked `is_dir()` but is gone now. Treat
+            // as "we did not actually do the removal" rather than
+            // claiming we did.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => {
                 return JsonAckResponse::Err {
                     code: ErrCode::Io,
@@ -694,8 +748,8 @@ pub async fn handle_domain_remove(
     } else {
         // No on-disk tree to remove — typically the non-force clean
         // path or a domain whose mailboxes were all created but never
-        // received mail.
-        true
+        // received mail. We did not delete anything from disk.
+        false
     };
 
     // Build the new in-memory Config.
@@ -848,7 +902,10 @@ pub fn run_direct_remove(
         }
         match std::fs::remove_dir(&domain_root) {
             Ok(()) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+            // Race against an external cleanup — the directory vanished
+            // between the `is_dir()` check and the `rmdir`. We did not
+            // remove it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
             Err(e) => {
                 return Err(format!(
                     "failed to remove storage tree {}: {e}",
@@ -858,7 +915,8 @@ pub fn run_direct_remove(
             }
         }
     } else {
-        true
+        // No on-disk tree to remove.
+        false
     };
 
     let mut new_config = config.clone();
@@ -879,6 +937,50 @@ pub fn run_direct_remove(
         storage_tree_removed,
         dkim_dir,
     })
+}
+
+/// Test-only injection points used by the unit tests in this module to
+/// pin invariants that are unreachable via production codepaths today.
+#[cfg(test)]
+mod test_hooks {
+    use super::MailboxContext;
+    use std::sync::Mutex;
+
+    /// Hook executed after `handle_domain_remove` has taken the
+    /// per-mailbox locks + `CONFIG_WRITE_LOCK` but before it
+    /// re-snapshots the config. Mutates the in-memory config via the
+    /// supplied `MailboxContext` so the test can drive the
+    /// `live_blocker_fqdns != lock_keys` conflict-detection branch
+    /// deterministically.
+    type Hook = Box<dyn Fn(&MailboxContext) + Send + Sync + 'static>;
+
+    static HOOK: Mutex<Option<Hook>> = Mutex::new(None);
+
+    pub(super) fn run_after_locks_hook(mb_ctx: &MailboxContext) {
+        let guard = HOOK.lock().unwrap();
+        if let Some(h) = guard.as_ref() {
+            h(mb_ctx);
+        }
+    }
+
+    /// RAII handle that uninstalls the hook on drop so tests can run
+    /// in parallel without leaking the hook across other tests in the
+    /// module.
+    pub(super) struct HookGuard;
+
+    impl Drop for HookGuard {
+        fn drop(&mut self) {
+            *HOOK.lock().unwrap() = None;
+        }
+    }
+
+    pub(super) fn install<F>(f: F) -> HookGuard
+    where
+        F: Fn(&MailboxContext) + Send + Sync + 'static,
+    {
+        *HOOK.lock().unwrap() = Some(Box::new(f));
+        HookGuard
+    }
 }
 
 #[cfg(test)]
@@ -1335,6 +1437,15 @@ mod tests {
                 assert!(parsed.blocking_mailboxes.is_empty());
                 assert!(parsed.cascaded_mailboxes.is_empty());
                 assert!(parsed.dkim_dir.ends_with("/b.com"));
+                // The per-domain storage tree never existed (no
+                // mailboxes were ever provisioned on b.com), so the
+                // response must report `storage_tree_removed = false`
+                // — printing "Storage tree removed." in this case
+                // would be misleading.
+                assert!(
+                    !parsed.storage_tree_removed,
+                    "clean-no-blockers must NOT claim a storage tree was removed when none existed",
+                );
             }
             other => panic!("expected Ok, got {other:?}"),
         }
@@ -1707,5 +1818,91 @@ mod tests {
         // Config unchanged on disk.
         let reloaded = Config::load_ignore_warnings(&config_path).unwrap();
         assert_eq!(reloaded.domains, vec!["a.com", "b.com"]);
+    }
+
+    /// Pin the `live_blocker_fqdns != lock_keys` conflict-detection
+    /// invariant. The path is unreachable via production codepaths
+    /// today because every mailbox-set mutator (`MAILBOX-CREATE`,
+    /// `MAILBOX-DELETE`, `DOMAIN-REMOVE` itself) takes the same
+    /// per-mailbox locks + `CONFIG_WRITE_LOCK` we hold here — but a
+    /// future bug that introduces drift between the canonical
+    /// pre-cascade scan and the per-mailbox lock acquisition list
+    /// would silently leak (skipping or double-touching mailboxes).
+    /// This test installs a test-only after-locks hook that injects
+    /// a new b.com mailbox into the live config snapshot AFTER the
+    /// locks have been taken — simulating exactly that drift — and
+    /// asserts the handler detects the divergence and refuses with
+    /// `ErrCode::Conflict`. Uses a serial-test-style coarse mutex to
+    /// keep the global hook race-free with respect to other tests.
+    #[tokio::test]
+    async fn live_blocker_fqdns_not_equal_lock_keys_refused_with_conflict() {
+        // Module-local async mutex to serialize the global hook
+        // across any other test that decides to install it
+        // concurrently. Use tokio's Mutex so we can hold the guard
+        // across the `.await` on `handle_domain_remove`.
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _serial = SERIAL.lock().await;
+
+        let _r = install_resolver();
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+        let (state_ctx, mb_ctx, keys) = contexts_with_config(
+            &tmp,
+            two_domain_config(tmp.path(), &["info"]), // single b.com mailbox
+        );
+
+        // Install the after-locks hook: once the handler has taken
+        // the per-mailbox locks (only `info@b.com` at this point) and
+        // the CONFIG_WRITE_LOCK, mutate the live config to insert a
+        // *new* b.com mailbox (`stranger@b.com`) that the lock-set
+        // pre-scan never saw. The under-lock re-scan must now produce
+        // a `live_blocker_fqdns` list that diverges from `lock_keys`,
+        // tripping the conflict-detection branch.
+        let _hook = test_hooks::install(move |mb_ctx| {
+            let snapshot = mb_ctx.config_handle.load();
+            let mut new_config = (*snapshot).clone();
+            new_config.mailboxes.insert(
+                "stranger@b.com".to_string(),
+                crate::config::MailboxConfig {
+                    address: "stranger@b.com".to_string(),
+                    owner: "testowner".to_string(),
+                    hooks: vec![],
+                    trust: None,
+                    trusted_senders: None,
+                    allow_root_catchall: false,
+                },
+            );
+            mb_ctx.config_handle.store(new_config);
+        });
+
+        let req = DomainRemoveRequest {
+            domain: "b.com".into(),
+            force: true,
+        };
+        let resp =
+            handle_domain_remove(&state_ctx, &mb_ctx, &keys, &req, &Caller::internal_root()).await;
+        match resp {
+            JsonAckResponse::Err { code, reason } => {
+                assert_eq!(code, ErrCode::Conflict, "reason={reason}");
+                assert!(
+                    reason.contains("changed under the cascade lock"),
+                    "expected the cascade-lock conflict reason, got: {reason}",
+                );
+            }
+            other => panic!("expected Err Conflict, got {other:?}"),
+        }
+
+        // The handler refused before touching the in-memory config /
+        // DKIM map / on-disk state. The post-hook config still carries
+        // both b.com mailboxes; the on-disk config still has b.com in
+        // `domains`.
+        let after = mb_ctx.config_handle.load();
+        assert!(
+            after.domains.contains(&"b.com".to_string()),
+            "domain must not be dropped on conflict path: {:?}",
+            after.domains,
+        );
+        assert!(after.mailboxes.contains_key("info@b.com"));
+        assert!(after.mailboxes.contains_key("stranger@b.com"));
     }
 }

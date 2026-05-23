@@ -86,14 +86,15 @@ jobs:
             src/mailbox_list_handler.rs src/mailbox_handler.rs \
             src/send_handler.rs src/ingest.rs src/state_handler.rs \
             src/mcp.rs src/hook_handler.rs src/hooks.rs src/serve.rs \
-            src/setup.rs 2>/dev/null \
-            | grep -vE 'src/(storage|upgrade_migration|mailbox)\.rs' || true)
+            src/setup.rs src/domain_handler.rs 2>/dev/null \
+            | grep -vE 'src/(storage|upgrade_migration|mailbox|domain_handler)\.rs' || true)
           if [ -n "$HITS" ]; then
             echo "ERROR: raw .join(\"inbox\"|\"sent\") found in production code outside the storage helper."
             echo "Use crate::storage::mailbox_storage_path or storage_path_for instead."
             echo "Allowed exemptions: src/storage.rs (the helper itself),"
             echo "src/upgrade_migration.rs (owns the rename(2) of legacy roots),"
-            echo "src/mailbox.rs (discover_mailbox_names walks storage_roots() + inbox/)."
+            echo "src/mailbox.rs (discover_mailbox_names walks storage_roots() + inbox/),"
+            echo "src/domain_handler.rs (cascade rmdir of per-domain inbox/ and sent/ parents)."
             echo
             echo "$HITS"
             exit 1
