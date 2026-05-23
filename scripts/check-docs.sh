@@ -68,6 +68,7 @@ ALLOWED_NON_VERBS=(
     -V
     # Documented clap aliases (src/cli.rs). Keep in sync with
     # `#[command(... alias = "...")]` attributes.
+    domain
     hook
     mailbox
     # Subcommands marked `#[command(hide = true)]` in `src/cli.rs`.
