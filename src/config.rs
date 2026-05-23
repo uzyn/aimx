@@ -200,9 +200,17 @@ pub struct Config {
 }
 
 impl Config {
-    /// Resolve the effective outbound signature. `None` falls back to
+    /// Resolve the effective outbound signature using the top-level
+    /// [`Config::signature`] field only. `None` falls back to
     /// [`DEFAULT_SIGNATURE`]; `Some(s)` is returned as-is (an empty
     /// string disables the signature).
+    ///
+    /// Per-message callers (the daemon's send handler) use
+    /// [`Self::effective_signature_for_domain`] instead so per-domain
+    /// `[domain."<d>"] signature` overrides apply. This single-domain
+    /// helper is retained for callers that don't have a domain in
+    /// hand (tests, future single-identity tooling).
+    #[allow(dead_code)]
     pub fn effective_signature(&self) -> &str {
         self.signature.as_deref().unwrap_or(DEFAULT_SIGNATURE)
     }
@@ -223,6 +231,54 @@ impl Config {
     /// callers that consume `per_domain`.
     pub fn default_dkim_selector(&self) -> &str {
         self.dkim_selector.as_deref().unwrap_or("aimx")
+    }
+
+    /// Resolve the DKIM selector for `domain`. Walks per-domain
+    /// `[domain."<d>"] dkim_selector` → top-level
+    /// [`Config::dkim_selector`] → built-in `"aimx"`.
+    ///
+    /// Domain lookup is case-insensitive against the `per_domain` map,
+    /// which is normalised to lowercase at `Config::load`.
+    pub fn dkim_selector_for_domain(&self, domain: &str) -> &str {
+        let key = domain.to_ascii_lowercase();
+        if let Some(over) = self.per_domain.get(&key)
+            && let Some(sel) = over.dkim_selector.as_deref()
+        {
+            return sel;
+        }
+        self.default_dkim_selector()
+    }
+
+    /// Resolve the outbound signature for `domain`. Walks per-domain
+    /// `[domain."<d>"] signature` → top-level [`Config::signature`].
+    /// Returns `None` when no signature is configured at either layer —
+    /// callers (`send_handler::handle_send`) fall back to
+    /// [`crate::config::DEFAULT_SIGNATURE`] via
+    /// [`Config::effective_signature`].
+    ///
+    /// Domain lookup is case-insensitive (mirrors
+    /// [`Self::dkim_selector_for_domain`]).
+    pub fn signature_for_domain(&self, domain: &str) -> Option<&str> {
+        let key = domain.to_ascii_lowercase();
+        if let Some(over) = self.per_domain.get(&key)
+            && let Some(sig) = over.signature.as_deref()
+        {
+            return Some(sig);
+        }
+        self.signature.as_deref()
+    }
+
+    /// Resolve the effective outbound signature for `domain` — the
+    /// per-message replacement for [`Self::effective_signature`].
+    /// Walks per-domain `[domain."<d>"] signature` → top-level
+    /// [`Config::signature`] → built-in [`DEFAULT_SIGNATURE`].
+    /// Returns the empty string when the operator explicitly set
+    /// `signature = ""` at either the per-domain or top-level layer
+    /// (signature disabled). Mirrors [`Self::effective_signature`] for
+    /// the multi-domain world.
+    pub fn effective_signature_for_domain(&self, domain: &str) -> &str {
+        self.signature_for_domain(domain)
+            .unwrap_or(DEFAULT_SIGNATURE)
     }
 
     /// True iff `domain` matches any entry in [`Self::domains`] —
@@ -873,20 +929,49 @@ impl MailboxConfig {
             .filter(|h| h.event == HookEvent::AfterSend)
     }
 
-    /// Resolve the effective trust policy for this mailbox, falling back
-    /// to `config.trust` when the mailbox's own `trust` is `None`.
+    /// Mailbox domain — everything after the `@` in
+    /// [`Self::address`]. The `address` field is canonical FQDN form
+    /// after `Config::load`, so this never returns an empty string on
+    /// a loaded mailbox. Used by per-domain override resolution
+    /// (`effective_trust` / `effective_trusted_senders`).
+    pub fn domain(&self) -> &str {
+        self.address.rsplit_once('@').map(|(_, d)| d).unwrap_or("")
+    }
+
+    /// Resolve the effective trust policy for this mailbox.
+    ///
+    /// Resolution order: per-mailbox override → per-domain override
+    /// (`[domain."<d>"] trust = "..."`) → global default (`Config::trust`).
+    /// Replace semantics at every layer — no merging.
     pub fn effective_trust<'a>(&'a self, config: &'a Config) -> &'a str {
-        self.trust.as_deref().unwrap_or(&config.trust)
+        if let Some(t) = self.trust.as_deref() {
+            return t;
+        }
+        if let Some(over) = config.per_domain.get(self.domain())
+            && let Some(t) = over.trust.as_deref()
+        {
+            return t;
+        }
+        &config.trust
     }
 
     /// Resolve the effective trusted-senders list for this mailbox.
-    /// Replace semantics: a `Some(vec)` on the mailbox entirely replaces
-    /// the global list, even if empty.
+    ///
+    /// Resolution order: per-mailbox override → per-domain override
+    /// (`[domain."<d>"] trusted_senders = [...]`) → global default
+    /// (`Config::trusted_senders`). Replace semantics at every layer:
+    /// a `Some(vec)` at any layer fully replaces the layers below, even
+    /// when the vec is empty. No merging.
     pub fn effective_trusted_senders<'a>(&'a self, config: &'a Config) -> &'a [String] {
-        match &self.trusted_senders {
-            Some(list) => list.as_slice(),
-            None => config.trusted_senders.as_slice(),
+        if let Some(list) = self.trusted_senders.as_deref() {
+            return list;
         }
+        if let Some(over) = config.per_domain.get(self.domain())
+            && let Some(list) = over.trusted_senders.as_deref()
+        {
+            return list;
+        }
+        config.trusted_senders.as_slice()
     }
 }
 
@@ -2742,5 +2827,387 @@ owner = "ops"
         let (name, mb) = cfg.resolve_mailbox_for_rcpt("info@x.com").unwrap();
         assert_eq!(name, "info");
         assert_eq!(mb.address, "info@x.com");
+    }
+
+    // --- Per-domain resolution: trust + trusted_senders ---
+    //
+    // Resolution order is per-mailbox → per-domain → global, replace
+    // semantics at every layer. The matrix below covers every
+    // combination of (per-mailbox set/unset, per-domain set/unset,
+    // global set/unset) for both `effective_trust` and
+    // `effective_trusted_senders`.
+
+    fn trust_matrix_config(
+        global_trust: &str,
+        global_senders: Vec<String>,
+        domain_trust: Option<&str>,
+        domain_senders: Option<Vec<String>>,
+        mailbox_trust: Option<&str>,
+        mailbox_senders: Option<Vec<String>>,
+    ) -> (Config, MailboxConfig) {
+        let mut per_domain: HashMap<String, DomainOverride> = HashMap::new();
+        if domain_trust.is_some() || domain_senders.is_some() {
+            per_domain.insert(
+                "a.com".to_string(),
+                DomainOverride {
+                    signature: None,
+                    dkim_selector: None,
+                    trust: domain_trust.map(|s| s.to_string()),
+                    trusted_senders: domain_senders,
+                },
+            );
+        }
+        let mb = MailboxConfig {
+            address: "alice@a.com".to_string(),
+            owner: "alice".to_string(),
+            hooks: vec![],
+            trust: mailbox_trust.map(|s| s.to_string()),
+            trusted_senders: mailbox_senders,
+            allow_root_catchall: false,
+        };
+        let mut mailboxes: HashMap<String, MailboxConfig> = HashMap::new();
+        mailboxes.insert("alice@a.com".to_string(), mb.clone());
+        let cfg = Config {
+            domains: vec!["a.com".to_string()],
+            data_dir: std::path::PathBuf::from("/tmp/test"),
+            dkim_selector: None,
+            trust: global_trust.to_string(),
+            trusted_senders: global_senders,
+            mailboxes,
+            per_domain,
+            verify_host: None,
+            enable_ipv6: false,
+            signature: None,
+            upgrade: None,
+        };
+        (cfg, mb)
+    }
+
+    #[test]
+    fn mailbox_domain_helper_extracts_domain_from_address() {
+        let mb = MailboxConfig {
+            address: "alice@a.com".to_string(),
+            owner: "alice".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        };
+        assert_eq!(mb.domain(), "a.com");
+    }
+
+    #[test]
+    fn effective_trust_global_only_when_nothing_else_set() {
+        let (cfg, mb) = trust_matrix_config("none", vec![], None, None, None, None);
+        assert_eq!(mb.effective_trust(&cfg), "none");
+    }
+
+    #[test]
+    fn effective_trust_per_domain_overrides_global() {
+        let (cfg, mb) = trust_matrix_config("none", vec![], Some("verified"), None, None, None);
+        assert_eq!(mb.effective_trust(&cfg), "verified");
+    }
+
+    #[test]
+    fn effective_trust_per_mailbox_overrides_per_domain() {
+        let (cfg, mb) =
+            trust_matrix_config("none", vec![], Some("verified"), None, Some("none"), None);
+        assert_eq!(mb.effective_trust(&cfg), "none");
+    }
+
+    #[test]
+    fn effective_trust_per_mailbox_overrides_global_when_no_per_domain() {
+        let (cfg, mb) = trust_matrix_config("none", vec![], None, None, Some("verified"), None);
+        assert_eq!(mb.effective_trust(&cfg), "verified");
+    }
+
+    #[test]
+    fn effective_trust_uses_global_when_per_domain_trust_absent_but_other_fields_set() {
+        // Per-domain block exists but `trust` is None — fall through to global.
+        let (cfg, mb) = trust_matrix_config(
+            "verified",
+            vec![],
+            None,
+            Some(vec!["*@partner.com".to_string()]),
+            None,
+            None,
+        );
+        assert_eq!(mb.effective_trust(&cfg), "verified");
+    }
+
+    #[test]
+    fn effective_trusted_senders_global_only_when_nothing_else_set() {
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(mb.effective_trusted_senders(&cfg), &["*@global.com"]);
+    }
+
+    #[test]
+    fn effective_trusted_senders_per_domain_replaces_global() {
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            None,
+            Some(vec!["*@domain.com".to_string()]),
+            None,
+            None,
+        );
+        assert_eq!(mb.effective_trusted_senders(&cfg), &["*@domain.com"]);
+    }
+
+    #[test]
+    fn effective_trusted_senders_per_mailbox_replaces_per_domain() {
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            None,
+            Some(vec!["*@domain.com".to_string()]),
+            None,
+            Some(vec!["*@mailbox.com".to_string()]),
+        );
+        assert_eq!(mb.effective_trusted_senders(&cfg), &["*@mailbox.com"]);
+    }
+
+    #[test]
+    fn effective_trusted_senders_per_domain_empty_vec_replaces_global() {
+        // Replace semantics: an empty Some(vec![]) at the per-domain
+        // layer fully replaces the global list (no merging).
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            None,
+            Some(vec![]),
+            None,
+            None,
+        );
+        let effective: &[String] = mb.effective_trusted_senders(&cfg);
+        assert!(effective.is_empty());
+    }
+
+    #[test]
+    fn effective_trusted_senders_per_mailbox_empty_vec_replaces_per_domain() {
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            None,
+            Some(vec!["*@domain.com".to_string()]),
+            None,
+            Some(vec![]),
+        );
+        let effective: &[String] = mb.effective_trusted_senders(&cfg);
+        assert!(effective.is_empty());
+    }
+
+    #[test]
+    fn effective_trusted_senders_uses_global_when_per_domain_senders_absent() {
+        // Per-domain block exists but `trusted_senders` is None —
+        // fall through to global.
+        let (cfg, mb) = trust_matrix_config(
+            "none",
+            vec!["*@global.com".to_string()],
+            Some("verified"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(mb.effective_trusted_senders(&cfg), &["*@global.com"]);
+    }
+
+    // --- Per-domain DKIM selector + signature resolution ---
+
+    fn cfg_with_per_domain_overrides(
+        top_level_selector: Option<&str>,
+        top_level_signature: Option<&str>,
+        per_domain: HashMap<String, DomainOverride>,
+    ) -> Config {
+        Config {
+            domains: vec!["a.com".to_string(), "b.com".to_string()],
+            data_dir: std::path::PathBuf::from("/tmp/test"),
+            dkim_selector: top_level_selector.map(|s| s.to_string()),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes: HashMap::new(),
+            per_domain,
+            verify_host: None,
+            enable_ipv6: false,
+            signature: top_level_signature.map(|s| s.to_string()),
+            upgrade: None,
+        }
+    }
+
+    #[test]
+    fn dkim_selector_for_domain_uses_built_in_default_when_nothing_set() {
+        let cfg = cfg_with_per_domain_overrides(None, None, HashMap::new());
+        assert_eq!(cfg.dkim_selector_for_domain("a.com"), "aimx");
+    }
+
+    #[test]
+    fn dkim_selector_for_domain_uses_top_level_when_no_per_domain() {
+        let cfg = cfg_with_per_domain_overrides(Some("global2025"), None, HashMap::new());
+        assert_eq!(cfg.dkim_selector_for_domain("a.com"), "global2025");
+    }
+
+    #[test]
+    fn dkim_selector_for_domain_per_domain_overrides_top_level() {
+        let mut per_domain = HashMap::new();
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                dkim_selector: Some("bdkim".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = cfg_with_per_domain_overrides(Some("global2025"), None, per_domain);
+        assert_eq!(cfg.dkim_selector_for_domain("a.com"), "global2025");
+        assert_eq!(cfg.dkim_selector_for_domain("b.com"), "bdkim");
+    }
+
+    #[test]
+    fn dkim_selector_for_domain_is_case_insensitive() {
+        let mut per_domain = HashMap::new();
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                dkim_selector: Some("bdkim".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = cfg_with_per_domain_overrides(None, None, per_domain);
+        assert_eq!(cfg.dkim_selector_for_domain("B.COM"), "bdkim");
+    }
+
+    #[test]
+    fn signature_for_domain_returns_none_when_nothing_set() {
+        let cfg = cfg_with_per_domain_overrides(None, None, HashMap::new());
+        assert_eq!(cfg.signature_for_domain("a.com"), None);
+    }
+
+    #[test]
+    fn signature_for_domain_returns_top_level_when_no_per_domain() {
+        let cfg = cfg_with_per_domain_overrides(None, Some("Sent from AIMX"), HashMap::new());
+        assert_eq!(cfg.signature_for_domain("a.com"), Some("Sent from AIMX"));
+    }
+
+    #[test]
+    fn signature_for_domain_per_domain_overrides_top_level() {
+        let mut per_domain = HashMap::new();
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                signature: Some("Sent from B Corp".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = cfg_with_per_domain_overrides(None, Some("Sent from AIMX"), per_domain);
+        assert_eq!(cfg.signature_for_domain("a.com"), Some("Sent from AIMX"));
+        assert_eq!(cfg.signature_for_domain("b.com"), Some("Sent from B Corp"));
+    }
+
+    #[test]
+    fn signature_for_domain_per_domain_empty_string_disables() {
+        // Replace semantics: an empty Some("") at the per-domain layer
+        // disables the signature (the wire_assembly treats `""` as
+        // "don't append").
+        let mut per_domain = HashMap::new();
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                signature: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        let cfg = cfg_with_per_domain_overrides(None, Some("Sent from AIMX"), per_domain);
+        assert_eq!(cfg.signature_for_domain("b.com"), Some(""));
+        // a.com falls back to top-level.
+        assert_eq!(cfg.signature_for_domain("a.com"), Some("Sent from AIMX"));
+    }
+
+    #[test]
+    fn effective_signature_for_domain_falls_back_to_default_when_unset() {
+        let cfg = cfg_with_per_domain_overrides(None, None, HashMap::new());
+        assert_eq!(
+            cfg.effective_signature_for_domain("a.com"),
+            DEFAULT_SIGNATURE
+        );
+    }
+
+    #[test]
+    fn effective_signature_for_domain_uses_per_domain_when_set() {
+        let mut per_domain = HashMap::new();
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                signature: Some("Sent from B Corp".to_string()),
+                ..Default::default()
+            },
+        );
+        let cfg = cfg_with_per_domain_overrides(None, None, per_domain);
+        assert_eq!(
+            cfg.effective_signature_for_domain("b.com"),
+            "Sent from B Corp"
+        );
+        // Unknown domain falls back to default.
+        assert_eq!(
+            cfg.effective_signature_for_domain("a.com"),
+            DEFAULT_SIGNATURE
+        );
+    }
+
+    #[test]
+    fn effective_trust_uses_correct_per_domain_for_two_domain_install() {
+        // alice@a.com and bob@b.com — each picks up its own per-domain
+        // override.
+        let mut per_domain: HashMap<String, DomainOverride> = HashMap::new();
+        per_domain.insert(
+            "a.com".to_string(),
+            DomainOverride {
+                trust: Some("verified".to_string()),
+                ..Default::default()
+            },
+        );
+        per_domain.insert(
+            "b.com".to_string(),
+            DomainOverride {
+                trust: Some("none".to_string()),
+                ..Default::default()
+            },
+        );
+        let alice = MailboxConfig {
+            address: "alice@a.com".to_string(),
+            owner: "alice".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        };
+        let bob = MailboxConfig {
+            address: "bob@b.com".to_string(),
+            owner: "bob".to_string(),
+            hooks: vec![],
+            trust: None,
+            trusted_senders: None,
+            allow_root_catchall: false,
+        };
+        let cfg = Config {
+            domains: vec!["a.com".to_string(), "b.com".to_string()],
+            data_dir: std::path::PathBuf::from("/tmp/test"),
+            dkim_selector: None,
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes: HashMap::new(),
+            per_domain,
+            verify_host: None,
+            enable_ipv6: false,
+            signature: None,
+            upgrade: None,
+        };
+        assert_eq!(alice.effective_trust(&cfg), "verified");
+        assert_eq!(bob.effective_trust(&cfg), "none");
     }
 }

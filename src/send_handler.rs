@@ -293,9 +293,16 @@ where
     // wanting the signature in the HTML view of an `--html-body` send
     // put it inside their HTML template — the daemon never modifies the
     // supplied HTML bytes.
+    // Per-domain signature resolution: `[domain."<d>"] signature` →
+    // top-level `signature` → built-in default. Computed per-message
+    // so multi-domain installs can ship different branding per domain
+    // without requiring a per-mailbox signature (out of scope for v1
+    // per PRD §11). The signature is appended to the body before
+    // DKIM signing, so the recipient's DKIM verifier sees the
+    // signed-over signature bytes.
     let body_bytes = match crate::wire_assembly::assemble_wire_message(
         &body_with_id,
-        config.effective_signature(),
+        config.effective_signature_for_domain(&sender_domain_lc),
         req.text_only,
         req.html_body.as_deref(),
     ) {
@@ -2366,6 +2373,237 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert_eq!(entries.len(), 1, "one sent file under b.com/sent/support");
+    }
+
+    /// Two-domain SendContext where each domain carries its own
+    /// `[domain."<d>"] signature` override. Used to pin per-domain
+    /// signature resolution end-to-end through `handle_send`.
+    fn two_domain_send_ctx_with_signature_overrides(
+        transport: Arc<dyn MailTransport + Send + Sync>,
+        data_dir: std::path::PathBuf,
+        top_level_signature: Option<String>,
+        a_signature: Option<String>,
+        b_signature: Option<String>,
+    ) -> SendContext {
+        use tempfile::TempDir;
+        let key_dir_a = TempDir::new().unwrap();
+        dkim::generate_keypair(key_dir_a.path(), false).unwrap();
+        let key_a = dkim::load_private_key(key_dir_a.path()).unwrap();
+
+        let key_dir_b = TempDir::new().unwrap();
+        dkim::generate_keypair(key_dir_b.path(), false).unwrap();
+        let key_b = dkim::load_private_key(key_dir_b.path()).unwrap();
+
+        let mut map: std::collections::HashMap<String, crate::dkim_keys::DkimKeyEntry> =
+            std::collections::HashMap::new();
+        map.insert(
+            "a.com".to_string(),
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key_a),
+                selector: "aimx".to_string(),
+            },
+        );
+        map.insert(
+            "b.com".to_string(),
+            crate::dkim_keys::DkimKeyEntry {
+                key: Arc::new(key_b),
+                selector: "aimx".to_string(),
+            },
+        );
+        let dkim_keys: crate::dkim_keys::SharedDkimKeyMap =
+            Arc::new(arc_swap::ArcSwap::from_pointee(map));
+
+        let mut mailboxes = std::collections::HashMap::new();
+        mailboxes.insert(
+            "info@a.com".to_string(),
+            crate::config::MailboxConfig {
+                address: "info@a.com".to_string(),
+                owner: "root".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+        mailboxes.insert(
+            "support@b.com".to_string(),
+            crate::config::MailboxConfig {
+                address: "support@b.com".to_string(),
+                owner: "root".to_string(),
+                hooks: vec![],
+                trust: None,
+                trusted_senders: None,
+                allow_root_catchall: false,
+            },
+        );
+
+        let mut per_domain: std::collections::HashMap<String, crate::config::DomainOverride> =
+            std::collections::HashMap::new();
+        if let Some(sig) = a_signature {
+            per_domain.insert(
+                "a.com".to_string(),
+                crate::config::DomainOverride {
+                    signature: Some(sig),
+                    ..Default::default()
+                },
+            );
+        }
+        if let Some(sig) = b_signature {
+            per_domain.insert(
+                "b.com".to_string(),
+                crate::config::DomainOverride {
+                    signature: Some(sig),
+                    ..Default::default()
+                },
+            );
+        }
+
+        let config = crate::config::Config {
+            domains: vec!["a.com".to_string(), "b.com".to_string()],
+            data_dir: data_dir.clone(),
+            dkim_selector: Some("aimx".to_string()),
+            trust: "none".to_string(),
+            trusted_senders: vec![],
+            mailboxes,
+            per_domain,
+            verify_host: None,
+            enable_ipv6: false,
+            signature: top_level_signature,
+            upgrade: None,
+        };
+        SendContext {
+            dkim_keys,
+            config_handle: ConfigHandle::new(config),
+            transport,
+            data_dir,
+        }
+    }
+
+    /// Per-domain signature override is applied on the outbound body
+    /// for the From: domain. Sends from a.com pick up the a.com
+    /// signature; sends from b.com pick up the b.com signature.
+    #[tokio::test]
+    async fn per_domain_signature_override_applied_for_send_domain() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx_with_signature_overrides(
+            mock.clone(),
+            data_dir.path().to_path_buf(),
+            Some("global-sig-marker".to_string()),
+            Some("a-sig-marker".to_string()),
+            Some("b-sig-marker".to_string()),
+        );
+
+        // Send from a.com → a-sig-marker present, b-sig-marker absent.
+        let req_a = SendRequest {
+            body: body("info@a.com"),
+            ..Default::default()
+        };
+        let resp_a = handle_send(req_a, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp_a, SendResponse::Ok { .. }));
+
+        // Send from b.com → b-sig-marker present, a-sig-marker absent.
+        let req_b = SendRequest {
+            body: body("support@b.com"),
+            ..Default::default()
+        };
+        let resp_b = handle_send(req_b, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp_b, SendResponse::Ok { .. }));
+
+        let captured = mock.captured.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        let a_body = String::from_utf8_lossy(&captured[0]);
+        let b_body = String::from_utf8_lossy(&captured[1]);
+
+        assert!(
+            a_body.contains("a-sig-marker"),
+            "a.com send must carry a-sig-marker: {a_body}"
+        );
+        assert!(
+            !a_body.contains("b-sig-marker"),
+            "a.com send must NOT carry b-sig-marker: {a_body}"
+        );
+        assert!(
+            !a_body.contains("global-sig-marker"),
+            "a.com per-domain override must replace global: {a_body}"
+        );
+
+        assert!(
+            b_body.contains("b-sig-marker"),
+            "b.com send must carry b-sig-marker: {b_body}"
+        );
+        assert!(
+            !b_body.contains("a-sig-marker"),
+            "b.com send must NOT carry a-sig-marker: {b_body}"
+        );
+    }
+
+    /// Per-domain signature falls through to top-level when the
+    /// per-domain block has no signature field.
+    #[tokio::test]
+    async fn per_domain_signature_falls_through_to_top_level_when_unset() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx_with_signature_overrides(
+            mock.clone(),
+            data_dir.path().to_path_buf(),
+            Some("global-sig-marker".to_string()),
+            None,
+            None,
+        );
+
+        let req = SendRequest {
+            body: body("info@a.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(
+            delivered.contains("global-sig-marker"),
+            "a.com must pick up top-level signature when no per-domain override: {delivered}"
+        );
+    }
+
+    /// Per-domain signature set to empty string disables signature
+    /// appending for that domain (replace semantics: empty Some
+    /// replaces top-level fully).
+    #[tokio::test]
+    async fn per_domain_empty_signature_disables_appending() {
+        let data_dir = tempfile::TempDir::new().unwrap();
+        let mock = Arc::new(MockTransport {
+            captured: Mutex::new(vec![]),
+            behavior: Behavior::Ok,
+        });
+        let ctx = two_domain_send_ctx_with_signature_overrides(
+            mock.clone(),
+            data_dir.path().to_path_buf(),
+            Some("global-sig-marker".to_string()),
+            None,
+            Some(String::new()),
+        );
+
+        let req = SendRequest {
+            body: body("support@b.com"),
+            ..Default::default()
+        };
+        let resp = handle_send(req, &ctx, &Caller::internal_root()).await;
+        assert!(matches!(resp, SendResponse::Ok { .. }));
+
+        let captured = mock.captured.lock().unwrap();
+        let delivered = String::from_utf8_lossy(&captured[0]);
+        assert!(
+            !delivered.contains("global-sig-marker"),
+            "b.com empty per-domain signature must disable global: {delivered}"
+        );
     }
 
     #[tokio::test]

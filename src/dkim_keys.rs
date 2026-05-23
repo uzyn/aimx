@@ -51,14 +51,12 @@ pub fn empty_shared() -> SharedDkimKeyMap {
 
 /// Resolve the per-domain DKIM selector via the documented order:
 /// per-domain override → top-level `Config.dkim_selector` → built-in
-/// `"aimx"` default.
+/// `"aimx"` default. Thin wrapper around
+/// [`Config::dkim_selector_for_domain`] returning the resolved
+/// selector as an owned `String` so the keymap loader can stash it on
+/// [`DkimKeyEntry`].
 pub fn resolve_selector_for_domain(config: &Config, domain: &str) -> String {
-    if let Some(over) = config.per_domain.get(domain)
-        && let Some(sel) = over.dkim_selector.as_deref()
-    {
-        return sel.to_string();
-    }
-    config.default_dkim_selector().to_string()
+    config.dkim_selector_for_domain(domain).to_string()
 }
 
 /// Outcome of a per-domain key load attempt. Used by the startup loader
