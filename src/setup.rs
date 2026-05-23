@@ -1096,7 +1096,7 @@ pub fn display_dns_guidance(
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DnsVerifyResult {
     Pass,
     Fail(String),

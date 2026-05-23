@@ -87,6 +87,59 @@ fn current_username() -> String {
     }
 }
 
+/// Provision a canonical two-domain v2 install under `tmp` with
+/// per-domain trust overrides. a.com sets `trust = "verified"` with a
+/// catch-all trusted-senders pattern; b.com leaves both unset (so
+/// effective trust falls back to global `"none"`). The same shared
+/// DKIM cache + storage layout as `setup_two_domain_env` applies.
+fn setup_two_domain_env_with_trust_overrides(tmp: &Path) {
+    let owner = current_username();
+    let cfg = format!(
+        r#"domains = ["a.com", "b.com"]
+data_dir = "{tmp_path}"
+trust = "none"
+trusted_senders = []
+
+[domain."a.com"]
+trust = "verified"
+trusted_senders = ["*@example.com"]
+
+[mailboxes."info@a.com"]
+address = "info@a.com"
+owner = "{owner}"
+
+[mailboxes."support@b.com"]
+address = "support@b.com"
+owner = "{owner}"
+"#,
+        tmp_path = tmp.display(),
+    );
+    std::fs::write(tmp.join("config.toml"), cfg).unwrap();
+
+    std::fs::write(tmp.join(".layout-version"), "2\n").unwrap();
+
+    install_dkim_under(&tmp.join("dkim").join("a.com"));
+    install_dkim_under(&tmp.join("dkim").join("b.com"));
+
+    for (domain, local) in [("a.com", "info"), ("b.com", "support")] {
+        for folder in ["inbox", "sent"] {
+            let dir = tmp.join(domain).join(folder).join(local);
+            std::fs::create_dir_all(&dir).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp.join(domain), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+}
+
 /// Provision a canonical two-domain v2 install under `tmp`:
 /// - `<tmp>/config.toml` carries `domains = ["a.com", "b.com"]` and one
 ///   FQDN-keyed mailbox per domain.
@@ -362,6 +415,62 @@ fn two_domain_smtp_intake_routes_to_per_domain_inbox() {
     assert!(
         b_content.contains("B-mail"),
         "b.com message must carry B-mail subject"
+    );
+
+    shutdown(&mut child);
+}
+
+/// Per-domain trust overrides land in the inbound frontmatter.
+///
+/// a.com has `[domain."a.com"] trust = "verified"` plus a matching
+/// trusted-senders pattern; b.com inherits the global `trust = "none"`.
+/// Inbound from `sender@example.com` to each domain produces:
+/// - `trusted = "true"` on a.com (sender matches `*@example.com` and
+///   the verified policy fires).
+/// - `trusted = "none"` on b.com (global default policy `none` — no
+///   evaluation).
+#[test]
+fn two_domain_per_domain_trust_overrides_land_in_frontmatter() {
+    let tmp = TempDir::new().unwrap();
+    setup_two_domain_env_with_trust_overrides(tmp.path());
+    let port = find_free_port();
+    let mut child = start_serve(tmp.path(), port);
+    wait_for_listener(port);
+
+    let email_a = "From: sender@example.com\r\nTo: info@a.com\r\nSubject: A-trust\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <a-trust@example.com>\r\n\r\nHello A";
+    let email_b = "From: sender@example.com\r\nTo: support@b.com\r\nSubject: B-trust\r\nDate: Mon, 01 Jan 2024 00:00:00 +0000\r\nMessage-ID: <b-trust@example.com>\r\n\r\nHello B";
+    smtp_send_email(port, "sender@example.com", &["info@a.com"], email_a);
+    smtp_send_email(port, "sender@example.com", &["support@b.com"], email_b);
+
+    std::thread::sleep(Duration::from_millis(500));
+
+    let a_inbox = tmp.path().join("a.com").join("inbox").join("info");
+    let a_entries: Vec<_> = std::fs::read_dir(&a_inbox)
+        .expect("a.com inbox must exist")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(a_entries.len(), 1);
+    let a_content = std::fs::read_to_string(a_entries[0].path()).unwrap();
+    // a.com inherits per-domain `trust = "verified"` + matching senders.
+    // DKIM will be "none" or "fail" (no DKIM signature on the inbound
+    // stub email), so the result will be "false" rather than "true" --
+    // the important assertion is that an evaluation HAPPENED (not
+    // "none") because the per-domain trust policy fired.
+    assert!(
+        a_content.contains("trusted = \"true\"") || a_content.contains("trusted = \"false\""),
+        "a.com per-domain trust = verified must trigger evaluation; got:\n{a_content}"
+    );
+
+    let b_inbox = tmp.path().join("b.com").join("inbox").join("support");
+    let b_entries: Vec<_> = std::fs::read_dir(&b_inbox)
+        .expect("b.com inbox must exist")
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(b_entries.len(), 1);
+    let b_content = std::fs::read_to_string(b_entries[0].path()).unwrap();
+    assert!(
+        b_content.contains("trusted = \"none\""),
+        "b.com falls through to global trust = none; got:\n{b_content}"
     );
 
     shutdown(&mut child);

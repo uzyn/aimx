@@ -76,10 +76,15 @@ fn collect_rows(config: &Config, caller_uid: u32) -> Vec<HookListRow> {
         if !is_visible_to(config, mailbox_name, caller_uid) {
             continue;
         }
+        // Multi-domain MCP convention: the `mailbox` field in tool
+        // responses is the canonical FQDN, never a bare local-part.
+        // Use `mb.address` (always FQDN form post-load) instead of
+        // the in-memory map key, which may still be a legacy
+        // bare-local-part on pre-rekey installs.
         for hook in &mb.hooks {
             rows.push(HookListRow {
                 name: effective_hook_name(hook),
-                mailbox: mailbox_name.clone(),
+                mailbox: mb.address.clone(),
                 event: hook.event,
                 cmd: hook.cmd.clone(),
                 fire_on_untrusted: hook.fire_on_untrusted,
@@ -213,8 +218,13 @@ mod tests {
             other => panic!("expected Ok, got {other:?}"),
         };
         let rows: Vec<HookListRow> = serde_json::from_slice(&body).unwrap();
+        // `mailbox` is the FQDN (canonical multi-domain return shape),
+        // not the in-memory map key.
         let mailboxes: Vec<&str> = rows.iter().map(|r| r.mailbox.as_str()).collect();
-        assert_eq!(mailboxes, vec!["alice", "alice", "bob"]);
+        assert_eq!(
+            mailboxes,
+            vec!["alice@example.com", "alice@example.com", "bob@example.com"]
+        );
     }
 
     /// A non-root caller whose uid matches `alice`'s owner sees only
@@ -235,7 +245,7 @@ mod tests {
         };
         let rows: Vec<HookListRow> = serde_json::from_slice(&body).unwrap();
         let mailboxes: Vec<&str> = rows.iter().map(|r| r.mailbox.as_str()).collect();
-        assert_eq!(mailboxes, vec!["alice", "alice"]);
+        assert_eq!(mailboxes, vec!["alice@example.com", "alice@example.com"]);
         // Sorted by (mailbox, event, name) — after_send comes before
         // on_receive lexicographically.
         assert_eq!(rows[0].event, HookEvent::AfterSend);
@@ -281,7 +291,8 @@ mod tests {
         };
         let rows: Vec<HookListRow> = serde_json::from_slice(&body).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].mailbox, "bob");
+        // FQDN echo (canonical multi-domain return shape).
+        assert_eq!(rows[0].mailbox, "bob@example.com");
         assert_eq!(rows[0].name, "b-recv");
     }
 
