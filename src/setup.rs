@@ -2809,16 +2809,16 @@ pub(crate) mod tests {
     use std::collections::HashMap;
     use tempfile::TempDir;
 
-    struct MockNetworkOps {
-        outbound_port25: bool,
-        inbound_port25: bool,
-        server_ipv4: Option<Ipv4Addr>,
-        server_ipv6: Option<Ipv6Addr>,
-        mx_records: HashMap<String, Vec<String>>,
-        a_records: HashMap<String, Vec<IpAddr>>,
-        aaaa_records: HashMap<String, Vec<IpAddr>>,
-        txt_records: HashMap<String, Vec<String>>,
-        get_server_ips_calls: std::cell::Cell<u32>,
+    pub(crate) struct MockNetworkOps {
+        pub(crate) outbound_port25: bool,
+        pub(crate) inbound_port25: bool,
+        pub(crate) server_ipv4: Option<Ipv4Addr>,
+        pub(crate) server_ipv6: Option<Ipv6Addr>,
+        pub(crate) mx_records: HashMap<String, Vec<String>>,
+        pub(crate) a_records: HashMap<String, Vec<IpAddr>>,
+        pub(crate) aaaa_records: HashMap<String, Vec<IpAddr>>,
+        pub(crate) txt_records: HashMap<String, Vec<String>>,
+        pub(crate) get_server_ips_calls: std::cell::Cell<u32>,
     }
 
     impl Default for MockNetworkOps {

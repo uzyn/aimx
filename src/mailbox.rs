@@ -264,18 +264,28 @@ pub fn list_mailboxes(config: &Config) -> Vec<(String, usize, usize)> {
 }
 
 /// Union of (a) mailboxes registered in `config.mailboxes` and (b)
-/// directories under `<data_dir>/inbox/`. Operators who restore an inbox
-/// dir out-of-band, or unregister a mailbox while keeping its messages
-/// on disk, still see the directory listed (the CLI/MCP can surface
-/// unregistered ones with a marker if needed). The catchall is always
-/// kept in config so it is always surfaced.
+/// directories under each per-domain `inbox/` root. Operators who
+/// restore an inbox dir out-of-band, or unregister a mailbox while
+/// keeping its messages on disk, still see the directory listed (the
+/// CLI/MCP can surface unregistered ones with a marker if needed).
+/// The catchall is always kept in config so it is always surfaced.
+///
+/// On the v2 (post-migration) layout this iterates
+/// `<data_dir>/<domain>/inbox/` for every domain in `config.domains`
+/// and aggregates the entries. On the v1 (pre-migration) layout it
+/// reads the legacy `<data_dir>/inbox/` root. `Config::storage_roots`
+/// owns the layout-aware decision; per-domain roots that have not
+/// been provisioned yet (e.g. a freshly added domain) are skipped.
 pub fn discover_mailbox_names(config: &Config) -> Vec<String> {
     use std::collections::BTreeSet;
 
     let mut set: BTreeSet<String> = config.mailboxes.keys().cloned().collect();
 
-    let inbox_root = config.data_dir.join("inbox");
-    if let Ok(entries) = std::fs::read_dir(&inbox_root) {
+    for root in config.storage_roots() {
+        let inbox_root = root.join("inbox");
+        let Ok(entries) = std::fs::read_dir(&inbox_root) else {
+            continue;
+        };
         for entry in entries.filter_map(|e| e.ok()) {
             if entry.file_type().is_ok_and(|t| t.is_dir())
                 && let Some(name) = entry.file_name().to_str()
@@ -1104,5 +1114,77 @@ mod tests {
         let cfg = config_with_owners(&[("admin", "root")]);
         // Caller is non-root; root-owned mailbox doesn't match.
         assert!(!caller_owns(&cfg, "admin", 1000));
+    }
+
+    /// On the v2 layout, `discover_mailbox_names` walks
+    /// `<data_dir>/<domain>/inbox/` for every configured domain and
+    /// aggregates the entries. Filesystem-only mailboxes — directories
+    /// present on disk but absent from `config.mailboxes` — must still
+    /// surface so operators can see orphaned storage.
+    #[test]
+    fn discover_aggregates_per_domain_inbox_dirs_on_v2_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        // v2 marker → `storage_roots` returns per-domain roots.
+        std::fs::write(data_dir.join(".layout-version"), "2\n").unwrap();
+
+        // Two domains, each with one on-disk-only mailbox.
+        for (domain, local) in [("agent.example.com", "ops"), ("two.example.com", "billing")] {
+            std::fs::create_dir_all(data_dir.join(domain).join("inbox").join(local)).unwrap();
+        }
+
+        let mut cfg = config_with_owners(&[("alice", "root")]);
+        cfg.data_dir = data_dir.clone();
+        cfg.domains = vec!["agent.example.com".into(), "two.example.com".into()];
+
+        let names = discover_mailbox_names(&cfg);
+        // From config:
+        assert!(names.contains(&"alice".to_string()), "{names:?}");
+        // From per-domain inbox dirs:
+        assert!(names.contains(&"ops".to_string()), "{names:?}");
+        assert!(names.contains(&"billing".to_string()), "{names:?}");
+    }
+
+    /// Pre-migration installs (no `.layout-version` marker) still
+    /// scan the legacy `<data_dir>/inbox/` root. Regression coverage
+    /// for the v1 fallback path.
+    #[test]
+    fn discover_falls_back_to_legacy_root_on_v1_layout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        // No marker: v1 layout.
+        std::fs::create_dir_all(data_dir.join("inbox").join("legacy_only")).unwrap();
+
+        let mut cfg = config_with_owners(&[]);
+        cfg.data_dir = data_dir;
+
+        let names = discover_mailbox_names(&cfg);
+        assert!(names.contains(&"legacy_only".to_string()), "{names:?}");
+    }
+
+    /// A configured domain whose per-domain inbox dir does not exist
+    /// yet (e.g. freshly added) must not crash the scan — the
+    /// `read_dir` error path silently skips it.
+    #[test]
+    fn discover_skips_missing_per_domain_inbox_dirs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+
+        std::fs::write(data_dir.join(".layout-version"), "2\n").unwrap();
+        // Provision only one of two domains.
+        std::fs::create_dir_all(data_dir.join("agent.example.com").join("inbox").join("ops"))
+            .unwrap();
+
+        let mut cfg = config_with_owners(&[]);
+        cfg.data_dir = data_dir;
+        cfg.domains = vec![
+            "agent.example.com".into(),
+            "unprovisioned.example.com".into(),
+        ];
+
+        let names = discover_mailbox_names(&cfg);
+        assert!(names.contains(&"ops".to_string()), "{names:?}");
     }
 }

@@ -1499,6 +1499,26 @@ impl Config {
             self.data_dir.clone()
         }
     }
+
+    /// Active per-domain storage roots used by scans that enumerate
+    /// mailbox directories on disk (`discover_mailbox_names`, the
+    /// `aimx doctor` orphan-storage finding).
+    ///
+    /// On the v2 layout (the `.layout-version` marker is present) this
+    /// returns one entry per configured domain pointing at
+    /// `<data_dir>/<domain>/`. On v1 (no marker) it returns a single
+    /// entry pointing at `<data_dir>/` — the legacy single-domain
+    /// layout has no per-domain split on disk.
+    ///
+    /// Callers join `inbox/` or `sent/` onto each root and scan their
+    /// directory entries.
+    pub fn storage_roots(&self) -> Vec<PathBuf> {
+        if self.data_dir.join(".layout-version").is_file() {
+            self.domains.iter().map(|d| self.data_dir.join(d)).collect()
+        } else {
+            vec![self.data_dir.clone()]
+        }
+    }
 }
 
 /// Shared, swappable handle to the daemon's in-memory `Config`.
