@@ -153,8 +153,11 @@ pub struct Config {
 
     /// Mailboxes keyed by full address (FQDN), e.g. `"info@a.com"`. Legacy
     /// local-part-keyed mailboxes (`[mailboxes.info]`) are accepted on
-    /// read and normalized to `<local>@<domains[0]>` in the in-memory
-    /// `Config`; the canonical serialized shape is FQDN-keyed.
+    /// read and preserved as the operator-friendly key in the in-memory
+    /// map; only the `address` field is validated against `domains`. The
+    /// canonical serialized shape on rewrite is FQDN-keyed, and on-disk
+    /// re-keying of legacy installs is performed by the upgrade
+    /// migration on first daemon start — not during config load.
     #[serde(default)]
     pub mailboxes: HashMap<String, MailboxConfig>,
 
@@ -335,10 +338,12 @@ impl Config {
     /// - lowercases + RFC 1035-validates each domain;
     /// - rejects empty `domains`, duplicates (case-insensitive), and
     ///   syntactically invalid entries;
-    /// - normalizes legacy local-part mailbox keys to FQDN against
-    ///   `domains[0]`;
-    /// - enforces the key/`address` invariant and the
-    ///   address-domain-in-`domains` invariant;
+    /// - preserves legacy local-part mailbox keys as-is in the in-memory
+    ///   map (on-disk re-keying to FQDN is handled later by the upgrade
+    ///   migration, not here);
+    /// - enforces the key/`address` invariant for FQDN-keyed mailboxes
+    ///   and the address-domain-in-`domains` invariant for every
+    ///   mailbox;
     /// - rejects dangling `[domain."<name>"]` sub-tables whose key isn't
     ///   in `domains`.
     ///
