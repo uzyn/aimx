@@ -1115,6 +1115,30 @@ async fn handle_uds_connection_with_timeout(
                 Reply::Json(crate::hook_list_handler::handle_hook_list(&state_ctx, &caller).await),
                 false,
             ),
+            Ok(Ok(Request::DomainList)) => (
+                Reply::Json(
+                    crate::domain_list_handler::handle_domain_list(
+                        &state_ctx,
+                        &send_ctx.dkim_keys,
+                        &caller,
+                    )
+                    .await,
+                ),
+                false,
+            ),
+            Ok(Ok(Request::DomainAdd(req))) => (
+                Reply::Ack(
+                    crate::domain_handler::handle_domain_add(
+                        &state_ctx,
+                        &mb_ctx,
+                        &send_ctx.dkim_keys,
+                        &req,
+                        &caller,
+                    )
+                    .await,
+                ),
+                false,
+            ),
             Ok(Ok(Request::Version)) => (
                 Reply::Version(crate::version_handler::current_version_response()),
                 false,

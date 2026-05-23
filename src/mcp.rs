@@ -257,9 +257,9 @@ impl AimxMcpServer {
             | crate::auth::Action::MarkReadWrite(n)
             | crate::auth::Action::HookCrud(n) => n.clone(),
             crate::auth::Action::MailboxDelete { mailbox } => mailbox.clone(),
-            crate::auth::Action::MailboxCreate { .. } | crate::auth::Action::SystemCommand => {
-                String::new()
-            }
+            crate::auth::Action::MailboxCreate { .. }
+            | crate::auth::Action::SystemCommand
+            | crate::auth::Action::DomainCrud => String::new(),
         };
         // Derive the rendering verb from the action so a future change
         // that produces `OwnerMismatch` from a non-create predicate
@@ -1375,6 +1375,135 @@ async fn submit_hook_list_request(
 /// the [`MailboxLifecycleFallback`] shape used by the CRUD path.
 pub(crate) fn submit_mailbox_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
     submit_mailbox_list_raw()
+}
+
+/// CLI-friendly variant for `DOMAIN-LIST`. Mirrors
+/// [`submit_mailbox_list_via_daemon_for_cli`] line-for-line so the
+/// `aimx domains list` CLI keeps the same SocketMissing / Daemon
+/// branching shape every other CRUD verb uses.
+pub(crate) fn submit_domain_list_via_daemon_for_cli() -> Result<String, MailboxLifecycleFallback> {
+    submit_domain_list_raw()
+}
+
+fn submit_domain_list_raw() -> Result<String, MailboxLifecycleFallback> {
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<Vec<u8>, std::io::Error> = match rt {
+        Ok(handle) => {
+            tokio::task::block_in_place(|| handle.block_on(submit_domain_list_request(&socket)))
+        }
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_list_request(&socket))
+        }
+    };
+
+    let raw = io_result.map_err(|e| {
+        if is_socket_missing(&e) {
+            MailboxLifecycleFallback::SocketMissing
+        } else {
+            MailboxLifecycleFallback::Daemon(format!(
+                "Failed to connect to aimx daemon at {}: {e}",
+                socket.display()
+            ))
+        }
+    })?;
+
+    // Reuse the MAILBOX-LIST decoder — wire shape is identical (status
+    // line + Content-Length + JSON body), only the JSON schema differs.
+    decode_mailbox_list_response(&raw).map_err(MailboxLifecycleFallback::Daemon)
+}
+
+async fn submit_domain_list_request(
+    socket_path: &std::path::Path,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_list_request(&mut writer).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(1024);
+    reader.read_to_end(&mut buf).await?;
+    Ok(buf)
+}
+
+/// Submit an `AIMX/1 DOMAIN-ADD` request over UDS. Returns a
+/// [`MailboxLifecycleFallback`] on failure so the CLI can decide
+/// whether to fall back to the direct on-disk edit (root) or
+/// hard-error (non-root).
+pub(crate) fn submit_domain_add_via_daemon(
+    domain: &str,
+    selector: Option<&str>,
+) -> Result<(), MailboxLifecycleFallback> {
+    let request = send_protocol::DomainAddRequest {
+        domain: domain.to_string(),
+        selector: selector.map(|s| s.to_string()),
+    };
+    let socket = crate::serve::aimx_socket_path();
+
+    let rt = tokio::runtime::Handle::try_current();
+    let io_result: Result<MarkOutcome, std::io::Error> = match rt {
+        Ok(handle) => tokio::task::block_in_place(|| {
+            handle.block_on(submit_domain_add_request(&socket, &request))
+        }),
+        Err(_) => {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|e| {
+                    MailboxLifecycleFallback::Daemon(format!("Failed to create tokio runtime: {e}"))
+                })?;
+            rt.block_on(submit_domain_add_request(&socket, &request))
+        }
+    };
+
+    match io_result {
+        Ok(MarkOutcome::Ok) => Ok(()),
+        Ok(MarkOutcome::Err { code, reason }) => Err(MailboxLifecycleFallback::Daemon(format!(
+            "[{}] {reason}",
+            code.as_str()
+        ))),
+        Ok(MarkOutcome::Malformed(reason)) => Err(MailboxLifecycleFallback::Daemon(format!(
+            "Malformed response from aimx daemon: {reason}"
+        ))),
+        Err(e) => {
+            if is_socket_missing(&e) {
+                Err(MailboxLifecycleFallback::SocketMissing)
+            } else {
+                Err(MailboxLifecycleFallback::Daemon(format!(
+                    "Failed to connect to aimx daemon at {}: {e}",
+                    socket.display()
+                )))
+            }
+        }
+    }
+}
+
+async fn submit_domain_add_request(
+    socket_path: &std::path::Path,
+    request: &send_protocol::DomainAddRequest,
+) -> Result<MarkOutcome, std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let stream = tokio::net::UnixStream::connect(socket_path).await?;
+    let (mut reader, mut writer) = stream.into_split();
+
+    send_protocol::write_domain_add_request(&mut writer, request).await?;
+    writer.shutdown().await.ok();
+
+    let mut buf = Vec::with_capacity(128);
+    reader.read_to_end(&mut buf).await?;
+
+    Ok(parse_ack_response(&buf))
 }
 
 fn submit_mailbox_list_raw() -> Result<String, MailboxLifecycleFallback> {

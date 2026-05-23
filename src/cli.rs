@@ -22,6 +22,7 @@ Server administration:
   serve        Start the SMTP daemon
   doctor       Show server health, DNS, and recent logs
   logs         Tail the aimx service log
+  domains      Manage configured domains
   dkim-keygen  Generate a DKIM keypair
   portcheck    Check port 25 connectivity (inbound, outbound)
   uninstall    Uninstall the aimx service (config and data retained)
@@ -257,6 +258,10 @@ pub enum Command {
     #[command(subcommand, alias = "hook")]
     Hooks(HookCommand),
 
+    /// Manage domains
+    #[command(subcommand, alias = "domain")]
+    Domains(DomainsCommand),
+
     /// Start the stdio MCP server (for AI agents)
     Mcp,
 
@@ -326,6 +331,15 @@ pub enum Command {
         /// DKIM selector name
         #[arg(long, default_value = "aimx")]
         selector: String,
+
+        /// Target domain. When omitted, defaults to the first entry of
+        /// `domains` in `config.toml` (the default domain). When set,
+        /// the keypair is written under
+        /// `<dkim_dir>/<domain>/{private,public}.key` (per-domain
+        /// layout). The target domain must already be in `domains` —
+        /// add new domains with `aimx domains add` first.
+        #[arg(long)]
+        domain: Option<String>,
 
         /// Overwrite existing keys
         #[arg(long)]
@@ -580,6 +594,42 @@ pub enum HookCommand {
         /// Skip confirmation prompt
         #[arg(short = 'y', long)]
         yes: bool,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum DomainsCommand {
+    /// List configured domains, their DKIM status, mailbox counts, and
+    /// per-domain override summary
+    List,
+
+    /// Add a new domain to the install. Generates a per-domain DKIM
+    /// keypair, prints DNS records to publish, runs the DNS
+    /// verification loop, and hot-reloads the running daemon.
+    Add {
+        /// Domain to add (e.g. side-project.com)
+        domain: String,
+
+        /// Optional DKIM selector (defaults to the top-level
+        /// `dkim_selector` or the built-in `aimx`)
+        #[arg(long)]
+        selector: Option<String>,
+
+        /// Skip the post-add DNS verification loop. Useful when DNS is
+        /// being provisioned out-of-band.
+        #[arg(long)]
+        no_dns_check: bool,
+    },
+
+    /// Remove a domain. (Implementation lands in a follow-up release.)
+    Remove {
+        /// Domain to remove (e.g. side-project.com)
+        domain: String,
+
+        /// Cascade-delete mailboxes on this domain and remove its
+        /// per-domain storage tree. DKIM keys on disk are preserved.
+        #[arg(long)]
+        force: bool,
     },
 }
 
