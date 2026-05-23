@@ -295,11 +295,10 @@ where
     // supplied HTML bytes.
     // Per-domain signature resolution: `[domain."<d>"] signature` →
     // top-level `signature` → built-in default. Computed per-message
-    // so multi-domain installs can ship different branding per domain
-    // without requiring a per-mailbox signature (out of scope for v1
-    // per PRD §11). The signature is appended to the body before
-    // DKIM signing, so the recipient's DKIM verifier sees the
-    // signed-over signature bytes.
+    // so multi-domain installs can ship different branding per domain.
+    // There is intentionally no per-mailbox signature layer. The
+    // signature is appended to the body before DKIM signing, so the
+    // recipient's DKIM verifier sees the signed-over signature bytes.
     let body_bytes = match crate::wire_assembly::assemble_wire_message(
         &body_with_id,
         config.effective_signature_for_domain(&sender_domain_lc),

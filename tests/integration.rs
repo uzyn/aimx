@@ -3717,8 +3717,11 @@ fn serve_e2e_stale_readme_refreshed_at_startup() {
     // *after* refresh_if_outdated runs in serve startup.  The README should
     // now contain the current template, not the stale content.
     let after = std::fs::read_to_string(&readme_path).unwrap();
+    // NOTE: keep this literal in lockstep with `VERSION` in
+    // `src/datadir_readme.rs`. The crate is binary-only (no `lib.rs`), so the
+    // constant isn't reachable from the integration target — bump both.
     assert!(
-        after.starts_with("<!-- aimx-readme-version: 7 -->"),
+        after.starts_with("<!-- aimx-readme-version: 8 -->"),
         "README should start with current version comment after serve startup; got: {}",
         after.lines().next().unwrap_or("<empty>")
     );

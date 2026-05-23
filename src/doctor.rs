@@ -77,6 +77,13 @@ pub struct DomainStatus {
     /// un-namespaced path for the default domain on pre-migration
     /// installs) exists.
     pub dkim_key_present: bool,
+    /// Result of resolving `<selector>._domainkey.<domain>` and (when a
+    /// local public key is on disk) comparing the published value to the
+    /// local key. `None` means the check was skipped (no `NetworkOps`
+    /// result, e.g. tests that don't seed DNS). Multi-domain installs
+    /// surface this on the per-domain block so operators see per-domain
+    /// DKIM DNS health alongside the per-domain key-on-disk status.
+    pub dkim_dns: Option<DnsVerifyResult>,
     /// Count of mailboxes (registered in `[mailboxes."<local>@<domain>"]`)
     /// scoped to this domain. The catchall (`*@<domain>`) is included.
     pub mailbox_count: usize,
@@ -227,6 +234,12 @@ pub fn gather_status_with_ops<S: SystemOps>(
     // (`domains[0]`) is always index 0. Empty `domains` is impossible
     // on a loaded `Config` (the loader rejects it), so the unwrap
     // path is unreachable.
+    // Only run per-domain DKIM DNS lookups on multi-domain installs.
+    // Single-domain installs already cover the default-domain DKIM
+    // check inside `gather_dns_section`; running it twice would emit
+    // duplicate lookups for no observable benefit.
+    let do_per_domain_dkim_dns = config.domains.len() > 1;
+
     let domains: Vec<DomainStatus> = config
         .domains
         .iter()
@@ -242,14 +255,43 @@ pub fn gather_status_with_ops<S: SystemOps>(
             let dom_dkim_present =
                 per_domain_key.exists() || (i == 0 && legacy_default_key.exists());
 
-            let (mailbox_count, unread_count) =
-                count_mailboxes_for_domain(&mailboxes, &config.mailboxes, dom);
+            let (mailbox_count, unread_count) = count_mailboxes_for_domain(&mailboxes, dom);
+
+            let selector = config.dkim_selector_for_domain(dom).to_string();
+            let dkim_dns = if do_per_domain_dkim_dns {
+                // Locate the per-domain public key for the local-vs-DNS
+                // comparison. Falls back to the legacy un-namespaced
+                // path for the default domain on pre-migration installs.
+                let per_domain_pub = dkim_root_base.join(dom).join("public.key");
+                let legacy_default_pub = dkim_root_base.join("public.key");
+                let pubkey_dir = if per_domain_pub.exists() {
+                    Some(dkim_root_base.join(dom))
+                } else if i == 0 && legacy_default_pub.exists() {
+                    Some(dkim_root_base.clone())
+                } else {
+                    None
+                };
+                let local_pub = pubkey_dir.and_then(|dir| {
+                    crate::dkim::dns_record_value(&dir)
+                        .ok()
+                        .and_then(|v| v.strip_prefix("v=DKIM1; k=rsa; p=").map(|s| s.to_string()))
+                });
+                Some(setup::verify_dkim(
+                    net,
+                    dom,
+                    &selector,
+                    local_pub.as_deref(),
+                ))
+            } else {
+                None
+            };
 
             DomainStatus {
                 domain: dom.clone(),
                 is_default: i == 0,
-                dkim_selector: config.dkim_selector_for_domain(dom).to_string(),
+                dkim_selector: selector,
                 dkim_key_present: dom_dkim_present,
+                dkim_dns,
                 mailbox_count,
                 unread_count,
             }
@@ -276,33 +318,18 @@ pub fn gather_status_with_ops<S: SystemOps>(
 
 /// Sum mailbox count + unread count for mailboxes whose configured
 /// address ends in `@<domain>`. Walks `MailboxStatus` rows (which
-/// carry on-disk unread counts) and matches against the in-memory
-/// `Config::mailboxes` to resolve the FQDN from the operator-friendly
-/// in-memory key.
-fn count_mailboxes_for_domain(
-    statuses: &[MailboxStatus],
-    config_mailboxes: &std::collections::HashMap<String, crate::config::MailboxConfig>,
-    domain: &str,
-) -> (usize, usize) {
+/// carry on-disk unread counts and the FQDN address copied from
+/// `MailboxConfig::address` at gather time). `MailboxConfig::address`
+/// is mandatory at config-load, so the FQDN is always available.
+fn count_mailboxes_for_domain(statuses: &[MailboxStatus], domain: &str) -> (usize, usize) {
     let mut count = 0;
     let mut unread = 0;
     let domain_lc = domain.to_ascii_lowercase();
     for s in statuses {
-        // `MailboxStatus.address` is the FQDN — use it directly when
-        // present. Fall back to looking up the in-memory mailbox
-        // config (for legacy local-part keys that never got rekeyed).
-        let addr = if !s.address.is_empty() {
-            s.address.as_str()
-        } else if let Some(mb) = config_mailboxes.get(&s.name) {
-            mb.address.as_str()
-        } else {
+        let Some((_, mb_domain)) = s.address.rsplit_once('@') else {
             continue;
         };
-        let mb_domain = addr
-            .rsplit_once('@')
-            .map(|(_, d)| d.to_ascii_lowercase())
-            .unwrap_or_default();
-        if mb_domain == domain_lc {
+        if mb_domain.eq_ignore_ascii_case(&domain_lc) {
             count += 1;
             unread += s.unread;
         }
@@ -703,6 +730,15 @@ pub fn format_status(info: &StatusInfo) -> String {
                     ))
                 },
             ));
+            if let Some(dns) = &dom.dkim_dns {
+                let rendered = match dns {
+                    DnsVerifyResult::Pass => term::success("PASS").to_string(),
+                    DnsVerifyResult::Fail(msg) => format!("{} - {msg}", term::fail_mark()),
+                    DnsVerifyResult::Missing(msg) => format!("{} - {msg}", term::fail_mark()),
+                    DnsVerifyResult::Warn(msg) => format!("{} - {msg}", term::warn_mark()),
+                };
+                out.push_str(&format!("      DKIM DNS:      {rendered}\n"));
+            }
             out.push_str(&format!(
                 "      Mailboxes:     {} ({} unread)\n",
                 dom.mailbox_count, dom.unread_count,
@@ -1393,6 +1429,7 @@ mod version_render_tests {
                 is_default: true,
                 dkim_selector: "aimx".to_string(),
                 dkim_key_present: true,
+                dkim_dns: None,
                 mailbox_count: 0,
                 unread_count: 0,
             }],
@@ -1706,6 +1743,7 @@ mod per_domain_render_tests {
                 is_default: true,
                 dkim_selector: "aimx".to_string(),
                 dkim_key_present: true,
+                dkim_dns: None,
                 mailbox_count: 2,
                 unread_count: 0,
             }],
@@ -1736,6 +1774,7 @@ mod per_domain_render_tests {
                     is_default: true,
                     dkim_selector: "aimx".to_string(),
                     dkim_key_present: true,
+                    dkim_dns: Some(DnsVerifyResult::Pass),
                     mailbox_count: 2,
                     unread_count: 1,
                 },
@@ -1744,6 +1783,7 @@ mod per_domain_render_tests {
                     is_default: false,
                     dkim_selector: "s2025".to_string(),
                     dkim_key_present: false,
+                    dkim_dns: Some(DnsVerifyResult::Missing("No DKIM record found".into())),
                     mailbox_count: 1,
                     unread_count: 0,
                 },
@@ -1831,8 +1871,35 @@ mod per_domain_render_tests {
     }
 
     #[test]
+    fn multi_domain_renders_per_domain_dkim_dns_status() {
+        let info = two_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        // a.com: DNS pass; b.com: DNS missing record.
+        assert!(
+            out.contains("DKIM DNS:      PASS"),
+            "passing per-domain DKIM DNS line missing: {out}"
+        );
+        assert!(
+            out.contains("No DKIM record found"),
+            "missing per-domain DKIM DNS line missing: {out}"
+        );
+    }
+
+    #[test]
+    fn single_domain_omits_per_domain_dkim_dns_line() {
+        // The flat single-domain layout already surfaces DKIM DNS health
+        // inside the DNS section, so the per-domain block doesn't appear
+        // and the dedicated `DKIM DNS:` line must stay suppressed.
+        let info = one_domain_status();
+        let out = strip_ansi(&format_status(&info));
+        assert!(
+            !out.contains("DKIM DNS:"),
+            "single-domain must not render per-domain DKIM DNS line: {out}"
+        );
+    }
+
+    #[test]
     fn count_mailboxes_for_domain_partitions_correctly() {
-        use std::collections::HashMap;
         let statuses = vec![
             MailboxStatus {
                 name: "info@a.com".to_string(),
@@ -1871,18 +1938,16 @@ mod per_domain_render_tests {
                 is_catchall: false,
             },
         ];
-        let config_mb: HashMap<String, crate::config::MailboxConfig> = HashMap::new();
-
-        let (count_a, unread_a) = count_mailboxes_for_domain(&statuses, &config_mb, "a.com");
+        let (count_a, unread_a) = count_mailboxes_for_domain(&statuses, "a.com");
         assert_eq!(count_a, 2);
         assert_eq!(unread_a, 1);
 
-        let (count_b, unread_b) = count_mailboxes_for_domain(&statuses, &config_mb, "b.com");
+        let (count_b, unread_b) = count_mailboxes_for_domain(&statuses, "b.com");
         assert_eq!(count_b, 1);
         assert_eq!(unread_b, 1);
 
         // Unknown domain partitions to zero.
-        let (count_c, unread_c) = count_mailboxes_for_domain(&statuses, &config_mb, "c.com");
+        let (count_c, unread_c) = count_mailboxes_for_domain(&statuses, "c.com");
         assert_eq!(count_c, 0);
         assert_eq!(unread_c, 0);
     }
