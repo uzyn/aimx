@@ -43,6 +43,7 @@ and [Getting Started](getting-started.md) for the full walkthrough.
 | [Configuration](configuration.md) | `config.toml` field reference, data / config directories, environment variables |
 | [Security](security.md) | Threat model, trust boundaries, what AIMX defends and what it does not |
 | [Mailboxes & Email](mailboxes.md) | Mailbox CRUD, email frontmatter, attachments, sending, threading |
+| [Multi-domain](multi-domain.md) | Hosting multiple domains on one AIMX install — `aimx domains` CLI, per-domain DKIM, upgrade migration, rollback |
 | [Markdown Email](markdown-email.md) | How outbound `--body` is rendered to HTML, the inlined stylesheet, escape hatches |
 | [Hooks & Trust](hooks.md) | `on_receive` / `after_send` events, ownership-as-authorization, trust gate |
 | [Hook Recipes](hook-recipes.md) | Copy-paste hook snippets per agent (Claude Code, Codex, OpenCode, Gemini, Goose, OpenClaw, Hermes, NanoClaw) |

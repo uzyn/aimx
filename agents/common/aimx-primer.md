@@ -11,6 +11,8 @@ For full reference material, see the files in `references/`:
 - `references/frontmatter.md`: complete frontmatter schema
 - `references/workflows.md`: worked examples for common tasks
 - `references/hooks.md`: creating hooks via MCP (mailbox-owner model)
+- `references/multi-domain.md`: multi-domain installs — default domain,
+  FQDN disambiguation, sending from a non-default domain
 - `references/troubleshooting.md`: error codes and recovery steps
 
 At runtime, `/var/lib/aimx/README.md` is the authoritative guide to the data
@@ -22,9 +24,13 @@ startup.
 Your interface to aimx is the MCP tools (`mailbox_list`, `email_send`,
 `email_reply`, `mailbox_create`, `hook_create`, …). The `aimx` binary on
 PATH is the host operator's CLI — do not invoke it. **You never need to
-know the configured domain**: `email_send(from_mailbox: "agent", ...)`
-takes the local part only and the daemon constructs `agent@<domain>` from
-`mailbox_list().address` server-side.
+know the configured domain on a single-domain install**:
+`email_send(from_mailbox: "agent", ...)` takes the local part only and
+the daemon constructs `agent@<domain>` from `mailbox_list().address`
+server-side. On a multi-domain install, bare local parts resolve to the
+**default domain** (the first entry in `domains`); to send from a
+non-default domain, pass the full FQDN (`from_mailbox:
+"agent@side-project.com"`). See `references/multi-domain.md`.
 
 If the `mcp__aimx__*` tools (or your client's equivalent) are not in your
 tool list, the MCP server is not registered. Tell the user to run
@@ -90,6 +96,34 @@ every layer:
 On a single-user box (the common case) the model is invisible: your
 one user owns every mailbox. On a multi-user box it gives real
 isolation — alice's agent cannot see, read, or act on bob's mail.
+
+## Multi-domain installs
+
+aimx may be configured with one domain or several. The list lives in
+`config.toml`'s `domains` array; the **first entry is the default**.
+Two rules govern how you address mailboxes:
+
+1. **Bare local parts default to the default domain.** Passing
+   `from_mailbox: "agent"` to `email_send` (or `mailbox: "agent"` to any
+   mailbox-scoped tool) resolves server-side to `agent@<domains[0]>`.
+   This is the single-domain behavior preserved on multi-domain
+   installs.
+2. **To target a non-default domain, pass the FQDN.** On an install with
+   `domains = ["a.com", "b.com"]`, an agent that owns
+   `support@b.com` sends with `from_mailbox: "support@b.com"`. The
+   daemon picks the b.com DKIM key and the message is signed as b.com.
+
+`mailbox_list()` returns FQDN names unambiguously
+(`{name: "support@b.com", address: "support@b.com", ...}`). Don't
+strip the `@<domain>` suffix when threading the name through subsequent
+tool calls — `mailbox: "support"` on a multi-domain install where both
+`support@a.com` and `support@b.com` exist would silently target the
+default-domain mailbox. The FQDN is the unambiguous identifier.
+
+Domain management itself (adding or removing a domain, generating a
+DKIM keypair for a new domain) is operator-only and requires `sudo`. No
+MCP tools exist for domain CRUD — see `references/multi-domain.md` for
+why and how operators do it.
 
 ## MCP tools: quick reference
 
@@ -180,28 +214,33 @@ argv to use.
      `0700 <owner>:<owner>` perms enforced by the daemon, not filesystem
      obscurity. -->
 
-aimx stores mail under a data directory (default `/var/lib/aimx/`):
+aimx stores mail under a data directory (default `/var/lib/aimx/`),
+nested by domain:
 
 ```
 /var/lib/aimx/                          # root:root 0755 (traversable)
 ├── README.md                           # agent-facing layout guide (auto-generated)
-├── inbox/                              # root:root 0755
-│   ├── <mailbox>/                      # <owner>:<owner> 0700
-│   │   ├── 2026-04-15-143022-meeting-notes.md
-│   │   └── 2026-04-15-153300-invoice-march/     # attachment bundle
-│   │       ├── 2026-04-15-153300-invoice-march.md
-│   │       ├── invoice.pdf
-│   │       └── receipt.png
-│   └── catchall/                       # aimx-catchall:aimx-catchall 0700
-│       └── ...
-└── sent/                               # root:root 0755
-    └── <mailbox>/                      # <owner>:<owner> 0700
-        └── 2026-04-15-160145-re-meeting-notes.md
+├── .layout-version                     # migration marker (do not edit)
+└── <domain>/                           # one per configured domain, 0755
+    ├── inbox/                          # root:root 0755
+    │   ├── <mailbox>/                  # <owner>:<owner> 0700
+    │   │   ├── 2026-04-15-143022-meeting-notes.md
+    │   │   └── 2026-04-15-153300-invoice-march/  # attachment bundle
+    │   │       ├── 2026-04-15-153300-invoice-march.md
+    │   │       ├── invoice.pdf
+    │   │       └── receipt.png
+    │   └── catchall/                   # aimx-catchall:aimx-catchall 0700
+    │       └── ...
+    └── sent/                           # root:root 0755
+        └── <mailbox>/                  # <owner>:<owner> 0700
+            └── 2026-04-15-160145-re-meeting-notes.md
 ```
 
 Each mailbox directory is `0700 <owner>:<owner>`, so only the owner and
 root can read or traverse in. Your MCP process runs as your uid and only
-sees mailboxes you own.
+sees mailboxes you own. `mailbox_list()` returns absolute `inbox_path` /
+`sent_path` values that already include the per-domain nesting — use
+them verbatim with filesystem tools instead of reconstructing paths.
 
 - **Filenames** follow `YYYY-MM-DD-HHMMSS-<slug>.md` (UTC). The slug is
   derived from the subject: lowercase, non-alphanumeric chars replaced with
@@ -218,11 +257,16 @@ not readable by agents):
 
 ```
 /etc/aimx/
-├── config.toml      # main config (root:root 640)
+├── config.toml             # main config (root:root 640)
 └── dkim/
-    ├── private.key   # DKIM signing key (root:root 600)
-    └── public.key    # publishable (root:root 644)
+    └── <domain>/           # one per configured domain (root:root 700)
+        ├── private.key     # DKIM signing key (root:root 600)
+        └── public.key      # publishable (root:root 644)
 ```
+
+Each configured domain has its own DKIM keypair under
+`/etc/aimx/dkim/<domain>/`. The daemon picks the right key based on the
+From: domain of each outbound message.
 
 ## Frontmatter: key fields
 

@@ -270,6 +270,74 @@ aimx hooks delete <name> --yes
 aimx hooks create --mailbox <m> --event on_receive --cmd '["/correct/path/to/agent", "..."]' --name <name>
 ```
 
+## Multi-domain
+
+### Migration aborts on startup with "corrupted layout marker"
+
+Symptom: `aimx serve` refuses to start after an upgrade with an error
+naming `/var/lib/aimx/.layout-version` and a version it didn't expect.
+
+Fix: the marker file at `/var/lib/aimx/.layout-version` exists but holds
+a value other than `2`. The migration uses the marker as the source of
+truth for "is this install already on the new layout?" — a corrupted
+marker is a hard startup error by design (a half-migrated state would
+be much worse than a refusal-to-start). Either restore the marker to
+`2` (if the layout is already migrated — confirm by checking that
+`/var/lib/aimx/<domain>/inbox/` exists and `/var/lib/aimx/inbox/`
+does not), or delete the marker entirely (`sudo rm /var/lib/aimx/.layout-version`)
+to let the migration re-run from scratch on the next start. Capture
+`aimx logs --lines 200` and the state of `/var/lib/aimx/` first if
+anything looks inconsistent.
+
+### Migration aborts with cross-filesystem rename (EXDEV)
+
+Symptom: `aimx serve` refuses to start after upgrade with an error
+mentioning `cross-device link` or `EXDEV` on a `rename` call. Typical
+trigger: `/var/lib/aimx/` lives on a different filesystem from where
+the per-domain subdirectory would land (e.g. someone bind-mounted
+`inbox/` onto a separate volume).
+
+Fix: the upgrade migration uses `rename(2)` exclusively for atomicity,
+which only works within one filesystem. Move `/var/lib/aimx/` so that
+the per-domain subtree lives on the same filesystem as `inbox/` and
+`sent/` did before the upgrade (or vice versa), then restart the
+daemon. The migration is idempotent — it'll detect the half-migrated
+state and resume from the first incomplete step.
+
+### Half-migrated install: some files on the new layout, some on the old
+
+Symptom: after a failed migration, `aimx logs` shows the migration
+aborted partway through. Some files are at the v1 paths, some at the
+v2 paths.
+
+Fix: the migration is **re-runnable**. Each step is detected via path
+existence and the next start picks up where the previous one left
+off. Resolve whatever underlying failure caused the abort (disk full,
+EXDEV per above, manual interference) and restart `aimx serve`. The
+daemon refuses to accept SMTP and UDS traffic until the entire
+transaction completes, so a half-migrated state cannot serve mail —
+there is no data loss window.
+
+### `aimx send` fails with "DKIM key not found for domain <domain>"
+
+Symptom: `aimx send --from user@side-project.com ...` exits non-zero
+with a daemon error naming the per-domain DKIM path
+(`/etc/aimx/dkim/side-project.com/private.key`).
+
+Fix: the daemon expects a DKIM keypair under
+`/etc/aimx/dkim/<domain>/private.key` for every domain in `domains`.
+The most common causes:
+
+- The domain was added by hand-editing `config.toml` instead of via
+  `aimx domains add`. Generate the missing keypair with
+  `sudo aimx dkim-keygen --domain <domain>` and restart the daemon
+  (or use `aimx domains add` to add a new domain — it generates the
+  key automatically).
+- The DKIM directory was moved or chmod-tightened in a way the daemon
+  can't read. Verify `ls -la /etc/aimx/dkim/<domain>/private.key`
+  shows `-rw------- root root` (mode `0600`).
+- The migration is half-done. See "Half-migrated install" above.
+
 ## Spam prevention
 
 If outbound emails land in spam:
