@@ -270,6 +270,14 @@ fn inspect_config_for_legacy(content: &str) -> (bool, bool) {
 /// Runs steps 1 and 2 of the storage half of the migration: `inbox`
 /// then `sent` (independent of each other, but both must complete for
 /// the install to be on the v2 layout).
+///
+/// The per-domain storage dir is created (or chmodded) to `0o755` so
+/// non-root mailbox owners can traverse into their own `inbox/<name>/`
+/// subdir, exactly as they could under `<data_dir>/` on v1. The daemon
+/// runs with `umask 0o077`, so without this explicit chmod the dir
+/// would land at `0o700` and every non-root MCP read would surface
+/// EACCES. The `inbox/<name>/` subdirs themselves remain `0o700` and
+/// owner-locked; only the per-domain traversal bit is opened.
 pub fn relocate_storage_for_default_domain(
     data_dir: &Path,
     default_domain: &str,
@@ -277,6 +285,15 @@ pub fn relocate_storage_for_default_domain(
     let domain_dir = data_dir.join(default_domain);
     if !domain_dir.exists() {
         fs::create_dir_all(&domain_dir).map_err(|e| MigrationError::Io {
+            path: domain_dir.clone(),
+            cause: e,
+        })?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = fs::Permissions::from_mode(0o755);
+        fs::set_permissions(&domain_dir, perms).map_err(|e| MigrationError::Io {
             path: domain_dir.clone(),
             cause: e,
         })?;
@@ -732,7 +749,37 @@ pub fn format_migration_log_line(report: &MigrationReport, rewritten_default: &s
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    /// Serialize tests that mutate the process umask. `umask(2)` is
+    /// thread-unsafe and cargo runs tests in parallel.
+    static UMASK_SERIALIZE: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that sets the process umask and restores the previous
+    /// value on drop. Holds [`UMASK_SERIALIZE`] for the whole lifetime.
+    struct UmaskGuard {
+        prev: u32,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl UmaskGuard {
+        fn set(new: u32) -> Self {
+            let lock = UMASK_SERIALIZE.lock().unwrap_or_else(|p| p.into_inner());
+            // SAFETY: umask(2) is thread-unsafe but the mutex above
+            // serializes every caller in the test binary.
+            let prev = unsafe { libc::umask(new as libc::mode_t) } as u32;
+            Self { prev, _lock: lock }
+        }
+    }
+
+    impl Drop for UmaskGuard {
+        fn drop(&mut self) {
+            unsafe {
+                libc::umask(self.prev as libc::mode_t);
+            }
+        }
+    }
 
     fn touch(path: &Path) {
         if let Some(parent) = path.parent() {
@@ -993,6 +1040,58 @@ mod tests {
             other => panic!("expected Renamed, got {other:?}"),
         }
         assert_eq!(report.sent, MoveOutcome::NothingToDo);
+    }
+
+    /// Regression: the per-domain storage dir must be `0o755` so a
+    /// non-root mailbox owner (running `aimx mcp` under their own uid)
+    /// can `x`-traverse into `<data_dir>/<domain>/inbox/<name>/`. The
+    /// daemon runs with `umask 0o077`, so `create_dir_all` would land
+    /// the dir at `0o700` without the explicit chmod and every
+    /// non-root MCP read would surface EACCES.
+    #[test]
+    fn storage_relocation_per_domain_dir_is_world_traversable() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        fs::create_dir_all(data_dir.join("inbox").join("info")).unwrap();
+
+        // Force the umask the daemon sets so the test reproduces the
+        // production code path (default `cargo test` umask is `0o022`
+        // and would hide the regression).
+        let _guard = UmaskGuard::set(0o077);
+
+        relocate_storage_for_default_domain(&data_dir, "x.com").unwrap();
+        let dir_mode = fs::metadata(data_dir.join("x.com"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            dir_mode, 0o755,
+            "per-domain storage dir must be 0o755 so non-root mailbox \
+             owners can traverse into their own inbox/<name>/ subdir"
+        );
+    }
+
+    /// The per-domain mode is also enforced when the dir already exists
+    /// from an earlier partial run (defense in depth — a re-entry
+    /// after a crash mid-migration must heal an over-tightened dir).
+    #[test]
+    fn storage_relocation_chmods_existing_per_domain_dir() {
+        let tmp = TempDir::new().unwrap();
+        let data_dir = tmp.path().to_path_buf();
+        // Pre-existing per-domain dir, locked to 0o700 (what a crashed
+        // earlier run under the daemon's umask would have left behind).
+        fs::create_dir_all(data_dir.join("x.com")).unwrap();
+        fs::set_permissions(data_dir.join("x.com"), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir_all(data_dir.join("inbox").join("info")).unwrap();
+
+        relocate_storage_for_default_domain(&data_dir, "x.com").unwrap();
+        let dir_mode = fs::metadata(data_dir.join("x.com"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o755);
     }
 
     #[test]
