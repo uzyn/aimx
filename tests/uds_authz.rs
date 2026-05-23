@@ -40,6 +40,34 @@ use std::time::{Duration, Instant};
 const ALICE: &str = "aimx-test-alice";
 const BOB: &str = "aimx-test-bob";
 
+/// The default domain baked into the test config (see `spin_up_serve`).
+/// After the daemon's first-start upgrade migration runs, mailbox
+/// storage lives at `<data_dir>/<DEFAULT_DOMAIN>/{inbox,sent}/<name>/`
+/// instead of the legacy `<data_dir>/{inbox,sent}/<name>/`. Tests that
+/// stat mailbox dirs on disk must route through the helpers below so
+/// they pick up the post-migration layout.
+const DEFAULT_DOMAIN: &str = "it.example.com";
+
+/// Path to a mailbox's inbox directory in the post-migration per-domain
+/// layout: `<tmp_root>/data/<DEFAULT_DOMAIN>/inbox/<name>/`.
+fn mailbox_inbox_path(tmp_root: &Path, mailbox: &str) -> PathBuf {
+    tmp_root
+        .join("data")
+        .join(DEFAULT_DOMAIN)
+        .join("inbox")
+        .join(mailbox)
+}
+
+/// Path to a mailbox's sent directory in the post-migration per-domain
+/// layout: `<tmp_root>/data/<DEFAULT_DOMAIN>/sent/<name>/`.
+fn mailbox_sent_path(tmp_root: &Path, mailbox: &str) -> PathBuf {
+    tmp_root
+        .join("data")
+        .join(DEFAULT_DOMAIN)
+        .join("sent")
+        .join(mailbox)
+}
+
 /// RAII guard: kill the serve subprocess and remove the test users on
 /// drop. Drop runs on assertion failure too, so the CI step stays
 /// hermetic.
@@ -373,18 +401,19 @@ fn spin_up_serve() -> Fixture {
     }
 
     let config_content = format!(
-        "domain = \"it.example.com\"\n\
+        "domain = \"{domain}\"\n\
          data_dir = \"{data_dir}\"\n\
          dkim_selector = \"aimx\"\n\n\
          [mailboxes.catchall]\n\
-         address = \"*@it.example.com\"\n\
+         address = \"*@{domain}\"\n\
          owner = \"aimx-catchall\"\n\n\
          [mailboxes.{alice}]\n\
-         address = \"{alice}@it.example.com\"\n\
+         address = \"{alice}@{domain}\"\n\
          owner = \"{alice}\"\n\n\
          [mailboxes.{bob}]\n\
-         address = \"{bob}@it.example.com\"\n\
+         address = \"{bob}@{domain}\"\n\
          owner = \"{bob}\"\n",
+        domain = DEFAULT_DOMAIN,
         data_dir = data_dir.display(),
         alice = ALICE,
         bob = BOB,
@@ -802,14 +831,14 @@ fn mailbox_create_non_root_owner_synthesized_from_peercred() {
 
     // On-disk owner must be alice (the SO_PEERCRED caller), never bob
     // (the wire `Owner:` header). NFR1 in one assertion.
-    let inbox = fx.tmp_root.join("data").join("inbox").join("alicemade");
+    let inbox = mailbox_inbox_path(&fx.tmp_root, "alicemade");
     let on_disk = stat_owner_username(&inbox);
     assert_eq!(
         on_disk, ALICE,
         "expected on-disk owner to equal SO_PEERCRED caller {ALICE}, got {on_disk} \
          (wire Owner:{BOB} must NOT be honored for non-root callers)"
     );
-    let sent = fx.tmp_root.join("data").join("sent").join("alicemade");
+    let sent = mailbox_sent_path(&fx.tmp_root, "alicemade");
     let on_disk_sent = stat_owner_username(&sent);
     assert_eq!(on_disk_sent, ALICE, "sent dir owner must match inbox dir");
 
@@ -834,7 +863,7 @@ fn mailbox_create_non_root_owner_ok() {
         raw_mailbox_create_frame("aliceowned", ALICE).as_bytes(),
     );
     assert_response_contains(&resp, "AIMX/1 OK");
-    let inbox = fx.tmp_root.join("data").join("inbox").join("aliceowned");
+    let inbox = mailbox_inbox_path(&fx.tmp_root, "aliceowned");
     assert_eq!(stat_owner_username(&inbox), ALICE);
     drop(fx);
 }
@@ -940,7 +969,7 @@ fn mailbox_delete_non_root_cross_uid_returns_no_such_mailbox() {
 
     // Defense in depth: bob's mailbox still exists on disk after the
     // failed cross-uid delete attempt.
-    let bob_inbox = fx.tmp_root.join("data").join("inbox").join(BOB);
+    let bob_inbox = mailbox_inbox_path(&fx.tmp_root, BOB);
     assert!(
         bob_inbox.exists(),
         "bob's inbox must still exist after alice's failed cross-uid delete"
