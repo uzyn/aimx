@@ -8,6 +8,7 @@
 - [Configuration](configuration.md)
 - [Security](security.md)
 - [Mailboxes & Email](mailboxes.md)
+- [Multi-domain](multi-domain.md)
 - [Markdown Email](markdown-email.md)
 - [Hooks & Trust](hooks.md)
 - [Hook Recipes](hook-recipes.md)

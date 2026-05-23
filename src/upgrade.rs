@@ -360,8 +360,64 @@ pub fn run_upgrade(
     // active`; this line is its `aimx upgrade` analogue.
     println!("{}", restart_confirmation_line(&manifest.tag));
 
+    // One-screen reminder of what changed on disk after the
+    // multi-domain rollout. Printed after the restart confirmation so
+    // operators see it as part of the `aimx upgrade` output flow.
+    print_post_upgrade_reminder();
+
     report.outcome = Some(Outcome::Upgraded);
     Ok(report)
+}
+
+/// One-screen reminder printed after a successful upgrade. Documents the
+/// visible config / storage / DKIM relocations that happen on the first
+/// `aimx serve` startup under the new binary, points at the book page
+/// for full details and rollback. Idempotent — the underlying migration
+/// is gated by `/var/lib/aimx/.layout-version`, so this text is safe to
+/// print on every upgrade.
+fn print_post_upgrade_reminder() {
+    print!("{}", post_upgrade_reminder_text());
+}
+
+/// Format the post-upgrade reminder body. Pulled out as a pure helper
+/// so unit tests can pin the operator-facing wording (config rewrite,
+/// storage relocate, DKIM relocate, book pointer, rollback pointer)
+/// without capturing stdout.
+pub(crate) fn post_upgrade_reminder_text() -> String {
+    let mut out = String::new();
+    out.push('\n');
+    out.push_str(&format!(
+        "{}\n",
+        term::header("What changes on the next aimx serve start:")
+    ));
+    out.push_str(&format!(
+        "  - {} is visibly rewritten to the normalized shape\n",
+        term::highlight("/etc/aimx/config.toml")
+    ));
+    out.push_str(&format!(
+        "    ({} -> {}, mailbox keys -> FQDN)\n",
+        term::highlight("domain = \"...\""),
+        term::highlight("domains = [...]"),
+    ));
+    out.push_str(&format!(
+        "  - Storage relocates to {}\n",
+        term::highlight("/var/lib/aimx/<domain>/{inbox,sent}/<mailbox>/"),
+    ));
+    out.push_str(&format!(
+        "  - DKIM keys relocate to {}\n",
+        term::highlight("/etc/aimx/dkim/<domain>/{private,public}.key"),
+    ));
+    out.push_str("  - Purely structural - no semantic changes for single-domain installs.\n");
+    out.push_str(&format!(
+        "  - {} See {} for the full walkthrough.\n",
+        term::accent("→"),
+        term::highlight("book/multi-domain.md"),
+    ));
+    out.push_str(&format!(
+        "  - Rollback procedure: {}\n",
+        term::highlight("book/multi-domain.md#rollback-procedure"),
+    ));
+    out
 }
 
 /// Format the one-line restart confirmation printed after the daemon
@@ -716,6 +772,40 @@ mod tests {
         let line = super::restart_confirmation_line("v1.2.3");
         assert!(line.contains("aimx serve restarted on"), "{line}");
         assert!(line.contains("v1.2.3"), "{line}");
+    }
+
+    /// The post-upgrade reminder must name every load-bearing change
+    /// (config rewrite, storage relocate, DKIM relocate) and point at
+    /// the multi-domain book page for the full walkthrough plus the
+    /// rollback procedure. Pin the wording so future edits don't
+    /// silently drop a section.
+    #[test]
+    fn post_upgrade_reminder_names_config_storage_dkim_and_book_page() {
+        let text = super::post_upgrade_reminder_text();
+        assert!(
+            text.contains("/etc/aimx/config.toml"),
+            "reminder must mention the config path: {text}"
+        );
+        assert!(
+            text.contains("domains = [...]"),
+            "reminder must show the normalized domains shape: {text}"
+        );
+        assert!(
+            text.contains("/var/lib/aimx/<domain>/"),
+            "reminder must name the per-domain storage path: {text}"
+        );
+        assert!(
+            text.contains("/etc/aimx/dkim/<domain>/"),
+            "reminder must name the per-domain DKIM path: {text}"
+        );
+        assert!(
+            text.contains("book/multi-domain.md"),
+            "reminder must link the operator at book/multi-domain.md: {text}"
+        );
+        assert!(
+            text.contains("Rollback"),
+            "reminder must point at the rollback procedure: {text}"
+        );
     }
 
     /// The rollback-on-start-failure path must NOT pretend the daemon

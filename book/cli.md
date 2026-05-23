@@ -174,6 +174,34 @@ Delete a mailbox. Owner-gated: non-root callers may only delete mailboxes they o
 
 See [Mailboxes: Managing mailboxes](mailboxes.md#managing-mailboxes).
 
+## Domain management
+
+Alias: `aimx domain` works identically to `aimx domains`. Domain CRUD is root-only (the same authz that gates other root-level operations). When `aimx serve` is running, every verb hot-reloads the daemon over the UDS with no restart. See [Multi-domain](multi-domain.md) for the operator walkthrough.
+
+### `aimx domains list`
+
+Print a table of every configured domain: domain name, default flag, DKIM key presence + DNS verification status, mailbox count, and any per-domain overrides (signature, selector, trust) summary. The first row is the default domain (`domains[0]`).
+
+No flags.
+
+### `aimx domains add <domain>`
+
+Append `<domain>` to the `domains` array. Generates a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/<domain>/`, prints the four DNS records to publish (MX, SPF, DMARC, DKIM), runs the existing setup DNS-verification loop, and hot-reloads `aimx serve` so `@<domain>` mail is accepted immediately. Refuses to re-add a domain already in the list.
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--selector <name>` | `aimx` | DKIM selector name for the new domain. |
+| `--no-dns-check` | off | Skip the verification loop (records are still printed). Use when publishing DNS out-of-band. |
+
+### `aimx domains remove <domain>`
+
+Remove `<domain>` from `domains` and drop its `[domain."<domain>"]` sub-table. Refuses with a JSON list of blocking mailboxes when any mailbox is still keyed at the target domain. The last remaining domain cannot be removed even with `--force`.
+
+| Flag | Description |
+|------|-------------|
+| `--force` | Cascade: take every per-mailbox lock on the target domain in sorted FQDN order, wipe `inbox/<local>/` and `sent/<local>/` for each, drop the mailbox entries, drop the optional `[domain."<domain>"]` sub-table, then drop the domain itself. The DKIM keys at `/etc/aimx/dkim/<domain>/` are preserved on disk — the command prints the path. |
+| `-y`, `--yes` | Skip the confirmation prompt. |
+
 ## Hook management
 
 Alias: `aimx hook` works identically to `aimx hooks`. Authorization: caller must own the target mailbox, or be root. When `aimx serve` is running, hook CRUD hot-swaps into the live config with no restart. See [Security: Per-action authorization](security.md#per-action-authorization).
@@ -268,10 +296,11 @@ Inverse of `aimx agents setup`. Removes the skill files under `$HOME` and prints
 
 ### `aimx dkim-keygen`
 
-Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, public `0644`). Normally run automatically by `aimx setup`; use directly for key rotation.
+Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/<domain>/` (private `0600`, public `0644`). Normally run automatically by `aimx setup` (for the first domain) and `aimx domains add` (for subsequent domains); use directly for key rotation.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--domain <name>` | default domain (`domains[0]`) | Target domain. The keypair is written under `/etc/aimx/dkim/<domain>/`. Refuses unknown domains. |
 | `--selector <name>` | `aimx` | DKIM selector name (controls the DNS record `<selector>._domainkey.<domain>`). |
 | `--force` | off | Overwrite existing keys. |
 
@@ -289,4 +318,7 @@ Generate a 2048-bit RSA DKIM keypair under `/etc/aimx/dkim/` (private `0600`, pu
 | `HOOK-CREATE` | header + JSON body | caller uid must own the hook's mailbox | `aimx hooks create` (UDS path), `hook_create` MCP tool |
 | `HOOK-DELETE` | header (hook name) | caller uid must own the hook's mailbox; operator-origin hooks are CLI-only | `aimx hooks delete` (UDS path), `hook_delete` MCP tool |
 | `HOOK-LIST` | request only | none server-side; the response is filtered to hooks on caller-owned mailboxes (root sees all) | `hook_list` MCP tool |
+| `DOMAIN-ADD` | header (domain, optional selector) | root only | `aimx domains add` |
+| `DOMAIN-REMOVE` | header (domain, force) | root only | `aimx domains remove` |
+| `DOMAIN-LIST` | request only | root only | `aimx domains list` |
 | `VERSION` | request only | none — payload is daemon build metadata only | `aimx doctor`'s `Server version:` line |
