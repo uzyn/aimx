@@ -44,10 +44,21 @@ static DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
 });
 
 fn cached_dkim_private() -> PathBuf {
-    DKIM_CACHE.path().join("dkim").join("private.key")
+    // The cache's `aimx dkim-keygen` (no `--domain`) lands under
+    // `<dkim_dir>/<default_domain>/` per the v2 layout. The cache
+    // config sets `domain = "cache.example.com"`.
+    DKIM_CACHE
+        .path()
+        .join("dkim")
+        .join("cache.example.com")
+        .join("private.key")
 }
 fn cached_dkim_public() -> PathBuf {
-    DKIM_CACHE.path().join("dkim").join("public.key")
+    DKIM_CACHE
+        .path()
+        .join("dkim")
+        .join("cache.example.com")
+        .join("public.key")
 }
 
 fn current_username() -> String {

@@ -57,7 +57,13 @@ static MD_DKIM_CACHE: LazyLock<TempDir> = LazyLock::new(|| {
 
 fn install_dkim_under(domain_dir: &Path) {
     std::fs::create_dir_all(domain_dir).unwrap();
-    let cache_dkim = MD_DKIM_CACHE.path().join("dkim");
+    // `aimx dkim-keygen` (no `--domain`) writes the cache under
+    // `<dkim_dir>/<default_domain>/` — the cache config sets the
+    // default domain to `md-cache.example.com`.
+    let cache_dkim = MD_DKIM_CACHE
+        .path()
+        .join("dkim")
+        .join("md-cache.example.com");
     for name in ["private.key", "public.key"] {
         let src = cache_dkim.join(name);
         let dst = domain_dir.join(name);

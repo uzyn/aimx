@@ -124,6 +124,7 @@ jobs:
           cargo test --no-run --test uds_authz
           cargo test --no-run --test hooks_list_filter
           cargo test --no-run --test integration
+          cargo test --no-run --test domains_uds
 
       - name: Run mailbox isolation test (under sudo)
         run: |
@@ -173,6 +174,22 @@ jobs:
             mailbox_list_full_cycle_against_root_owned_config \
             email_list_full_cycle_against_root_owned_config \
             hook_list_full_cycle_against_root_owned_config
+
+      - name: Run domains UDS hot-reload tests (under sudo)
+        run: |
+          # `tests/domains_uds.rs` covers `DOMAIN-CRUD` over UDS:
+          # the daemon `DOMAIN-ADD` verb, hot-reload of in-memory
+          # `Arc<Config>` + per-domain DKIM map, SMTP RCPT acceptance
+          # for the freshly-added domain without a restart, duplicate-
+          # add rejection, and the root daemon-stopped fallback.
+          # These tests gate on `skip_if_not_root()` rather than
+          # `#[ignore]`, so we run them as root WITHOUT `--ignored`;
+          # the non-root subset (DKIM keygen path coverage) re-runs
+          # harmlessly. `--test-threads=1` avoids contention on the
+          # shared `AIMX_CONFIG_DIR` / UDS socket directory.
+          BIN=$(ls -t target/debug/deps/domains_uds-* | grep -v '\.d$' | head -n 1)
+          test -x "$BIN"
+          sudo AIMX_INTEGRATION_SUDO=1 "$BIN" --test-threads=1
 
       - name: Tear down test users
         if: always()

@@ -445,17 +445,19 @@ fn dkim_keygen_with_unknown_domain_refuses() {
 }
 
 #[test]
-fn dkim_keygen_without_domain_uses_legacy_root_path() {
-    // The `aimx dkim-keygen` invocation without `--domain` keeps the
-    // legacy un-namespaced output path (`<dkim_dir>/{private,public}.key`)
-    // so existing single-domain scripts continue to work. The daemon's
-    // startup loader falls back to that path for the default domain
-    // when no per-domain key exists.
+fn dkim_keygen_without_domain_uses_default_domain_path() {
+    // `aimx dkim-keygen` without `--domain` targets the default
+    // domain's per-domain path (`<dkim_dir>/<default_domain>/`), not
+    // the legacy un-namespaced root. The daemon's loader reads from
+    // the per-domain path on v2 installs, so writing here is what
+    // makes a rotate-by-omission actually take effect after a
+    // daemon restart. Writing to the legacy root would silently
+    // land the new key where the daemon never looks.
     let tmp = TempDir::new().unwrap();
     setup_single_domain_env(tmp.path());
 
-    // Remove the pre-installed per-domain key so we can distinguish
-    // legacy-path vs per-domain-path output.
+    // Remove the pre-installed per-domain key so we can be certain
+    // the no-`--domain` path is what regenerated it.
     let _ = std::fs::remove_dir_all(tmp.path().join("dkim").join("a.com"));
 
     let out = StdCommand::new(aimx_binary_path())
@@ -467,14 +469,23 @@ fn dkim_keygen_without_domain_uses_legacy_root_path() {
         .expect("dkim-keygen");
     assert!(
         out.status.success(),
-        "dkim-keygen without --domain must succeed for back-compat"
+        "dkim-keygen without --domain must succeed for the default domain"
     );
-    // Legacy un-namespaced root: `<dkim_dir>/private.key`.
-    let key = tmp.path().join("dkim").join("private.key");
+    // Per-domain layout for the default domain.
+    let key = tmp.path().join("dkim").join("a.com").join("private.key");
     assert!(
         key.is_file(),
-        "expected legacy un-namespaced key at {}",
+        "expected default-domain key at {}",
         key.display()
+    );
+    // And we explicitly do NOT want a key written at the un-namespaced
+    // legacy root — that would be the silent-rotation footgun the fix
+    // is preventing.
+    let legacy = tmp.path().join("dkim").join("private.key");
+    assert!(
+        !legacy.is_file(),
+        "no-`--domain` keygen must NOT write to the legacy root path {}",
+        legacy.display()
     );
 }
 

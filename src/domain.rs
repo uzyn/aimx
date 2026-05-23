@@ -17,7 +17,6 @@
 //! with `ERR EACCES`, which the CLI surfaces verbatim).
 
 use std::io::{self, Write};
-use std::path::Path;
 
 use crate::cli::DomainsCommand;
 use crate::config::Config;
@@ -35,14 +34,14 @@ pub(crate) const EXIT_SOCKET_MISSING: i32 = 2;
 pub(crate) const SOCKET_MISSING_HINT: &str = "daemon must be running for non-root domain CRUD; start `aimx serve` \
      or run with sudo to fall back to direct config edit.";
 
-pub fn run(cmd: DomainsCommand, data_dir: Option<&Path>) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(cmd: DomainsCommand) -> Result<(), Box<dyn std::error::Error>> {
     match cmd {
         DomainsCommand::List => list(),
         DomainsCommand::Add {
             domain,
             selector,
             no_dns_check,
-        } => add(&domain, selector.as_deref(), no_dns_check, data_dir),
+        } => add(&domain, selector.as_deref(), no_dns_check),
         DomainsCommand::Remove { domain, force } => remove(&domain, force),
     }
 }
@@ -122,13 +121,17 @@ pub(crate) fn list_via_daemon() -> Result<Vec<DomainListRow>, Box<dyn std::error
 
 /// `aimx domains add <domain> [--selector <s>] [--no-dns-check]` — UDS
 /// first, daemon-down fallback for root, hard-error for non-root.
+///
+/// `--data-dir` is read off the global `Cli` struct by the daemon-side
+/// loader (`Config::load_resolved_with_data_dir`) when this path
+/// falls back to direct config edit, so we do not thread it through
+/// here: the storage layout is decided by the running daemon, not the
+/// CLI invocation.
 fn add(
     domain: &str,
     selector: Option<&str>,
     no_dns_check: bool,
-    data_dir: Option<&Path>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let _ = data_dir; // reserved for future use (`--data-dir` is global)
     let normalized = domain.trim().to_ascii_lowercase();
     if !crate::config::is_valid_domain_syntax(&normalized) {
         return Err(format!("domain '{domain}' is not a valid RFC 1035 hostname").into());

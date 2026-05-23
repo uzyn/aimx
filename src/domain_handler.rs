@@ -32,13 +32,17 @@
 //!    this sequence linear with respect to other writers, so a
 //!    concurrent `DOMAIN-ADD` cannot lose an entry.
 //!
-//! Atomicity ordering (NFR-3 from the multi-domain PRD): DKIM key on
-//! disk **before** the config rewrite. A crash between key write and
-//! config rewrite leaves an orphan key (harmless — the operator can
-//! re-run `aimx domains add` cleanly; the duplicate-add check still
-//! passes because the domain isn't in `domains` yet). The opposite
-//! ordering — config rewritten first, then key write fails — would
-//! leave outbound from the new domain broken until manual recovery.
+//! Atomicity ordering rationale: DKIM key on disk **before** the config
+//! rewrite, and the in-memory DKIM map updated **before** the
+//! `ConfigHandle::store`. A crash between key write and config rewrite
+//! leaves an orphan key (harmless — the operator can re-run
+//! `aimx domains add` cleanly; the duplicate-add check still passes
+//! because the domain isn't in `domains` yet). The opposite ordering —
+//! config rewritten first, then key write fails — would leave outbound
+//! from the new domain broken until manual recovery. Updating the DKIM
+//! map before the config snapshot also guarantees that any reader who
+//! sees the new domain in `config.domains` already sees the matching
+//! DKIM key entry.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -210,15 +214,16 @@ pub async fn handle_domain_add(
         };
     }
 
-    // Hot-swap the in-memory Config.
-    mb_ctx.config_handle.store(new_config);
-
-    // Hot-swap the DKIM map: clone the current snapshot, insert the
-    // new entry, and `ArcSwap::store` it. Loads inside `handle_send`
+    // Hot-swap the DKIM map FIRST: clone the current snapshot, insert
+    // the new entry, and `ArcSwap::store` it. Loads inside `handle_send`
     // take a `load_full()` snapshot, so a concurrent send observes
     // either the pre-swap map (its From: domain is in the old set; ok)
     // or the post-swap map (the From: domain may be in the new set;
-    // ok). The swap is atomic.
+    // ok). The swap is atomic. We update the DKIM map BEFORE the
+    // ConfigHandle so that any reader who sees the new domain in
+    // `config.domains` (via the subsequent `ConfigHandle::store`)
+    // already sees the matching DKIM entry — there is no window where
+    // a SEND can match a configured domain but find no key.
     let mut new_map: DkimKeyMap = (*dkim_keys.load_full()).clone();
     new_map.insert(
         domain_lc.clone(),
@@ -228,6 +233,9 @@ pub async fn handle_domain_add(
         },
     );
     dkim_keys.store(Arc::new(new_map));
+
+    // Now hot-swap the in-memory Config.
+    mb_ctx.config_handle.store(new_config);
 
     log_decision(
         verb,
@@ -556,5 +564,74 @@ mod tests {
         assert!(!is_valid_dkim_selector("UPPER"));
         assert!(!is_valid_dkim_selector("a b"));
         assert!(!is_valid_dkim_selector("a.b"));
+    }
+
+    /// Pin the pre-provisioned-key contract: if the operator dropped a
+    /// keypair into `<dkim_dir>/<domain>/{private,public}.key` before
+    /// running `aimx domains add <domain>`, the handler MUST reuse those
+    /// keys and not overwrite them. This is the supported flow for
+    /// rotating a known-good key into a new domain in one step.
+    #[tokio::test]
+    async fn pre_existing_dkim_keys_are_reused_not_overwritten() {
+        let _r = install_resolver();
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+        let (state_ctx, mb_ctx, keys) = contexts(&tmp);
+
+        // Pre-provision a real RSA keypair at the per-domain layout
+        // BEFORE the handler runs. The handler must detect the
+        // existing private.key and skip the keygen so this exact
+        // byte sequence ends up loaded into the DKIM map.
+        let dkim_root = crate::config::dkim_dir();
+        let per_domain_dir = dkim_root.join("b.com");
+        std::fs::create_dir_all(&per_domain_dir).unwrap();
+        crate::dkim::generate_keypair(&per_domain_dir, false).unwrap();
+        let before = std::fs::read_to_string(per_domain_dir.join("private.key")).unwrap();
+
+        let req = DomainAddRequest {
+            domain: "b.com".into(),
+            selector: None,
+        };
+        let resp =
+            handle_domain_add(&state_ctx, &mb_ctx, &keys, &req, &Caller::internal_root()).await;
+        assert!(matches!(resp, AckResponse::Ok), "got {resp:?}");
+
+        let after = std::fs::read_to_string(per_domain_dir.join("private.key")).unwrap();
+        assert_eq!(
+            before, after,
+            "pre-existing DKIM private key must not be overwritten by `aimx domains add`"
+        );
+
+        // The DKIM map carries the (unchanged) pre-existing key.
+        let snapshot = keys.load_full();
+        assert!(
+            snapshot.contains_key("b.com"),
+            "DKIM map must contain an entry for the added domain"
+        );
+    }
+
+    /// Same contract for the daemon-stopped fallback path. `run_direct_add`
+    /// must also preserve a pre-existing per-domain key.
+    #[test]
+    fn direct_add_preserves_pre_existing_dkim_keys() {
+        let _r = install_resolver();
+        let tmp = TempDir::new().unwrap();
+        let _override = ConfigDirOverride::set(tmp.path());
+        let config_path = tmp.path().join("config.toml");
+        let config = base_config(tmp.path());
+        crate::config::write_atomic(&config_path, &config).unwrap();
+        let dkim_root = tmp.path().join("dkim");
+
+        let per_domain_dir = dkim_root.join("b.com");
+        std::fs::create_dir_all(&per_domain_dir).unwrap();
+        crate::dkim::generate_keypair(&per_domain_dir, false).unwrap();
+        let before = std::fs::read_to_string(per_domain_dir.join("private.key")).unwrap();
+
+        let _ = run_direct_add(&config_path, &dkim_root, &config, "b.com", None).unwrap();
+        let after = std::fs::read_to_string(per_domain_dir.join("private.key")).unwrap();
+        assert_eq!(
+            before, after,
+            "daemon-stopped fallback must preserve pre-existing DKIM keys"
+        );
     }
 }

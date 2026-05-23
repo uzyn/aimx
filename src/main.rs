@@ -163,7 +163,7 @@ fn dispatch(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         // would surface as a bare `Permission denied (os error 13)`
         // before `domain::run` ever sees the request. `domain::run`
         // loads config lazily only on the root daemon-down fallback.
-        Command::Domains(cmd) => domain::run(cmd, cli.data_dir.as_deref()),
+        Command::Domains(cmd) => domain::run(cmd),
         // `aimx upgrade` reads the release-manifest URL from Config
         // (optional `[upgrade] release_manifest_url`) but tolerates a
         // missing / unloadable config — a freshly-installed machine
@@ -233,19 +233,19 @@ fn dispatch_with_config(
                 dkim::run_keygen(&dkim_root, &d_lc, &selector, force)
             }
             None => {
-                // No `--domain`: legacy single-domain layout (write to
-                // `<dkim_dir>/{private,public}.key` at the un-namespaced
-                // root). This is what the daemon's startup loader
-                // falls back to for the default domain when no
-                // per-domain key exists, so single-domain installs
-                // and existing scripts keep working without change.
-                // The DNS record printed is for the default domain.
-                dkim::run_keygen(
-                    &config::dkim_dir(),
-                    config.default_domain(),
-                    &selector,
-                    force,
-                )
+                // No `--domain`: target the default domain's per-domain
+                // layout (`<dkim_dir>/<default_domain>/`). The daemon
+                // reads keys from the per-domain path on v2 installs;
+                // writing to the un-namespaced legacy root here would
+                // silently land the new key where the daemon never
+                // looks, leaving the OLD key signing — a silent
+                // rotation footgun. The loader still falls back to
+                // the legacy root for *reads* on unmigrated v1
+                // installs, so existing single-domain installs keep
+                // working until they migrate. The DNS record printed
+                // is for the default domain.
+                let dkim_root = config::dkim_dir().join(config.default_domain());
+                dkim::run_keygen(&dkim_root, config.default_domain(), &selector, force)
             }
         },
         Command::Serve {
