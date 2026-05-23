@@ -111,7 +111,18 @@ pub fn gather_status_with_ops<S: SystemOps>(
     sys: &S,
     net: &dyn NetworkOps,
 ) -> StatusInfo {
-    let dkim_key_present = crate::config::dkim_dir().join("private.key").exists();
+    // Layout-aware DKIM key probe: post-migration the private key lives
+    // at `<dkim_dir>/<default_domain>/private.key`; pre-migration (v1
+    // legacy installs or fresh `aimx setup` before the layout marker is
+    // written) it lives at the legacy `<dkim_dir>/private.key`. Using
+    // `resolve_active_dkim_dir` keeps the report aligned with the
+    // path the daemon actually signs from, so a post-migration host
+    // does not falsely report MISSING and steer the operator into
+    // `aimx dkim-keygen` on the wrong path.
+    let dkim_root_base = crate::config::dkim_dir();
+    let active_dkim_dir =
+        crate::upgrade_migration::resolve_active_dkim_dir(config, &dkim_root_base);
+    let dkim_key_present = active_dkim_dir.join("private.key").exists();
     let smtp_running = sys.is_service_running("aimx");
     let runtime_dir = crate::serve::runtime_dir();
     let stale_send_sock_present =
@@ -205,7 +216,11 @@ fn gather_dns_section(config: &Config, net: &dyn NetworkOps) -> Option<DnsSectio
         None
     };
 
-    let dkim_dir = crate::config::dkim_dir();
+    // Mirror the layout-aware probe used at the top of
+    // `gather_status_with_ops`: read the public key from the per-domain
+    // dir post-migration, the legacy root on v1 installs.
+    let dkim_dir_base = crate::config::dkim_dir();
+    let dkim_dir = crate::upgrade_migration::resolve_active_dkim_dir(config, &dkim_dir_base);
     let local_dkim_pubkey = if dkim_dir.join("public.key").exists() {
         crate::dkim::dns_record_value(&dkim_dir)
             .ok()
@@ -817,37 +832,50 @@ pub fn check_mailbox_ownership(config: &Config) -> Vec<DoctorFinding> {
 
     // Orphan-storage findings: directories under `inbox/` / `sent/`
     // with no matching config entry (left behind by a removed mailbox).
-    for root in ["inbox", "sent"] {
-        let root_dir = config.data_dir.join(root);
-        let Ok(entries) = std::fs::read_dir(&root_dir) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let Ok(meta) = entry.metadata() else { continue };
-            if !meta.is_dir() {
+    //
+    // Iterates per-domain roots on the v2 (post-migration) layout
+    // (`<data_dir>/<domain>/inbox/`, `<data_dir>/<domain>/sent/`) and
+    // the legacy single root on v1. `Config::storage_roots` owns the
+    // layout-aware decision. Per-domain roots that have not been
+    // provisioned (e.g. a freshly added domain with no mailboxes
+    // yet) silently skip via the `read_dir` error path.
+    for storage_root in config.storage_roots() {
+        for kind in ["inbox", "sent"] {
+            let root_dir = storage_root.join(kind);
+            let Ok(entries) = std::fs::read_dir(&root_dir) else {
                 continue;
-            }
-            let name = match entry.file_name().into_string() {
-                Ok(n) => n,
-                Err(_) => continue,
             };
-            if configured_names.contains(&name) {
-                continue;
+            for entry in entries.flatten() {
+                let Ok(meta) = entry.metadata() else { continue };
+                if !meta.is_dir() {
+                    continue;
+                }
+                let name = match entry.file_name().into_string() {
+                    Ok(n) => n,
+                    Err(_) => continue,
+                };
+                if configured_names.contains(&name) {
+                    continue;
+                }
+                out.push(
+                    DoctorFinding::new(
+                        "ORPHAN-STORAGE",
+                        FindingSeverity::Warn,
+                        format!(
+                            "storage directory `{}/{name}/` has no matching \
+                             mailbox in config.toml",
+                            root_dir
+                                .strip_prefix(&config.data_dir)
+                                .unwrap_or(Path::new(kind))
+                                .display(),
+                        ),
+                    )
+                    .with_fix(format!(
+                        "remove the stale directory or add a matching `[mailboxes.{name}]` \
+                         block to config.toml",
+                    )),
+                );
             }
-            out.push(
-                DoctorFinding::new(
-                    "ORPHAN-STORAGE",
-                    FindingSeverity::Warn,
-                    format!(
-                        "storage directory `{root}/{name}/` has no matching \
-                         mailbox in config.toml"
-                    ),
-                )
-                .with_fix(format!(
-                    "remove the stale directory or add a matching `[mailboxes.{name}]` \
-                     block to config.toml",
-                )),
-            );
         }
     }
 
@@ -1337,5 +1365,145 @@ mod version_render_tests {
         );
         let out = strip_ansi(&format_version_lines(&info));
         assert!(out.contains("(daemon not running)"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod dkim_layout_tests {
+    //! Exercise the layout-aware DKIM key probe in `gather_status_with_ops`.
+    //!
+    //! Pre-fix, this code read `<dkim_dir>/private.key` directly, so a
+    //! post-migration install (where the key has moved to
+    //! `<dkim_dir>/<default_domain>/private.key`) reported DKIM as
+    //! MISSING and steered the operator into regenerating the key.
+    //! These tests pin the fix: the probe routes through
+    //! `resolve_active_dkim_dir` and reports `present` from the
+    //! per-domain dir on a post-migration install.
+    use super::*;
+    use crate::config::Config;
+    use crate::config::test_env::ConfigDirOverride;
+    use crate::setup::tests::MockNetworkOps;
+    use std::fs;
+    use tempfile::TempDir;
+
+    fn write_canonical_config(path: &Path, domain: &str) {
+        let s = format!(
+            "domains = [\"{domain}\"]\n\n\
+             [mailboxes.\"info@{domain}\"]\n\
+             address = \"info@{domain}\"\n\
+             owner = \"ops\"\n",
+        );
+        fs::write(path, s).unwrap();
+    }
+
+    /// Post-migration (`.layout-version: 2` present), the DKIM key
+    /// lives at `<dkim_dir>/<default_domain>/private.key`. The probe
+    /// must report `present` even though the legacy
+    /// `<dkim_dir>/private.key` is gone.
+    #[test]
+    fn dkim_present_when_only_per_domain_key_exists() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        // v2 layout marker — `resolve_active_dkim_dir` short-circuits
+        // on the per-domain key being present, but the marker is the
+        // load-bearing post-migration signal in production.
+        fs::write(data_dir.join(".layout-version"), "2\n").unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        write_canonical_config(&cfg_path, "example.com");
+
+        // Per-domain DKIM dir + key only — no legacy `dkim/private.key`.
+        let per_domain_dkim = config_dir.join("dkim").join("example.com");
+        fs::create_dir_all(&per_domain_dkim).unwrap();
+        fs::write(per_domain_dkim.join("private.key"), b"stub").unwrap();
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            info.dkim_key_present,
+            "post-migration per-domain DKIM key should register as present"
+        );
+    }
+
+    /// Legacy v1 install (no marker, no per-domain dir). The probe
+    /// falls back to `<dkim_dir>/private.key`. Regression coverage so
+    /// the fix does not break the pre-migration path.
+    #[test]
+    fn dkim_present_on_legacy_v1_layout() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        // Canonical-shape config is fine; the v1-vs-v2 layout decision
+        // is purely on-disk (`.layout-version` marker + per-domain
+        // dir presence), not on config shape.
+        write_canonical_config(&cfg_path, "example.com");
+
+        // Legacy key location only.
+        let dkim_dir = config_dir.join("dkim");
+        fs::create_dir_all(&dkim_dir).unwrap();
+        fs::write(dkim_dir.join("private.key"), b"stub").unwrap();
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            info.dkim_key_present,
+            "legacy-layout DKIM key should still register as present"
+        );
+    }
+
+    /// Genuine "missing" case: neither path holds a key. The probe
+    /// must report MISSING so the operator runs `aimx dkim-keygen`.
+    #[test]
+    fn dkim_missing_when_no_key_present() {
+        let tmp = TempDir::new().unwrap();
+        let config_dir = tmp.path().join("etc");
+        let data_dir = tmp.path().join("data");
+        fs::create_dir_all(&config_dir).unwrap();
+        fs::create_dir_all(&data_dir).unwrap();
+
+        let cfg_path = config_dir.join("config.toml");
+        write_canonical_config(&cfg_path, "example.com");
+
+        let _guard = ConfigDirOverride::set(&config_dir);
+        let mut config = Config::load_resolved().unwrap().0;
+        config.data_dir = data_dir.clone();
+
+        let sys = crate::setup::tests::MockSystemOps::default();
+        let net = MockNetworkOps {
+            server_ipv4: None,
+            ..Default::default()
+        };
+
+        let info = gather_status_with_ops(&config, &sys, &net);
+        assert!(
+            !info.dkim_key_present,
+            "no DKIM key on disk should register as missing"
+        );
     }
 }

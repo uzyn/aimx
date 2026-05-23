@@ -47,6 +47,7 @@ mod wire_assembly;
 mod release;
 mod uninstall;
 mod upgrade;
+mod upgrade_migration;
 mod user_resolver;
 mod version;
 mod version_handler;

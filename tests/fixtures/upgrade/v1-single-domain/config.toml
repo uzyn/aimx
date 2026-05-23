@@ -1,0 +1,9 @@
+domain = "fixture.example"
+
+[mailboxes.info]
+address = "info@fixture.example"
+owner = "OWNER_PLACEHOLDER"
+
+[mailboxes.support]
+address = "support@fixture.example"
+owner = "OWNER_PLACEHOLDER"

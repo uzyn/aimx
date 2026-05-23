@@ -142,8 +142,39 @@ fn find_md_files(dir: &Path) -> Vec<std::path::PathBuf> {
 }
 
 /// Resolve the inbox directory for a mailbox under a test tempdir.
+///
+/// Layout-aware: see [`storage_subdir`].
 fn inbox(tmp: &Path, name: &str) -> std::path::PathBuf {
-    tmp.join("inbox").join(name)
+    storage_subdir(tmp, "inbox", name)
+}
+
+/// Resolve the sent directory for a mailbox under a test tempdir.
+///
+/// Layout-aware: see [`storage_subdir`].
+#[allow(dead_code)]
+fn sent(tmp: &Path, name: &str) -> std::path::PathBuf {
+    storage_subdir(tmp, "sent", name)
+}
+
+/// Layout-aware resolver shared by [`inbox`] and [`sent`]. If the
+/// upgrade migration has run and the `<tmp>/.layout-version` marker is
+/// present, returns `<tmp>/<domain>/<folder>/<name>/`. Otherwise falls
+/// back to the legacy `<tmp>/<folder>/<name>/`. Tests that pass
+/// through `setup_test_env` always use a single configured domain, so
+/// finding the per-domain subdir is unambiguous.
+fn storage_subdir(tmp: &Path, folder: &str, name: &str) -> std::path::PathBuf {
+    let marker = tmp.join(".layout-version");
+    if marker.is_file()
+        && let Ok(entries) = std::fs::read_dir(tmp)
+    {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_dir() && p.join(folder).is_dir() {
+                return p.join(folder).join(name);
+            }
+        }
+    }
+    tmp.join(folder).join(name)
 }
 
 /// Search every bundle directory under `mailbox_dir` for an attachment
@@ -2906,7 +2937,7 @@ fn send_uds_end_to_end_emits_multipart_alternative_for_markdown_body() {
     // The sent record exists at sent/alice/<stem>.md and its body
     // contains the Markdown source verbatim (no `.html` sibling, no
     // rendered HTML in the persisted body).
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3105,7 +3136,7 @@ fn send_uds_end_to_end_text_only_emits_single_part_text_plain() {
     // trail declares `outbound_format = "text"` so an operator
     // browsing `sent/` can tell at a glance the recipient saw plain
     // text — distinct from a default Markdown send (`"markdown"`).
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3228,7 +3259,7 @@ fn send_uds_end_to_end_html_body_uses_supplied_html_verbatim() {
     // Sent record stores the --body text, not the --html-body content.
     // The "custom HTML is not stored" invariant is verified at the
     // integration layer here.
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let entries: Vec<_> = std::fs::read_dir(&sent_dir)
         .unwrap()
         .filter_map(|e| e.ok())
@@ -3705,10 +3736,14 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    // Pre-seed one email so MARK-READ has a target.
-    let alice_dir = inbox(tmp.path(), "alice");
+    // Pre-seed one email so MARK-READ has a target. `inbox()` is
+    // layout-aware: pre-daemon it returns the legacy path, post-daemon
+    // (after the upgrade migration runs) it returns the per-domain
+    // path. Re-resolve after `start_serve` so the read uses whichever
+    // location the migration produced.
+    let pre_alice_dir = inbox(tmp.path(), "alice");
     create_email_file(
-        &alice_dir,
+        &pre_alice_dir,
         "2025-06-01-001",
         "sender@example.com",
         "Hello",
@@ -3717,6 +3752,7 @@ fn mcp_mark_read_concurrent_with_inbound_ingest() {
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
+    let alice_dir = inbox(tmp.path(), "alice");
 
     let runtime = tmp.path().join("run");
     let sock = runtime.join("aimx.sock");
@@ -4348,7 +4384,7 @@ fn mailbox_create_delete_force_e2e_as_non_root_user() {
 
     // On-disk owner check: the inbox dir must be owned by the runner's
     // uid (the daemon chowns to the resolved owner).
-    let inbox_dir = tmp.path().join("inbox").join("task-mb");
+    let inbox_dir = inbox(tmp.path(), "task-mb");
     assert!(inbox_dir.is_dir(), "inbox/task-mb/ must exist on disk");
     use std::os::unix::fs::MetadataExt;
     let meta = std::fs::metadata(&inbox_dir).unwrap();
@@ -5232,15 +5268,22 @@ fn concurrent_ingest_burst_and_mark_same_mailbox_no_torn_writes() {
     let tmp = TempDir::new().unwrap();
     setup_test_env(tmp.path());
 
-    let alice_dir = inbox(tmp.path(), "alice");
     // Pre-seed two emails so MARK-READ has stable targets while new
-    // inbound ingests are landing in the same directory.
+    // inbound ingests are landing in the same directory. `inbox()` is
+    // layout-aware: pre-daemon it returns the legacy path, post-daemon
+    // (after the upgrade migration runs) it returns the per-domain
+    // path. Re-resolve after `start_serve` so the read uses whichever
+    // location the migration produced.
+    let pre_alice_dir = inbox(tmp.path(), "alice");
     for id in ["2025-06-01-seed1", "2025-06-01-seed2"] {
-        create_email_file(&alice_dir, id, "sender@example.com", "Pre-seed", false);
+        create_email_file(&pre_alice_dir, id, "sender@example.com", "Pre-seed", false);
     }
 
     let port = find_free_port();
     let daemon = start_serve(tmp.path(), port);
+    // Re-resolve after the migration may have moved storage under
+    // `<data_dir>/<default_domain>/inbox/<name>/`.
+    let alice_dir = inbox(tmp.path(), "alice");
 
     let runtime = tmp.path().join("run");
     let sock = runtime.join("aimx.sock");
@@ -7110,7 +7153,7 @@ fn email_list_full_cycle_against_root_owned_config() {
     // `sent/alice/`. Without this assertion a future regression where
     // the sent-copy persistence silently no-ops would only be caught
     // by the EACCES guard, which would not fire.
-    let sent_dir = tmp.path().join("sent").join("alice");
+    let sent_dir = sent(tmp.path(), "alice");
     let sent_md_count = std::fs::read_dir(&sent_dir)
         .expect("sent/alice/ must exist")
         .filter_map(|e| e.ok())

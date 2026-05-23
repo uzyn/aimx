@@ -27,10 +27,12 @@
 //!
 //! Always acquire outer → inner, never the reverse.
 
-use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::config::ConfigHandle;
+use crate::config::{Config, ConfigHandle};
 use crate::frontmatter::InboundFrontmatter;
 use crate::mailbox_locks::{MailboxLocks, MailboxState};
 use crate::mcp::resolve_email_path_strict;
@@ -49,7 +51,11 @@ pub struct StateContext {
     /// never changes; the `Config` swap path (MAILBOX-CRUD in
     /// `mailbox_handler.rs`) deliberately never rewrites `data_dir`, so
     /// this snapshot and the live handle's `data_dir` cannot diverge in
-    /// practice.
+    /// practice. Today every reader routes through the live
+    /// `config_handle` for layout-aware path resolution, but the field
+    /// is kept for tests and any pre-existing callers that still need
+    /// the raw root.
+    #[allow(dead_code)]
     pub data_dir: PathBuf,
     /// Live handle to the daemon's `Config`. MARK-* uses it to validate
     /// that the referenced mailbox exists at the time of the call (rather
@@ -113,8 +119,8 @@ fn validate_id(id: &str) -> Result<(), AckResponse> {
     Ok(())
 }
 
-fn inbox_dir(data_dir: &Path, mailbox: &str) -> PathBuf {
-    data_dir.join("inbox").join(mailbox)
+fn inbox_dir(config: &Config, mailbox: &str) -> PathBuf {
+    config.inbox_dir(mailbox)
 }
 
 /// Handle a `MARK-READ` / `MARK-UNREAD` request. Takes the shared
@@ -159,7 +165,7 @@ pub async fn handle_mark(ctx: &StateContext, req: &MarkRequest, caller: &Caller)
     let state = ctx.lock_for(&req.mailbox);
     let _guard = state.lock.lock().await;
 
-    let mailbox_dir = inbox_dir(&ctx.data_dir, &req.mailbox);
+    let mailbox_dir = inbox_dir(&config_snapshot, &req.mailbox);
     let filepath = match resolve_email_path_strict(&mailbox_dir, &req.id) {
         Some(p) => p,
         None => {
